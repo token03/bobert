@@ -13,3 +13,5 @@ checkpoints/
 # IDE
 .idea/
 .vscode/
+
+uv.lock
