@@ -1,0 +1,23 @@
+data:
+  db_path: './data/beatmaps.db'
+  max_seq_len: 1023
+  in_channels: 10
+  val_split: 0.1
+
+model:
+  d_model: 256
+  n_heads: 8
+  n_layers: 6
+  dim_feedforward_mult: 4 
+  dropout: 0.1
+
+training:
+  batch_size: 8
+  num_epochs: 5
+  learning_rate: 5e-4
+  weight_decay: 0.05
+  masking_ratio: 0.20
+  warmup_ratio: 0.05
+  min_lr: 1e-6
+  use_amp: true
+  checkpoint_dir: "./checkpoints"

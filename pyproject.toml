@@ -1,0 +1,22 @@
+[project]
+name = "osu_corpora"
+version = "0.1.0"
+description = "universal embedding encoder for osu beatmaps"
+requires-python = ">=3.12"
+
+# Core dependencies (equivalent to requirements.txt)
+dependencies = [
+    "torch",
+    "numpy",
+    "pandas",
+    "tqdm",
+    "gdown",
+]
+
+[project.optional-dependencies]
+# Dependencies for development, like notebooks or linters
+dev = [
+    "notebook",
+    "jupyterlab",
+    "ruff" # A great, fast linter that uv is built on!
+]
