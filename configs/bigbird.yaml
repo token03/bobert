@@ -14,7 +14,7 @@ model:
 
 training:
   batch_size: 16  
-  checkpoint_dir: "./checkpoints/bigbird_mlm"
+  checkpoint_dir: "./checkpoints/bigbird"
 
 mlm:
   masking_ratio: 0.15  

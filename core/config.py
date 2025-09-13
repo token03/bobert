@@ -55,9 +55,3 @@ def print_config(config: Dict[str, Any], title: str = "Configuration"):
     print(f"\n--- {title} ---")
     print(yaml.dump(config, sort_keys=False, indent=2))
     print("-" * (len(title) + 8))
-
-
-if __name__ == "__main__":
-    CONFIG_NAME = "bert_mlm_base"
-    cfg = load_config(CONFIG_NAME, config_dir="configs")
-    print_config(cfg, f"Loaded Configuration: {CONFIG_NAME}")

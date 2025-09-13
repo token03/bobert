@@ -9,7 +9,7 @@ model:
   dim_feedforward_mult: 4
 
 training:
-  checkpoint_dir: "./checkpoints/bert_mlm"
+  checkpoint_dir: "./checkpoints/bert"
 
 mlm:
   masking_ratio: 0.20
