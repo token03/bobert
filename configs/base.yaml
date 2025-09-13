@@ -1,7 +1,7 @@
 data:
   db_path: './data/beatmaps.db'
   max_seq_len: 1023
-  in_channels: 10
+  in_channels: 11  # Updated from 10 to include duration_beats
   val_split: 0.1
   chunk_size: 1000
     
@@ -20,8 +20,10 @@ training:
   sampling:
     method: "kde"  # "kde", "temperature", or "weighted"
     kde_bandwidth: 0.3  # Bandwidth for KDE sampling
+    kde_bins: 200      # Number of bins for histogram-based KDE approximation
     temperature: 2.0    # Temperature for temperature sampling
     difficulty_index: 3  # Index of difficulty rating in metadata
+    expand_for_augmentation: true
   
 model:
   dropout: 0.1

@@ -19,7 +19,9 @@ def collate_fn(
     
     for i, (v, length) in enumerate(zip(vectors, lengths)):
         if length > 0:
-            padded_vectors[i, :length] = v[:length]
+            # Ensure we don't exceed the expected vector dimension
+            actual_dim = min(v.shape[1], vector_dim)
+            padded_vectors[i, :length, :actual_dim] = v[:length, :actual_dim]
             attention_mask[i, :length] = True
         
     stacked_metadata = torch.stack(metadata, dim=0)

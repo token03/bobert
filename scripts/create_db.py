@@ -24,8 +24,7 @@ def create_tables(conn):
             x_diff REAL, y_diff REAL, time_diff REAL,
             abs_x REAL, abs_y REAL, object_type INTEGER, is_new_combo INTEGER,
             slider_curve_type INTEGER, slider_num_anchors INTEGER,
-            slider_pixel_length REAL, slider_complexity REAL,
-            spinner_duration_ms REAL,
+            slider_pixel_length REAL, spinner_duration_ms REAL, duration_beats REAL,
             FOREIGN KEY (beatmap_id) REFERENCES beatmaps (id)
         )
     ''')
@@ -44,7 +43,6 @@ def insert_beatmap_data(cursor, beatmap_data):
          beatmap_data['difficulty_rating']))
 
     beatmap_row_id = cursor.lastrowid
-    # If the insert was ignored, beatmap_row_id will be 0. We shouldn't add vectors.
     if beatmap_row_id == 0:
         return
 
@@ -57,23 +55,54 @@ def insert_beatmap_data(cursor, beatmap_data):
             '''INSERT INTO beatmap_vectors (
                 beatmap_id, x_diff, y_diff, time_diff, abs_x, abs_y,
                 object_type, is_new_combo, slider_curve_type, slider_num_anchors,
-                slider_pixel_length, slider_complexity, spinner_duration_ms
+                slider_pixel_length, spinner_duration_ms, duration_beats
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             vector_data_to_insert
         )
 
 def worker(tasks_queue, results_queue):
-    """Producer: parses files and enqueues the processed beatmap data."""
+    """
+    Producer: parses files, validates the data, and enqueues valid beatmap data.
+    A beatmap is considered invalid and skipped if:
+    - It has more than 4000 hit objects.
+    - Any hit object has a negative time_diff or duration_beats.
+    - Any hit object is outside the playable area (coordinates 0-512 for x, 0-384 for y).
+    """
     while True:
         file_path = tasks_queue.get()
         if file_path is None:
             tasks_queue.task_done()
             break
-        # The worker's job is simple: call the parser and put the result in a queue.
-        beatmap_data = parse_osu_file(file_path)
-        if beatmap_data and beatmap_data['vectors'] and (len(beatmap_data['vectors']) <= 4000):
-            results_queue.put(beatmap_data)
-        tasks_queue.task_done()
+        
+        try:
+            beatmap_data = parse_osu_file(file_path)
+            
+            if not beatmap_data or not beatmap_data.get('vectors') or not (0 < len(beatmap_data['vectors']) <= 4000):
+                continue
+
+            is_map_valid = True
+            for vec in beatmap_data['vectors']:
+                time_diff = vec[2]
+                abs_x = vec[3]
+                abs_y = vec[4]
+                duration_beats = vec[11]
+
+                if time_diff < 0 or duration_beats < 0:
+                    is_map_valid = False
+                    break
+                
+                if not (0 <= abs_x <= 512 and 0 <= abs_y <= 384):
+                    is_map_valid = False
+                    break
+            
+            if is_map_valid:
+                results_queue.put(beatmap_data)
+
+        except Exception:
+            pass
+        finally:
+            tasks_queue.task_done()
+
 
 def db_writer(results_queue, db_path):
     """Consumer: takes processed data and writes it to the SQLite database."""
@@ -91,11 +120,11 @@ def db_writer(results_queue, db_path):
             insert_beatmap_data(cursor, beatmap_data)
             count += 1
             if count % 400 == 0:
+                conn.commit() 
                 elapsed = time.time() - start_time
                 maps_per_sec = count / elapsed if elapsed > 0 else 0
                 print(f"Processed {count} beatmaps... ({maps_per_sec:.2f} beatmaps/sec)", end='\r')
         except sqlite3.IntegrityError:
-            # This can happen if two workers parse the same mapset; we just ignore it.
             pass
         except Exception as e:
             print(f"DB Writer error: {e}")
@@ -127,7 +156,6 @@ def main():
     else:
         print("Creating new database.")
     
-    # Initialize database and tables
     conn = sqlite3.connect(db_path)
     create_tables(conn)
     conn.close()
@@ -135,11 +163,9 @@ def main():
     tasks_queue = queue.Queue(maxsize=1024)
     results_queue = queue.Queue(maxsize=256)
 
-    # Start the single database writer thread
     db_thread = threading.Thread(target=db_writer, args=(results_queue, db_path))
     db_thread.start()
     
-    # Start worker threads
     threads = []
     print(f"Starting {num_worker_threads} worker threads...")
     for _ in range(num_worker_threads):
@@ -148,7 +174,6 @@ def main():
         t.start()
         threads.append(t)
 
-    # Find .osu files and add them to the tasks queue
     print(f"Finding .osu files in '{root_dir}'...")
     found_count = 0
     for dirpath, _, filenames in os.walk(root_dir):
@@ -160,17 +185,15 @@ def main():
                 found_count += 1
     print(f"Found {found_count} beatmaps to process.")
 
-    # Signal workers to stop when the queue is empty
     for _ in range(num_worker_threads):
         tasks_queue.put(None)
+    
     tasks_queue.join()
     print("All file processing tasks are complete.")
 
-    # Signal the database writer to stop
     results_queue.put(None)
     results_queue.join()
     
-    # Wait for all threads to finish
     for t in threads:
         t.join()
     db_thread.join()

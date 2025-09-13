@@ -55,7 +55,7 @@ def load_and_group_data_from_db(
     num_chunks = (len(valid_map_ids) + chunk_size - 1) // chunk_size
 
     vector_query_template = """
-        SELECT beatmap_id, x_diff, y_diff, time_diff, abs_x, abs_y, object_type, is_new_combo, slider_curve_type, slider_num_anchors, slider_pixel_length
+        SELECT beatmap_id, x_diff, y_diff, time_diff, abs_x, abs_y, object_type, is_new_combo, slider_curve_type, slider_num_anchors, slider_pixel_length, duration_beats
         FROM beatmap_vectors 
         WHERE beatmap_id IN ({placeholders}) 
         ORDER BY beatmap_id
@@ -87,7 +87,13 @@ def load_and_group_data_from_db(
                 continue 
 
             vectors_tensor = torch.tensor(vectors_list, dtype=torch.float32)
+
+            # clamp and log-transform time_diff and duration_beats
+            vectors_tensor[:, 2].clamp_(min=0.0, max=16.0) 
+            vectors_tensor[:, 11].clamp_(min=0.0, max=16.0)
+
             vectors_tensor[:, 2] = torch.log1p(vectors_tensor[:, 2]) 
+            vectors_tensor[:, 11] = torch.log1p(vectors_tensor[:, 11])
             
             if max_seq_len and vectors_tensor.shape[0] > max_seq_len:
                 vectors_tensor = vectors_tensor[:max_seq_len]
@@ -199,21 +205,34 @@ def create_kde_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
     difficulty_index: int = 3,
     bandwidth: float = 0.5,
-    expand_for_augmentation: bool = False
+    expand_for_augmentation: bool = False,
+    num_bins: int = 100
 ) -> WeightedRandomSampler:
-    print(f"Creating KDE sampler with bandwidth={bandwidth}...")
+    print(f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}...")
     
     difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
     
     if expand_for_augmentation:
         difficulty_ratings = np.tile(difficulty_ratings, 4)
     
-    kde = gaussian_kde(difficulty_ratings, bw_method=bandwidth)
+    min_rating, max_rating = difficulty_ratings.min(), difficulty_ratings.max()
+    bin_edges = np.linspace(min_rating - 0.5, max_rating + 0.5, num_bins + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     
-    kde_values = kde(difficulty_ratings)
+    hist, _ = np.histogram(difficulty_ratings, bins=bin_edges, density=True)
     
-    sample_weights = 1.0 / (kde_values + 1e-8)
+    from scipy.ndimage import gaussian_filter1d
+    sigma = bandwidth * num_bins / (max_rating - min_rating + 1.0)  # Scale bandwidth to bins
+    smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode='reflect')
     
+    from scipy.interpolate import interp1d
+    interp_func = interp1d(bin_centers, smoothed_hist, kind='linear', 
+                          bounds_error=False, fill_value=smoothed_hist.min())
+    
+    density_values = interp_func(difficulty_ratings)
+    density_values = np.maximum(density_values, 1e-8) 
+    
+    sample_weights = 1.0 / density_values
     sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
     sample_weights = torch.from_numpy(sample_weights).double()
     

@@ -37,7 +37,7 @@ SR_RANGES_TO_SAMPLE = [
 # ------------------------------------
 
 MAX_SEQ_LEN = 1023
-IN_CHANNELS = 10
+IN_CHANNELS = 11  # Updated from 10 to include duration_beats
 METADATA_DIM = 5  # ar, od, cs, difficulty_rating, bpm
 
 D_MODEL = 256
@@ -238,7 +238,7 @@ def load_sampled_data_from_db(db_path, sr_ranges, sample_size_per_range, chunk_s
 
     processed_data = []
     vector_query_template = """
-        SELECT beatmap_id, x_diff, y_diff, time_diff, abs_x, abs_y, object_type, is_new_combo, slider_curve_type, slider_num_anchors, slider_pixel_length
+        SELECT beatmap_id, x_diff, y_diff, time_diff, abs_x, abs_y, object_type, is_new_combo, slider_curve_type, slider_num_anchors, slider_pixel_length, duration_beats
         FROM beatmap_vectors
         WHERE beatmap_id IN ({placeholders})
         ORDER BY beatmap_id
