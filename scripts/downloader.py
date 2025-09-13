@@ -11,30 +11,17 @@ import tqdm
 import json
 import concurrent.futures
 
-# --- CONFIGURATION ---
-
-# Path to your main osu! songs folder.
-# The script will scan this folder ONCE and create a fast cache ('beatmap_index.json') inside the target directory.
-# Subsequent runs will load from the cache in seconds.
-# Set to None to disable the local search feature entirely.
 SONGS_FOLDER_PATH = r'F:\Songs' 
 
-# The number of threads to use for the initial index build.
-# A good starting point is (number of cores * 2). Adjust based on your system.
 INDEXER_THREADS = os.cpu_count() * 2
 
-# The name of the cache file to be created within the target directory.
 CACHE_FILE_NAME = 'beatmap_index.json'
 
-# API endpoints and their respective rate-limit delays (in seconds).
 API_CONFIG = {
-    'https://catboy.best/osu/{id}': 0.5,
-    'https://osu.direct/api/osu/{id}': 0.9,
+    'https://catboy.best/osu/{id}': 0.4,
+    'https://osu.direct/api/osu/{id}': 0.8,
 }
 
-# --- END CONFIGURATION ---
-
-# --- Globals for thread communication ---
 processed_ids = set()
 processed_ids_lock = threading.Lock()
 
@@ -44,14 +31,13 @@ DOWNLOAD_HEADERS = {
 }
 
 def process_file_chunk(file_paths):
-    """Worker function for a thread to process a chunk of .osu files."""
     local_index = {}
     beatmap_id_regex = re.compile(r'^\s*BeatmapID\s*:\s*(\d+)\s*$', re.IGNORECASE)
     for file_path in file_paths:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 for i, line in enumerate(f):
-                    if i > 50: # Metadata is always at the top
+                    if i > 50:
                         break
                     match = beatmap_id_regex.match(line)
                     if match:
@@ -64,11 +50,9 @@ def process_file_chunk(file_paths):
     return local_index
 
 def build_index_multithreaded():
-    """Scans the songs folder using multiple threads to build the index rapidly."""
     print("Building local beatmap index with multiple threads...")
     
     all_osu_files = []
-    # Using a simple progress bar for the os.walk, as it can be slow on large folders
     print("Discovering .osu files...")
     for root, _, files in os.walk(SONGS_FOLDER_PATH):
         for file in files:
@@ -100,13 +84,6 @@ def build_index_multithreaded():
     return final_index
 
 def load_or_build_index(cache_file_path):
-    """
-    Manages the beatmap index. Loads from cache if fresh, otherwise builds it.
-    Args:
-        cache_file_path (str): The full path to the cache file.
-    Returns:
-        dict: The loaded or newly built beatmap index.
-    """
     if not SONGS_FOLDER_PATH or not os.path.isdir(SONGS_FOLDER_PATH):
         print("Warning: SONGS_FOLDER_PATH is not set or invalid. Disabling local search.")
         return {}
@@ -143,7 +120,6 @@ def load_or_build_index(cache_file_path):
         return {}
 
 def extract_beatmap_info(input_file):
-    """Parses an input file to extract beatmap information."""
     try:
         with open(input_file, 'r', encoding='utf-8') as infile:
             content = infile.read()
@@ -160,7 +136,6 @@ def extract_beatmap_info(input_file):
     return []
 
 def inject_star_rating(file_path, star_rating):
-    """Injects DifficultyRating into a .osu file if it doesn't exist."""
     if star_rating is None: return
     try:
         with open(file_path, 'r+', encoding='utf-8') as f:
@@ -168,12 +143,12 @@ def inject_star_rating(file_path, star_rating):
             try:
                 difficulty_section_index = next(i for i, line in enumerate(lines) if line.strip().lower() == '[difficulty]')
             except StopIteration:
-                return # No [Difficulty] section found
+                return
             rating_line_exists = False
             for i in range(difficulty_section_index + 1, len(lines)):
                 line = lines[i].strip()
                 if not line: continue
-                if line.startswith('['): break # Reached next section
+                if line.startswith('['): break
                 if line.lower().startswith('difficultyrating:'):
                     rating_line_exists = True
                     break
@@ -185,7 +160,6 @@ def inject_star_rating(file_path, star_rating):
     except Exception as e: print(f"Error injecting SR into {os.path.basename(file_path)}: {e}")
 
 def download_worker(tasks_queue, api_url_template, delay):
-    """The main function for each download thread."""
     while True:
         try:
             beatmap_id, star_rating, output_folder = tasks_queue.get_nowait()
@@ -204,7 +178,7 @@ def download_worker(tasks_queue, api_url_template, delay):
             if response.status_code == 200 and response.content:
                 with open(file_path, 'wb') as outfile: outfile.write(response.content)
                 inject_star_rating(file_path, star_rating)
-            else: # If download fails, remove from processed so another API can try
+            else:
                 with processed_ids_lock: processed_ids.discard(beatmap_id)
         except requests.exceptions.RequestException:
             with processed_ids_lock: processed_ids.discard(beatmap_id)
@@ -212,7 +186,6 @@ def download_worker(tasks_queue, api_url_template, delay):
         time.sleep(delay)
 
 def process_file(input_file, beatmap_index):
-    """Orchestrates the process for a single input file."""
     print(f"\n--- Processing {os.path.basename(input_file)} ---")
     output_folder = os.path.splitext(input_file)[0]
     os.makedirs(output_folder, exist_ok=True)
@@ -227,7 +200,7 @@ def process_file(input_file, beatmap_index):
     found_locally_ids = set()
     ids_to_process = [info for info in beatmap_infos if info[0] not in already_exist_ids]
 
-    if beatmap_index: # Only check local if the index exists
+    if beatmap_index:
         for beatmap_id, star_rating in tqdm.tqdm(ids_to_process, desc="Checking local index", unit="maps", leave=False):
             local_path = beatmap_index.get(beatmap_id)
             if local_path:
@@ -279,13 +252,8 @@ def process_file(input_file, beatmap_index):
     print(f"\n--- Finished processing {os.path.basename(input_file)} ---")
 
 def main():
-    """
-    Main execution function. Sets up the target directory, loads the index,
-    and processes all found .txt files.
-    """
     start_time = time.time()
     
-    # --- Determine and set up the target directory ---
     DEFAULT_TARGET_DIR = 'data'
     if len(sys.argv) > 1:
         target_dir = sys.argv[1]
@@ -298,12 +266,9 @@ def main():
     os.makedirs(target_dir, exist_ok=True)
     print(f"--- Operating in target directory: {os.path.abspath(target_dir)} ---")
 
-    # --- Load or build the index ---
-    # The cache file will be placed inside the target directory.
     cache_path = os.path.join(target_dir, CACHE_FILE_NAME)
     beatmap_index = load_or_build_index(cache_path)
     
-    # --- Find and process input files within the target directory ---
     input_files = glob.glob(os.path.join(target_dir, "*.txt"))
     if not input_files:
         print(f"\nNo .txt files found in '{target_dir}'.")
@@ -318,9 +283,4 @@ def main():
     print(f"\nAll tasks completed in {end_time - start_time:.2f} seconds.")
 
 if __name__ == "__main__":
-    """
-    --- Beatmap Downloader (Directory-Oriented) ---
-    Operates on .txt files within a specified or default './data' directory.
-    Caches the local beatmap index for hyper-fast subsequent runs.
-    """
     main()

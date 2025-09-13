@@ -1,37 +1,16 @@
-"""
-osu! beatmap parser module
-
-This module provides functionality to parse .osu beatmap files and extract
-musical features and metadata for analysis.
-
-Constants:
-    OBJECT_TYPE_CIRCLE: Hit circle object type (0)
-    OBJECT_TYPE_SLIDER: Slider object type (1) 
-    OBJECT_TYPE_SPINNER: Spinner object type (2)
-    OBJECT_TYPE_UNKNOWN: Unknown object type (-1)
-    SLIDER_CURVE_TYPES: Mapping of curve type characters to numeric values
-"""
-
 import os
 import bisect
 from collections import Counter
 import math
 
-# Hit object type constants
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
 OBJECT_TYPE_SPINNER = 2
 OBJECT_TYPE_UNKNOWN = -1
 
-# Slider curve type mapping
 SLIDER_CURVE_TYPES = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
 
-
 def _find_timing_points(t, timing_points, timing_points_times):
-    """
-    Finds the active uninherited and effective timing points for a given time `t`.
-    Internal helper function for the parser.
-    """
     idx = bisect.bisect_right(timing_points_times, t) - 1
     if idx < 0:
         return None, None
@@ -45,11 +24,6 @@ def _find_timing_points(t, timing_points, timing_points_times):
     return uninherited_point, effective_point
 
 def _calculate_main_bpm(timing_points, hit_objects_lines):
-    """
-    Calculates the most common BPM in a beatmap, weighted by how many
-    objects fall under each timing section.
-    Internal helper function for the parser.
-    """
     if not timing_points or not hit_objects_lines:
         return None
 
@@ -80,18 +54,6 @@ def _calculate_main_bpm(timing_points, hit_objects_lines):
 
 
 def parse_osu_file(file_path, print_info=False):
-    """
-    Parses a .osu file, calculating musically relevant vectors and main BPM.
-    
-    Returns a dictionary containing beatmap metadata and calculated vectors,
-    or None if parsing fails.
-    
-    - time_diff is in beats and rounded to 5 decimal places.
-    - x_diff and y_diff are RAW PIXEL DIFFERENCES.
-    - main_bpm is the most common BPM weighted by hit object count.
-    - abs_x and abs_y are the absolute pixel positions of the current object.
-    - New fields added for hit objects: object_type, is_new_combo, slider properties, etc.
-    """
     data = {
         'beatmap_id': None, 'hp_drain': None, 'circle_size': None, 'od': None,
         'ar': None, 'slider_multiplier': 1.4, 'slider_tick': 1.0,

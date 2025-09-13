@@ -2,5 +2,6 @@
 Core functionality for osu_corpora
 """
 
-from . import data
-from . import models
+# Lazy imports to avoid torch dependency on import
+# from . import data
+# from . import models

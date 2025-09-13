@@ -1,0 +1,25 @@
+defaults:
+  - base
+
+model:
+  type: "bigbird"
+  d_model: 512
+  n_heads: 16
+  n_layers: 8
+  dim_feedforward_mult: 4
+  attention_type: "original_full"
+  num_random_blocks: 3
+  max_seq_len: 2055
+  block_size: 64
+
+training:
+  batch_size: 16  
+  checkpoint_dir: "./checkpoints/bigbird_mlm"
+
+mlm:
+  masking_ratio: 0.15  
+
+components:
+  use_rope: false 
+  use_flash_attention: false 
+  compile_model: false

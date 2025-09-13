@@ -6,7 +6,13 @@ venv/
 .ipynb_checkpoints/
 
 # Data & Checkpoints
-data/*
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.txt
+data/*.json
+data/**/*.osu
+
 checkpoints/
 *.pth
 
@@ -15,3 +21,4 @@ checkpoints/
 .vscode/
 
 uv.lock
+
