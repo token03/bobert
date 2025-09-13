@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader, random_split, WeightedRandomSampler
 from tqdm import tqdm
 from typing import Tuple, List, Dict, Any, Optional
+from scipy.stats import gaussian_kde
+from scipy.interpolate import interp1d
 
 def setup_database(db_path: str, colab_url: Optional[str] = None) -> str:
     try:
@@ -85,7 +87,7 @@ def load_and_group_data_from_db(
                 continue 
 
             vectors_tensor = torch.tensor(vectors_list, dtype=torch.float32)
-            vectors_tensor[:, 2] = torch.log1p(vectors_tensor[:, 2])  # Log transform time_diff
+            vectors_tensor[:, 2] = torch.log1p(vectors_tensor[:, 2]) 
             
             if max_seq_len and vectors_tensor.shape[0] > max_seq_len:
                 vectors_tensor = vectors_tensor[:max_seq_len]
@@ -155,11 +157,15 @@ def calculate_normalization_stats(
 
 def create_weighted_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3
+    difficulty_index: int = 3,
+    expand_for_augmentation: bool = False
 ) -> WeightedRandomSampler:
     print("Creating weighted sampler for difficulty balancing...")
     
     all_difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
+    
+    if expand_for_augmentation:
+        all_difficulty_ratings = np.tile(all_difficulty_ratings, 4)
     
     bins = [0, 5, 6, 7, 8, 9, 10, np.inf]
     binned_ratings = pd.cut(all_difficulty_ratings, bins=bins, right=False, labels=False)
@@ -170,7 +176,7 @@ def create_weighted_sampler(
         lower = bins[i]
         upper = bins[i+1]
         count = class_counts[i]
-        total_maps = len(data)
+        total_maps = len(all_difficulty_ratings)
         percentage = (count / total_maps * 100) if total_maps > 0 else 0
         if np.isinf(upper):
             print(f"{lower:2.0f}★+  : {count:7d} maps ({percentage:5.2f}%)")
@@ -189,8 +195,98 @@ def create_weighted_sampler(
     )
 
 
+def create_kde_sampler(
+    data: List[Tuple[torch.Tensor, torch.Tensor]],
+    difficulty_index: int = 3,
+    bandwidth: float = 0.5,
+    expand_for_augmentation: bool = False
+) -> WeightedRandomSampler:
+    print(f"Creating KDE sampler with bandwidth={bandwidth}...")
+    
+    difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
+    
+    if expand_for_augmentation:
+        difficulty_ratings = np.tile(difficulty_ratings, 4)
+    
+    kde = gaussian_kde(difficulty_ratings, bw_method=bandwidth)
+    
+    kde_values = kde(difficulty_ratings)
+    
+    sample_weights = 1.0 / (kde_values + 1e-8)
+    
+    sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
+    sample_weights = torch.from_numpy(sample_weights).double()
+    
+    print(f"KDE sampling - Min weight: {sample_weights.min():.4f}, Max weight: {sample_weights.max():.4f}")
+    
+    return WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+
+def create_temperature_sampler(
+    data: List[Tuple[torch.Tensor, torch.Tensor]],
+    difficulty_index: int = 3,
+    temperature: float = 2.0,
+    expand_for_augmentation: bool = False
+) -> WeightedRandomSampler:
+    print(f"Creating temperature sampler with temperature={temperature}...")
+    
+    difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
+    
+    if expand_for_augmentation:
+        difficulty_ratings = np.tile(difficulty_ratings, 4)
+    
+    hist, bin_edges = np.histogram(difficulty_ratings, bins=50, density=True)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    scaled_hist = np.exp(np.log(hist + 1e-8) / temperature)
+    scaled_hist = scaled_hist / np.sum(scaled_hist)
+    
+    interp_func = interp1d(bin_centers, scaled_hist, kind='cubic', 
+                          bounds_error=False, fill_value='extrapolate')
+    
+    interpolated_weights = interp_func(difficulty_ratings)
+    interpolated_weights = np.maximum(interpolated_weights, 1e-8)
+    
+    sample_weights = 1.0 / interpolated_weights
+    sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
+    sample_weights = torch.from_numpy(sample_weights).double()
+    
+    print(f"Temperature sampling - Min weight: {sample_weights.min():.4f}, Max weight: {sample_weights.max():.4f}")
+    
+    return WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+
+def create_sampler_from_config(
+    data: List[Tuple[torch.Tensor, torch.Tensor]],
+    config: Dict[str, Any]
+) -> WeightedRandomSampler:
+    sampling_config = config.get('training', {}).get('sampling', {})
+    method = sampling_config.get('method', 'weighted')
+    difficulty_index = sampling_config.get('difficulty_index', 3)
+    expand_for_augmentation = sampling_config.get('expand_for_augmentation', True)
+    
+    if method == 'kde':
+        bandwidth = sampling_config.get('kde_bandwidth', 0.5)
+        return create_kde_sampler(data, difficulty_index, bandwidth, expand_for_augmentation)
+    elif method == 'temperature':
+        temperature = sampling_config.get('temperature', 2.0)
+        return create_temperature_sampler(data, difficulty_index, temperature, expand_for_augmentation)
+    elif method == 'weighted':
+        return create_weighted_sampler(data, difficulty_index, expand_for_augmentation)
+    else:
+        print(f"Unknown sampling method '{method}', falling back to weighted sampling")
+        return create_weighted_sampler(data, difficulty_index, expand_for_augmentation)
+
+
 def print_data_summary(all_data: List[Tuple[torch.Tensor, torch.Tensor]]):
-    """Prints a summary of the loaded data."""
     if not all_data:
         print("No data loaded!")
         return

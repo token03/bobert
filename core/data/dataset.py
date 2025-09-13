@@ -99,6 +99,47 @@ class MaskedBeatmapDataset(BeatmapDataset):
         return torch.bernoulli(mask_prob).bool()
 
 
+class AugmentedBeatmapDataset(BeatmapDataset):
+    
+    def __init__(
+        self, 
+        beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]], 
+        vector_mean: torch.Tensor, 
+        vector_std: torch.Tensor, 
+        meta_mean: torch.Tensor, 
+        meta_std: torch.Tensor, 
+        epsilon: float = 1e-8
+    ):
+        super().__init__(beatmap_data, vector_mean, vector_std, meta_mean, meta_std, False, epsilon)
+        self.base_length = len(beatmap_data)
+
+    def __len__(self) -> int:
+        return self.base_length * 4
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        base_idx = idx % self.base_length
+        aug_type = idx // self.base_length
+        
+        vectors, metadata = self.beatmap_data[base_idx]
+        vectors = vectors.clone()
+        
+        if aug_type == 1:
+            vectors[:, 0] *= -1                  
+            vectors[:, 3] = 512 - vectors[:, 3]  
+        elif aug_type == 2:
+            vectors[:, 1] *= -1                  
+            vectors[:, 4] = 384 - vectors[:, 4]  
+        elif aug_type == 3:
+            vectors[:, 0:2] *= -1                
+            vectors[:, 3] = 512 - vectors[:, 3]  
+            vectors[:, 4] = 384 - vectors[:, 4]  
+
+        normalized_metadata = (metadata - self.meta_mean) / (self.meta_std + self.epsilon)
+        normalized_vectors = (vectors - self.vector_mean) / (self.vector_std + self.epsilon)
+
+        return normalized_vectors, normalized_metadata
+
+
 def create_dataloaders(
     train_data: List[Tuple[torch.Tensor, torch.Tensor]],
     val_data: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -115,9 +156,17 @@ def create_dataloaders(
     if hasattr(val_data, 'dataset'):
         val_data = [val_data.dataset[i] for i in val_data.indices]
     
-    train_dataset = BeatmapDataset(
-        train_data, vector_mean, vector_std, meta_mean, meta_std, augment=True
-    )
+    use_augmented_dataset = config.get('training', {}).get('sampling', {}).get('expand_for_augmentation', True)
+    
+    if use_augmented_dataset:
+        train_dataset = AugmentedBeatmapDataset(
+            train_data, vector_mean, vector_std, meta_mean, meta_std
+        )
+    else:
+        train_dataset = BeatmapDataset(
+            train_data, vector_mean, vector_std, meta_mean, meta_std, augment=True
+        )
+    
     val_dataset = BeatmapDataset(
         val_data, vector_mean, vector_std, meta_mean, meta_std, augment=False
     )

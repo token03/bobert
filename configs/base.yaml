@@ -16,6 +16,13 @@ training:
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
   
+  # Sampling configuration
+  sampling:
+    method: "kde"  # "kde", "temperature", or "weighted"
+    kde_bandwidth: 0.3  # Bandwidth for KDE sampling
+    temperature: 2.0    # Temperature for temperature sampling
+    difficulty_index: 3  # Index of difficulty rating in metadata
+  
 model:
   dropout: 0.1
   
