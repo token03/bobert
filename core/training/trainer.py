@@ -36,6 +36,20 @@ class CosineWarmupScheduler(_LRScheduler):
             return [self.min_lr + (self.base_lr - self.min_lr) * cosine_decay
                    for _ in self.optimizer.param_groups]
 
+def masked_mlm_loss_fn(
+    predictions: torch.Tensor, 
+    targets: torch.Tensor, 
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """Calculates MSE loss only on masked tokens."""
+    num_masked = torch.sum(mask)
+    if num_masked == 0:
+        return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+
+    masked_predictions = predictions[mask]
+    masked_targets = targets[mask]
+    
+    return nn.functional.mse_loss(masked_predictions, masked_targets)
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> Optimizer:
     training_config = config['training']
@@ -214,7 +228,7 @@ class MLMTrainer:
         config: Dict[str, Any],
         device: torch.device,
         checkpoint_manager: CheckpointManager,
-        loss_fn: Callable = mlm_loss_fn
+        loss_fn: Callable = masked_mlm_loss_fn
     ):
         self.model = model
         self.train_dataloader = train_dataloader
@@ -229,8 +243,8 @@ class MLMTrainer:
         self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
         
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
-        
+        self.scaler = torch.amp.GradScaler(device.type, enabled=self.use_amp)
+
         self.metrics_tracker = MetricsTracker()
         
         print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}")
@@ -251,8 +265,8 @@ class MLMTrainer:
             self.optimizer.zero_grad()
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                predictions, targets = self.model(vectors, metadata, attention_mask)
-                loss = self.loss_fn(predictions, targets)
+                all_predictions, targets, mask = self.model(vectors, metadata, attention_mask)
+                loss = self.loss_fn(all_predictions, targets, mask)
             
             self.scaler.scale(loss).backward()
             
@@ -289,8 +303,8 @@ class MLMTrainer:
         with torch.no_grad():
             for vectors, attention_mask, metadata in self.val_dataloader:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    predictions, targets = self.model(vectors, metadata, attention_mask)
-                    loss = self.loss_fn(predictions, targets)
+                    all_predictions, targets, mask = self.model(vectors, metadata, attention_mask)
+                    loss = self.loss_fn(all_predictions, targets, mask)
                 
                 total_loss += loss.item()
                 num_batches += 1

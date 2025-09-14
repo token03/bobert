@@ -140,16 +140,11 @@ class BertForMaskedModeling(nn.Module):
         x: torch.Tensor, 
         metadata: torch.Tensor, 
         attention_mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: # Return signature changes
         
         prob = torch.full(x.shape[:2], self.masking_ratio, device=x.device)
         prob.masked_fill_(~attention_mask, 0.0)
         is_masked = torch.bernoulli(prob).bool()
-
-        # if not is_masked.any():
-        #     return torch.tensor([], device=x.device), torch.tensor([], device=x.device)
-
-        targets = x[is_masked]
 
         x_embed = self.bert.input_proj(x)
         mask_expanded = is_masked.unsqueeze(-1).expand_as(x_embed)
@@ -164,7 +159,7 @@ class BertForMaskedModeling(nn.Module):
         
         encoded_output = self.bert.encode(full_encoder_input, full_padding_mask)
         
-        encoded_masked_tokens = encoded_output[:, 1:, :][is_masked]
-        predictions = self.prediction_head(encoded_masked_tokens)
+        sequence_output = encoded_output[:, 1:, :]
+        all_predictions = self.prediction_head(sequence_output)
         
-        return predictions, targets
+        return all_predictions, x, is_masked
