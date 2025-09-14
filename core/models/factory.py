@@ -66,10 +66,6 @@ def create_model_from_config(config: Dict[str, Any], device: torch.device) -> nn
     
     model = model.to(device)
     
-    if components_config.get('compile_model', False):
-        print("Compiling model with torch.compile...")
-        model = torch.compile(model, mode="reduce-overhead")
-    
     return model
 
 def create_task_model_from_config(
@@ -94,7 +90,7 @@ def create_task_model_from_config(
     components_config = config.get('components', {})
     if components_config.get('compile_model', False):
         print("Compiling task model with torch.compile...")
-        model = torch.compile(model, mode="reduce-overhead")
+        model = torch.compile(model, mode="default")
     
     return model
 

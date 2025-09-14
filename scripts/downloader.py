@@ -10,6 +10,13 @@ import shutil
 import tqdm
 import json
 import concurrent.futures
+import sys
+from pathlib import Path
+
+# Ensure project root (parent of 'scripts') is on sys.path so 'core' imports work
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 SONGS_FOLDER_PATH = r'F:\Songs' 
 

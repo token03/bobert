@@ -4,6 +4,15 @@ import threading
 import queue
 import time
 import argparse
+import random 
+import sys
+from pathlib import Path
+
+# Ensure project root (parent of 'scripts') is on sys.path so 'core' imports work
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from core.data.parser import parse_osu_file
 from core.data.types import HitObjectVector
 
@@ -109,17 +118,11 @@ def worker(tasks_queue, results_queue):
 
             is_map_valid = True
             for vec in beatmap_data['vectors']:
-                # Access fields using NamedTuple attributes
-                time_diff = vec.time_diff
-                abs_x = vec.abs_x
-                abs_y = vec.abs_y
-                duration_beats = vec.duration_beats
-
-                if time_diff < 0 or duration_beats < 0:
+                if vec.time_diff < 0 or vec.duration_beats < 0:
                     is_map_valid = False
                     break
                 
-                if not (0 <= abs_x <= 512 and 0 <= abs_y <= 384):
+                if not (0 <= vec.abs_x <= 512 and 0 <= vec.abs_y <= 384):
                     is_map_valid = False
                     break
             
@@ -127,6 +130,7 @@ def worker(tasks_queue, results_queue):
                 results_queue.put(beatmap_data)
 
         except Exception as e:
+            # print(f"Worker error processing {os.path.basename(file_path)}: {e}")
             pass
         finally:
             tasks_queue.task_done()
@@ -163,22 +167,13 @@ def db_writer(results_queue, db_path):
     conn.close()
     print(f"\nDatabase writer finished. Total beatmaps inserted: {count}")
 
-def main():
-    """Main function to orchestrate file discovery, parsing, and database writing."""
-    parser = argparse.ArgumentParser(description='Create SQLite database from osu! beatmap files')
-    parser.add_argument('directory', nargs='?', default='./data', 
-                       help='Directory to search for .osu files (default: ./data)')
-    args = parser.parse_args()
-    
-    root_dir = args.directory
+
+def create_full_db(root_dir):
+    """Orchestrates creating the full database from all found .osu files."""
     db_path = './beatmaps.db'
     num_worker_threads = max(1, (os.cpu_count() or 1) - 1)
-
-    if not os.path.exists(root_dir):
-        print(f"Error: Directory '{root_dir}' does not exist.")
-        return
-
     start_time = time.time()
+    
     if os.path.exists(db_path):
         print(f"Database at {db_path} already exists. Appending new data.")
     else:
@@ -191,6 +186,7 @@ def main():
     tasks_queue = queue.Queue(maxsize=1024)
     results_queue = queue.Queue(maxsize=256)
 
+    # Start DB writer and worker threads
     db_thread = threading.Thread(target=db_writer, args=(results_queue, db_path))
     db_thread.start()
     
@@ -202,6 +198,7 @@ def main():
         t.start()
         threads.append(t)
 
+    # Find and enqueue all .osu files
     print(f"Finding .osu files in '{root_dir}'...")
     found_count = 0
     for dirpath, _, filenames in os.walk(root_dir):
@@ -213,6 +210,84 @@ def main():
                 found_count += 1
     print(f"Found {found_count} beatmaps to process.")
 
+    # Signal workers to stop
+    for _ in range(num_worker_threads):
+        tasks_queue.put(None)
+    
+    tasks_queue.join()
+    print("All file processing tasks are complete.")
+
+    # Signal DB writer to stop
+    results_queue.put(None)
+    results_queue.join()
+    
+    # Wait for all threads to finish
+    for t in threads:
+        t.join()
+    db_thread.join()
+
+    end_time = time.time()
+    print(f"All done! Total time taken: {end_time - start_time:.2f} seconds.")
+
+
+def create_test_db(root_dir, sample_size=3000):
+    """Orchestrates creating a smaller, randomly sampled test database."""
+    db_path = './beatmaps_test.db'
+    num_worker_threads = max(1, (os.cpu_count() or 1) - 1)
+    start_time = time.time()
+
+    # --- Step 1: Find all files first ---
+    print(f"Finding all .osu files in '{root_dir}' to create a sample...")
+    all_osu_files = []
+    for dirpath, _, filenames in os.walk(root_dir):
+        if os.path.basename(dirpath).startswith('.'):
+            continue
+        for filename in filenames:
+            if filename.endswith('.osu'):
+                all_osu_files.append(os.path.join(dirpath, filename))
+    
+    print(f"Found {len(all_osu_files)} total .osu files.")
+
+    # --- Step 2: Randomly sample the files ---
+    if len(all_osu_files) > sample_size:
+        print(f"Randomly sampling {sample_size} beatmaps for the test database...")
+        files_to_process = random.sample(all_osu_files, sample_size)
+    else:
+        print(f"Found fewer files than sample size. Processing all {len(all_osu_files)} files.")
+        files_to_process = all_osu_files
+
+    # --- Step 3: Setup database and processing pipeline (similar to full version) ---
+    if os.path.exists(db_path):
+        print(f"Test database at {db_path} already exists. Overwriting.")
+        os.remove(db_path)
+    else:
+        print(f"Creating new test database at {db_path}.")
+    
+    conn = sqlite3.connect(db_path)
+    create_tables(conn)
+    conn.close()
+
+    tasks_queue = queue.Queue(maxsize=1024)
+    results_queue = queue.Queue(maxsize=256)
+
+    # Start DB writer and worker threads
+    db_thread = threading.Thread(target=db_writer, args=(results_queue, db_path))
+    db_thread.start()
+    
+    threads = []
+    print(f"Starting {num_worker_threads} worker threads...")
+    for _ in range(num_worker_threads):
+        t = threading.Thread(target=worker, args=(tasks_queue, results_queue))
+        t.daemon = True
+        t.start()
+        threads.append(t)
+
+    # --- Step 4: Enqueue only the sampled files ---
+    print(f"Enqueuing {len(files_to_process)} beatmaps to be processed...")
+    for file_path in files_to_process:
+        tasks_queue.put(file_path)
+
+    # --- Step 5: Graceful shutdown (same as full version) ---
     for _ in range(num_worker_threads):
         tasks_queue.put(None)
     
@@ -227,7 +302,32 @@ def main():
     db_thread.join()
 
     end_time = time.time()
-    print(f"All done! Total time taken: {end_time - start_time:.2f} seconds.")
+    print(f"Test DB creation done! Total time taken: {end_time - start_time:.2f} seconds.")
+
+
+def main():
+    """Main function to orchestrate file discovery, parsing, and database writing."""
+    parser = argparse.ArgumentParser(description='Create SQLite database from osu! beatmap files')
+    parser.add_argument('directory', nargs='?', default='./data', 
+                       help='Directory to search for .osu files (default: ./data)')
+    parser.add_argument('--test', action='store_true', default=False,
+                       help='Create a smaller, randomly sampled test database (default: False).')
+    parser.add_argument('--sample_size', type=int, default=3000,
+                       help='Number of beatmaps for the test database (default: 3000).')
+    args = parser.parse_args()
+    
+    if not os.path.exists(args.directory):
+        print(f"Error: Directory '{args.directory}' does not exist.")
+        return
+
+    # Explicitly check the test flag
+    if args.test:
+        print(f"Creating TEST database with {args.sample_size} samples...")
+        create_test_db(args.directory, args.sample_size)
+    else:
+        print("Creating FULL database with all available beatmaps...")
+        create_full_db(args.directory)
+
 
 if __name__ == '__main__':
     main()
