@@ -3,7 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
-from rotary_embedding_torch import RotaryEmbedding
+from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+
+try:
+    from flash_attn import flash_attn_varlen_qkvpacked_func
+    from einops import rearrange
+    _flash_attn_available = True
+except ImportError:
+    flash_attn_varlen_qkvpacked_func = None
+    rearrange = None
+    _flash_attn_available = False
 
 class BaseAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
@@ -19,31 +28,40 @@ class BaseAttention(nn.Module):
         self.wo = nn.Linear(d_model, d_model, bias=False)
         self.dropout = dropout
         
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError("Subclasses must implement forward method")
 
 class MultiHeadAttentionWithRoPE(BaseAttention):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, local_window_size: int = 128):
         super().__init__(d_model, n_heads, dropout)
-        
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
+        self.local_window_size = local_window_size
+
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        # This layer supports both padded and packed (unpadded) inputs.
+        # It dispatches to the appropriate implementation.
+        if 'cu_seqlens' in kwargs and _flash_attn_available:
+            return self.forward_packed(x, **kwargs)
+        else:
+            return self.forward_padded(x, **kwargs)
+
+    def forward_padded(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Original implementation for padded sequences, used as a fallback."""
         rotary_emb: Optional[RotaryEmbedding] = kwargs.get("rotary_emb")
+        mask: torch.Tensor = kwargs.get("mask")
         batch_size, seq_len, _ = x.shape
         
         q, k, v = self.wq(x), self.wk(x), self.wv(x)
         
-        # Reshape and transpose for multi-head attention
         q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
 
-        # Apply rotary embeddings if provided
         if rotary_emb is not None:
             q = rotary_emb.rotate_queries_or_keys(q)
             k = rotary_emb.rotate_queries_or_keys(k)
         
-        attn_mask = mask.unsqueeze(1).unsqueeze(2) 
-        attn_mask = attn_mask == False 
+        # Mask should be boolean, where True means ignore
+        attn_mask = mask.unsqueeze(1).unsqueeze(2) if mask is not None else None
 
         output = F.scaled_dot_product_attention(
             q, k, v, 
@@ -55,28 +73,82 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
         
         return self.wo(output)
 
+    def forward_packed(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Unpadded / packed sequence implementation using FlashAttention.
+        x is a packed tensor of shape (total_tokens, d_model).
+        """
+        rotary_emb: RotaryEmbedding = kwargs.get("rotary_emb")
+        cu_seqlens: torch.Tensor = kwargs.get("cu_seqlens")
+        max_seqlen: int = kwargs.get("max_seqlen")
+        is_global: bool = kwargs.get("is_global", True)
+        
+        total_tokens, _ = x.shape
+
+        q, k, v = self.wq(x), self.wk(x), self.wv(x)
+        
+        q = q.view(total_tokens, self.n_heads, self.d_head)
+        k = k.view(total_tokens, self.n_heads, self.d_head)
+        v = v.view(total_tokens, self.n_heads, self.d_head)
+
+        if rotary_emb is not None:
+            t_for_cache = torch.arange(max_seqlen, device=x.device)
+            all_freqs = rotary_emb(t_for_cache, seq_len=max_seqlen)
+            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            position_ids = torch.cat([torch.arange(s, device=x.device, dtype=torch.long) for s in seqlens])
+            freqs = all_freqs[position_ids]
+            freqs = freqs.view(total_tokens, 1, self.d_head)
+            
+            q = apply_rotary_emb(freqs, q, seq_dim=0)
+            k = apply_rotary_emb(freqs, k, seq_dim=0)
+
+        qkv = torch.stack([q, k, v], dim=1)
+        qkv = qkv.view(total_tokens, 3, self.n_heads, self.d_head)
+
+        window_size = (-1, -1) if is_global else (self.local_window_size, self.local_window_size)
+
+        # --- START: FIX FOR FLASHATTENTION DTYPE REQUIREMENT ---
+        # FlashAttention requires fp16 or bf16 input. We cast the input to fp16
+        # and then cast the output back to the original dtype to ensure
+        # compatibility with the rest of the model's layers.
+        orig_dtype = qkv.dtype
+        target_dtype = torch.float16 # or torch.bfloat16 if your hardware supports it well
+
+        output = flash_attn_varlen_qkvpacked_func(
+            qkv.to(target_dtype),
+            cu_seqlens,
+            max_seqlen,
+            dropout_p=self.dropout if self.training else 0.0,
+            causal=False,
+            window_size=window_size
+        )
+        
+        output = output.to(orig_dtype)
+        # --- END: FIX FOR FLASHATTENTION DTYPE REQUIREMENT ---
+        
+        output = output.view(total_tokens, self.d_model)
+        
+        return self.wo(output)
+
+
 class StandardMultiHeadAttention(BaseAttention):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, **kwargs):
         super().__init__(d_model, n_heads, dropout)
         self.pos_embed = nn.Parameter(torch.randn(1, 2048, d_model) * 0.02)  
         
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        mask: torch.Tensor = kwargs.get("mask")
         batch_size, seq_len, _ = x.shape
         
         x = x + self.pos_embed[:, :seq_len, :]
         
         q, k, v = self.wq(x), self.wk(x), self.wv(x)
         
-        q = q.view(batch_size, seq_len, self.n_heads, self.d_head)
-        k = k.view(batch_size, seq_len, self.n_heads, self.d_head)
-        v = v.view(batch_size, seq_len, self.n_heads, self.d_head)
-        
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2) 
-        v = v.transpose(1, 2) 
+        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
 
-        attn_mask = mask.unsqueeze(1).unsqueeze(2) 
-        attn_mask = attn_mask == False 
+        attn_mask = mask.unsqueeze(1).unsqueeze(2) if mask is not None else None
 
         output = F.scaled_dot_product_attention(
             q, k, v, 
@@ -92,10 +164,11 @@ def create_attention_layer(
     attention_type: str,
     d_model: int, 
     n_heads: int, 
-    dropout: float = 0.1
+    dropout: float = 0.1,
+    local_window_size: int = 128
 ) -> BaseAttention:
     if attention_type == 'rope':
-        return MultiHeadAttentionWithRoPE(d_model, n_heads, dropout)
+        return MultiHeadAttentionWithRoPE(d_model, n_heads, dropout, local_window_size)
     elif attention_type == 'standard':
         return StandardMultiHeadAttention(d_model, n_heads, dropout)
     else:
