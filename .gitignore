@@ -21,4 +21,4 @@ checkpoints/
 .vscode/
 
 uv.lock
-
+.venv
