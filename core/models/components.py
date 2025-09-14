@@ -4,15 +4,8 @@ import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
-
-try:
-    from flash_attn import flash_attn_varlen_qkvpacked_func
-    from einops import rearrange
-    _flash_attn_available = True
-except ImportError:
-    flash_attn_varlen_qkvpacked_func = None
-    rearrange = None
-    _flash_attn_available = False
+from flash_attn import flash_attn_varlen_qkvpacked_func
+from einops import rearrange
 
 class BaseAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
@@ -37,47 +30,6 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
         self.local_window_size = local_window_size
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        # This layer supports both padded and packed (unpadded) inputs.
-        # It dispatches to the appropriate implementation.
-        if 'cu_seqlens' in kwargs and _flash_attn_available:
-            return self.forward_packed(x, **kwargs)
-        else:
-            return self.forward_padded(x, **kwargs)
-
-    def forward_padded(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        """Original implementation for padded sequences, used as a fallback."""
-        rotary_emb: Optional[RotaryEmbedding] = kwargs.get("rotary_emb")
-        mask: torch.Tensor = kwargs.get("mask")
-        batch_size, seq_len, _ = x.shape
-        
-        q, k, v = self.wq(x), self.wk(x), self.wv(x)
-        
-        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-
-        if rotary_emb is not None:
-            q = rotary_emb.rotate_queries_or_keys(q)
-            k = rotary_emb.rotate_queries_or_keys(k)
-        
-        # Mask should be boolean, where True means ignore
-        attn_mask = mask.unsqueeze(1).unsqueeze(2) if mask is not None else None
-
-        output = F.scaled_dot_product_attention(
-            q, k, v, 
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0
-        )
-        
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
-        
-        return self.wo(output)
-
-    def forward_packed(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        """
-        Unpadded / packed sequence implementation using FlashAttention.
-        x is a packed tensor of shape (total_tokens, d_model).
-        """
         rotary_emb: RotaryEmbedding = kwargs.get("rotary_emb")
         cu_seqlens: torch.Tensor = kwargs.get("cu_seqlens")
         max_seqlen: int = kwargs.get("max_seqlen")
@@ -107,12 +59,8 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
 
         window_size = (-1, -1) if is_global else (self.local_window_size, self.local_window_size)
 
-        # --- START: FIX FOR FLASHATTENTION DTYPE REQUIREMENT ---
-        # FlashAttention requires fp16 or bf16 input. We cast the input to fp16
-        # and then cast the output back to the original dtype to ensure
-        # compatibility with the rest of the model's layers.
         orig_dtype = qkv.dtype
-        target_dtype = torch.float16 # or torch.bfloat16 if your hardware supports it well
+        target_dtype = torch.bfloat16
 
         output = flash_attn_varlen_qkvpacked_func(
             qkv.to(target_dtype),
@@ -124,12 +72,9 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
         )
         
         output = output.to(orig_dtype)
-        # --- END: FIX FOR FLASHATTENTION DTYPE REQUIREMENT ---
-        
         output = output.view(total_tokens, self.d_model)
         
         return self.wo(output)
-
 
 class StandardMultiHeadAttention(BaseAttention):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, **kwargs):
@@ -137,26 +82,39 @@ class StandardMultiHeadAttention(BaseAttention):
         self.pos_embed = nn.Parameter(torch.randn(1, 2048, d_model) * 0.02)  
         
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        mask: torch.Tensor = kwargs.get("mask")
-        batch_size, seq_len, _ = x.shape
+        cu_seqlens: torch.Tensor = kwargs.get("cu_seqlens")
+        max_seqlen: int = kwargs.get("max_seqlen")
         
-        x = x + self.pos_embed[:, :seq_len, :]
+        total_tokens, _ = x.shape
+        
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        position_ids = torch.cat([torch.arange(s, device=x.device, dtype=torch.long) for s in seqlens])
+        pos_embeds = self.pos_embed[0, position_ids, :]
+        x = x + pos_embeds
         
         q, k, v = self.wq(x), self.wk(x), self.wv(x)
         
-        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        q = q.view(total_tokens, self.n_heads, self.d_head)
+        k = k.view(total_tokens, self.n_heads, self.d_head)
+        v = v.view(total_tokens, self.n_heads, self.d_head)
 
-        attn_mask = mask.unsqueeze(1).unsqueeze(2) if mask is not None else None
+        qkv = torch.stack([q, k, v], dim=1)
+        qkv = qkv.view(total_tokens, 3, self.n_heads, self.d_head)
 
-        output = F.scaled_dot_product_attention(
-            q, k, v, 
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0
+        orig_dtype = qkv.dtype
+        target_dtype = torch.float16
+
+        output = flash_attn_varlen_qkvpacked_func(
+            qkv.to(target_dtype),
+            cu_seqlens,
+            max_seqlen,
+            dropout_p=self.dropout if self.training else 0.0,
+            causal=False,
+            window_size=(-1, -1)
         )
         
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        output = output.to(orig_dtype)
+        output = output.view(total_tokens, self.d_model)
         
         return self.wo(output)
 
