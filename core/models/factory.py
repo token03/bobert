@@ -9,7 +9,6 @@ from .components import (
     create_ffn_layer
 )
 
-
 class ModelRegistry:
     _models: Dict[str, Type[nn.Module]] = {}
     
