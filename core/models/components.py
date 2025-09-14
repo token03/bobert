@@ -4,14 +4,12 @@ import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 
-
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs) 
     return freqs_cis
-
 
 def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
@@ -22,7 +20,6 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
-
 
 class BaseAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
@@ -40,7 +37,6 @@ class BaseAttention(nn.Module):
         
     def forward(self, x: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
         raise NotImplementedError("Subclasses must implement forward method")
-
 
 class MultiHeadAttentionWithRoPE(BaseAttention):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
@@ -75,7 +71,6 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
         
         return self.wo(output)
 
-
 class StandardMultiHeadAttention(BaseAttention):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__(d_model, n_heads, dropout)
@@ -109,7 +104,6 @@ class StandardMultiHeadAttention(BaseAttention):
         
         return self.wo(output)
 
-
 def create_attention_layer(
     attention_type: str,
     d_model: int, 
@@ -122,7 +116,6 @@ def create_attention_layer(
         return StandardMultiHeadAttention(d_model, n_heads, dropout)
     else:
         raise ValueError(f"Unknown attention type: {attention_type}")
-
 
 class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-6):
@@ -143,7 +136,6 @@ def create_norm_layer(norm_type: str, d_model: int) -> nn.Module:
     else:
         raise ValueError(f"Unknown norm type: {norm_type}")
 
-
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, dim_feedforward: int):
         super().__init__()
@@ -154,7 +146,6 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-
 class StandardFFN(nn.Module):
     def __init__(self, d_model: int, dim_feedforward: int, dropout: float = 0.1):
         super().__init__()
@@ -164,7 +155,6 @@ class StandardFFN(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(self.dropout(F.gelu(self.linear1(x))))
-
 
 def create_ffn_layer(
     ffn_type: str,

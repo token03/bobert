@@ -52,7 +52,6 @@ class TransformerEncoderLayer(nn.Module):
         
         return src
 
-
 class BertEncoder(nn.Module):
     def __init__(
         self,
@@ -129,7 +128,6 @@ class BertEncoder(nn.Module):
         full_embeddings, full_padding_mask = self._embed(x, metadata, attention_mask)
         output = self.encode(full_embeddings, full_padding_mask)
         return output
-
 
 class BertForMaskedModeling(nn.Module):
     def __init__(self, bert_model: BertEncoder, in_channels: int, masking_ratio: float = 0.15):

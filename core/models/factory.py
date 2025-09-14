@@ -29,7 +29,6 @@ class ModelRegistry:
     def list_models(cls) -> list[str]:
         return list(cls._models.keys())
 
-
 ModelRegistry.register("bert")(BertEncoder)
 
 def create_model_from_config(config: Dict[str, Any], device: torch.device) -> nn.Module:
@@ -73,7 +72,6 @@ def create_model_from_config(config: Dict[str, Any], device: torch.device) -> nn
     
     return model
 
-
 def create_task_model_from_config(
     config: Dict[str, Any], 
     device: torch.device,
@@ -100,7 +98,6 @@ def create_task_model_from_config(
     
     return model
 
-
 def print_model_info(model: nn.Module, config: Dict[str, Any]):
     """Prints information about the model."""
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -117,7 +114,6 @@ def print_model_info(model: nn.Module, config: Dict[str, Any]):
     print(f"Flash Attention: {components.get('use_flash_attention', True)}")
     print(f"Model Compiled: {components.get('compile_model', False)}")
     print("-" * 25)
-
 
 def get_model_summary(model: nn.Module) -> Dict[str, Any]:
     """Gets a summary of model statistics."""
