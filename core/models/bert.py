@@ -27,7 +27,7 @@ class TransformerEncoderLayer(nn.Module):
         self.is_global = is_global
         
         self.self_attn = create_attention_layer(
-            attention_type, d_model, n_heads, dropout, local_window_size
+            attention_type, d_model, n_heads, dropout, local_window_size, is_global=is_global
         )
         self.ffn = create_ffn_layer(ffn_type, d_model, dim_feedforward, dropout)
         
@@ -49,7 +49,6 @@ class TransformerEncoderLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_emb=rotary_emb,
-            is_global=self.is_global
         )
 
         src = src + self.dropout1(src2)
@@ -114,12 +113,11 @@ class BertEncoder(nn.Module):
         
         return full_embeddings, full_attention_mask
 
-    def encode(self, embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def encode(self, embeddings: torch.Tensor, attention_mask: torch.Tensor, max_seqlen: int) -> torch.Tensor:
         """Runs the transformer encoder layers on already-embedded inputs."""
         
         seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
         indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
-        max_seqlen = seqlens.max().item()
         cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
         
         packed_output = embeddings.flatten(0, 1)[indices]
@@ -143,7 +141,10 @@ class BertEncoder(nn.Module):
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
         full_embeddings, full_attention_mask = self._embed(x, metadata, attention_mask)
-        output = self.encode(full_embeddings, full_attention_mask)
+        
+        max_seqlen = full_embeddings.shape[1] 
+        
+        output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         return output
 
 class BertForMaskedModeling(nn.Module):
@@ -174,17 +175,27 @@ class BertForMaskedModeling(nn.Module):
 
         x_embed = self.bert.input_proj(x)
         mask_expanded = is_masked.unsqueeze(-1).expand_as(x_embed)
-        encoder_x_input = torch.where(mask_expanded, self.mask_token_embed, x_embed)
+        
+        encoder_x_input = torch.where(
+            mask_expanded, 
+            self.mask_token_embed.to(x_embed.dtype), 
+            x_embed
+        )
 
-        meta_embed = self.bert.metadata_proj(metadata).unsqueeze(1) + self.bert.metadata_token
+        projected_meta = self.bert.metadata_proj(metadata).unsqueeze(1)
+        meta_embed = projected_meta + self.bert.metadata_token.to(projected_meta.dtype)
+
         full_encoder_input = torch.cat([meta_embed, encoder_x_input], dim=1)
 
         meta_attn_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
         full_attention_mask = torch.cat([meta_attn_mask, attention_mask], dim=1)
         
-        encoded_output = self.bert.encode(full_encoder_input, full_attention_mask)
+        max_seqlen = full_encoder_input.shape[1]
+        
+        encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
         
         sequence_output = encoded_output[:, 1:, :]
+        
         all_predictions = self.prediction_head(sequence_output)
         
         return all_predictions, x, is_masked

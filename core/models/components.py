@@ -25,15 +25,15 @@ class BaseAttention(nn.Module):
         raise NotImplementedError("Subclasses must implement forward method")
 
 class MultiHeadAttentionWithRoPE(BaseAttention):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, local_window_size: int = 128):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, local_window_size: int = 128, is_global: bool = True):
         super().__init__(d_model, n_heads, dropout)
         self.local_window_size = local_window_size
+        self.is_global = is_global
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         rotary_emb: RotaryEmbedding = kwargs.get("rotary_emb")
         cu_seqlens: torch.Tensor = kwargs.get("cu_seqlens")
         max_seqlen: int = kwargs.get("max_seqlen")
-        is_global: bool = kwargs.get("is_global", True)
         
         total_tokens, _ = x.shape
 
@@ -57,13 +57,10 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
         qkv = torch.stack([q, k, v], dim=1)
         qkv = qkv.view(total_tokens, 3, self.n_heads, self.d_head)
 
-        window_size = (-1, -1) if is_global else (self.local_window_size, self.local_window_size)
-
-        orig_dtype = qkv.dtype
-        target_dtype = torch.bfloat16
+        window_size = (-1, -1) if self.is_global else (self.local_window_size, self.local_window_size)
 
         output = flash_attn_varlen_qkvpacked_func(
-            qkv.to(target_dtype),
+            qkv,
             cu_seqlens,
             max_seqlen,
             dropout_p=self.dropout if self.training else 0.0,
@@ -71,7 +68,6 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
             window_size=window_size
         )
         
-        output = output.to(orig_dtype)
         output = output.view(total_tokens, self.d_model)
         
         return self.wo(output)
@@ -101,11 +97,8 @@ class StandardMultiHeadAttention(BaseAttention):
         qkv = torch.stack([q, k, v], dim=1)
         qkv = qkv.view(total_tokens, 3, self.n_heads, self.d_head)
 
-        orig_dtype = qkv.dtype
-        target_dtype = torch.float16
-
         output = flash_attn_varlen_qkvpacked_func(
-            qkv.to(target_dtype),
+            qkv,
             cu_seqlens,
             max_seqlen,
             dropout_p=self.dropout if self.training else 0.0,
@@ -113,7 +106,6 @@ class StandardMultiHeadAttention(BaseAttention):
             window_size=(-1, -1)
         )
         
-        output = output.to(orig_dtype)
         output = output.view(total_tokens, self.d_model)
         
         return self.wo(output)
@@ -123,10 +115,11 @@ def create_attention_layer(
     d_model: int, 
     n_heads: int, 
     dropout: float = 0.1,
-    local_window_size: int = 128
+    local_window_size: int = 128,
+    is_global: bool = True 
 ) -> BaseAttention:
     if attention_type == 'rope':
-        return MultiHeadAttentionWithRoPE(d_model, n_heads, dropout, local_window_size)
+        return MultiHeadAttentionWithRoPE(d_model, n_heads, dropout, local_window_size, is_global=is_global)
     elif attention_type == 'standard':
         return StandardMultiHeadAttention(d_model, n_heads, dropout)
     else:
@@ -139,8 +132,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = x * torch.rsqrt((x * x).mean(-1, keepdim=True) + self.eps) * self.weight
-        return output
+        input_dtype = x.dtype
+        variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = x * torch.rsqrt(variance + self.eps)
+        return (self.weight * hidden_states).to(input_dtype)
 
 
 def create_norm_layer(norm_type: str, d_model: int) -> nn.Module:
