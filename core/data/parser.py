@@ -2,6 +2,8 @@ import os
 import bisect
 from collections import Counter
 import math
+import numpy as np
+from .types import HitObjectVector, BeatmapMetadata
 
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
@@ -9,6 +11,31 @@ OBJECT_TYPE_SPINNER = 2
 OBJECT_TYPE_UNKNOWN = -1
 
 SLIDER_CURVE_TYPES = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
+
+def _convert_to_polar_diff(x_diff, y_diff):
+    """Convert x_diff, y_diff to distance and angle (cos, sin)."""
+    distance = math.sqrt(x_diff * x_diff + y_diff * y_diff)
+    if distance == 0:
+        return 0.0, 1.0, 0.0 
+    
+    cos_angle = x_diff / distance
+    sin_angle = y_diff / distance
+    return distance, cos_angle, sin_angle
+
+def _create_object_type_one_hot(object_type):
+    """Create one-hot encoding for object type."""
+    is_circle = 1 if object_type == OBJECT_TYPE_CIRCLE else 0
+    is_slider = 1 if object_type == OBJECT_TYPE_SLIDER else 0
+    is_spinner = 1 if object_type == OBJECT_TYPE_SPINNER else 0
+    return is_circle, is_slider, is_spinner
+
+def _create_slider_curve_one_hot(slider_curve_type):
+    """Create one-hot encoding for slider curve type."""
+    slider_curve_b = 1 if slider_curve_type == 0 else 0  # B
+    slider_curve_c = 1 if slider_curve_type == 1 else 0  # C
+    slider_curve_l = 1 if slider_curve_type == 2 else 0  # L
+    slider_curve_p = 1 if slider_curve_type == 3 else 0  # P
+    return slider_curve_b, slider_curve_c, slider_curve_l, slider_curve_p
 
 def _find_timing_points(t, timing_points, timing_points_times):
     idx = bisect.bisect_right(timing_points_times, t) - 1
@@ -139,7 +166,6 @@ def parse_osu_file(file_path, print_info=False):
             slider_curve_type_val = -1
             slider_num_anchors = -1
             slider_pixel_length_val = 0.0
-            spinner_duration_ms = 0.0
             duration_beats = 0.0
 
             if is_circle_flag:
@@ -184,11 +210,10 @@ def parse_osu_file(file_path, print_info=False):
                 current_start_x, current_start_y = 256.0, 192.0
                 try:
                     end_time = int(obj_data[5])
-                    spinner_duration_ms = float(end_time - t)
                     
                     uninherited_tp, _ = _find_timing_points(t, timing_points, timing_points_times)
                     if uninherited_tp and uninherited_tp['beatLength'] > 0:
-                        duration_beats = spinner_duration_ms / uninherited_tp['beatLength']
+                        duration_beats = (end_time - t) / uninherited_tp['beatLength']
 
                     current_end_x, current_end_y, current_end_time = 256.0, 192.0, end_time
                 except (ValueError, IndexError):
@@ -202,13 +227,32 @@ def parse_osu_file(file_path, print_info=False):
                     time_diff_beats = round(time_diff_ms / beat_length, 5)
                     x_diff = current_start_x - prev_end_x
                     y_diff = current_start_y - prev_end_y
-                    data['vectors'].append((
-                        x_diff, y_diff, time_diff_beats,
-                        current_start_x, current_start_y,
-                        current_object_type, is_new_combo,
-                        slider_curve_type_val, slider_num_anchors, slider_pixel_length_val,
-                        spinner_duration_ms, duration_beats
-                    ))
+                    
+                    distance_diff, angle_cos, angle_sin = _convert_to_polar_diff(x_diff, y_diff)
+                    
+                    is_circle, is_slider, is_spinner = _create_object_type_one_hot(current_object_type)
+                    slider_curve_b, slider_curve_c, slider_curve_l, slider_curve_p = _create_slider_curve_one_hot(slider_curve_type_val)
+                    
+                    vector = HitObjectVector(
+                        distance_diff=distance_diff,
+                        angle_cos=angle_cos,
+                        angle_sin=angle_sin,
+                        time_diff=time_diff_beats,
+                        abs_x=current_start_x,
+                        abs_y=current_start_y,
+                        is_circle=is_circle,
+                        is_slider=is_slider,
+                        is_spinner=is_spinner,
+                        is_new_combo=is_new_combo,
+                        slider_curve_b=slider_curve_b,
+                        slider_curve_c=slider_curve_c,
+                        slider_curve_l=slider_curve_l,
+                        slider_curve_p=slider_curve_p,
+                        slider_num_anchors=slider_num_anchors,
+                        slider_pixel_length=slider_pixel_length_val,
+                        duration_beats=duration_beats
+                    )
+                    data['vectors'].append(vector)
 
             prev_end_x, prev_end_y, prev_end_time = current_end_x, current_end_y, current_end_time
 

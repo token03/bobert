@@ -1,10 +1,6 @@
-"""
-BERT-style encoder model with configurable components.
-"""
-
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Tuple
 
 from .components import (
     create_attention_layer,
@@ -96,6 +92,23 @@ class BertEncoder(nn.Module):
         else:
             self.freqs_cis = None
 
+    def _embed(
+        self, 
+        x: torch.Tensor, 
+        metadata: torch.Tensor, 
+        attention_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Projects and combines input features and metadata."""
+        x_embed = self.input_proj(x)
+        meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
+        full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
+        
+        meta_mask = torch.zeros((x.shape[0], 1), dtype=torch.bool, device=x.device)
+        padding_mask = ~attention_mask
+        full_padding_mask = torch.cat([meta_mask, padding_mask], dim=1)
+        
+        return full_embeddings, full_padding_mask
+
     def encode(self, embeddings: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         """Runs the transformer encoder layers on already-embedded inputs."""
         freqs_cis_slice = None
@@ -113,18 +126,8 @@ class BertEncoder(nn.Module):
         metadata: torch.Tensor, 
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        batch_size = x.shape[0]
-        
-        x_embed = self.input_proj(x)
-        meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
-        full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
-        
-        meta_mask = torch.zeros((batch_size, 1), dtype=torch.bool, device=x.device)
-        padding_mask = ~attention_mask
-        full_padding_mask = torch.cat([meta_mask, padding_mask], dim=1)
-        
+        full_embeddings, full_padding_mask = self._embed(x, metadata, attention_mask)
         output = self.encode(full_embeddings, full_padding_mask)
-            
         return output
 
 
@@ -149,10 +152,8 @@ class BertForMaskedModeling(nn.Module):
         metadata: torch.Tensor, 
         attention_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x_embed = self.bert.input_proj(x)
-        meta_embed = self.bert.metadata_proj(metadata).unsqueeze(1) + self.bert.metadata_token
         
-        prob = torch.full(x_embed.shape[:2], self.masking_ratio, device=x.device)
+        prob = torch.full(x.shape[:2], self.masking_ratio, device=x.device)
         prob.masked_fill_(~attention_mask, 0.0)
         is_masked = torch.bernoulli(prob).bool()
 
@@ -161,13 +162,14 @@ class BertForMaskedModeling(nn.Module):
 
         targets = x[is_masked]
 
+        x_embed = self.bert.input_proj(x)
         mask_expanded = is_masked.unsqueeze(-1).expand_as(x_embed)
         encoder_x_input = torch.where(mask_expanded, self.mask_token_embed, x_embed)
-        
+
+        meta_embed = self.bert.metadata_proj(metadata).unsqueeze(1) + self.bert.metadata_token
         full_encoder_input = torch.cat([meta_embed, encoder_x_input], dim=1)
 
-        batch_size = x.shape[0]
-        meta_pad_mask = torch.zeros((batch_size, 1), dtype=torch.bool, device=x.device)
+        meta_pad_mask = torch.zeros((x.shape[0], 1), dtype=torch.bool, device=x.device)
         seq_pad_mask = ~attention_mask
         full_padding_mask = torch.cat([meta_pad_mask, seq_pad_mask], dim=1)
         

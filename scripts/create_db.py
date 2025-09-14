@@ -5,6 +5,7 @@ import queue
 import time
 import argparse
 from core.data.parser import parse_osu_file
+from core.data.types import HitObjectVector
 
 def create_tables(conn):
     """Initializes the database schema."""
@@ -17,14 +18,13 @@ def create_tables(conn):
             difficulty_rating REAL
         )
     ''')
-    cursor.execute('''
+    
+    vector_fields = ', '.join([f"{field} REAL" for field in HitObjectVector.get_field_names()])
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS beatmap_vectors (
             id INTEGER PRIMARY KEY,
             beatmap_id INTEGER,
-            x_diff REAL, y_diff REAL, time_diff REAL,
-            abs_x REAL, abs_y REAL, object_type INTEGER, is_new_combo INTEGER,
-            slider_curve_type INTEGER, slider_num_anchors INTEGER,
-            slider_pixel_length REAL, spinner_duration_ms REAL, duration_beats REAL,
+            {vector_fields},
             FOREIGN KEY (beatmap_id) REFERENCES beatmaps (id)
         )
     ''')
@@ -44,19 +44,46 @@ def insert_beatmap_data(cursor, beatmap_data):
 
     beatmap_row_id = cursor.lastrowid
     if beatmap_row_id == 0:
-        return
+        cursor.execute('SELECT id FROM beatmaps WHERE beatmap_id = ?', (beatmap_data['beatmap_id'],))
+        result = cursor.fetchone()
+        if result:
+            beatmap_row_id = result[0]
+        else:
+            return
 
     if beatmap_data['vectors']:
-        vector_data_to_insert = [
-            (beatmap_row_id, vec[0], vec[1], vec[2], vec[3], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9], vec[10], vec[11])
-            for vec in beatmap_data['vectors']
-        ]
+        field_names = HitObjectVector.get_field_names()
+        placeholders = ', '.join(['?' for _ in field_names])
+        field_names_str = ', '.join(field_names)
+        
+        vector_data_to_insert = []
+        for vec in beatmap_data['vectors']:
+            vector_tuple = (
+                beatmap_row_id,
+                float(vec.distance_diff),
+                float(vec.angle_cos),
+                float(vec.angle_sin),
+                float(vec.time_diff),
+                float(vec.abs_x),
+                float(vec.abs_y),
+                int(vec.is_circle),
+                int(vec.is_slider),
+                int(vec.is_spinner),
+                int(vec.is_new_combo),
+                int(vec.slider_curve_b),
+                int(vec.slider_curve_c),
+                int(vec.slider_curve_l),
+                int(vec.slider_curve_p),
+                float(vec.slider_num_anchors),
+                float(vec.slider_pixel_length),
+                float(vec.duration_beats)
+            )
+            vector_data_to_insert.append(vector_tuple)
+        
         cursor.executemany(
-            '''INSERT INTO beatmap_vectors (
-                beatmap_id, x_diff, y_diff, time_diff, abs_x, abs_y,
-                object_type, is_new_combo, slider_curve_type, slider_num_anchors,
-                slider_pixel_length, spinner_duration_ms, duration_beats
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            f'''INSERT INTO beatmap_vectors (
+                beatmap_id, {field_names_str}
+            ) VALUES (?, {placeholders})''',
             vector_data_to_insert
         )
 
@@ -82,10 +109,11 @@ def worker(tasks_queue, results_queue):
 
             is_map_valid = True
             for vec in beatmap_data['vectors']:
-                time_diff = vec[2]
-                abs_x = vec[3]
-                abs_y = vec[4]
-                duration_beats = vec[11]
+                # Access fields using NamedTuple attributes
+                time_diff = vec.time_diff
+                abs_x = vec.abs_x
+                abs_y = vec.abs_y
+                duration_beats = vec.duration_beats
 
                 if time_diff < 0 or duration_beats < 0:
                     is_map_valid = False
@@ -98,7 +126,7 @@ def worker(tasks_queue, results_queue):
             if is_map_valid:
                 results_queue.put(beatmap_data)
 
-        except Exception:
+        except Exception as e:
             pass
         finally:
             tasks_queue.task_done()
