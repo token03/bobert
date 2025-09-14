@@ -13,6 +13,7 @@ from scipy.stats import gaussian_kde
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
 from .types import HitObjectVector, BeatmapMetadata
+from .transforms import BeatmapNormalizer
 
 def setup_database(db_path: str, colab_url: Optional[str] = None) -> str:
     try:
@@ -127,68 +128,13 @@ def load_and_group_data_from_db(
 def calculate_normalization_stats(
     train_data: List[Tuple[torch.Tensor, torch.Tensor]],
     include_augmentation: bool = True
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    print("Calculating normalization statistics...")
-
+) -> BeatmapNormalizer:
+    """Create a BeatmapNormalizer from training data with statistics printing."""
+    normalizer = BeatmapNormalizer.from_data(train_data, include_augmentation)
+    
+    # Print statistics
     vector_field_names = HitObjectVector.get_field_names()
-    categorical_indices = {
-        vector_field_names.index(field) for field in [
-            'is_circle', 'is_slider', 'is_spinner', 'is_new_combo',
-            'slider_curve_b', 'slider_curve_c', 'slider_curve_l', 'slider_curve_p'
-        ]
-    }
-
-    all_vectors_list = [data[0] for data in train_data]
-    all_metadata_list = [data[1] for data in train_data]
-
-    if include_augmentation:
-        print("Including data augmentation in normalization statistics...")
-        augmented_vectors_list = []
-        angle_cos_idx = vector_field_names.index('angle_cos')
-        angle_sin_idx = vector_field_names.index('angle_sin')
-        abs_x_idx = vector_field_names.index('abs_x')
-        abs_y_idx = vector_field_names.index('abs_y')
-
-        for vectors in all_vectors_list:
-            augmented_vectors_list.append(vectors)
-
-            flipped_x = vectors.clone()
-            flipped_x[:, angle_cos_idx] *= -1
-            flipped_x[:, abs_x_idx] *= -1
-            augmented_vectors_list.append(flipped_x)
-
-            flipped_y = vectors.clone()
-            flipped_y[:, angle_sin_idx] *= -1
-            flipped_y[:, abs_y_idx] *= -1
-            augmented_vectors_list.append(flipped_y)
-
-            flipped_xy = flipped_x.clone()
-            flipped_xy[:, angle_sin_idx] *= -1
-            flipped_xy[:, abs_y_idx] *= -1
-            augmented_vectors_list.append(flipped_xy)
-
-        all_vectors_tensor = torch.cat(augmented_vectors_list, dim=0)
-    else:
-        all_vectors_tensor = torch.cat(all_vectors_list, dim=0)
-
-    all_metadata_tensor = torch.stack(all_metadata_list, dim=0)
-
-    vector_mean = torch.zeros(all_vectors_tensor.shape[1])
-    vector_std = torch.ones(all_vectors_tensor.shape[1])
-
-    continuous_mask = torch.ones(all_vectors_tensor.shape[1], dtype=torch.bool)
-    for idx in categorical_indices:
-        continuous_mask[idx] = False
-
-    if continuous_mask.any():
-        vector_mean[continuous_mask] = all_vectors_tensor[:, continuous_mask].mean(dim=0)
-        vector_std[continuous_mask] = all_vectors_tensor[:, continuous_mask].std(dim=0)
-        vector_std[continuous_mask].clamp_(min=1e-8)
-
-    meta_mean = all_metadata_tensor.mean(dim=0)
-    meta_std = all_metadata_tensor.std(dim=0)
-    meta_std.clamp_(min=1e-8)
-
+    
     print("\n" + "="*70)
     print("                    NORMALIZATION STATISTICS")
     print("="*70)
@@ -210,9 +156,9 @@ def calculate_normalization_stats(
     }
 
     for i, field_name in enumerate(vector_field_names):
-        is_normalized = "Yes" if i not in categorical_indices else "No"
+        is_normalized = "Yes" if normalizer.normalization_mask[i] else "No"
         description = field_descriptions.get(field_name, 'Unknown field')
-        print(f"{field_name:<20} {vector_mean[i]:<12.4f} {vector_std[i]:<12.4f} {is_normalized:<11} {description}")
+        print(f"{field_name:<20} {normalizer.vector_mean[i]:<12.4f} {normalizer.vector_std[i]:<12.4f} {is_normalized:<11} {description}")
 
     print("\n--- METADATA STATISTICS:")
     print("-" * 70)
@@ -227,11 +173,11 @@ def calculate_normalization_stats(
 
     for i, field_name in enumerate(metadata_field_names):
         description = metadata_descriptions.get(field_name, 'Unknown field')
-        print(f"{field_name:<20} {meta_mean[i]:<12.4f} {meta_std[i]:<12.4f} {description}")
+        print(f"{field_name:<20} {normalizer.meta_mean[i]:<12.4f} {normalizer.meta_std[i]:<12.4f} {description}")
 
     print("="*70)
-
-    return vector_mean, vector_std, meta_mean, meta_std
+    
+    return normalizer
 
 
 def create_weighted_sampler(

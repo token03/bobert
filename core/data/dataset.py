@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from typing import Tuple, List, Optional
 from .types import HitObjectVector
+from .transforms import BeatmapNormalizer, BeatmapAugmenter, BeatmapTransform
 
 def collate_fn(
     batch: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -36,85 +37,27 @@ class BeatmapDataset(Dataset):
     def __init__(
         self,
         beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]],
-        vector_mean: torch.Tensor,
-        vector_std: torch.Tensor,
-        meta_mean: torch.Tensor,
-        meta_std: torch.Tensor,
-        augment: bool = False,
-        epsilon: float = 1e-8
+        transform: BeatmapTransform
     ):
         self.beatmap_data = beatmap_data
-        self.vector_mean = vector_mean
-        self.vector_std = vector_std
-        self.meta_mean = meta_mean
-        self.meta_std = meta_std
-        self.epsilon = epsilon
-        self.augment = augment
-
-        vector_field_names = HitObjectVector.get_field_names()
-        self.angle_cos_idx = vector_field_names.index('angle_cos')
-        self.angle_sin_idx = vector_field_names.index('angle_sin')
-        self.abs_x_idx = vector_field_names.index('abs_x')
-        self.abs_y_idx = vector_field_names.index('abs_y')
-
-        categorical_indices = {
-            vector_field_names.index(field) for field in [
-                'is_circle', 'is_slider', 'is_spinner', 'is_new_combo',
-                'slider_curve_b', 'slider_curve_c', 'slider_curve_l', 'slider_curve_p'
-            ]
-        }
-        self.normalization_mask = torch.ones(len(vector_field_names), dtype=torch.bool)
-        for idx in categorical_indices:
-            self.normalization_mask[idx] = False
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.beatmap_data)
 
-    def _apply_augmentation(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
-        if aug_type == 1:  # Flip X
-            vectors[:, self.angle_cos_idx] *= -1
-            vectors[:, self.abs_x_idx] *= -1
-        elif aug_type == 2:  # Flip Y
-            vectors[:, self.angle_sin_idx] *= -1
-            vectors[:, self.abs_y_idx] *= -1
-        elif aug_type == 3:  # Flip XY
-            vectors[:, self.angle_cos_idx] *= -1
-            vectors[:, self.angle_sin_idx] *= -1
-            vectors[:, self.abs_x_idx] *= -1
-            vectors[:, self.abs_y_idx] *= -1
-        return vectors
-
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         vectors, metadata = self.beatmap_data[idx]
-        vectors = vectors.clone()
-
-        if self.augment:
-            aug_type = torch.randint(0, 4, (1,)).item()
-            vectors = self._apply_augmentation(vectors, aug_type)
-
-        normalized_metadata = (metadata - self.meta_mean) / (self.meta_std + self.epsilon)
-
-        normalized_vectors = vectors.clone()
-        normalized_vectors[:, self.normalization_mask] = (
-            vectors[:, self.normalization_mask] - self.vector_mean[self.normalization_mask]
-        ) / (self.vector_std[self.normalization_mask] + self.epsilon)
-
-        return normalized_vectors, normalized_metadata
+        return self.transform(vectors, metadata)
 
 class MaskedBeatmapDataset(BeatmapDataset):
 
     def __init__(
         self,
         beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]],
-        vector_mean: torch.Tensor,
-        vector_std: torch.Tensor,
-        meta_mean: torch.Tensor,
-        meta_std: torch.Tensor,
-        masking_ratio: float = 0.15,
-        augment: bool = False,
-        epsilon: float = 1e-8
+        transform: BeatmapTransform,
+        masking_ratio: float = 0.15
     ):
-        super().__init__(beatmap_data, vector_mean, vector_std, meta_mean, meta_std, augment, epsilon)
+        super().__init__(beatmap_data, transform)
         self.masking_ratio = masking_ratio
 
     def create_mask(self, seq_len: int) -> torch.Tensor:
@@ -127,13 +70,11 @@ class AugmentedBeatmapDataset(BeatmapDataset):
     def __init__(
         self,
         beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]],
-        vector_mean: torch.Tensor,
-        vector_std: torch.Tensor,
-        meta_mean: torch.Tensor,
-        meta_std: torch.Tensor,
-        epsilon: float = 1e-8
+        normalizer: BeatmapNormalizer
     ):
-        super().__init__(beatmap_data, vector_mean, vector_std, meta_mean, meta_std, False, epsilon)
+        self.beatmap_data = beatmap_data
+        self.normalizer = normalizer
+        self.augmenter = BeatmapAugmenter()
         self.base_length = len(beatmap_data)
 
     def __len__(self) -> int:
@@ -144,14 +85,10 @@ class AugmentedBeatmapDataset(BeatmapDataset):
         aug_type = idx // self.base_length
 
         vectors, metadata = self.beatmap_data[base_idx]
-        vectors = self._apply_augmentation(vectors.clone(), aug_type)
-
-        normalized_metadata = (metadata - self.meta_mean) / (self.meta_std + self.epsilon)
-
-        normalized_vectors = vectors.clone()
-        normalized_vectors[:, self.normalization_mask] = (
-            vectors[:, self.normalization_mask] - self.vector_mean[self.normalization_mask]
-        ) / (self.vector_std[self.normalization_mask] + self.epsilon)
+        augmented_vectors = self.augmenter.apply_augmentation(vectors, aug_type)
+        
+        normalized_vectors = self.normalizer.normalize_vectors(augmented_vectors)
+        normalized_metadata = self.normalizer.normalize_metadata(metadata)
 
         return normalized_vectors, normalized_metadata
 
@@ -159,10 +96,7 @@ class AugmentedBeatmapDataset(BeatmapDataset):
 def create_dataloaders(
     train_data: List[Tuple[torch.Tensor, torch.Tensor]],
     val_data: List[Tuple[torch.Tensor, torch.Tensor]],
-    vector_mean: torch.Tensor,
-    vector_std: torch.Tensor,
-    meta_mean: torch.Tensor,
-    meta_std: torch.Tensor,
+    normalizer: BeatmapNormalizer,
     config: dict,
     device: torch.device,
     sampler: Optional[Sampler] = None
@@ -175,17 +109,13 @@ def create_dataloaders(
     use_augmented_dataset = config.get('training', {}).get('sampling', {}).get('expand_for_augmentation', True)
 
     if use_augmented_dataset:
-        train_dataset = AugmentedBeatmapDataset(
-            train_data, vector_mean, vector_std, meta_mean, meta_std
-        )
+        train_dataset = AugmentedBeatmapDataset(train_data, normalizer)
     else:
-        train_dataset = BeatmapDataset(
-            train_data, vector_mean, vector_std, meta_mean, meta_std, augment=True
-        )
+        train_transform = BeatmapTransform(normalizer, augment=True)
+        train_dataset = BeatmapDataset(train_data, train_transform)
 
-    val_dataset = BeatmapDataset(
-        val_data, vector_mean, vector_std, meta_mean, meta_std, augment=False
-    )
+    val_transform = BeatmapTransform(normalizer, augment=False)
+    val_dataset = BeatmapDataset(val_data, val_transform)
 
     collate_with_args = lambda batch: collate_fn(
         batch,
