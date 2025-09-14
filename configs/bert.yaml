@@ -1,6 +1,8 @@
 defaults:
   - base
 
+data:
+  db_path: './data/beatmaps_test.db'
 model:
   type: "bert"
   d_model: 512
@@ -17,4 +19,4 @@ mlm:
 components:
   use_rope: true
   use_flash_attention: true
-  compile_model: false
+  compile_model: true

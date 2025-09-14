@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
+from rotary_embedding_torch import RotaryEmbedding
 
 from .components import (
     create_attention_layer,
     create_norm_layer, 
     create_ffn_layer,
-    precompute_freqs_cis
 )
 
 class TransformerEncoderLayer(nn.Module):
@@ -30,20 +30,18 @@ class TransformerEncoderLayer(nn.Module):
         
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
-        
-        self.attention_type = attention_type
 
     def forward(
         self, 
         src: torch.Tensor, 
         src_key_padding_mask: torch.Tensor,
-        freqs_cis: Optional[torch.Tensor] = None
+        rotary_emb: Optional[RotaryEmbedding] = None
     ) -> torch.Tensor:
         
         src2 = self.self_attn(
             self.norm1(src), 
             src_key_padding_mask,
-            freqs_cis=freqs_cis if self.attention_type == 'rope' else None
+            rotary_emb=rotary_emb
         )
         src = src + self.dropout1(src2)
         
@@ -84,12 +82,9 @@ class BertEncoder(nn.Module):
         ])
         
         if attention_type == 'rope':
-            self.register_buffer(
-                "freqs_cis", 
-                precompute_freqs_cis(d_model // n_heads, max_seq_len + 1)
-            )
+            self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads)
         else:
-            self.freqs_cis = None
+            self.rotary_emb = None
 
     def _embed(
         self, 
@@ -110,13 +105,9 @@ class BertEncoder(nn.Module):
 
     def encode(self, embeddings: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
         """Runs the transformer encoder layers on already-embedded inputs."""
-        freqs_cis_slice = None
-        if self.attention_type == 'rope' and self.freqs_cis is not None:
-            freqs_cis_slice = self.freqs_cis[:embeddings.shape[1]]
-        
         output = embeddings
         for layer in self.layers:
-            output = layer(output, src_key_padding_mask=padding_mask, freqs_cis=freqs_cis_slice)
+            output = layer(output, src_key_padding_mask=padding_mask, rotary_emb=self.rotary_emb)
         return output
 
     def forward(
@@ -155,8 +146,8 @@ class BertForMaskedModeling(nn.Module):
         prob.masked_fill_(~attention_mask, 0.0)
         is_masked = torch.bernoulli(prob).bool()
 
-        if not is_masked.any():
-            return torch.tensor([], device=x.device), torch.tensor([], device=x.device)
+        # if not is_masked.any():
+        #     return torch.tensor([], device=x.device), torch.tensor([], device=x.device)
 
         targets = x[is_masked]
 

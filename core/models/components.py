@@ -3,23 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
-
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs) 
-    return freqs_cis
-
-def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    
-    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2) 
-    
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+from rotary_embedding_torch import RotaryEmbedding
 
 class BaseAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
@@ -42,22 +26,22 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
         super().__init__(d_model, n_heads, dropout)
         
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
+        rotary_emb: Optional[RotaryEmbedding] = kwargs.get("rotary_emb")
         batch_size, seq_len, _ = x.shape
         
         q, k, v = self.wq(x), self.wk(x), self.wv(x)
         
-        q = q.view(batch_size, seq_len, self.n_heads, self.d_head)
-        k = k.view(batch_size, seq_len, self.n_heads, self.d_head)
-        v = v.view(batch_size, seq_len, self.n_heads, self.d_head)
+        # Reshape and transpose for multi-head attention
+        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
 
-        if freqs_cis is not None:
-            q, k = apply_rotary_emb(q, k, freqs_cis)
+        # Apply rotary embeddings if provided
+        if rotary_emb is not None:
+            q = rotary_emb.rotate_queries_or_keys(q)
+            k = rotary_emb.rotate_queries_or_keys(k)
         
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2) 
-        v = v.transpose(1, 2) 
-
         attn_mask = mask.unsqueeze(1).unsqueeze(2) 
         attn_mask = attn_mask == False 
 
