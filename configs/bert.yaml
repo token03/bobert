@@ -2,8 +2,8 @@ defaults:
   - base
 
 data:
-  # db_path: './data/beatmaps_test.db'
-  db_path: './data/beatmaps.db'
+  db_path: './data/beatmaps_test.db'
+  # db_path: './data/beatmaps.db'
 model:
   type: "bert"
   d_model: 512

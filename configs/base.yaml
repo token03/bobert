@@ -1,7 +1,6 @@
 data:
   db_path: './data/beatmaps.db'
   max_seq_len: 1023
-  in_channels: 17  
   val_split: 0.1
   chunk_size: 1000
     
