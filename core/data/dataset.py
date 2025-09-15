@@ -117,10 +117,13 @@ def create_dataloaders(
     val_transform = BeatmapTransform(normalizer, augment=False)
     val_dataset = BeatmapDataset(val_data, val_transform)
 
+    # Use the actual vector dimension from the data, falling back to config if needed
+    actual_vector_dim = train_data[0][0].shape[1] if train_data else config['data']['in_channels']
+    
     collate_with_args = lambda batch: collate_fn(
         batch,
         max_seq_len=config['data']['max_seq_len'],
-        vector_dim=config['data']['in_channels'],
+        vector_dim=actual_vector_dim,
         device=device
     )
 
