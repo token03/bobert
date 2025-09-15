@@ -8,6 +8,7 @@ from .components import (
     create_norm_layer,
     create_ffn_layer
 )
+from ..data.types import VECTOR_DIM
 
 class ModelRegistry:
     _models: Dict[str, Type[nn.Module]] = {}
@@ -52,7 +53,7 @@ def create_model_from_config(config: Dict[str, Any], device: torch.device) -> nn
         'n_layers': model_config['n_layers'],
         'dim_feedforward': dim_feedforward,
         'dropout': model_config.get('dropout', 0.1),
-        'in_channels': data_config['in_channels'],
+        'in_channels': VECTOR_DIM,
         'metadata_dim': 5,  
         'attention_type': attention_type,
         'norm_type': norm_type,
@@ -79,7 +80,7 @@ def create_task_model_from_config(
         masking_ratio = config.get('mlm', {}).get('masking_ratio', 0.15)
         model = BertForMaskedModeling(
             base_model, 
-            config['data']['in_channels'], 
+            VECTOR_DIM,
             masking_ratio
         )
     else:
