@@ -1,6 +1,7 @@
 import os
 import time
 import math
+from core.data.types import HitObjectVector
 from typing import Dict, Any, Optional, Tuple, Callable
 from tqdm.auto import tqdm
 
@@ -242,9 +243,11 @@ class MLMTrainer:
         self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
         
-        self.scaler = torch.amp.GradScaler(device.type, enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler(enabled=self.use_amp) # Note: GradScaler handles device internally
 
         self.metrics_tracker = MetricsTracker()
+        
+        self.vector_field_names = HitObjectVector.get_field_names()
         
         print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}")
     
@@ -261,7 +264,10 @@ class MLMTrainer:
         )
         
         for vectors, attention_mask, metadata in progress_bar:
-            self.optimizer.zero_grad()
+            # Move data to device inside the loop
+            vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
+            
+            self.optimizer.zero_grad(set_to_none=True) # More efficient
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                 all_predictions, targets, mask = self.model(vectors, metadata, attention_mask)
@@ -293,33 +299,58 @@ class MLMTrainer:
             'learning_rate': self.optimizer.param_groups[0]['lr']
         }
     
-    def validate_epoch(self, epoch: int) -> Dict[str, float]:
-        """Validates for one epoch."""
+    ### MODIFIED ###
+    def validate_epoch(self, epoch: int) -> Dict[str, Any]:
+        """Validates for one epoch and calculates detailed per-feature errors."""
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
         
+        # Initialize trackers for detailed metrics
+        num_features = len(self.vector_field_names)
+        total_abs_error_per_feature = torch.zeros(num_features, device=self.device)
+        total_masked_count = 0
+
         with torch.no_grad():
             for vectors, attention_mask, metadata in self.val_dataloader:
+                # Move data to device inside the loop
+                vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
+
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                     all_predictions, targets, mask = self.model(vectors, metadata, attention_mask)
                     loss = self.loss_fn(all_predictions, targets, mask)
                 
                 total_loss += loss.item()
                 num_batches += 1
+
+                # Calculate per-feature MAE on masked tokens
+                num_masked_in_batch = torch.sum(mask)
+                if num_masked_in_batch > 0:
+                    masked_predictions = all_predictions[mask]
+                    masked_targets = targets[mask]
+                    
+                    # Sum of absolute differences for each feature in this batch
+                    batch_abs_error = torch.sum(torch.abs(masked_predictions - masked_targets), dim=0)
+                    total_abs_error_per_feature += batch_abs_error
+                    total_masked_count += num_masked_in_batch
         
         avg_loss = total_loss / max(num_batches, 1)
-        return {'loss': avg_loss}
-    
+        
+        # Calculate final average absolute error per feature
+        if total_masked_count > 0:
+            mae_per_feature = total_abs_error_per_feature / total_masked_count
+        else:
+            mae_per_feature = torch.zeros(num_features, device=self.device)
+
+        return {
+            'loss': avg_loss,
+            'mae_per_feature': mae_per_feature.cpu().tolist() # Return as a list for easy handling
+        }
+
+    ### MODIFIED ###
     def train(self, start_epoch: int = 0) -> MetricsTracker:
         """
-        Main training loop.
-        
-        Args:
-            start_epoch: Epoch to start training from
-            
-        Returns:
-            MetricsTracker with training history
+        Main training loop with detailed validation metric printing.
         """
         num_epochs = self.config['training']['num_epochs']
         
@@ -336,9 +367,12 @@ class MLMTrainer:
             
             val_metrics = self.validate_epoch(epoch)
             
+            # The metrics tracker will now store the detailed metrics too
             self.metrics_tracker.log_epoch(epoch, train_metrics, val_metrics)
             
             epoch_duration = time.time() - epoch_start_time
+
+            # Print main summary line
             print(
                 f"Epoch {epoch+1}/{num_epochs} | "
                 f"Train Loss: {train_metrics['loss']:.4f} | "
@@ -346,7 +380,23 @@ class MLMTrainer:
                 f"LR: {train_metrics['learning_rate']:.2e} | "
                 f"Time: {epoch_duration:.2f}s"
             )
-            
+
+            # Print detailed validation MAE per feature
+            if 'mae_per_feature' in val_metrics:
+                print("  Validation MAE per feature:")
+                mae_list = val_metrics['mae_per_feature']
+                # Format into 3 columns for readability
+                max_name_len = max(len(name) for name in self.vector_field_names)
+                for i in range(0, len(self.vector_field_names), 3):
+                    line = "    "
+                    for j in range(3):
+                        if i + j < len(self.vector_field_names):
+                            name = self.vector_field_names[i+j]
+                            mae = mae_list[i+j]
+                            line += f"{name:<{max_name_len}}: {mae:.4f} | "
+                    print(line.strip().rstrip('|').strip())
+
+            # Checkpoint saving remains the same; torch.save handles lists fine
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics

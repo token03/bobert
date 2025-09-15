@@ -2,8 +2,8 @@ defaults:
   - base
 
 data:
-  db_path: './data/beatmaps_test.db'
-  # db_path: './data/beatmaps.db'
+  # db_path: './data/beatmaps_test.db'
+  db_path: './data/beatmaps.db'
 model:
   type: "bert"
   d_model: 512
@@ -15,7 +15,7 @@ training:
   checkpoint_dir: "./checkpoints/bert"
 
 mlm:
-  masking_ratio: 0.20
+  masking_ratio: 0.25
   
 components:
   use_rope: true
