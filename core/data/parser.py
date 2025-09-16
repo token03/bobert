@@ -1,3 +1,4 @@
+# parser.py
 import os
 import bisect
 from collections import Counter
@@ -13,29 +14,12 @@ OBJECT_TYPE_UNKNOWN = -1
 SLIDER_CURVE_TYPES = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
 
 def _convert_to_polar_diff(x_diff, y_diff):
-    """Convert x_diff, y_diff to distance and angle (cos, sin)."""
     distance = math.sqrt(x_diff * x_diff + y_diff * y_diff)
     if distance == 0:
-        return 0.0, 1.0, 0.0 
-    
+        return 0.0, 1.0, 0.0
     cos_angle = x_diff / distance
     sin_angle = y_diff / distance
     return distance, cos_angle, sin_angle
-
-def _create_object_type_one_hot(object_type):
-    """Create one-hot encoding for object type."""
-    is_circle = 1 if object_type == OBJECT_TYPE_CIRCLE else 0
-    is_slider = 1 if object_type == OBJECT_TYPE_SLIDER else 0
-    is_spinner = 1 if object_type == OBJECT_TYPE_SPINNER else 0
-    return is_circle, is_slider, is_spinner
-
-def _create_slider_curve_one_hot(slider_curve_type):
-    """Create one-hot encoding for slider curve type."""
-    slider_curve_b = 1 if slider_curve_type == 0 else 0  # B
-    slider_curve_c = 1 if slider_curve_type == 1 else 0  # C
-    slider_curve_l = 1 if slider_curve_type == 2 else 0  # L
-    slider_curve_p = 1 if slider_curve_type == 3 else 0  # P
-    return slider_curve_b, slider_curve_c, slider_curve_l, slider_curve_p
 
 def _find_timing_points(t, timing_points, timing_points_times):
     idx = bisect.bisect_right(timing_points_times, t) - 1
@@ -163,7 +147,7 @@ def parse_osu_file(file_path, print_info=False):
             current_object_type = OBJECT_TYPE_UNKNOWN
             is_new_combo = 1 if (hit_object_type_flags & 0b0100) else 0
 
-            slider_curve_type_val = -1
+            slider_curve_type = 4  # 4 for N/A
             slider_num_anchors = -1
             slider_pixel_length_val = 0.0
             duration_beats = 0.0
@@ -179,7 +163,7 @@ def parse_osu_file(file_path, print_info=False):
                     slides = int(obj_data[6])
                     slider_pixel_length_val = float(obj_data[7])
 
-                    slider_curve_type_val = SLIDER_CURVE_TYPES.get(curve_char, -1)
+                    slider_curve_type = SLIDER_CURVE_TYPES.get(curve_char, 4)
                     slider_num_anchors = len(curve_parts)
                     
                     if slides % 2 == 0:
@@ -230,24 +214,16 @@ def parse_osu_file(file_path, print_info=False):
                     
                     distance_diff, angle_cos, angle_sin = _convert_to_polar_diff(x_diff, y_diff)
                     
-                    is_circle, is_slider, is_spinner = _create_object_type_one_hot(current_object_type)
-                    slider_curve_b, slider_curve_c, slider_curve_l, slider_curve_p = _create_slider_curve_one_hot(slider_curve_type_val)
-                    
-                    vector = HitObjectVector(
+                    vector = HitObjectVector.create_with_quantization(
                         distance_diff=distance_diff,
                         angle_cos=angle_cos,
                         angle_sin=angle_sin,
                         time_diff=time_diff_beats,
                         abs_x=current_start_x,
                         abs_y=current_start_y,
-                        is_circle=is_circle,
-                        is_slider=is_slider,
-                        is_spinner=is_spinner,
+                        object_type=current_object_type,
                         is_new_combo=is_new_combo,
-                        slider_curve_b=slider_curve_b,
-                        slider_curve_c=slider_curve_c,
-                        slider_curve_l=slider_curve_l,
-                        slider_curve_p=slider_curve_p,
+                        slider_curve_type=slider_curve_type,
                         slider_num_anchors=slider_num_anchors,
                         slider_pixel_length=slider_pixel_length_val,
                         duration_beats=duration_beats

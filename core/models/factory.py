@@ -80,7 +80,6 @@ def create_task_model_from_config(
         masking_ratio = config.get('mlm', {}).get('masking_ratio', 0.15)
         model = BertForMaskedModeling(
             base_model, 
-            VECTOR_DIM,
             masking_ratio
         )
     else:

@@ -1,3 +1,4 @@
+# loader.py
 import os
 import sqlite3
 import sys
@@ -74,8 +75,7 @@ def load_and_group_data_from_db(
 
     indices = {name: vector_field_names.index(name) for name in vector_field_names}
     indices_to_clamp_and_log = [
-        indices['time_diff'], indices['duration_beats'], indices['distance_diff'],
-        indices['slider_pixel_length'], indices['slider_num_anchors']
+        indices['distance_diff'], indices['slider_pixel_length'], indices['slider_num_anchors']
     ]
 
     for i in tqdm(
@@ -129,12 +129,11 @@ def calculate_normalization_stats(
     train_data: List[Tuple[torch.Tensor, torch.Tensor]],
     include_augmentation: bool = True
 ) -> BeatmapNormalizer:
-    """Create a BeatmapNormalizer from training data with statistics printing."""
     normalizer = BeatmapNormalizer.from_data(train_data, include_augmentation)
-    
-    # Print statistics
+
     vector_field_names = HitObjectVector.get_field_names()
-    
+    categorical_features = HitObjectVector.get_feature_info()['categorical'].keys()
+
     print("\n" + "="*70)
     print("                    NORMALIZATION STATISTICS")
     print("="*70)
@@ -145,20 +144,24 @@ def calculate_normalization_stats(
 
     field_descriptions = {
         'distance_diff': 'Distance between objects (log)', 'angle_cos': 'Angle cosine component',
-        'angle_sin': 'Angle sine component', 'time_diff': 'Time difference (log)',
-        'abs_x': 'Absolute X position (scaled)', 'abs_y': 'Absolute Y position (scaled)',
-        'is_circle': 'Circle object flag', 'is_slider': 'Slider object flag',
-        'is_spinner': 'Spinner object flag', 'is_new_combo': 'New combo flag',
-        'slider_curve_b': 'Bezier curve flag', 'slider_curve_c': 'Catmull curve flag',
-        'slider_curve_l': 'Linear curve flag', 'slider_curve_p': 'Perfect curve flag',
-        'slider_num_anchors': 'Number of anchors (log)', 'slider_pixel_length': 'Slider pixel length (log)',
-        'duration_beats': 'Duration in beats (log)'
+        'angle_sin': 'Angle sine component', 'abs_x': 'Absolute X position (scaled)',
+        'abs_y': 'Absolute Y position (scaled)', 'object_type': 'Object type (categorical)',
+        'is_new_combo': 'New combo flag', 'slider_curve_type': 'Slider curve type (categorical)',
+        'slider_num_anchors': 'Number of anchors (log)',
+        'slider_pixel_length': 'Slider pixel length (log)',
+        'time_diff_bin': 'Time diff bin (categorical)',
+        'duration_bin': 'Duration bin (categorical)',
     }
 
     for i, field_name in enumerate(vector_field_names):
         is_normalized = "Yes" if normalizer.normalization_mask[i] else "No"
         description = field_descriptions.get(field_name, 'Unknown field')
-        print(f"{field_name:<20} {normalizer.vector_mean[i]:<12.4f} {normalizer.vector_std[i]:<12.4f} {is_normalized:<11} {description}")
+        if field_name in categorical_features:
+            mean_str, std_str = "N/A", "N/A"
+        else:
+            mean_str = f"{normalizer.vector_mean[i]:.4f}"
+            std_str = f"{normalizer.vector_std[i]:.4f}"
+        print(f"{field_name:<20} {mean_str:<12} {std_str:<12} {is_normalized:<11} {description}")
 
     print("\n--- METADATA STATISTICS:")
     print("-" * 70)
@@ -168,7 +171,7 @@ def calculate_normalization_stats(
     metadata_field_names = BeatmapMetadata.get_field_names()
     metadata_descriptions = {
         'ar': 'Approach Rate', 'od': 'Overall Difficulty', 'cs': 'Circle Size',
-        'difficulty_rating': 'Star Rating', 'bpm': 'Beats Per Minute'
+        'difficulty_rating': 'Star Rating', 'bpm': 'Beats Per Minute (log)'
     }
 
     for i, field_name in enumerate(metadata_field_names):
@@ -176,7 +179,7 @@ def calculate_normalization_stats(
         print(f"{field_name:<20} {normalizer.meta_mean[i]:<12.4f} {normalizer.meta_std[i]:<12.4f} {description}")
 
     print("="*70)
-    
+
     return normalizer
 
 

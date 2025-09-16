@@ -1,6 +1,9 @@
+# trainer.py
 import os
 import time
 import math
+import numpy as np
+from collections import defaultdict, Counter
 from core.data.types import HitObjectVector
 from typing import Dict, Any, Optional, Tuple, Callable
 from tqdm.auto import tqdm
@@ -10,6 +13,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
+from sklearn.metrics import precision_recall_fscore_support
 
 class CosineWarmupScheduler(_LRScheduler):
     def __init__(
@@ -37,20 +41,42 @@ class CosineWarmupScheduler(_LRScheduler):
             return [self.min_lr + (self.base_lr - self.min_lr) * cosine_decay
                    for _ in self.optimizer.param_groups]
 
-def masked_mlm_loss_fn(
-    predictions: torch.Tensor, 
+def mlm_loss_fn(
+    predictions: Dict[str, Any], 
     targets: torch.Tensor, 
     mask: torch.Tensor
 ) -> torch.Tensor:
-    """Calculates MSE loss only on masked tokens."""
+    """Calculates a hybrid MLM loss for continuous (MSE) and categorical (CrossEntropy) features."""
     num_masked = torch.sum(mask)
     if num_masked == 0:
-        return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+        return torch.tensor(0.0, device=targets.device, requires_grad=True)
 
-    masked_predictions = predictions[mask]
-    masked_targets = targets[mask]
-    
-    return nn.functional.mse_loss(masked_predictions, masked_targets)
+    feature_info = HitObjectVector.get_feature_info()
+    total_loss = torch.tensor(0.0, device=targets.device)
+
+    cont_indices = list(feature_info['continuous'].values())
+    if cont_indices:
+        cont_preds = predictions['continuous']
+        cont_targets = targets[..., cont_indices]
+        cont_loss = nn.functional.mse_loss(cont_preds, cont_targets, reduction='none')
+        masked_cont_loss = cont_loss[mask].sum()
+        total_loss += masked_cont_loss
+
+    for name, info in feature_info['categorical'].items():
+        cat_logits = predictions['categorical'][name]
+        cat_targets = targets[..., info['index']].long()
+        
+        flat_logits = cat_logits.view(-1, info['cardinality'])
+        flat_targets = cat_targets.view(-1)
+        
+        cat_loss = nn.functional.cross_entropy(flat_logits, flat_targets, reduction='none')
+        cat_loss = cat_loss.view_as(mask) #
+        
+        masked_cat_loss = cat_loss[mask].sum()
+        total_loss += masked_cat_loss
+
+    return total_loss / num_masked
+
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> Optimizer:
     training_config = config['training']
@@ -211,12 +237,6 @@ class MetricsTracker:
         self.epoch_metrics.append(epoch_data)
 
 
-def mlm_loss_fn(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    if predictions.numel() == 0:
-        return torch.tensor(0.0, device=predictions.device, requires_grad=True)
-    return nn.functional.mse_loss(predictions, targets)
-
-
 class MLMTrainer:
     def __init__(
         self,
@@ -228,7 +248,7 @@ class MLMTrainer:
         config: Dict[str, Any],
         device: torch.device,
         checkpoint_manager: CheckpointManager,
-        loss_fn: Callable = masked_mlm_loss_fn
+        loss_fn: Callable = mlm_loss_fn
     ):
         self.model = model
         self.train_dataloader = train_dataloader
@@ -243,11 +263,13 @@ class MLMTrainer:
         self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
         
-        self.scaler = torch.amp.GradScaler(enabled=self.use_amp) # Note: GradScaler handles device internally
+        self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
 
         self.metrics_tracker = MetricsTracker()
         
-        self.vector_field_names = HitObjectVector.get_field_names()
+        self.feature_info = HitObjectVector.get_feature_info()
+        self.cont_feat_names = list(self.feature_info['continuous'].keys())
+        self.cat_feat_names = list(self.feature_info['categorical'].keys())
         
         print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}")
     
@@ -264,14 +286,13 @@ class MLMTrainer:
         )
         
         for vectors, attention_mask, metadata in progress_bar:
-            # Move data to device inside the loop
             vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
             
-            self.optimizer.zero_grad(set_to_none=True) # More efficient
+            self.optimizer.zero_grad(set_to_none=True)
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                all_predictions, targets, mask = self.model(vectors, metadata, attention_mask)
-                loss = self.loss_fn(all_predictions, targets, mask)
+                predictions, targets, mask = self.model(vectors, metadata, attention_mask)
+                loss = self.loss_fn(predictions, targets, mask)
             
             self.scaler.scale(loss).backward()
             
@@ -299,80 +320,107 @@ class MLMTrainer:
             'learning_rate': self.optimizer.param_groups[0]['lr']
         }
     
-    ### MODIFIED ###
     def validate_epoch(self, epoch: int) -> Dict[str, Any]:
-        """Validates for one epoch and calculates detailed per-feature errors."""
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
-        
-        # Initialize trackers for detailed metrics
-        num_features = len(self.vector_field_names)
-        total_abs_error_per_feature = torch.zeros(num_features, device=self.device)
         total_masked_count = 0
+        
+        total_abs_error_cont = torch.zeros(len(self.cont_feat_names), device=self.device)
+        all_masked_cont_targets = []
+        all_masked_cat_preds = defaultdict(list)
+        all_masked_cat_targets = defaultdict(list)
 
         with torch.no_grad():
             for vectors, attention_mask, metadata in self.val_dataloader:
-                # Move data to device inside the loop
                 vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    all_predictions, targets, mask = self.model(vectors, metadata, attention_mask)
-                    loss = self.loss_fn(all_predictions, targets, mask)
+                    predictions, targets, mask = self.model(vectors, metadata, attention_mask)
+                    loss = self.loss_fn(predictions, targets, mask)
                 
                 total_loss += loss.item()
                 num_batches += 1
 
-                # Calculate per-feature MAE on masked tokens
                 num_masked_in_batch = torch.sum(mask)
                 if num_masked_in_batch > 0:
-                    masked_predictions = all_predictions[mask]
-                    masked_targets = targets[mask]
-                    
-                    # Sum of absolute differences for each feature in this batch
-                    batch_abs_error = torch.sum(torch.abs(masked_predictions - masked_targets), dim=0)
-                    total_abs_error_per_feature += batch_abs_error
                     total_masked_count += num_masked_in_batch
+                    
+                    # Continuous MAE
+                    cont_indices = list(self.feature_info['continuous'].values())
+                    masked_cont_preds = predictions['continuous'][mask]
+                    masked_cont_targets = targets[mask][:, cont_indices]
+                    total_abs_error_cont += torch.sum(torch.abs(masked_cont_preds - masked_cont_targets), dim=0)
+                    all_masked_cont_targets.append(masked_cont_targets)
+
+                    # Categorical Predictions
+                    for name, info in self.feature_info['categorical'].items():
+                        masked_cat_logits = predictions['categorical'][name][mask]
+                        masked_cat_targets = targets[mask][:, info['index']].long()
+                        
+                        pred_classes = torch.argmax(masked_cat_logits, dim=-1)
+                        all_masked_cat_preds[name].append(pred_classes)
+                        all_masked_cat_targets[name].append(masked_cat_targets)
         
         avg_loss = total_loss / max(num_batches, 1)
         
-        # Calculate final average absolute error per feature
+        results = {'loss': avg_loss}
         if total_masked_count > 0:
-            mae_per_feature = total_abs_error_per_feature / total_masked_count
-        else:
-            mae_per_feature = torch.zeros(num_features, device=self.device)
+            cont_metrics = {}
+            mae_per_cont = (total_abs_error_cont / total_masked_count).cpu().tolist()
+            
+            all_cont_targets_tensor = torch.cat(all_masked_cont_targets, dim=0)
+            mean_per_cont = all_cont_targets_tensor.mean(dim=0).cpu().tolist()
+            std_per_cont = all_cont_targets_tensor.std(dim=0).cpu().tolist()
 
-        return {
-            'loss': avg_loss,
-            'mae_per_feature': mae_per_feature.cpu().tolist() # Return as a list for easy handling
-        }
+            for i, name in enumerate(self.cont_feat_names):
+                cont_metrics[name] = {
+                    'mae': mae_per_cont[i],
+                    'mean': mean_per_cont[i],
+                    'std': std_per_cont[i],
+                }
+            results['continuous_metrics'] = cont_metrics
 
-    ### MODIFIED ###
+            cat_metrics = {}
+            for name in self.cat_feat_names:
+                preds = torch.cat(all_masked_cat_preds[name]).cpu().numpy()
+                targets = torch.cat(all_masked_cat_targets[name]).cpu().numpy()
+                
+                accuracy = np.mean(preds == targets)
+                precision, recall, _, _ = precision_recall_fscore_support(
+                    targets, preds, average='macro', zero_division=0
+                )
+                distribution = Counter(targets)
+                
+                cat_metrics[name] = {
+                    'accuracy': accuracy,
+                    'precision': precision,
+                    'recall': recall,
+                    'distribution': distribution,
+                }
+            results['categorical_metrics'] = cat_metrics
+        
+        return results
+
     def train(self, start_epoch: int = 0) -> MetricsTracker:
-        """
-        Main training loop with detailed validation metric printing.
-        """
         num_epochs = self.config['training']['num_epochs']
         
         print(f"\n--- Starting Training ---")
         print(f"Epochs: {start_epoch + 1} to {num_epochs}")
         print(f"Batch Size: {self.config['training']['batch_size']}")
         print(f"Learning Rate: {self.config['training']['learning_rate']}")
-        print("-" * 40)
+        print("-" * 60)
         
         for epoch in range(start_epoch, num_epochs):
             epoch_start_time = time.time()
             
             train_metrics = self.train_epoch(epoch)
-            
             val_metrics = self.validate_epoch(epoch)
             
-            # The metrics tracker will now store the detailed metrics too
             self.metrics_tracker.log_epoch(epoch, train_metrics, val_metrics)
             
             epoch_duration = time.time() - epoch_start_time
 
-            # Print main summary line
             print(
                 f"Epoch {epoch+1}/{num_epochs} | "
                 f"Train Loss: {train_metrics['loss']:.4f} | "
@@ -380,29 +428,65 @@ class MLMTrainer:
                 f"LR: {train_metrics['learning_rate']:.2e} | "
                 f"Time: {epoch_duration:.2f}s"
             )
+            
+            print("=" * 70)
+            print(f"{' ' * 21} DETAILED VALIDATION REPORT {' ' * 22}")
 
-            # Print detailed validation MAE per feature
-            if 'mae_per_feature' in val_metrics:
-                print("  Validation MAE per feature:")
-                mae_list = val_metrics['mae_per_feature']
-                # Format into 3 columns for readability
-                max_name_len = max(len(name) for name in self.vector_field_names)
-                for i in range(0, len(self.vector_field_names), 3):
-                    line = "    "
-                    for j in range(3):
-                        if i + j < len(self.vector_field_names):
-                            name = self.vector_field_names[i+j]
-                            mae = mae_list[i+j]
-                            line += f"{name:<{max_name_len}}: {mae:.4f} | "
-                    print(line.strip().rstrip('|').strip())
+            if 'continuous_metrics' in val_metrics:
+                print("-" * 70)
+                print(" CONTINUOUS FEATURES:")
+                header = f"  {'Feature':<22} | {'MAE':<10} | {'Mean (True)':<12} | {'Std (True)':<12}"
+                print(header)
+                print(f"  {'-'*22}-+-{'-'*10}-+-{'-'*12}-+-{'-'*12}")
+                for name, metrics in val_metrics['continuous_metrics'].items():
+                    row = f"  {name:<22} | {metrics['mae']:<10.4f} | {metrics['mean']:<12.4f} | {metrics['std']:<12.4f}"
+                    print(row)
 
-            # Checkpoint saving remains the same; torch.save handles lists fine
+            if 'categorical_metrics' in val_metrics:
+                print("-" * 70)
+                print(" CATEGORICAL FEATURES:")
+                header = f"  {'Feature':<22} | {'Accuracy':<10} | {'Precision':<12} | {'Recall':<12}"
+                print(header)
+                print(f"  {'-'*22}-+-{'-'*10}-+-{'-'*12}-+-{'-'*12}")
+                for name, metrics in val_metrics['categorical_metrics'].items():
+                    row = f"  {name:<22} | {metrics['accuracy']:<10.2%} | {metrics['precision']:<12.4f} | {metrics['recall']:<12.4f}"
+                    print(row)
+                    
+                    # Distribution
+                    dist_data = metrics['distribution']
+                    total_count = sum(dist_data.values())
+                    if total_count == 0: continue
+                    
+                    sorted_dist = sorted(dist_data.items(), key=lambda item: item[1], reverse=True)
+                    
+                    dist_str_parts = []
+                    limit = 5
+                    if len(sorted_dist) > limit:
+                        top_items = sorted_dist[:limit]
+                        other_count = sum(count for _, count in sorted_dist[limit:])
+                        
+                        for class_idx, count in top_items:
+                            percent = (count / total_count) * 100
+                            dist_str_parts.append(f"{class_idx}:{percent:.1f}%")
+                        
+                        if other_count > 0:
+                            other_percent = (other_count / total_count) * 100
+                            dist_str_parts.append(f"Other:{other_percent:.1f}%")
+                    else:
+                        for class_idx, count in sorted_dist:
+                            percent = (count / total_count) * 100
+                            dist_str_parts.append(f"{class_idx}:{percent:.1f}%")
+                    
+                    dist_str = ", ".join(dist_str_parts)
+                    print(f"    └─ True Dist: {dist_str}")
+
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics
             )
+            print("-" * 70)
             print(f"Checkpoint saved to {checkpoint_path}")
-            print("-" * 40)
+            print("=" * 70)
         
         print("\n--- Training Finished ---")
         return self.metrics_tracker

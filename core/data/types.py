@@ -1,59 +1,107 @@
-from typing import NamedTuple
+# types.py
+from typing import NamedTuple, List
 import numpy as np
+
+DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
+
+def quantize_to_bins(value: float, bins: List[float]) -> int:
+    """Quantize a value to the nearest bin and return the bin index."""
+    if value <= 0:
+        return 0
+    if value >= bins[-1]:
+        return len(bins) - 1
+    
+    min_diff = float('inf')
+    best_idx = 0
+    for i, bin_val in enumerate(bins):
+        diff = abs(value - bin_val)
+        if diff < min_diff:
+            min_diff = diff
+            best_idx = i
+    return best_idx
 
 class HitObjectVector(NamedTuple):
     """Represents a single hit object's vector data."""
     distance_diff: float
     angle_cos: float
     angle_sin: float
-    time_diff: float
     abs_x: float
     abs_y: float
-    # One-hot encoded object types (3 values: circle, slider, spinner)
-    is_circle: int
-    is_slider: int
-    is_spinner: int
+    object_type: int
     is_new_combo: int
-    # One-hot encoded slider curve types (4 values: B, C, L, P)
-    slider_curve_b: int
-    slider_curve_c: int
-    slider_curve_l: int
-    slider_curve_p: int
+    slider_curve_type: int
     slider_num_anchors: int
     slider_pixel_length: float
-    duration_beats: float
+    time_diff_bin: int
+    duration_bin: int
 
     @classmethod
     def get_field_names(cls):
-        """Returns list of field names in order."""
         return list(cls._fields)
     
     @classmethod
     def get_vector_dim(cls):
-        """Returns the total vector dimension."""
         return len(cls._fields)
     
+    @classmethod
+    def get_feature_info(cls):
+        field_names = cls.get_field_names()
+        
+        categorical_features = [
+            'object_type', 'is_new_combo', 'slider_curve_type',
+            'time_diff_bin', 'duration_bin'
+        ]
+        
+        continuous_features = [f for f in field_names if f not in categorical_features]
+        
+        cat_cardinalities = {
+            'object_type': 3,
+            'is_new_combo': 2,
+            'slider_curve_type': 5,
+            'time_diff_bin': len(DURATION_BINS),
+            'duration_bin': len(DURATION_BINS)
+        }
+
+        info = {
+            'categorical': {
+                name: {
+                    'index': field_names.index(name),
+                    'cardinality': cat_cardinalities[name]
+                } for name in categorical_features
+            },
+            'continuous': {
+                name: field_names.index(name) for name in continuous_features
+            },
+            'names': field_names
+        }
+        return info
+
+    @classmethod
+    def create_with_quantization(cls, distance_diff: float, angle_cos: float, angle_sin: float,
+                                time_diff: float, abs_x: float, abs_y: float, object_type: int,
+                                is_new_combo: int, slider_curve_type: int,
+                                slider_num_anchors: int, slider_pixel_length: float,
+                                duration_beats: float):
+        time_diff_bin_idx = quantize_to_bins(time_diff, DURATION_BINS)
+        duration_bin_idx = quantize_to_bins(duration_beats, DURATION_BINS)
+        
+        return cls(
+            distance_diff=distance_diff,
+            angle_cos=angle_cos,
+            angle_sin=angle_sin,
+            abs_x=abs_x,
+            abs_y=abs_y,
+            object_type=object_type,
+            is_new_combo=is_new_combo,
+            slider_curve_type=slider_curve_type,
+            slider_num_anchors=slider_num_anchors,
+            slider_pixel_length=slider_pixel_length,
+            time_diff_bin=time_diff_bin_idx,
+            duration_bin=duration_bin_idx
+        )
+    
     def to_array(self):
-        """Convert to numpy array with proper type handling."""
-        return np.array([
-            float(self.distance_diff),
-            float(self.angle_cos),
-            float(self.angle_sin),
-            float(self.time_diff),
-            float(self.abs_x),
-            float(self.abs_y),
-            float(self.is_circle),
-            float(self.is_slider),
-            float(self.is_spinner),
-            float(self.is_new_combo),
-            float(self.slider_curve_b),
-            float(self.slider_curve_c),
-            float(self.slider_curve_l),
-            float(self.slider_curve_p),
-            float(self.slider_num_anchors),
-            float(self.slider_pixel_length),
-            float(self.duration_beats)
-        ], dtype=np.float32)
+        return np.array(self, dtype=np.float32)
 
 class BeatmapMetadata(NamedTuple):
     """Represents beatmap metadata."""
@@ -65,16 +113,13 @@ class BeatmapMetadata(NamedTuple):
 
     @classmethod
     def get_field_names(cls):
-        """Returns list of field names in order."""
         return list(cls._fields)
     
     @classmethod
     def get_metadata_dim(cls):
-        """Returns the total metadata dimension."""
         return len(cls._fields)
     
     def to_array(self):
-        """Convert to numpy array."""
         return np.array(self, dtype=np.float32)
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()

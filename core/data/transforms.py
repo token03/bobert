@@ -1,11 +1,10 @@
+# transforms.py
 import torch
 import numpy as np
 from typing import List, Tuple, Optional, Set
 from .types import HitObjectVector, BeatmapMetadata
 
-
 class BeatmapNormalizer:
-    """Handles normalization of beatmap vectors and metadata."""
     
     def __init__(
         self,
@@ -21,12 +20,11 @@ class BeatmapNormalizer:
         self.meta_std = meta_std
         self.epsilon = epsilon
         
-        # Get categorical indices that shouldn't be normalized
         vector_field_names = HitObjectVector.get_field_names()
         categorical_indices = {
             vector_field_names.index(field) for field in [
-                'is_circle', 'is_slider', 'is_spinner', 'is_new_combo',
-                'slider_curve_b', 'slider_curve_c', 'slider_curve_l', 'slider_curve_p'
+                'object_type', 'is_new_combo', 'slider_curve_type',
+                'time_diff_bin', 'duration_bin'
             ]
         }
         self.normalization_mask = torch.ones(len(vector_field_names), dtype=torch.bool)
@@ -34,7 +32,6 @@ class BeatmapNormalizer:
             self.normalization_mask[idx] = False
     
     def normalize_vectors(self, vectors: torch.Tensor) -> torch.Tensor:
-        """Normalize vector data while preserving categorical features."""
         normalized_vectors = vectors.clone()
         normalized_vectors[:, self.normalization_mask] = (
             vectors[:, self.normalization_mask] - self.vector_mean[self.normalization_mask]
@@ -42,11 +39,9 @@ class BeatmapNormalizer:
         return normalized_vectors
     
     def normalize_metadata(self, metadata: torch.Tensor) -> torch.Tensor:
-        """Normalize metadata."""
         return (metadata - self.meta_mean) / (self.meta_std + self.epsilon)
     
     def denormalize_vectors(self, normalized_vectors: torch.Tensor) -> torch.Tensor:
-        """Denormalize vector data."""
         denormalized_vectors = normalized_vectors.clone()
         denormalized_vectors[:, self.normalization_mask] = (
             normalized_vectors[:, self.normalization_mask] * (self.vector_std[self.normalization_mask] + self.epsilon)
@@ -54,7 +49,6 @@ class BeatmapNormalizer:
         return denormalized_vectors
     
     def denormalize_metadata(self, normalized_metadata: torch.Tensor) -> torch.Tensor:
-        """Denormalize metadata."""
         return (normalized_metadata * (self.meta_std + self.epsilon)) + self.meta_mean
 
     @classmethod
@@ -64,14 +58,13 @@ class BeatmapNormalizer:
         include_augmentation: bool = True,
         epsilon: float = 1e-8
     ) -> 'BeatmapNormalizer':
-        """Create normalizer from training data."""
         print("Calculating normalization statistics...")
         
         vector_field_names = HitObjectVector.get_field_names()
         categorical_indices = {
             vector_field_names.index(field) for field in [
-                'is_circle', 'is_slider', 'is_spinner', 'is_new_combo',
-                'slider_curve_b', 'slider_curve_c', 'slider_curve_l', 'slider_curve_p'
+                'object_type', 'is_new_combo', 'slider_curve_type',
+                'time_diff_bin', 'duration_bin'
             ]
         }
         
@@ -129,16 +122,13 @@ class BeatmapNormalizer:
         return cls(vector_mean, vector_std, meta_mean, meta_std, epsilon)
 
     def get_vector_stats(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get vector normalization statistics."""
         return self.vector_mean, self.vector_std
     
     def get_metadata_stats(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get metadata normalization statistics."""
         return self.meta_mean, self.meta_std
 
 
 class BeatmapAugmenter:
-    """Handles spatial augmentation of beatmap data."""
     
     def __init__(self):
         vector_field_names = HitObjectVector.get_field_names()
@@ -148,16 +138,15 @@ class BeatmapAugmenter:
         self.abs_y_idx = vector_field_names.index('abs_y')
     
     def apply_augmentation(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
-        """Apply spatial augmentation based on type."""
         augmented = vectors.clone()
         
-        if aug_type == 1:  # Flip X
+        if aug_type == 1:
             augmented[:, self.angle_cos_idx] *= -1
             augmented[:, self.abs_x_idx] *= -1
-        elif aug_type == 2:  # Flip Y
+        elif aug_type == 2:
             augmented[:, self.angle_sin_idx] *= -1
             augmented[:, self.abs_y_idx] *= -1
-        elif aug_type == 3:  # Flip XY
+        elif aug_type == 3:
             augmented[:, self.angle_cos_idx] *= -1
             augmented[:, self.angle_sin_idx] *= -1
             augmented[:, self.abs_x_idx] *= -1
@@ -166,13 +155,11 @@ class BeatmapAugmenter:
         return augmented
     
     def random_augmentation(self, vectors: torch.Tensor) -> torch.Tensor:
-        """Apply random augmentation."""
         aug_type = torch.randint(0, 4, (1,)).item()
         return self.apply_augmentation(vectors, aug_type)
 
 
 class BeatmapTransform:
-    """Complete transform pipeline for beatmap data."""
     
     def __init__(
         self,
@@ -185,7 +172,6 @@ class BeatmapTransform:
         self.augment = augment
     
     def __call__(self, vectors: torch.Tensor, metadata: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Apply complete transform pipeline."""
         processed_vectors = vectors.clone()
         
         if self.augment:

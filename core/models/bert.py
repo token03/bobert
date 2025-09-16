@@ -1,7 +1,8 @@
+# bert.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 from rotary_embedding_torch import RotaryEmbedding
 
 from .components import (
@@ -9,6 +10,7 @@ from .components import (
     create_norm_layer, 
     create_ffn_layer
 )
+from ..data.types import HitObjectVector
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(
@@ -68,7 +70,7 @@ class BertEncoder(nn.Module):
         dim_feedforward: int,
         dropout: float = 0.1,
         metadata_dim: int = 5,
-        in_channels: int = 10,
+        in_channels: int = 12,
         attention_type: str = 'rope',
         norm_type: str = 'rmsnorm',
         ffn_type: str = 'swiglu',
@@ -148,26 +150,29 @@ class BertEncoder(nn.Module):
         return output
 
 class BertForMaskedModeling(nn.Module):
-    def __init__(self, bert_model: BertEncoder, in_channels: int, masking_ratio: float = 0.15):
+    def __init__(self, bert_model: BertEncoder, masking_ratio: float = 0.15):
         super().__init__()
         self.bert = bert_model
         self.masking_ratio = masking_ratio
         
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
         
-        self.prediction_head = nn.Sequential(
-            nn.Linear(bert_model.d_model, bert_model.d_model),
-            nn.GELU(),
-            nn.LayerNorm(bert_model.d_model),
-            nn.Linear(bert_model.d_model, in_channels)
-        )
+        self.feature_info = HitObjectVector.get_feature_info()
+        
+        num_continuous = len(self.feature_info['continuous'])
+        self.continuous_head = nn.Linear(bert_model.d_model, num_continuous)
+
+        self.categorical_heads = nn.ModuleDict({
+            name: nn.Linear(bert_model.d_model, info['cardinality'])
+            for name, info in self.feature_info['categorical'].items()
+        })
 
     def forward(
         self, 
         x: torch.Tensor, 
         metadata: torch.Tensor, 
         attention_mask: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
         
         prob = torch.full(x.shape[:2], self.masking_ratio, device=x.device)
         prob.masked_fill_(~attention_mask, 0.0)
@@ -196,6 +201,15 @@ class BertForMaskedModeling(nn.Module):
         
         sequence_output = encoded_output[:, 1:, :]
         
-        all_predictions = self.prediction_head(sequence_output)
+        continuous_preds = self.continuous_head(sequence_output)
+        categorical_preds = {
+            name: head(sequence_output)
+            for name, head in self.categorical_heads.items()
+        }
+
+        predictions = {
+            'continuous': continuous_preds,
+            'categorical': categorical_preds
+        }
         
-        return all_predictions, x, is_masked
+        return predictions, x, is_masked
