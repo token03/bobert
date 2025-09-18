@@ -75,7 +75,7 @@ def load_and_group_data_from_db(
 
     indices = {name: vector_field_names.index(name) for name in vector_field_names}
     indices_to_clamp_and_log = [
-        indices['distance_diff'], indices['slider_pixel_length'], indices['slider_num_anchors']
+        indices['slider_pixel_length'], indices['slider_num_anchors']
     ]
 
     for i in tqdm(
@@ -104,12 +104,12 @@ def load_and_group_data_from_db(
 
             vectors_tensor = torch.tensor(vectors_list, dtype=torch.float32)
 
+            # Apply log1p to slider-related fields to handle skewed distributions
             for idx in indices_to_clamp_and_log:
                 vectors_tensor[:, idx].clamp_(min=0.0)
                 vectors_tensor[:, idx] = torch.log1p(vectors_tensor[:, idx])
 
-            vectors_tensor[:, indices['abs_x']] = (vectors_tensor[:, indices['abs_x']] / 256.0) - 1.0
-            vectors_tensor[:, indices['abs_y']] = (vectors_tensor[:, indices['abs_y']] / 192.0) - 1.0
+            # Note: x_diff and y_diff are already differences, no coordinate normalization needed
 
             if max_seq_len and vectors_tensor.shape[0] > max_seq_len:
                 vectors_tensor = vectors_tensor[:max_seq_len]
@@ -143,10 +143,11 @@ def calculate_normalization_stats(
     print("-" * 70)
 
     field_descriptions = {
-        'distance_diff': 'Distance between objects (log)', 'angle_cos': 'Angle cosine component',
-        'angle_sin': 'Angle sine component', 'abs_x': 'Absolute X position (scaled)',
-        'abs_y': 'Absolute Y position (scaled)', 'object_type': 'Object type (categorical)',
-        'is_new_combo': 'New combo flag', 'slider_curve_type': 'Slider curve type (categorical)',
+        'x_diff': 'X-coordinate difference',
+        'y_diff': 'Y-coordinate difference', 
+        'object_type': 'Object type (categorical)',
+        'is_new_combo': 'New combo flag', 
+        'slider_curve_type': 'Slider curve type (categorical)',
         'slider_num_anchors': 'Number of anchors (log)',
         'slider_pixel_length': 'Slider pixel length (log)',
         'time_diff_bin': 'Time diff bin (categorical)',
@@ -185,10 +186,13 @@ def calculate_normalization_stats(
 
 def create_weighted_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3,
+    difficulty_index: Optional[int] = None,
     expand_for_augmentation: bool = False
 ) -> WeightedRandomSampler:
     print("Creating weighted sampler for difficulty balancing...")
+
+    if difficulty_index is None:
+        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
 
     all_difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
 
@@ -224,12 +228,15 @@ def create_weighted_sampler(
 
 def create_kde_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3,
+    difficulty_index: Optional[int] = None,
     bandwidth: float = 0.5,
     expand_for_augmentation: bool = False,
     num_bins: int = 100
 ) -> WeightedRandomSampler:
     print(f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}...")
+
+    if difficulty_index is None:
+        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
 
     difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
 
@@ -266,11 +273,14 @@ def create_kde_sampler(
 
 def create_temperature_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3,
+    difficulty_index: Optional[int] = None,
     temperature: float = 2.0,
     expand_for_augmentation: bool = False
 ) -> WeightedRandomSampler:
     print(f"Creating temperature sampler with temperature={temperature}...")
+
+    if difficulty_index is None:
+        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
 
     difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
 
@@ -308,7 +318,9 @@ def create_sampler_from_config(
 ) -> WeightedRandomSampler:
     sampling_config = config.get('training', {}).get('sampling', {})
     method = sampling_config.get('method', 'weighted')
-    difficulty_index = sampling_config.get('difficulty_index', 3)
+    difficulty_index = sampling_config.get('difficulty_index', None)
+    if difficulty_index is None:
+        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
     expand_for_augmentation = sampling_config.get('expand_for_augmentation', True)
 
     if method == 'kde':

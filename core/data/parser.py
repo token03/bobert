@@ -4,7 +4,7 @@ import bisect
 from collections import Counter
 import math
 import numpy as np
-from .types import HitObjectVector, BeatmapMetadata
+from .types import HitObjectVector, BeatmapMetadata, BeatmapData
 
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
@@ -12,14 +12,6 @@ OBJECT_TYPE_SPINNER = 2
 OBJECT_TYPE_UNKNOWN = -1
 
 SLIDER_CURVE_TYPES = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
-
-def _convert_to_polar_diff(x_diff, y_diff):
-    distance = math.sqrt(x_diff * x_diff + y_diff * y_diff)
-    if distance == 0:
-        return 0.0, 1.0, 0.0
-    cos_angle = x_diff / distance
-    sin_angle = y_diff / distance
-    return distance, cos_angle, sin_angle
 
 def _find_timing_points(t, timing_points, timing_points_times):
     idx = bisect.bisect_right(timing_points_times, t) - 1
@@ -68,14 +60,14 @@ def parse_osu_file(file_path, print_info=False):
     data = {
         'beatmap_id': None, 'hp_drain': None, 'circle_size': None, 'od': None,
         'ar': None, 'slider_multiplier': 1.4, 'slider_tick': 1.0,
-        'hit_objects_lines': [], 'label': None, 'vectors': [], 'main_bpm': None,
+        'hit_objects_lines': [], 'category': None, 'vectors': [], 'main_bpm': None,
         'difficulty_rating': None
     }
     timing_points = []
 
     try:
         parent_folder = os.path.dirname(file_path)
-        data['label'] = os.path.basename(parent_folder)
+        data['category'] = os.path.basename(parent_folder)
 
         with open(file_path, 'r', encoding='utf-8') as file:
             section = None
@@ -212,15 +204,10 @@ def parse_osu_file(file_path, print_info=False):
                     x_diff = current_start_x - prev_end_x
                     y_diff = current_start_y - prev_end_y
                     
-                    distance_diff, angle_cos, angle_sin = _convert_to_polar_diff(x_diff, y_diff)
-                    
                     vector = HitObjectVector.create_with_quantization(
-                        distance_diff=distance_diff,
-                        angle_cos=angle_cos,
-                        angle_sin=angle_sin,
+                        x_diff=x_diff,
+                        y_diff=y_diff,
                         time_diff=time_diff_beats,
-                        abs_x=current_start_x,
-                        abs_y=current_start_y,
                         object_type=current_object_type,
                         is_new_combo=is_new_combo,
                         slider_curve_type=slider_curve_type,
@@ -233,7 +220,20 @@ def parse_osu_file(file_path, print_info=False):
             prev_end_x, prev_end_y, prev_end_time = current_end_x, current_end_y, current_end_time
 
         data.pop('hit_objects_lines')
-        return data
+        
+        return BeatmapData(
+            beatmap_id=data['beatmap_id'],
+            category=data['category'],
+            hp_drain=data['hp_drain'],
+            circle_size=data['circle_size'],
+            od=data['od'],
+            ar=data['ar'],
+            slider_multiplier=data['slider_multiplier'],
+            slider_tick=data['slider_tick'],
+            main_bpm=data['main_bpm'],
+            difficulty_rating=data['difficulty_rating'],
+            vectors=data['vectors']
+        )
     except Exception as e:
         if print_info:
             print(f"Error parsing file {file_path}: {e}")

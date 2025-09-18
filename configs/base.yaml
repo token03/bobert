@@ -30,7 +30,7 @@ training:
     kde_bins: 200     
     temperature: 2.0  
     difficulty_index: 3 
-    expand_for_augmentation: false
+    expand_for_augmentation: true
   
 model:
   dropout: 0.1

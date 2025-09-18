@@ -14,16 +14,18 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.parser import parse_osu_file
-from core.data.types import HitObjectVector
+from core.data.types import HitObjectVector, BeatmapData
 
 def create_tables(conn):
     cursor = conn.cursor()
-    cursor.execute('''
+    
+    beatmap_fields = BeatmapData.get_db_field_types()
+    beatmap_fields_sql = ', '.join([f"{field} {field_type}" for field, field_type in beatmap_fields.items()])
+    
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS beatmaps (
-            id INTEGER PRIMARY KEY, beatmap_id INTEGER UNIQUE, category TEXT,
-            hp_drain REAL, circle_size REAL, od REAL, ar REAL,
-            slider_multiplier REAL, slider_tick REAL, main_bpm REAL,
-            difficulty_rating REAL
+            id INTEGER PRIMARY KEY,
+            {beatmap_fields_sql}
         )
     ''')
     
@@ -40,39 +42,40 @@ def create_tables(conn):
     conn.commit()
 
 def insert_beatmap_data(cursor, beatmap_data):
-    cursor.execute('''
-        INSERT OR IGNORE INTO beatmaps (beatmap_id, category, hp_drain, circle_size, od, ar, slider_multiplier, slider_tick, main_bpm, difficulty_rating)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    field_names = BeatmapData.get_field_names()
+    placeholders = ', '.join(['?' for _ in field_names])
+    field_names_str = ', '.join(field_names)
+    
+    cursor.execute(f'''
+        INSERT OR IGNORE INTO beatmaps ({field_names_str})
+        VALUES ({placeholders})
         ''',
-        (beatmap_data['beatmap_id'], beatmap_data['label'], beatmap_data['hp_drain'],
-         beatmap_data['circle_size'], beatmap_data['od'], beatmap_data['ar'],
-         beatmap_data['slider_multiplier'], beatmap_data['slider_tick'], beatmap_data['main_bpm'],
-         beatmap_data['difficulty_rating']))
+        beatmap_data.to_db_tuple())
 
     beatmap_row_id = cursor.lastrowid
     if beatmap_row_id == 0:
-        cursor.execute('SELECT id FROM beatmaps WHERE beatmap_id = ?', (beatmap_data['beatmap_id'],))
+        cursor.execute('SELECT id FROM beatmaps WHERE beatmap_id = ?', (beatmap_data.beatmap_id,))
         result = cursor.fetchone()
         if result:
             beatmap_row_id = result[0]
         else:
             return
 
-    if beatmap_data['vectors']:
-        field_names = HitObjectVector.get_field_names()
-        placeholders = ', '.join(['?' for _ in field_names])
-        field_names_str = ', '.join(field_names)
+    if beatmap_data.vectors:
+        vector_field_names = HitObjectVector.get_field_names()
+        vector_placeholders = ', '.join(['?' for _ in vector_field_names])
+        vector_field_names_str = ', '.join(vector_field_names)
         
         vector_data_to_insert = []
-        for vec in beatmap_data['vectors']:
+        for vec in beatmap_data.vectors:
             vec_array = vec.to_array()
             vector_tuple = (beatmap_row_id,) + tuple(float(x) for x in vec_array)
             vector_data_to_insert.append(vector_tuple)
         
         cursor.executemany(
             f'''INSERT INTO beatmap_vectors (
-                beatmap_id, {field_names_str}
-            ) VALUES (?, {placeholders})''',
+                beatmap_id, {vector_field_names_str}
+            ) VALUES (?, {vector_placeholders})''',
             vector_data_to_insert
         )
 
@@ -86,17 +89,10 @@ def worker(tasks_queue, results_queue):
         try:
             beatmap_data = parse_osu_file(file_path)
             
-            if not beatmap_data or not beatmap_data.get('vectors') or not (0 < len(beatmap_data['vectors']) <= 4000):
+            if not beatmap_data or not beatmap_data.vectors or not (0 < len(beatmap_data.vectors) <= 4000):
                 continue
 
-            is_map_valid = True
-            for vec in beatmap_data['vectors']:
-                if not (0 <= vec.abs_x <= 512 and 0 <= vec.abs_y <= 384):
-                    is_map_valid = False
-                    break
-            
-            if is_map_valid:
-                results_queue.put(beatmap_data)
+            results_queue.put(beatmap_data)
 
         except Exception as e:
             pass

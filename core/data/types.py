@@ -22,11 +22,8 @@ def quantize_to_bins(value: float, bins: List[float]) -> int:
 
 class HitObjectVector(NamedTuple):
     """Represents a single hit object's vector data."""
-    distance_diff: float
-    angle_cos: float
-    angle_sin: float
-    abs_x: float
-    abs_y: float
+    x_diff: float
+    y_diff: float
     object_type: int
     is_new_combo: int
     slider_curve_type: int
@@ -77,8 +74,8 @@ class HitObjectVector(NamedTuple):
         return info
 
     @classmethod
-    def create_with_quantization(cls, distance_diff: float, angle_cos: float, angle_sin: float,
-                                time_diff: float, abs_x: float, abs_y: float, object_type: int,
+    def create_with_quantization(cls, x_diff: float, y_diff: float,
+                                time_diff: float, object_type: int,
                                 is_new_combo: int, slider_curve_type: int,
                                 slider_num_anchors: int, slider_pixel_length: float,
                                 duration_beats: float):
@@ -86,11 +83,8 @@ class HitObjectVector(NamedTuple):
         duration_bin_idx = quantize_to_bins(duration_beats, DURATION_BINS)
         
         return cls(
-            distance_diff=distance_diff,
-            angle_cos=angle_cos,
-            angle_sin=angle_sin,
-            abs_x=abs_x,
-            abs_y=abs_y,
+            x_diff=x_diff,
+            y_diff=y_diff,
             object_type=object_type,
             is_new_combo=is_new_combo,
             slider_curve_type=slider_curve_type,
@@ -121,6 +115,61 @@ class BeatmapMetadata(NamedTuple):
     
     def to_array(self):
         return np.array(self, dtype=np.float32)
+
+
+class BeatmapData(NamedTuple):
+    """Comprehensive beatmap data structure - single source of truth for beatmap fields."""
+    beatmap_id: int
+    category: str
+    hp_drain: float
+    circle_size: float
+    od: float
+    ar: float
+    slider_multiplier: float
+    slider_tick: float
+    main_bpm: float
+    difficulty_rating: float
+    vectors: List[HitObjectVector]
+
+    @classmethod
+    def get_field_names(cls):
+        """Get field names for database table creation."""
+        return [field for field in cls._fields if field != 'vectors']
+    
+    @classmethod
+    def get_db_field_types(cls):
+        """Get database field types for table creation."""
+        return {
+            'beatmap_id': 'INTEGER UNIQUE',
+            'category': 'TEXT',
+            'hp_drain': 'REAL',
+            'circle_size': 'REAL', 
+            'od': 'REAL',
+            'ar': 'REAL',
+            'slider_multiplier': 'REAL',
+            'slider_tick': 'REAL',
+            'main_bpm': 'REAL',
+            'difficulty_rating': 'REAL'
+        }
+    
+    def get_metadata(self) -> BeatmapMetadata:
+        """Extract metadata from beatmap data."""
+        return BeatmapMetadata(
+            ar=self.ar,
+            od=self.od,
+            cs=self.circle_size,
+            difficulty_rating=self.difficulty_rating,
+            bpm=self.main_bpm
+        )
+    
+    def to_db_tuple(self):
+        """Convert to tuple for database insertion (excluding vectors)."""
+        return (
+            self.beatmap_id, self.category, self.hp_drain,
+            self.circle_size, self.od, self.ar,
+            self.slider_multiplier, self.slider_tick, 
+            self.main_bpm, self.difficulty_rating
+        )
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()
 METADATA_DIM = BeatmapMetadata.get_metadata_dim()
