@@ -13,7 +13,7 @@ from typing import Tuple, List, Dict, Any, Optional
 from scipy.stats import gaussian_kde
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
-from .types import HitObjectVector, BeatmapMetadata
+from .types import HitObjectVector, BeatmapMetadata, NormalizationType
 from .transforms import BeatmapNormalizer
 
 def setup_database(db_path: str, colab_url: Optional[str] = None) -> str:
@@ -73,9 +73,13 @@ def load_and_group_data_from_db(
         ORDER BY beatmap_id
     """
 
+    vector_norm_specs = HitObjectVector.get_normalization_specs()
+    meta_norm_specs = BeatmapMetadata.get_normalization_specs()
+    
     indices = {name: vector_field_names.index(name) for name in vector_field_names}
-    indices_to_clamp_and_log = [
-        indices['slider_pixel_length'], indices['slider_num_anchors']
+    log_transform_indices = [
+        indices[field_name] for field_name, norm_type in vector_norm_specs.items()
+        if norm_type == NormalizationType.LOG
     ]
 
     for i in tqdm(
@@ -104,19 +108,19 @@ def load_and_group_data_from_db(
 
             vectors_tensor = torch.tensor(vectors_list, dtype=torch.float32)
 
-            # Apply log1p to slider-related fields to handle skewed distributions
-            for idx in indices_to_clamp_and_log:
+            for idx in log_transform_indices:
                 vectors_tensor[:, idx].clamp_(min=0.0)
                 vectors_tensor[:, idx] = torch.log1p(vectors_tensor[:, idx])
-
-            # Note: x_diff and y_diff are already differences, no coordinate normalization needed
 
             if max_seq_len and vectors_tensor.shape[0] > max_seq_len:
                 vectors_tensor = vectors_tensor[:max_seq_len]
 
             metadata_tensor = torch.from_numpy(meta_np)
-            bpm_idx = BeatmapMetadata.get_field_names().index('bpm')
-            metadata_tensor[bpm_idx] = torch.log1p(metadata_tensor[bpm_idx])
+            
+            meta_field_names = BeatmapMetadata.get_field_names()
+            for i, field_name in enumerate(meta_field_names):
+                if meta_norm_specs[field_name] == NormalizationType.LOG:
+                    metadata_tensor[i] = torch.log1p(metadata_tensor[i])
 
             processed_data.append((vectors_tensor, metadata_tensor))
 
@@ -132,52 +136,94 @@ def calculate_normalization_stats(
     normalizer = BeatmapNormalizer.from_data(train_data, include_augmentation)
 
     vector_field_names = HitObjectVector.get_field_names()
-    categorical_features = HitObjectVector.get_feature_info()['categorical'].keys()
+    vector_norm_specs = HitObjectVector.get_normalization_specs()
+    vector_stats = normalizer.get_vector_stats()
 
     print("\n" + "="*70)
     print("                    NORMALIZATION STATISTICS")
     print("="*70)
     print("\n--- VECTOR STATISTICS:")
     print("-" * 70)
-    print(f"{'Field Name':<20} {'Mean':<12} {'Std Dev':<12} {'Normalized':<11} {'Description'}")
+    print(f"{'Field Name':<20} {'Type':<12} {'Param 1':<12} {'Param 2':<12} {'Description'}")
     print("-" * 70)
 
     field_descriptions = {
         'x_diff': 'X-coordinate difference',
         'y_diff': 'Y-coordinate difference', 
         'object_type': 'Object type (categorical)',
-        'is_new_combo': 'New combo flag', 
+        'is_new_combo': 'New combo flag (categorical)', 
         'slider_curve_type': 'Slider curve type (categorical)',
         'slider_num_anchors': 'Number of anchors (log)',
         'slider_pixel_length': 'Slider pixel length (log)',
         'time_diff_bin': 'Time diff bin (categorical)',
         'duration_bin': 'Duration bin (categorical)',
+        'kiai_time': 'Kiai time (categorical)',
     }
 
-    for i, field_name in enumerate(vector_field_names):
-        is_normalized = "Yes" if normalizer.normalization_mask[i] else "No"
+    for field_name in vector_field_names:
+        norm_type = vector_norm_specs[field_name]
         description = field_descriptions.get(field_name, 'Unknown field')
-        if field_name in categorical_features:
-            mean_str, std_str = "N/A", "N/A"
+        
+        if norm_type == NormalizationType.CATEGORICAL:
+            param1_str, param2_str = "N/A", "N/A"
+            type_str = "categorical"
+        elif field_name in vector_stats:
+            param1, param2 = vector_stats[field_name]
+            if norm_type in [NormalizationType.STANDARD, NormalizationType.LOG]:
+                param1_str = f"{param1:.4f}"
+                param2_str = f"{param2:.4f}"
+                type_str = "mean/std" if norm_type == NormalizationType.STANDARD else "log+norm"
+            elif norm_type == NormalizationType.MINMAX:
+                param1_str = f"{param1:.4f}"
+                param2_str = f"{param2:.4f}"
+                type_str = "min/max"
+            else:
+                param1_str, param2_str = "N/A", "N/A"
+                type_str = str(norm_type.value)
         else:
-            mean_str = f"{normalizer.vector_mean[i]:.4f}"
-            std_str = f"{normalizer.vector_std[i]:.4f}"
-        print(f"{field_name:<20} {mean_str:<12} {std_str:<12} {is_normalized:<11} {description}")
+            param1_str, param2_str = "N/A", "N/A"
+            type_str = str(norm_type.value)
+            
+        print(f"{field_name:<20} {type_str:<12} {param1_str:<12} {param2_str:<12} {description}")
 
     print("\n--- METADATA STATISTICS:")
     print("-" * 70)
-    print(f"{'Field Name':<20} {'Mean':<12} {'Std Dev':<12} {'Description'}")
+    print(f"{'Field Name':<20} {'Type':<12} {'Param 1':<12} {'Param 2':<12} {'Description'}")
     print("-" * 70)
 
     metadata_field_names = BeatmapMetadata.get_field_names()
+    meta_norm_specs = BeatmapMetadata.get_normalization_specs()
+    meta_stats = normalizer.get_metadata_stats()
     metadata_descriptions = {
         'ar': 'Approach Rate', 'od': 'Overall Difficulty', 'cs': 'Circle Size',
         'difficulty_rating': 'Star Rating', 'bpm': 'Beats Per Minute (log)'
     }
 
-    for i, field_name in enumerate(metadata_field_names):
+    for field_name in metadata_field_names:
+        norm_type = meta_norm_specs[field_name]
         description = metadata_descriptions.get(field_name, 'Unknown field')
-        print(f"{field_name:<20} {normalizer.meta_mean[i]:<12.4f} {normalizer.meta_std[i]:<12.4f} {description}")
+        
+        if norm_type == NormalizationType.CATEGORICAL:
+            param1_str, param2_str = "N/A", "N/A"
+            type_str = "categorical"
+        elif field_name in meta_stats:
+            param1, param2 = meta_stats[field_name]
+            if norm_type in [NormalizationType.STANDARD, NormalizationType.LOG]:
+                param1_str = f"{param1:.4f}"
+                param2_str = f"{param2:.4f}"
+                type_str = "mean/std" if norm_type == NormalizationType.STANDARD else "log+norm"
+            elif norm_type == NormalizationType.MINMAX:
+                param1_str = f"{param1:.4f}"
+                param2_str = f"{param2:.4f}"
+                type_str = "min/max"
+            else:
+                param1_str, param2_str = "N/A", "N/A"
+                type_str = str(norm_type.value)
+        else:
+            param1_str, param2_str = "N/A", "N/A"
+            type_str = str(norm_type.value)
+            
+        print(f"{field_name:<20} {type_str:<12} {param1_str:<12} {param2_str:<12} {description}")
 
     print("="*70)
 

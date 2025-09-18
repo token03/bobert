@@ -1,4 +1,3 @@
-# parser.py
 import os
 import bisect
 from collections import Counter
@@ -104,7 +103,8 @@ def parse_osu_file(file_path, print_info=False):
                         timing_points.append({
                             'time': int(float(parts[0])),
                             'beatLength': float(parts[1]),
-                            'uninherited': len(parts) >= 7 and parts[6] == '1'
+                            'uninherited': len(parts) >= 7 and parts[6] == '1',
+                            'effects': int(parts[7]) if len(parts) >= 8 else 0
                         })
                 elif section == 'hitobjects':
                     data['hit_objects_lines'].append(line)
@@ -196,7 +196,8 @@ def parse_osu_file(file_path, print_info=False):
                     current_end_x, current_end_y, current_end_time = 256.0, 192.0, t
 
             if prev_end_time is not None:
-                uninherited_tp, _ = _find_timing_points(t, timing_points, timing_points_times)
+                uninherited_tp, effective_tp = _find_timing_points(t, timing_points, timing_points_times)
+                is_kiai = 1 if effective_tp and (effective_tp.get('effects', 0) & 1) else 0
                 if uninherited_tp and uninherited_tp['beatLength'] > 10:
                     time_diff_ms = t - prev_end_time
                     beat_length = uninherited_tp['beatLength']
@@ -213,7 +214,8 @@ def parse_osu_file(file_path, print_info=False):
                         slider_curve_type=slider_curve_type,
                         slider_num_anchors=slider_num_anchors,
                         slider_pixel_length=slider_pixel_length_val,
-                        duration_beats=duration_beats
+                        duration_beats=duration_beats,
+                        kiai_time=is_kiai
                     )
                     data['vectors'].append(vector)
 

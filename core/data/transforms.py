@@ -1,55 +1,128 @@
 # transforms.py
 import torch
 import numpy as np
-from typing import List, Tuple, Optional, Set
-from .types import HitObjectVector, BeatmapMetadata
+from typing import List, Tuple, Optional, Set, Dict
+from .types import HitObjectVector, BeatmapMetadata, NormalizationType
 
 class BeatmapNormalizer:
     
     def __init__(
         self,
-        vector_mean: torch.Tensor,
-        vector_std: torch.Tensor,
-        meta_mean: torch.Tensor,
-        meta_std: torch.Tensor,
+        vector_stats: Dict[str, Tuple[torch.Tensor, torch.Tensor]],  
+        meta_stats: Dict[str, Tuple[torch.Tensor, torch.Tensor]],   
         epsilon: float = 1e-8
     ):
-        self.vector_mean = vector_mean
-        self.vector_std = vector_std
-        self.meta_mean = meta_mean
-        self.meta_std = meta_std
+        self.vector_stats = vector_stats
+        self.meta_stats = meta_stats
         self.epsilon = epsilon
         
+        self.vector_norm_specs = HitObjectVector.get_normalization_specs()
+        self.meta_norm_specs = BeatmapMetadata.get_normalization_specs()
+        
         vector_field_names = HitObjectVector.get_field_names()
-        categorical_indices = {
-            vector_field_names.index(field) for field in [
-                'object_type', 'is_new_combo', 'slider_curve_type',
-                'time_diff_bin', 'duration_bin'
-            ]
-        }
-        self.normalization_mask = torch.ones(len(vector_field_names), dtype=torch.bool)
-        for idx in categorical_indices:
-            self.normalization_mask[idx] = False
+        
+        self.categorical_mask = torch.zeros(len(vector_field_names), dtype=torch.bool)
+        self.standard_mask = torch.zeros(len(vector_field_names), dtype=torch.bool)
+        self.log_mask = torch.zeros(len(vector_field_names), dtype=torch.bool)
+        self.minmax_mask = torch.zeros(len(vector_field_names), dtype=torch.bool)
+        
+        for i, field_name in enumerate(vector_field_names):
+            norm_type = self.vector_norm_specs[field_name]
+            if norm_type == NormalizationType.CATEGORICAL:
+                self.categorical_mask[i] = True
+            elif norm_type == NormalizationType.STANDARD:
+                self.standard_mask[i] = True
+            elif norm_type == NormalizationType.LOG:
+                self.log_mask[i] = True
+            elif norm_type == NormalizationType.MINMAX:
+                self.minmax_mask[i] = True
     
     def normalize_vectors(self, vectors: torch.Tensor) -> torch.Tensor:
         normalized_vectors = vectors.clone()
-        normalized_vectors[:, self.normalization_mask] = (
-            vectors[:, self.normalization_mask] - self.vector_mean[self.normalization_mask]
-        ) / (self.vector_std[self.normalization_mask] + self.epsilon)
+        
+        if self.standard_mask.any():
+            for i, field_name in enumerate(HitObjectVector.get_field_names()):
+                if self.standard_mask[i] and field_name in self.vector_stats:
+                    mean, std = self.vector_stats[field_name]
+                    normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
+        
+        if self.log_mask.any():
+            for i, field_name in enumerate(HitObjectVector.get_field_names()):
+                if self.log_mask[i] and field_name in self.vector_stats:
+                    mean, std = self.vector_stats[field_name]
+                    normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
+        
+        if self.minmax_mask.any():
+            for i, field_name in enumerate(HitObjectVector.get_field_names()):
+                if self.minmax_mask[i] and field_name in self.vector_stats:
+                    min_val, max_val = self.vector_stats[field_name]
+                    normalized_vectors[:, i] = (vectors[:, i] - min_val) / (max_val - min_val + self.epsilon)
+        
         return normalized_vectors
     
     def normalize_metadata(self, metadata: torch.Tensor) -> torch.Tensor:
-        return (metadata - self.meta_mean) / (self.meta_std + self.epsilon)
+        normalized_metadata = metadata.clone()
+        
+        for i, field_name in enumerate(BeatmapMetadata.get_field_names()):
+            norm_type = self.meta_norm_specs[field_name]
+            if field_name not in self.meta_stats:
+                continue
+                
+            if norm_type == NormalizationType.STANDARD:
+                mean, std = self.meta_stats[field_name]
+                normalized_metadata[i] = (metadata[i] - mean) / (std + self.epsilon)
+            elif norm_type == NormalizationType.LOG:
+                mean, std = self.meta_stats[field_name]
+                # Data should already be log-transformed in loader, just normalize
+                normalized_metadata[i] = (metadata[i] - mean) / (std + self.epsilon)
+            elif norm_type == NormalizationType.MINMAX:
+                min_val, max_val = self.meta_stats[field_name]
+                normalized_metadata[i] = (metadata[i] - min_val) / (max_val - min_val + self.epsilon)
+        
+        return normalized_metadata
     
     def denormalize_vectors(self, normalized_vectors: torch.Tensor) -> torch.Tensor:
         denormalized_vectors = normalized_vectors.clone()
-        denormalized_vectors[:, self.normalization_mask] = (
-            normalized_vectors[:, self.normalization_mask] * (self.vector_std[self.normalization_mask] + self.epsilon)
-        ) + self.vector_mean[self.normalization_mask]
+        
+        if self.standard_mask.any():
+            for i, field_name in enumerate(HitObjectVector.get_field_names()):
+                if self.standard_mask[i] and field_name in self.vector_stats:
+                    mean, std = self.vector_stats[field_name]
+                    denormalized_vectors[:, i] = normalized_vectors[:, i] * (std + self.epsilon) + mean
+        
+        if self.log_mask.any():
+            for i, field_name in enumerate(HitObjectVector.get_field_names()):
+                if self.log_mask[i] and field_name in self.vector_stats:
+                    mean, std = self.vector_stats[field_name]
+                    denormalized_vectors[:, i] = normalized_vectors[:, i] * (std + self.epsilon) + mean
+        
+        if self.minmax_mask.any():
+            for i, field_name in enumerate(HitObjectVector.get_field_names()):
+                if self.minmax_mask[i] and field_name in self.vector_stats:
+                    min_val, max_val = self.vector_stats[field_name]
+                    denormalized_vectors[:, i] = normalized_vectors[:, i] * (max_val - min_val + self.epsilon) + min_val
+        
         return denormalized_vectors
     
     def denormalize_metadata(self, normalized_metadata: torch.Tensor) -> torch.Tensor:
-        return (normalized_metadata * (self.meta_std + self.epsilon)) + self.meta_mean
+        denormalized_metadata = normalized_metadata.clone()
+        
+        for i, field_name in enumerate(BeatmapMetadata.get_field_names()):
+            norm_type = self.meta_norm_specs[field_name]
+            if field_name not in self.meta_stats:
+                continue
+                
+            if norm_type == NormalizationType.STANDARD:
+                mean, std = self.meta_stats[field_name]
+                denormalized_metadata[i] = normalized_metadata[i] * (std + self.epsilon) + mean
+            elif norm_type == NormalizationType.LOG:
+                mean, std = self.meta_stats[field_name]
+                denormalized_metadata[i] = normalized_metadata[i] * (std + self.epsilon) + mean
+            elif norm_type == NormalizationType.MINMAX:
+                min_val, max_val = self.meta_stats[field_name]
+                denormalized_metadata[i] = normalized_metadata[i] * (max_val - min_val + self.epsilon) + min_val
+        
+        return denormalized_metadata
 
     @classmethod
     def from_data(
@@ -61,12 +134,9 @@ class BeatmapNormalizer:
         print("Calculating normalization statistics...")
         
         vector_field_names = HitObjectVector.get_field_names()
-        categorical_indices = {
-            vector_field_names.index(field) for field in [
-                'object_type', 'is_new_combo', 'slider_curve_type',
-                'time_diff_bin', 'duration_bin'
-            ]
-        }
+        meta_field_names = BeatmapMetadata.get_field_names()
+        vector_norm_specs = HitObjectVector.get_normalization_specs()
+        meta_norm_specs = BeatmapMetadata.get_normalization_specs()
         
         all_vectors_list = [data[0] for data in train_data]
         all_metadata_list = [data[1] for data in train_data]
@@ -99,29 +169,48 @@ class BeatmapNormalizer:
         
         all_metadata_tensor = torch.stack(all_metadata_list, dim=0)
         
-        vector_mean = torch.zeros(all_vectors_tensor.shape[1])
-        vector_std = torch.ones(all_vectors_tensor.shape[1])
+        vector_stats = {}
+        meta_stats = {}
         
-        continuous_mask = torch.ones(all_vectors_tensor.shape[1], dtype=torch.bool)
-        for idx in categorical_indices:
-            continuous_mask[idx] = False
+        for i, field_name in enumerate(vector_field_names):
+            norm_type = vector_norm_specs[field_name]
+            field_data = all_vectors_tensor[:, i]
+            
+            if norm_type == NormalizationType.CATEGORICAL:
+                continue
+            elif norm_type == NormalizationType.STANDARD or norm_type == NormalizationType.LOG:
+                mean = field_data.mean()
+                std = field_data.std()
+                std = torch.clamp(std, min=epsilon)
+                vector_stats[field_name] = (mean, std)
+            elif norm_type == NormalizationType.MINMAX:
+                min_val = field_data.min()
+                max_val = field_data.max()
+                vector_stats[field_name] = (min_val, max_val)
         
-        if continuous_mask.any():
-            vector_mean[continuous_mask] = all_vectors_tensor[:, continuous_mask].mean(dim=0)
-            vector_std[continuous_mask] = all_vectors_tensor[:, continuous_mask].std(dim=0)
-            vector_std[continuous_mask].clamp_(min=epsilon)
+        for i, field_name in enumerate(meta_field_names):
+            norm_type = meta_norm_specs[field_name]
+            field_data = all_metadata_tensor[:, i]
+            
+            if norm_type == NormalizationType.CATEGORICAL:
+                continue
+            elif norm_type == NormalizationType.STANDARD or norm_type == NormalizationType.LOG:
+                mean = field_data.mean()
+                std = field_data.std()
+                std = torch.clamp(std, min=epsilon)
+                meta_stats[field_name] = (mean, std)
+            elif norm_type == NormalizationType.MINMAX:
+                min_val = field_data.min()
+                max_val = field_data.max()
+                meta_stats[field_name] = (min_val, max_val)
         
-        meta_mean = all_metadata_tensor.mean(dim=0)
-        meta_std = all_metadata_tensor.std(dim=0)
-        meta_std.clamp_(min=epsilon)
-        
-        return cls(vector_mean, vector_std, meta_mean, meta_std, epsilon)
+        return cls(vector_stats, meta_stats, epsilon)
 
-    def get_vector_stats(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.vector_mean, self.vector_std
+    def get_vector_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+        return self.vector_stats
     
-    def get_metadata_stats(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.meta_mean, self.meta_std
+    def get_metadata_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+        return self.meta_stats
 
 
 class BeatmapAugmenter:

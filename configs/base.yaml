@@ -15,14 +15,12 @@ training:
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
   
-  # Class weighting for categorical features to handle imbalance
   use_class_weights: true
-  class_weighting_method: "inverse_frequency"  # Options: "inverse_frequency", "balanced"
+  class_weighting_method: "inverse_frequency" 
   
-  # Loss weights to balance continuous vs categorical features
   loss_weights:
-    continuous: 1.0      # Weight for continuous feature losses (MSE)
-    categorical: 0.5     # Weight for categorical feature losses (CrossEntropy)
+    continuous: 1.0      
+    categorical: 0.5     
   
   sampling:
     method: "temperature"  

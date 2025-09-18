@@ -1,8 +1,16 @@
-# types.py
-from typing import NamedTuple, List
+from typing import NamedTuple, List, Dict, Any
 import numpy as np
+from enum import Enum
 
 DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
+
+class NormalizationType(Enum):
+    """Enumeration of normalization types."""
+    CATEGORICAL = "categorical"
+    STANDARD = "standard"      
+    LOG = "log"               
+    MINMAX = "minmax"        
+    NONE = "none"             
 
 def quantize_to_bins(value: float, bins: List[float]) -> int:
     """Quantize a value to the nearest bin and return the bin index."""
@@ -31,6 +39,7 @@ class HitObjectVector(NamedTuple):
     slider_pixel_length: float
     time_diff_bin: int
     duration_bin: int
+    kiai_time: int
 
     @classmethod
     def get_field_names(cls):
@@ -46,7 +55,7 @@ class HitObjectVector(NamedTuple):
         
         categorical_features = [
             'object_type', 'is_new_combo', 'slider_curve_type',
-            'time_diff_bin', 'duration_bin'
+            'time_diff_bin', 'duration_bin', 'kiai_time'
         ]
         
         continuous_features = [f for f in field_names if f not in categorical_features]
@@ -56,7 +65,8 @@ class HitObjectVector(NamedTuple):
             'is_new_combo': 2,
             'slider_curve_type': 5,
             'time_diff_bin': len(DURATION_BINS),
-            'duration_bin': len(DURATION_BINS)
+            'duration_bin': len(DURATION_BINS),
+            'kiai_time': 2
         }
 
         info = {
@@ -74,11 +84,27 @@ class HitObjectVector(NamedTuple):
         return info
 
     @classmethod
+    def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
+        """Get normalization specifications for each field."""
+        return {
+            'x_diff': NormalizationType.STANDARD,
+            'y_diff': NormalizationType.STANDARD,
+            'object_type': NormalizationType.CATEGORICAL,
+            'is_new_combo': NormalizationType.CATEGORICAL,
+            'slider_curve_type': NormalizationType.CATEGORICAL,
+            'slider_num_anchors': NormalizationType.LOG,
+            'slider_pixel_length': NormalizationType.LOG,
+            'time_diff_bin': NormalizationType.CATEGORICAL,
+            'duration_bin': NormalizationType.CATEGORICAL,
+            'kiai_time': NormalizationType.CATEGORICAL
+        }
+
+    @classmethod
     def create_with_quantization(cls, x_diff: float, y_diff: float,
                                 time_diff: float, object_type: int,
                                 is_new_combo: int, slider_curve_type: int,
                                 slider_num_anchors: int, slider_pixel_length: float,
-                                duration_beats: float):
+                                duration_beats: float, kiai_time: int):
         time_diff_bin_idx = quantize_to_bins(time_diff, DURATION_BINS)
         duration_bin_idx = quantize_to_bins(duration_beats, DURATION_BINS)
         
@@ -91,7 +117,8 @@ class HitObjectVector(NamedTuple):
             slider_num_anchors=slider_num_anchors,
             slider_pixel_length=slider_pixel_length,
             time_diff_bin=time_diff_bin_idx,
-            duration_bin=duration_bin_idx
+            duration_bin=duration_bin_idx,
+            kiai_time=kiai_time
         )
     
     def to_array(self):
@@ -112,6 +139,17 @@ class BeatmapMetadata(NamedTuple):
     @classmethod
     def get_metadata_dim(cls):
         return len(cls._fields)
+    
+    @classmethod
+    def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
+        """Get normalization specifications for each metadata field."""
+        return {
+            'ar': NormalizationType.STANDARD,
+            'od': NormalizationType.STANDARD,
+            'cs': NormalizationType.STANDARD,
+            'difficulty_rating': NormalizationType.STANDARD,
+            'bpm': NormalizationType.LOG
+        }
     
     def to_array(self):
         return np.array(self, dtype=np.float32)
