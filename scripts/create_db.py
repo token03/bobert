@@ -131,15 +131,16 @@ def db_writer(results_queue, db_path):
     print(f"\nDatabase writer finished. Total beatmaps inserted: {count}")
 
 
-def create_full_db(root_dir):
-    db_path = './beatmaps.db'
+def create_full_db(root_dir, output_dir='./data'):
+    db_path = os.path.join(output_dir, 'beatmaps.db')
+    os.makedirs(output_dir, exist_ok=True)
     num_worker_threads = max(1, (os.cpu_count() or 1) - 1)
     start_time = time.time()
     
     if os.path.exists(db_path):
         print(f"Database at {db_path} already exists. Appending new data.")
     else:
-        print("Creating new database.")
+        print(f"Creating new database at {db_path}.")
     
     conn = sqlite3.connect(db_path)
     create_tables(conn)
@@ -187,8 +188,9 @@ def create_full_db(root_dir):
     print(f"All done! Total time taken: {end_time - start_time:.2f} seconds.")
 
 
-def create_test_db(root_dir, sample_size=3000):
-    db_path = './beatmaps_test.db'
+def create_test_db(root_dir, sample_size=3000, output_dir='./data'):
+    db_path = os.path.join(output_dir, 'beatmaps_test.db')
+    os.makedirs(output_dir, exist_ok=True)
     num_worker_threads = max(1, (os.cpu_count() or 1) - 1)
     start_time = time.time()
 
@@ -263,6 +265,8 @@ def main():
                        help='Create a smaller, randomly sampled test database (default: False).')
     parser.add_argument('--sample_size', type=int, default=3000,
                        help='Number of beatmaps for the test database (default: 3000).')
+    parser.add_argument('--output-dir', type=str, default='./data',
+                       help='Directory to create the database files (default: ./data).')
     args = parser.parse_args()
     
     if not os.path.exists(args.directory):
@@ -271,10 +275,10 @@ def main():
 
     if args.test:
         print(f"Creating TEST database with {args.sample_size} samples...")
-        create_test_db(args.directory, args.sample_size)
+        create_test_db(args.directory, args.sample_size, args.output_dir)
     else:
         print("Creating FULL database with all available beatmaps...")
-        create_full_db(args.directory)
+        create_full_db(args.directory, args.output_dir)
 
 
 if __name__ == '__main__':
