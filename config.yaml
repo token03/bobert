@@ -1,5 +1,6 @@
 data:
-  db_path: './data/beatmaps.db'
+  db_path: './data/beatmaps_test.db'
+  # db_path: './data/beatmaps.db'
   max_seq_len: 1023
   val_split: 0.1
   chunk_size: 1000
@@ -12,7 +13,7 @@ training:
   warmup_ratio: 0.05
   min_lr: 1e-6
   use_amp: true
-  checkpoint_dir: "./checkpoints"
+  checkpoint_dir: "./checkpoints/bert"
   grad_clip_norm: 1.0
   
   use_class_weights: true
@@ -31,12 +32,16 @@ training:
     expand_for_augmentation: true
   
 model:
+  d_model: 512
+  n_heads: 8
+  n_layers: 6
+  dim_feedforward_mult: 4
   dropout: 0.1
   
 components:
   use_rope: true
   use_flash_attention: true
-  compile_model: false
+  compile_model: true
   
 mlm:
-  masking_ratio: 0.20
+  masking_ratio: 0.25

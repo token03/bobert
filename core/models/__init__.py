@@ -1,11 +1,10 @@
-"""Core model implementations and factory."""
+"""Core BERT model implementations and utilities."""
 
-from .factory import (
-    ModelRegistry,
-    create_model_from_config,
-    create_task_model_from_config,
-    print_model_info,
-    get_model_summary
+from .bert_utils import (
+    create_bert_encoder,
+    create_bert_for_mlm,
+    print_bert_info,
+    get_bert_summary
 )
 from .bert import BertEncoder, BertForMaskedModeling
 from .components import (
@@ -18,11 +17,10 @@ from .components import (
 )
 
 __all__ = [
-    'ModelRegistry',
-    'create_model_from_config',
-    'create_task_model_from_config', 
-    'print_model_info',
-    'get_model_summary',
+    'create_bert_encoder',
+    'create_bert_for_mlm',
+    'print_bert_info',
+    'get_bert_summary',
     'BertEncoder',
     'BertForMaskedModeling',
     'BaseAttention',
