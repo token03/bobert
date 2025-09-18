@@ -178,14 +178,35 @@ class BertForMaskedModeling(nn.Module):
         prob.masked_fill_(~attention_mask, 0.0)
         is_masked = torch.bernoulli(prob).bool()
 
-        x_embed = self.bert.input_proj(x)
-        mask_expanded = is_masked.unsqueeze(-1).expand_as(x_embed)
+        rand_for_split = torch.rand(x.shape[:2], device=x.device)
         
+        mask_replace = is_masked & (rand_for_split < 0.8)
+        mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
+        
+        x_embed = self.bert.input_proj(x)
+        encoder_x_input = x_embed.clone()
+
         encoder_x_input = torch.where(
-            mask_expanded, 
-            self.mask_token_embed.to(x_embed.dtype), 
-            x_embed
+            mask_replace.unsqueeze(-1),
+            self.mask_token_embed.to(x_embed.dtype),
+            encoder_x_input
         )
+        
+        if torch.any(mask_random):
+            B, S, D = x.shape
+            
+            random_batch_indices = torch.randint(0, B, (B, S), device=x.device)
+            random_seq_indices = torch.randint(0, S, (B, S), device=x.device)
+
+            random_x = x[random_batch_indices, random_seq_indices]
+            
+            random_x_embed = self.bert.input_proj(random_x)
+            
+            encoder_x_input = torch.where(
+                mask_random.unsqueeze(-1),
+                random_x_embed,
+                encoder_x_input
+            )
 
         projected_meta = self.bert.metadata_proj(metadata).unsqueeze(1)
         meta_embed = projected_meta + self.bert.metadata_token.to(projected_meta.dtype)
