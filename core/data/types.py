@@ -100,6 +100,30 @@ class HitObjectVector(NamedTuple):
         }
 
     @classmethod
+    def get_hit_object_feature_indices(cls) -> List[int]:
+        """Get indices of features related to hit objects (position, type, timing)."""
+        field_names = cls.get_field_names()
+        hit_object_features = ['x_diff', 'y_diff', 'object_type', 'is_new_combo', 'time_diff_bin', 'kiai_time']
+        return [field_names.index(name) for name in hit_object_features]
+    
+    @classmethod 
+    def get_slider_feature_indices(cls) -> List[int]:
+        """Get indices of features related to sliders and duration."""
+        field_names = cls.get_field_names()
+        slider_features = ['slider_curve_type', 'slider_num_anchors', 'slider_pixel_length', 'duration_bin']
+        return [field_names.index(name) for name in slider_features]
+    
+    @classmethod
+    def get_hit_object_dim(cls) -> int:
+        """Get dimension of hit object features."""
+        return len(cls.get_hit_object_feature_indices())
+    
+    @classmethod
+    def get_slider_dim(cls) -> int:
+        """Get dimension of slider/duration features."""
+        return len(cls.get_slider_feature_indices())
+
+    @classmethod
     def create_with_quantization(cls, x_diff: float, y_diff: float,
                                 time_diff: float, object_type: int,
                                 is_new_combo: int, slider_curve_type: int,

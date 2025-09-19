@@ -80,7 +80,20 @@ class BertEncoder(nn.Module):
         self.d_model = d_model
         self.attention_type = attention_type
         
-        self.input_proj = nn.Linear(in_channels, d_model)
+        self.hit_object_dim = HitObjectVector.get_hit_object_dim()
+        self.slider_dim = HitObjectVector.get_slider_dim()
+        self.hit_object_indices = HitObjectVector.get_hit_object_feature_indices()
+        self.slider_indices = HitObjectVector.get_slider_feature_indices()
+        
+        slider_out_dim = d_model // 3
+        hit_object_out_dim = d_model - slider_out_dim  
+
+        self.slider_proj = nn.Linear(self.slider_dim, slider_out_dim)
+        self.hit_object_proj = nn.Linear(self.hit_object_dim, hit_object_out_dim)
+
+
+        self.feature_combiner = nn.Linear(d_model, d_model)
+        
         self.metadata_proj = nn.Linear(metadata_dim, d_model)
         self.metadata_token = nn.Parameter(torch.randn(1, 1, d_model))
         
@@ -106,7 +119,18 @@ class BertEncoder(nn.Module):
         attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Projects and combines input features and metadata."""
-        x_embed = self.input_proj(x)
+        # Split features into hit object and slider components
+        hit_object_features = x[:, :, self.hit_object_indices]
+        slider_features = x[:, :, self.slider_indices]
+        
+        # Project each feature type separately
+        hit_object_embed = self.hit_object_proj(hit_object_features)
+        slider_embed = self.slider_proj(slider_features)
+        
+        # Concatenate and combine the embeddings
+        combined_features = torch.cat([hit_object_embed, slider_embed], dim=-1)
+        x_embed = self.feature_combiner(combined_features)
+        
         meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
         full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
         
@@ -183,7 +207,18 @@ class BertForMaskedModeling(nn.Module):
         mask_replace = is_masked & (rand_for_split < 0.8)
         mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
         
-        x_embed = self.bert.input_proj(x)
+        # Split features for separate processing
+        hit_object_features = x[:, :, self.bert.hit_object_indices]
+        slider_features = x[:, :, self.bert.slider_indices]
+        
+        # Project each feature type separately
+        hit_object_embed = self.bert.hit_object_proj(hit_object_features)
+        slider_embed = self.bert.slider_proj(slider_features)
+        
+        # Combine embeddings
+        combined_features = torch.cat([hit_object_embed, slider_embed], dim=-1)
+        x_embed = self.bert.feature_combiner(combined_features)
+        
         encoder_x_input = x_embed.clone()
 
         encoder_x_input = torch.where(
@@ -200,7 +235,15 @@ class BertForMaskedModeling(nn.Module):
 
             random_x = x[random_batch_indices, random_seq_indices]
             
-            random_x_embed = self.bert.input_proj(random_x)
+            # Process random features through the same dual input pipeline
+            random_hit_object_features = random_x[:, :, self.bert.hit_object_indices]
+            random_slider_features = random_x[:, :, self.bert.slider_indices]
+            
+            random_hit_object_embed = self.bert.hit_object_proj(random_hit_object_features)
+            random_slider_embed = self.bert.slider_proj(random_slider_features)
+            
+            random_combined_features = torch.cat([random_hit_object_embed, random_slider_embed], dim=-1)
+            random_x_embed = self.bert.feature_combiner(random_combined_features)
             
             encoder_x_input = torch.where(
                 mask_random.unsqueeze(-1),
