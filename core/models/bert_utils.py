@@ -9,7 +9,6 @@ from ..data.types import VECTOR_DIM
 def create_bert_encoder(config: Dict[str, Any], device: torch.device) -> BertEncoder:
     """Create a BERT encoder directly from config."""
     model_config = config['model']
-    data_config = config['data']
     components_config = config.get('components', {})
     
     attention_type = 'rope' if components_config.get('use_rope', True) else 'standard'
@@ -19,13 +18,11 @@ def create_bert_encoder(config: Dict[str, Any], device: torch.device) -> BertEnc
     dim_feedforward = model_config['d_model'] * model_config.get('dim_feedforward_mult', 4)
     
     model = BertEncoder(
-        max_seq_len=data_config['max_seq_len'],
         d_model=model_config['d_model'],
         n_heads=model_config['n_heads'],
         n_layers=model_config['n_layers'],
         dim_feedforward=dim_feedforward,
         dropout=model_config.get('dropout', 0.1),
-        in_channels=VECTOR_DIM,
         metadata_dim=5,  
         attention_type=attention_type,
         norm_type=norm_type,

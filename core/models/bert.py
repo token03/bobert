@@ -7,7 +7,7 @@ from rotary_embedding_torch import RotaryEmbedding
 
 from .components import (
     create_attention_layer,
-    create_norm_layer, 
+    create_norm_layer,
     create_ffn_layer
 )
 from ..data.types import HitObjectVector
@@ -16,7 +16,7 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
         d_model: int,
-        n_heads: int, 
+        n_heads: int,
         dim_feedforward: int,
         dropout: float = 0.1,
         attention_type: str = 'rope',
@@ -27,50 +27,48 @@ class TransformerEncoderLayer(nn.Module):
     ):
         super().__init__()
         self.is_global = is_global
-        
+
         self.self_attn = create_attention_layer(
             attention_type, d_model, n_heads, dropout, local_window_size, is_global=is_global
         )
         self.ffn = create_ffn_layer(ffn_type, d_model, dim_feedforward, dropout)
-        
+
         self.norm1 = create_norm_layer(norm_type, d_model)
         self.norm2 = create_norm_layer(norm_type, d_model)
-        
+
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
     def forward(
-        self, 
-        src: torch.Tensor, 
+        self,
+        src: torch.Tensor,
         rotary_emb: Optional[RotaryEmbedding] = None,
         cu_seqlens: torch.Tensor = None,
         max_seqlen: int = None
     ) -> torch.Tensor:
         src2 = self.self_attn(
-            self.norm1(src), 
+            self.norm1(src),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_emb=rotary_emb,
         )
 
         src = src + self.dropout1(src2)
-        
+
         src2 = self.ffn(self.norm2(src))
         src = src + self.dropout2(src2)
-        
+
         return src
 
 class BertEncoder(nn.Module):
     def __init__(
         self,
-        max_seq_len: int,
         d_model: int,
         n_heads: int,
         n_layers: int,
         dim_feedforward: int,
         dropout: float = 0.1,
         metadata_dim: int = 5,
-        in_channels: int = 12,
         attention_type: str = 'rope',
         norm_type: str = 'rmsnorm',
         ffn_type: str = 'swiglu',
@@ -79,24 +77,28 @@ class BertEncoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.attention_type = attention_type
-        
-        self.hit_object_dim = HitObjectVector.get_hit_object_dim()
-        self.slider_dim = HitObjectVector.get_slider_dim()
-        self.hit_object_indices = HitObjectVector.get_hit_object_feature_indices()
-        self.slider_indices = HitObjectVector.get_slider_feature_indices()
-        
-        slider_out_dim = d_model // 3
-        hit_object_out_dim = d_model - slider_out_dim  
 
-        self.slider_proj = nn.Linear(self.slider_dim, slider_out_dim)
-        self.hit_object_proj = nn.Linear(self.hit_object_dim, hit_object_out_dim)
+        self.feature_info = HitObjectVector.get_feature_info()
 
+        self.cont_indices = list(self.feature_info['continuous'].values())
+        num_continuous = len(self.cont_indices)
+        cont_proj_dim = d_model // 4
+        self.continuous_proj = nn.Linear(num_continuous, cont_proj_dim)
 
-        self.feature_combiner = nn.Linear(d_model, d_model)
-        
+        self.cat_embeds = nn.ModuleDict()
+        total_cat_embed_dim = 0
+        cat_embed_dim = d_model // 8
+        for name, info in self.feature_info['categorical'].items():
+            embedding = nn.Embedding(info['cardinality'], cat_embed_dim)
+            self.cat_embeds[name] = embedding
+            total_cat_embed_dim += cat_embed_dim
+
+        combined_dim = cont_proj_dim + total_cat_embed_dim
+        self.embedding_proj = nn.Linear(combined_dim, d_model)
+
         self.metadata_proj = nn.Linear(metadata_dim, d_model)
         self.metadata_token = nn.Parameter(torch.randn(1, 1, d_model))
-        
+
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
                 d_model, n_heads, dim_feedforward, dropout,
@@ -106,70 +108,76 @@ class BertEncoder(nn.Module):
             )
             for i in range(n_layers)
         ])
-        
+
         if attention_type == 'rope':
             self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads)
         else:
             self.rotary_emb = None
 
+    def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
+        """Embeds a batch of hit object sequences using categorical embeddings."""
+        cont_features = x[:, :, self.cont_indices]
+        projected_cont = self.continuous_proj(cont_features)
+
+        cat_feature_embeds = []
+        for name, info in self.feature_info['categorical'].items():
+            cat_indices = x[:, :, info['index']].long()
+            embed_layer = self.cat_embeds[name]
+            cat_feature_embeds.append(embed_layer(cat_indices))
+
+        all_features = [projected_cont] + cat_feature_embeds
+        combined_features = torch.cat(all_features, dim=-1)
+
+        x_embed = self.embedding_proj(combined_features)
+        return x_embed
+
     def _embed(
-        self, 
-        x: torch.Tensor, 
-        metadata: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Projects and combines input features and metadata."""
-        # Split features into hit object and slider components
-        hit_object_features = x[:, :, self.hit_object_indices]
-        slider_features = x[:, :, self.slider_indices]
-        
-        # Project each feature type separately
-        hit_object_embed = self.hit_object_proj(hit_object_features)
-        slider_embed = self.slider_proj(slider_features)
-        
-        # Concatenate and combine the embeddings
-        combined_features = torch.cat([hit_object_embed, slider_embed], dim=-1)
-        x_embed = self.feature_combiner(combined_features)
-        
+        """Embeds sequences, adds metadata token, and creates full attention mask."""
+        x_embed = self.embed_sequences(x)
+
         meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
         full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
-        
+
         meta_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
         full_attention_mask = torch.cat([meta_mask, attention_mask], dim=1)
-        
+
         return full_embeddings, full_attention_mask
 
     def encode(self, embeddings: torch.Tensor, attention_mask: torch.Tensor, max_seqlen: int) -> torch.Tensor:
         """Runs the transformer encoder layers on already-embedded inputs."""
-        
+
         seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-        indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
         cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-        
-        packed_output = embeddings.flatten(0, 1)[indices]
-        
+
+        packed_output = embeddings[attention_mask]
+
         for layer in self.layers:
             packed_output = layer(
-                packed_output, 
+                packed_output,
                 rotary_emb=self.rotary_emb,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen
             )
-        
+
         output = torch.zeros_like(embeddings)
-        output.flatten(0, 1)[indices] = packed_output
+        output[attention_mask] = packed_output
         return output
 
     def forward(
-        self, 
-        x: torch.Tensor, 
-        metadata: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
         full_embeddings, full_attention_mask = self._embed(x, metadata, attention_mask)
-        
-        max_seqlen = full_embeddings.shape[1] 
-        
+
+        max_seqlen = full_embeddings.shape[1]
+
         output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         return output
 
@@ -178,13 +186,16 @@ class BertForMaskedModeling(nn.Module):
         super().__init__()
         self.bert = bert_model
         self.masking_ratio = masking_ratio
-        
+
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
-        
+
         self.feature_info = HitObjectVector.get_feature_info()
+
+        standard_cont_names = [name for name in self.feature_info['continuous'] if 'angle' not in name]
+        num_standard_continuous = len(standard_cont_names)
         
-        num_continuous = len(self.feature_info['continuous'])
-        self.continuous_head = nn.Linear(bert_model.d_model, num_continuous)
+        self.standard_continuous_head = nn.Linear(bert_model.d_model, num_standard_continuous)
+        self.angle_head = nn.Linear(bert_model.d_model, 2)  # Predicts (cos, sin) pair
 
         self.categorical_heads = nn.ModuleDict({
             name: nn.Linear(bert_model.d_model, info['cardinality'])
@@ -192,88 +203,66 @@ class BertForMaskedModeling(nn.Module):
         })
 
     def forward(
-        self, 
-        x: torch.Tensor, 
-        metadata: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        
+
         prob = torch.full(x.shape[:2], self.masking_ratio, device=x.device)
         prob.masked_fill_(~attention_mask, 0.0)
         is_masked = torch.bernoulli(prob).bool()
 
         rand_for_split = torch.rand(x.shape[:2], device=x.device)
-        
         mask_replace = is_masked & (rand_for_split < 0.8)
         mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
-        
-        # Split features for separate processing
-        hit_object_features = x[:, :, self.bert.hit_object_indices]
-        slider_features = x[:, :, self.bert.slider_indices]
-        
-        # Project each feature type separately
-        hit_object_embed = self.bert.hit_object_proj(hit_object_features)
-        slider_embed = self.bert.slider_proj(slider_features)
-        
-        # Combine embeddings
-        combined_features = torch.cat([hit_object_embed, slider_embed], dim=-1)
-        x_embed = self.bert.feature_combiner(combined_features)
-        
+
+        x_embed = self.bert.embed_sequences(x)
+
         encoder_x_input = x_embed.clone()
+
+        if torch.any(mask_random):
+            with torch.no_grad():
+                valid_embeddings = x_embed[attention_mask]
+                num_to_replace = mask_random.sum()
+
+                rand_indices = torch.randint(0, valid_embeddings.shape[0], (num_to_replace,), device=x.device)
+                random_embeds = valid_embeddings[rand_indices]
+
+            encoder_x_input[mask_random] = random_embeds
 
         encoder_x_input = torch.where(
             mask_replace.unsqueeze(-1),
             self.mask_token_embed.to(x_embed.dtype),
             encoder_x_input
         )
-        
-        if torch.any(mask_random):
-            B, S, D = x.shape
-            
-            random_batch_indices = torch.randint(0, B, (B, S), device=x.device)
-            random_seq_indices = torch.randint(0, S, (B, S), device=x.device)
-
-            random_x = x[random_batch_indices, random_seq_indices]
-            
-            # Process random features through the same dual input pipeline
-            random_hit_object_features = random_x[:, :, self.bert.hit_object_indices]
-            random_slider_features = random_x[:, :, self.bert.slider_indices]
-            
-            random_hit_object_embed = self.bert.hit_object_proj(random_hit_object_features)
-            random_slider_embed = self.bert.slider_proj(random_slider_features)
-            
-            random_combined_features = torch.cat([random_hit_object_embed, random_slider_embed], dim=-1)
-            random_x_embed = self.bert.feature_combiner(random_combined_features)
-            
-            encoder_x_input = torch.where(
-                mask_random.unsqueeze(-1),
-                random_x_embed,
-                encoder_x_input
-            )
 
         projected_meta = self.bert.metadata_proj(metadata).unsqueeze(1)
         meta_embed = projected_meta + self.bert.metadata_token.to(projected_meta.dtype)
-
         full_encoder_input = torch.cat([meta_embed, encoder_x_input], dim=1)
 
         meta_attn_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
         full_attention_mask = torch.cat([meta_attn_mask, attention_mask], dim=1)
-        
+
         max_seqlen = full_encoder_input.shape[1]
-        
         encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
-        
+
         sequence_output = encoded_output[:, 1:, :]
+
+        standard_cont_preds = self.standard_continuous_head(sequence_output)
+        angle_preds = self.angle_head(sequence_output)
         
-        continuous_preds = self.continuous_head(sequence_output)
+        angle_preds = F.normalize(angle_preds, p=2, dim=-1)
+
         categorical_preds = {
             name: head(sequence_output)
             for name, head in self.categorical_heads.items()
         }
 
         predictions = {
-            'continuous': continuous_preds,
+            'standard_continuous': standard_cont_preds,
+            'angle': angle_preds,
             'categorical': categorical_preds
         }
-        
+
         return predictions, x, is_masked
