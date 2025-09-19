@@ -205,9 +205,19 @@ def parse_osu_file(file_path, print_info=False):
                     x_diff = current_start_x - prev_end_x
                     y_diff = current_start_y - prev_end_y
                     
+                    # Calculate distance and angle components
+                    distance_diff = math.sqrt(x_diff**2 + y_diff**2)
+                    if distance_diff > 0:
+                        cos_angle = x_diff / distance_diff
+                        sin_angle = y_diff / distance_diff
+                    else:
+                        cos_angle = 0.0
+                        sin_angle = 0.0
+                    
                     vector = HitObjectVector.create_with_quantization(
-                        x_diff=x_diff,
-                        y_diff=y_diff,
+                        distance_diff=distance_diff,
+                        cos_angle=cos_angle,
+                        sin_angle=sin_angle,
                         time_diff=time_diff_beats,
                         object_type=current_object_type,
                         is_new_combo=is_new_combo,

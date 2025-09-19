@@ -30,8 +30,9 @@ def quantize_to_bins(value: float, bins: List[float]) -> int:
 
 class HitObjectVector(NamedTuple):
     """Represents a single hit object's vector data."""
-    x_diff: float
-    y_diff: float
+    distance_diff: float
+    cos_angle: float
+    sin_angle: float
     object_type: int
     is_new_combo: int
     slider_curve_type: int
@@ -87,8 +88,9 @@ class HitObjectVector(NamedTuple):
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
         """Get normalization specifications for each field."""
         return {
-            'x_diff': NormalizationType.STANDARD,
-            'y_diff': NormalizationType.STANDARD,
+            'distance_diff': NormalizationType.LOG,
+            'cos_angle': NormalizationType.STANDARD,
+            'sin_angle': NormalizationType.STANDARD,
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'slider_curve_type': NormalizationType.CATEGORICAL,
@@ -103,7 +105,7 @@ class HitObjectVector(NamedTuple):
     def get_hit_object_feature_indices(cls) -> List[int]:
         """Get indices of features related to hit objects (position, type, timing)."""
         field_names = cls.get_field_names()
-        hit_object_features = ['x_diff', 'y_diff', 'object_type', 'is_new_combo', 'time_diff_bin', 'kiai_time']
+        hit_object_features = ['distance_diff', 'cos_angle', 'sin_angle', 'object_type', 'is_new_combo', 'time_diff_bin', 'kiai_time']
         return [field_names.index(name) for name in hit_object_features]
     
     @classmethod 
@@ -124,7 +126,7 @@ class HitObjectVector(NamedTuple):
         return len(cls.get_slider_feature_indices())
 
     @classmethod
-    def create_with_quantization(cls, x_diff: float, y_diff: float,
+    def create_with_quantization(cls, distance_diff: float, cos_angle: float, sin_angle: float,
                                 time_diff: float, object_type: int,
                                 is_new_combo: int, slider_curve_type: int,
                                 slider_num_anchors: int, slider_pixel_length: float,
@@ -133,8 +135,9 @@ class HitObjectVector(NamedTuple):
         duration_bin_idx = quantize_to_bins(duration_beats, DURATION_BINS)
         
         return cls(
-            x_diff=x_diff,
-            y_diff=y_diff,
+            distance_diff=distance_diff,
+            cos_angle=cos_angle,
+            sin_angle=sin_angle,
             object_type=object_type,
             is_new_combo=is_new_combo,
             slider_curve_type=slider_curve_type,

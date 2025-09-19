@@ -151,8 +151,9 @@ def calculate_normalization_stats(
     print("-" * 70)
 
     field_descriptions = {
-        'x_diff': 'X-coordinate difference',
-        'y_diff': 'Y-coordinate difference', 
+        'distance_diff': 'Distance difference',
+        'cos_angle': 'Cosine of angle',
+        'sin_angle': 'Sine of angle',
         'object_type': 'Object type (categorical)',
         'is_new_combo': 'New combo flag (categorical)', 
         'slider_curve_type': 'Slider curve type (categorical)',

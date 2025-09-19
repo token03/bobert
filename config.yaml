@@ -29,7 +29,7 @@ training:
     kde_bins: 200     
     temperature: 2.0  
     difficulty_index: 3 
-    expand_for_augmentation: true
+    expand_for_augmentation: false
   
 model:
   d_model: 512

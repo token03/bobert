@@ -144,23 +144,27 @@ class BeatmapNormalizer:
         if include_augmentation:
             print("Including data augmentation in normalization statistics...")
             augmented_vectors_list = []
-            x_diff_idx = vector_field_names.index('x_diff')
-            y_diff_idx = vector_field_names.index('y_diff')
+            distance_diff_idx = vector_field_names.index('distance_diff')
+            cos_angle_idx = vector_field_names.index('cos_angle')
+            sin_angle_idx = vector_field_names.index('sin_angle')
             
             for vectors in all_vectors_list:
                 augmented_vectors_list.append(vectors)
                 
+                # Flip horizontally (negate cos_angle)
                 flipped_x = vectors.clone()
-                flipped_x[:, x_diff_idx] *= -1
+                flipped_x[:, cos_angle_idx] *= -1
                 augmented_vectors_list.append(flipped_x)
                 
+                # Flip vertically (negate sin_angle)
                 flipped_y = vectors.clone()
-                flipped_y[:, y_diff_idx] *= -1
+                flipped_y[:, sin_angle_idx] *= -1
                 augmented_vectors_list.append(flipped_y)
                 
+                # Flip both (negate both cos_angle and sin_angle)
                 flipped_xy = vectors.clone()
-                flipped_xy[:, x_diff_idx] *= -1
-                flipped_xy[:, y_diff_idx] *= -1
+                flipped_xy[:, cos_angle_idx] *= -1
+                flipped_xy[:, sin_angle_idx] *= -1
                 augmented_vectors_list.append(flipped_xy)
             
             all_vectors_tensor = torch.cat(augmented_vectors_list, dim=0)
@@ -217,19 +221,19 @@ class BeatmapAugmenter:
     
     def __init__(self):
         vector_field_names = HitObjectVector.get_field_names()
-        self.x_diff_idx = vector_field_names.index('x_diff')
-        self.y_diff_idx = vector_field_names.index('y_diff')
+        self.cos_angle_idx = vector_field_names.index('cos_angle')
+        self.sin_angle_idx = vector_field_names.index('sin_angle')
     
     def apply_augmentation(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
         augmented = vectors.clone()
         
-        if aug_type == 1:  
-            augmented[:, self.x_diff_idx] *= -1
-        elif aug_type == 2:  
-            augmented[:, self.y_diff_idx] *= -1
-        elif aug_type == 3:  
-            augmented[:, self.x_diff_idx] *= -1
-            augmented[:, self.y_diff_idx] *= -1
+        if aug_type == 1:  # Flip horizontally (negate cos_angle)
+            augmented[:, self.cos_angle_idx] *= -1
+        elif aug_type == 2:  # Flip vertically (negate sin_angle)
+            augmented[:, self.sin_angle_idx] *= -1
+        elif aug_type == 3:  # Flip both (negate both cos_angle and sin_angle)
+            augmented[:, self.cos_angle_idx] *= -1
+            augmented[:, self.sin_angle_idx] *= -1
         
         return augmented
     
