@@ -2,7 +2,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from typing import Tuple, List, Optional
-from .types import HitObjectVector
 from .transforms import BeatmapNormalizer, BeatmapAugmenter, BeatmapTransform
 
 def collate_fn(

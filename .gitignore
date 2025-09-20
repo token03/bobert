@@ -12,6 +12,7 @@ data/*.db-wal
 data/*.txt
 data/*.json
 data/**/*.osu
+data/**/*.parquet
 
 checkpoints/
 *.pth

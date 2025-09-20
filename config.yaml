@@ -1,6 +1,6 @@
 data:
-  db_path: './data/beatmaps_test.db'
-  # db_path: './data/beatmaps.db'
+  db_path: './data/beatmap_dataset_test/'
+  # db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
   chunk_size: 1000
