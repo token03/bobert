@@ -50,7 +50,7 @@ def mlm_loss_fn(
     """
     Calculates a hybrid MLM loss for:
     - Standard continuous features (MSE)
-    - Angle vector (MSE on unit vectors)
+    - Angle vectors (MSE on unit vectors)
     - Categorical features (CrossEntropy)
     """
     num_masked = torch.sum(mask)
@@ -60,7 +60,6 @@ def mlm_loss_fn(
     feature_info = HitObjectVector.get_feature_info()
     total_loss = torch.tensor(0.0, device=targets.device)
 
-    # FIX: Standard Continuous Loss (MSE)
     standard_cont_names = [name for name in feature_info['continuous'] if 'angle' not in name]
     standard_cont_indices = [feature_info['continuous'][name] for name in standard_cont_names]
     
@@ -71,13 +70,15 @@ def mlm_loss_fn(
         masked_cont_loss = cont_loss[mask].sum()
         total_loss += masked_cont_loss
 
+    angle_names = sorted([name for name in feature_info['continuous'] if 'angle' in name])
+    angle_indices = [feature_info['continuous'][name] for name in angle_names]
+    
     angle_preds = predictions['angle'] 
+    angle_targets = targets[..., angle_indices]
     
-    cos_idx = feature_info['continuous']['cos_angle']
-    sin_idx = feature_info['continuous']['sin_angle']
-    angle_targets = targets[..., [cos_idx, sin_idx]]
-    
-    angle_targets_norm = F.normalize(angle_targets, p=2, dim=-1)
+    angle_targets_reshaped = angle_targets.view(*angle_targets.shape[:-1], -1, 2)
+    angle_targets_norm = F.normalize(angle_targets_reshaped, p=2, dim=-1)
+    angle_targets_norm = angle_targets_norm.view_as(angle_targets)
     
     angle_loss = F.mse_loss(angle_preds, angle_targets_norm, reduction='none')
     masked_angle_loss = angle_loss[mask].sum()
@@ -91,7 +92,7 @@ def mlm_loss_fn(
         flat_targets = cat_targets.view(-1)
         
         cat_loss = F.cross_entropy(flat_logits, flat_targets, reduction='none')
-        cat_loss = cat_loss.view(mask.shape) # Reshape from (B*S) to (B, S)
+        cat_loss = cat_loss.view(mask.shape) 
         
         masked_cat_loss = cat_loss[mask].sum()
         total_loss += masked_cat_loss
@@ -257,7 +258,6 @@ class MetricsTracker:
         }
         self.epoch_metrics.append(epoch_data)
 
-
 class MLMTrainer:
     def __init__(
         self,
@@ -285,18 +285,16 @@ class MLMTrainer:
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
         
         self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
-
         self.metrics_tracker = MetricsTracker()
-        
         self.feature_info = HitObjectVector.get_feature_info()
-        # FIX: Split continuous feature names for separate metric tracking
+
         self.standard_cont_names = [name for name in self.feature_info['continuous'] if 'angle' not in name]
+        self.angle_names = sorted([name for name in self.feature_info['continuous'] if 'angle' in name])
         self.cat_feat_names = list(self.feature_info['categorical'].keys())
         
         print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """Trains for one epoch."""
         self.model.train()
         total_loss = 0.0
         num_batches = 0
@@ -309,7 +307,6 @@ class MLMTrainer:
         
         for vectors, attention_mask, metadata in progress_bar:
             vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
-            
             self.optimizer.zero_grad(set_to_none=True)
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
@@ -325,8 +322,7 @@ class MLMTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             
-            if self.scheduler is not None:
-                self.scheduler.step()
+            if self.scheduler is not None: self.scheduler.step()
             
             total_loss += loss.item()
             num_batches += 1
@@ -337,33 +333,24 @@ class MLMTrainer:
             })
         
         avg_loss = total_loss / max(num_batches, 1)
-        return {
-            'loss': avg_loss,
-            'learning_rate': self.optimizer.param_groups[0]['lr']
-        }
+        return {'loss': avg_loss, 'learning_rate': self.optimizer.param_groups[0]['lr']}
     
     def validate_epoch(self, epoch: int) -> Dict[str, Any]:
         self.model.eval()
-        total_loss = 0.0
-        num_batches = 0
-        total_masked_count = 0
+        total_loss, num_batches, total_masked_count = 0.0, 0, 0
         
-        # FIX: Separate metric accumulators
         total_abs_error_standard_cont = torch.zeros(len(self.standard_cont_names), device=self.device)
-        total_angle_error_rad = 0.0
-
+        total_angle_error_rad = torch.zeros(len(self.angle_names) // 2, device=self.device)
+        
         all_masked_standard_cont_targets = []
-        all_masked_cat_preds = defaultdict(list)
-        all_masked_cat_targets = defaultdict(list)
+        all_masked_cat_preds, all_masked_cat_targets = defaultdict(list), defaultdict(list)
 
         with torch.no_grad():
             for vectors, attention_mask, metadata in self.val_dataloader:
                 vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
-
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                     predictions, targets, mask = self.model(vectors, metadata, attention_mask)
                     loss = self.loss_fn(predictions, targets, mask)
-                
                 total_loss += loss.item()
                 num_batches += 1
 
@@ -371,77 +358,55 @@ class MLMTrainer:
                 if num_masked_in_batch > 0:
                     total_masked_count += num_masked_in_batch
                     
-                    # FIX: Standard Continuous MAE
                     standard_cont_indices = [self.feature_info['continuous'][name] for name in self.standard_cont_names]
                     masked_standard_cont_preds = predictions['standard_continuous'][mask]
                     masked_standard_cont_targets = targets[mask][:, standard_cont_indices]
                     total_abs_error_standard_cont += torch.sum(torch.abs(masked_standard_cont_preds - masked_standard_cont_targets), dim=0)
                     all_masked_standard_cont_targets.append(masked_standard_cont_targets)
                     
-                    # FIX: Angle Error (in degrees)
-                    cos_idx = self.feature_info['continuous']['cos_angle']
-                    sin_idx = self.feature_info['continuous']['sin_angle']
-                    masked_angle_preds = predictions['angle'][mask] # Already normalized
-                    masked_angle_targets = targets[mask][:, [cos_idx, sin_idx]]
-                    masked_angle_targets_norm = F.normalize(masked_angle_targets, p=2, dim=-1)
+                    angle_indices = [self.feature_info['continuous'][name] for name in self.angle_names]
+                    masked_angle_preds = predictions['angle'][mask]
+                    masked_angle_targets = targets[mask][:, angle_indices]
 
-                    dot_product = torch.sum(masked_angle_preds * masked_angle_targets_norm, dim=-1)
-                    dot_product = torch.clamp(dot_product, -1.0, 1.0) # For numerical stability
-                    angle_errors_rad = torch.acos(dot_product)
-                    total_angle_error_rad += torch.sum(angle_errors_rad).item()
+                    for i in range(len(self.angle_names) // 2):
+                        pair_slice = slice(i*2, (i+1)*2)
+                        preds_pair = masked_angle_preds[:, pair_slice] 
+                        targets_pair = F.normalize(masked_angle_targets[:, pair_slice], p=2, dim=-1)
 
-                    # Categorical Predictions
+                        dot_product = torch.sum(preds_pair * targets_pair, dim=-1).clamp(-1.0, 1.0)
+                        angle_errors_rad = torch.acos(dot_product)
+                        total_angle_error_rad[i] += torch.sum(angle_errors_rad)
+
                     for name, info in self.feature_info['categorical'].items():
-                        masked_cat_logits = predictions['categorical'][name][mask]
-                        masked_cat_targets = targets[mask][:, info['index']].long()
-                        
-                        pred_classes = torch.argmax(masked_cat_logits, dim=-1)
+                        pred_classes = torch.argmax(predictions['categorical'][name][mask], dim=-1)
+                        target_classes = targets[mask][:, info['index']].long()
                         all_masked_cat_preds[name].append(pred_classes)
-                        all_masked_cat_targets[name].append(masked_cat_targets)
+                        all_masked_cat_targets[name].append(target_classes)
         
         avg_loss = total_loss / max(num_batches, 1)
-        
         results = {'loss': avg_loss}
         if total_masked_count > 0:
             cont_metrics = {}
-            # FIX: Process standard continuous metrics
             mae_per_cont = (total_abs_error_standard_cont / total_masked_count).cpu().tolist()
-            
             all_cont_targets_tensor = torch.cat(all_masked_standard_cont_targets, dim=0)
-            mean_per_cont = all_cont_targets_tensor.mean(dim=0).cpu().tolist()
-            std_per_cont = all_cont_targets_tensor.std(dim=0).cpu().tolist()
+            mean_per_cont, std_per_cont = all_cont_targets_tensor.mean(dim=0).cpu().tolist(), all_cont_targets_tensor.std(dim=0).cpu().tolist()
 
             for i, name in enumerate(self.standard_cont_names):
-                cont_metrics[name] = {
-                    'mae': mae_per_cont[i],
-                    'mean': mean_per_cont[i],
-                    'std': std_per_cont[i],
-                }
+                cont_metrics[name] = {'mae': mae_per_cont[i], 'mean': mean_per_cont[i], 'std': std_per_cont[i]}
             
-            # FIX: Process angle metrics
-            avg_angle_error_rad = total_angle_error_rad / total_masked_count
-            avg_angle_error_deg = math.degrees(avg_angle_error_rad)
-            cont_metrics['angle_vector'] = {'mae_degrees': avg_angle_error_deg}
+            avg_angle_errors_rad = (total_angle_error_rad / total_masked_count).cpu().tolist()
+            angle_pair_names = ['movement_angle', 'inner_angle'] 
+            for i, name in enumerate(angle_pair_names):
+                 cont_metrics[name] = {'mae_degrees': math.degrees(avg_angle_errors_rad[i])}
             
             results['continuous_metrics'] = cont_metrics
 
             cat_metrics = {}
             for name in self.cat_feat_names:
-                preds = torch.cat(all_masked_cat_preds[name]).cpu().numpy()
-                targets = torch.cat(all_masked_cat_targets[name]).cpu().numpy()
-                
+                preds, targets = torch.cat(all_masked_cat_preds[name]).cpu().numpy(), torch.cat(all_masked_cat_targets[name]).cpu().numpy()
                 accuracy = np.mean(preds == targets)
-                precision, recall, _, _ = precision_recall_fscore_support(
-                    targets, preds, average='macro', zero_division=0
-                )
-                distribution = Counter(targets)
-                
-                cat_metrics[name] = {
-                    'accuracy': accuracy,
-                    'precision': precision,
-                    'recall': recall,
-                    'distribution': distribution,
-                }
+                precision, recall, _, _ = precision_recall_fscore_support(targets, preds, average='macro', zero_division=0)
+                cat_metrics[name] = {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'distribution': Counter(targets)}
             results['categorical_metrics'] = cat_metrics
         
         return results
@@ -476,19 +441,23 @@ class MLMTrainer:
             print("=" * 70)
             print(f"{' ' * 21} DETAILED VALIDATION REPORT {' ' * 22}")
 
-            # FIX: Update validation report printing
             if 'continuous_metrics' in val_metrics:
                 print("-" * 70)
                 print(" CONTINUOUS FEATURES:")
                 header = f"  {'Feature':<22} | {'MAE / Error':<15} | {'Mean (True)':<12} | {'Std (True)':<12}"
                 print(header)
                 print(f"  {'-'*22}-+-{'-'*15}-+-{'-'*12}-+-{'-'*12}")
-                for name, metrics in val_metrics['continuous_metrics'].items():
-                    if 'mae_degrees' in metrics:
-                        row = f"  {name:<22} | {metrics['mae_degrees']:<15.4f} (deg) | {'-':<12} | {'-':<12}"
-                    else:
+                for name in self.standard_cont_names:
+                     if name in val_metrics['continuous_metrics']:
+                        metrics = val_metrics['continuous_metrics'][name]
                         row = f"  {name:<22} | {metrics['mae']:<15.4f} | {metrics['mean']:<12.4f} | {metrics['std']:<12.4f}"
-                    print(row)
+                        print(row)
+                angle_pair_names = ['movement_angle', 'inner_angle']
+                for name in angle_pair_names:
+                    if name in val_metrics['continuous_metrics']:
+                        metrics = val_metrics['continuous_metrics'][name]
+                        row = f"  {name:<22} | {metrics['mae_degrees']:<15.4f} (deg) | {'-':<12} | {'-':<12}"
+                        print(row)
 
             if 'categorical_metrics' in val_metrics:
                 print("-" * 70)
@@ -499,34 +468,19 @@ class MLMTrainer:
                 for name, metrics in val_metrics['categorical_metrics'].items():
                     row = f"  {name:<22} | {metrics['accuracy']:<10.2%} | {metrics['precision']:<12.4f} | {metrics['recall']:<12.4f}"
                     print(row)
-                    
-                    # Distribution
                     dist_data = metrics['distribution']
                     total_count = sum(dist_data.values())
                     if total_count == 0: continue
-                    
                     sorted_dist = sorted(dist_data.items(), key=lambda item: item[1], reverse=True)
-                    
-                    dist_str_parts = []
-                    limit = 5
+                    dist_str_parts, limit = [], 5
                     if len(sorted_dist) > limit:
                         top_items = sorted_dist[:limit]
                         other_count = sum(count for _, count in sorted_dist[limit:])
-                        
-                        for class_idx, count in top_items:
-                            percent = (count / total_count) * 100
-                            dist_str_parts.append(f"{class_idx}:{percent:.1f}%")
-                        
-                        if other_count > 0:
-                            other_percent = (other_count / total_count) * 100
-                            dist_str_parts.append(f"Other:{other_percent:.1f}%")
+                        for class_idx, count in top_items: dist_str_parts.append(f"{class_idx}:{count/total_count:.1%}")
+                        if other_count > 0: dist_str_parts.append(f"Other:{other_count/total_count:.1%}")
                     else:
-                        for class_idx, count in sorted_dist:
-                            percent = (count / total_count) * 100
-                            dist_str_parts.append(f"{class_idx}:{percent:.1f}%")
-                    
-                    dist_str = ", ".join(dist_str_parts)
-                    print(f"    └─ True Dist: {dist_str}")
+                        for class_idx, count in sorted_dist: dist_str_parts.append(f"{class_idx}:{count/total_count:.1%}")
+                    print(f"    └─ True Dist: {', '.join(dist_str_parts)}")
 
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,

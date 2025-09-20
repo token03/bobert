@@ -60,6 +60,7 @@ class TransformerEncoderLayer(nn.Module):
 
         return src
 
+
 class BertEncoder(nn.Module):
     def __init__(
         self,
@@ -181,6 +182,7 @@ class BertEncoder(nn.Module):
         output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         return output
 
+
 class BertForMaskedModeling(nn.Module):
     def __init__(self, bert_model: BertEncoder, masking_ratio: float = 0.15):
         super().__init__()
@@ -188,14 +190,16 @@ class BertForMaskedModeling(nn.Module):
         self.masking_ratio = masking_ratio
 
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
-
         self.feature_info = HitObjectVector.get_feature_info()
 
         standard_cont_names = [name for name in self.feature_info['continuous'] if 'angle' not in name]
-        num_standard_continuous = len(standard_cont_names)
+        self.angle_names = sorted([name for name in self.feature_info['continuous'] if 'angle' in name])
         
+        num_standard_continuous = len(standard_cont_names)
+        num_angle_features = len(self.angle_names) 
+
         self.standard_continuous_head = nn.Linear(bert_model.d_model, num_standard_continuous)
-        self.angle_head = nn.Linear(bert_model.d_model, 2)  # Predicts (cos, sin) pair
+        self.angle_head = nn.Linear(bert_model.d_model, num_angle_features)
 
         self.categorical_heads = nn.ModuleDict({
             name: nn.Linear(bert_model.d_model, info['cardinality'])
@@ -208,7 +212,6 @@ class BertForMaskedModeling(nn.Module):
         metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-
         prob = torch.full(x.shape[:2], self.masking_ratio, device=x.device)
         prob.masked_fill_(~attention_mask, 0.0)
         is_masked = torch.bernoulli(prob).bool()
@@ -218,25 +221,19 @@ class BertForMaskedModeling(nn.Module):
         mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
 
         x_embed = self.bert.embed_sequences(x)
-
         encoder_x_input = x_embed.clone()
-
         if torch.any(mask_random):
             with torch.no_grad():
                 valid_embeddings = x_embed[attention_mask]
                 num_to_replace = mask_random.sum()
-
                 rand_indices = torch.randint(0, valid_embeddings.shape[0], (num_to_replace,), device=x.device)
                 random_embeds = valid_embeddings[rand_indices]
-
             encoder_x_input[mask_random] = random_embeds
-
         encoder_x_input = torch.where(
             mask_replace.unsqueeze(-1),
             self.mask_token_embed.to(x_embed.dtype),
             encoder_x_input
         )
-
         projected_meta = self.bert.metadata_proj(metadata).unsqueeze(1)
         meta_embed = projected_meta + self.bert.metadata_token.to(projected_meta.dtype)
         full_encoder_input = torch.cat([meta_embed, encoder_x_input], dim=1)
@@ -250,9 +247,11 @@ class BertForMaskedModeling(nn.Module):
         sequence_output = encoded_output[:, 1:, :]
 
         standard_cont_preds = self.standard_continuous_head(sequence_output)
-        angle_preds = self.angle_head(sequence_output)
+        angle_preds_raw = self.angle_head(sequence_output)
         
-        angle_preds = F.normalize(angle_preds, p=2, dim=-1)
+        angle_preds_reshaped = angle_preds_raw.view(*angle_preds_raw.shape[:-1], -1, 2)
+        normalized_angle_preds = F.normalize(angle_preds_reshaped, p=2, dim=-1)
+        angle_preds = normalized_angle_preds.view_as(angle_preds_raw)
 
         categorical_preds = {
             name: head(sequence_output)

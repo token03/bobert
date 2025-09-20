@@ -34,6 +34,9 @@ class HitObjectVector(NamedTuple):
     distance_diff: float
     cos_angle: float
     sin_angle: float
+    velocity: float
+    cos_inner_angle: float
+    sin_inner_angle: float
     object_type: int
     is_new_combo: int
     slider_curve_type: int
@@ -42,7 +45,7 @@ class HitObjectVector(NamedTuple):
     time_diff_bin: int
     duration_bin: int
     kiai_time: int
-
+    
     @classmethod
     def get_field_names(cls):
         return list(cls._fields)
@@ -92,6 +95,9 @@ class HitObjectVector(NamedTuple):
             'distance_diff': NormalizationType.LOG,
             'cos_angle': NormalizationType.STANDARD,
             'sin_angle': NormalizationType.STANDARD,
+            'velocity': NormalizationType.LOG,
+            'cos_inner_angle': NormalizationType.STANDARD,
+            'sin_inner_angle': NormalizationType.STANDARD,
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'slider_curve_type': NormalizationType.CATEGORICAL,
@@ -106,7 +112,11 @@ class HitObjectVector(NamedTuple):
     def get_hit_object_feature_indices(cls) -> List[int]:
         """Get indices of features related to hit objects (position, type, timing)."""
         field_names = cls.get_field_names()
-        hit_object_features = ['distance_diff', 'cos_angle', 'sin_angle', 'object_type', 'is_new_combo', 'time_diff_bin', 'kiai_time']
+        hit_object_features = [
+            'distance_diff', 'cos_angle', 'sin_angle', 'velocity',
+            'cos_inner_angle', 'sin_inner_angle', 'object_type', 'is_new_combo', 
+            'time_diff_bin', 'kiai_time'
+        ]
         return [field_names.index(name) for name in hit_object_features]
     
     @classmethod 
@@ -128,6 +138,7 @@ class HitObjectVector(NamedTuple):
 
     @classmethod
     def create_with_quantization(cls, distance_diff: float, cos_angle: float, sin_angle: float,
+                                velocity: float, cos_inner_angle: float, sin_inner_angle: float,
                                 time_diff: float, object_type: int,
                                 is_new_combo: int, slider_curve_type: int,
                                 slider_num_anchors: int, slider_pixel_length: float,
@@ -139,6 +150,9 @@ class HitObjectVector(NamedTuple):
             distance_diff=distance_diff,
             cos_angle=cos_angle,
             sin_angle=sin_angle,
+            velocity=velocity,
+            cos_inner_angle=cos_inner_angle,
+            sin_inner_angle=sin_inner_angle,
             object_type=object_type,
             is_new_combo=is_new_combo,
             slider_curve_type=slider_curve_type,
