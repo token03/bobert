@@ -47,12 +47,6 @@ def mlm_loss_fn(
     targets: torch.Tensor, 
     mask: torch.Tensor
 ) -> torch.Tensor:
-    """
-    Calculates a hybrid MLM loss for:
-    - Standard continuous features (MSE)
-    - Angle vectors (MSE on unit vectors)
-    - Categorical features (CrossEntropy)
-    """
     num_masked = torch.sum(mask)
     if num_masked == 0:
         return torch.tensor(0.0, device=targets.device, requires_grad=True)
@@ -142,15 +136,12 @@ def create_scheduler(
         raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
 class CheckpointManager:
-    """Manages model checkpointing and loading."""
-    
     def __init__(self, checkpoint_dir: str, model_name: str = "model"):
         self.checkpoint_dir = checkpoint_dir
         self.model_name = model_name
         os.makedirs(checkpoint_dir, exist_ok=True)
         
     def get_checkpoint_path(self, suffix: str = "latest") -> str:
-        """Gets the path for a checkpoint file."""
         return os.path.join(self.checkpoint_dir, f"{self.model_name}_{suffix}.pth")
     
     def save_checkpoint(
@@ -163,7 +154,6 @@ class CheckpointManager:
         metrics: Dict[str, float],
         suffix: str = "latest"
     ):
-        """Saves a training checkpoint."""
         checkpoint_data = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -190,20 +180,25 @@ class CheckpointManager:
         suffix: str = "latest",
         device: torch.device = torch.device('cpu')
     ) -> Tuple[int, Dict[str, float]]:
-        """
-        Loads a training checkpoint.
-        
-        Returns:
-            Tuple of (epoch, metrics)
-        """
         checkpoint_path = self.get_checkpoint_path(suffix)
         
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
             
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
-        model.load_state_dict(checkpoint['model_state_dict'])
+        state_dict = checkpoint['model_state_dict']
+        if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+            new_state_dict = {}
+            for key, value in state_dict.items():
+                if key.startswith('_orig_mod.'):
+                    new_key = key[len('_orig_mod.'):]
+                    new_state_dict[new_key] = value
+                else:
+                    new_state_dict[key] = value
+            state_dict = new_state_dict
+        
+        model.load_state_dict(state_dict)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         if scheduler is not None and 'scheduler_state_dict' in checkpoint:
@@ -220,14 +215,11 @@ class CheckpointManager:
 
 
 class MetricsTracker:
-    """Tracks training and validation metrics."""
-    
     def __init__(self):
         self.metrics = {}
         self.epoch_metrics = []
     
     def update(self, phase: str, **kwargs):
-        """Updates metrics for a given phase."""
         if phase not in self.metrics:
             self.metrics[phase] = {}
         
@@ -237,20 +229,17 @@ class MetricsTracker:
             self.metrics[phase][key].append(value)
     
     def get_latest(self, phase: str, metric: str) -> Optional[float]:
-        """Gets the latest value for a metric."""
         if phase in self.metrics and metric in self.metrics[phase]:
             return self.metrics[phase][metric][-1]
         return None
     
     def get_average(self, phase: str, metric: str, last_n: int = 1) -> Optional[float]:
-        """Gets the average of the last N values for a metric."""
         if phase in self.metrics and metric in self.metrics[phase]:
             values = self.metrics[phase][metric][-last_n:]
             return sum(values) / len(values) if values else None
         return None
     
     def log_epoch(self, epoch: int, train_metrics: Dict[str, float], val_metrics: Dict[str, float] = None):
-        """Logs metrics for an epoch."""
         epoch_data = {
             'epoch': epoch,
             'train': train_metrics,
