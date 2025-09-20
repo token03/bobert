@@ -4,7 +4,7 @@ import bisect
 from collections import Counter, namedtuple
 import math
 import numpy as np
-from .types import HitObjectVector, BeatmapMetadata, BeatmapData
+from .types import HitObjectVector, BeatmapData
 
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1

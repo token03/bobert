@@ -184,7 +184,6 @@ class BeatmapMetadata(NamedTuple):
     
     @classmethod
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
-        """Get normalization specifications for each metadata field."""
         return {
             'ar': NormalizationType.STANDARD,
             'od': NormalizationType.STANDARD,
@@ -198,7 +197,6 @@ class BeatmapMetadata(NamedTuple):
 
 
 class BeatmapData(NamedTuple):
-    """Comprehensive beatmap data structure - single source of truth for beatmap fields."""
     beatmap_id: int
     category: str
     hp_drain: float
@@ -213,7 +211,6 @@ class BeatmapData(NamedTuple):
 
     @classmethod
     def get_field_names(cls):
-        """Get field names for database table creation."""
         return [field for field in cls._fields if field != 'vectors']
     
     @classmethod

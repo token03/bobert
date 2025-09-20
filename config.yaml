@@ -24,11 +24,9 @@ training:
     categorical: 0.5     
   
   sampling:
-    method: "temperature"  
-    kde_bandwidth: 0.3  
-    kde_bins: 200     
+    method: "kde"  
+    kde_bandwidth: 0.5
     temperature: 2.0  
-    difficulty_index: 3 
     expand_for_augmentation: true
   
 model:

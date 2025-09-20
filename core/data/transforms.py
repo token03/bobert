@@ -73,7 +73,6 @@ class BeatmapNormalizer:
                 normalized_metadata[i] = (metadata[i] - mean) / (std + self.epsilon)
             elif norm_type == NormalizationType.LOG:
                 mean, std = self.meta_stats[field_name]
-                # Data should already be log-transformed in loader, just normalize
                 normalized_metadata[i] = (metadata[i] - mean) / (std + self.epsilon)
             elif norm_type == NormalizationType.MINMAX:
                 min_val, max_val = self.meta_stats[field_name]
@@ -151,17 +150,14 @@ class BeatmapNormalizer:
             for vectors in all_vectors_list:
                 augmented_vectors_list.append(vectors)
                 
-                # Flip horizontally (negate cos_angle)
                 flipped_x = vectors.clone()
                 flipped_x[:, cos_angle_idx] *= -1
                 augmented_vectors_list.append(flipped_x)
                 
-                # Flip vertically (negate sin_angle)
                 flipped_y = vectors.clone()
                 flipped_y[:, sin_angle_idx] *= -1
                 augmented_vectors_list.append(flipped_y)
                 
-                # Flip both (negate both cos_angle and sin_angle)
                 flipped_xy = vectors.clone()
                 flipped_xy[:, cos_angle_idx] *= -1
                 flipped_xy[:, sin_angle_idx] *= -1
@@ -218,7 +214,6 @@ class BeatmapNormalizer:
 
 
 class BeatmapAugmenter:
-    
     def __init__(self):
         vector_field_names = HitObjectVector.get_field_names()
         self.cos_angle_idx = vector_field_names.index('cos_angle')
@@ -227,11 +222,11 @@ class BeatmapAugmenter:
     def apply_augmentation(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
         augmented = vectors.clone()
         
-        if aug_type == 1:  # Flip horizontally (negate cos_angle)
+        if aug_type == 1: 
             augmented[:, self.cos_angle_idx] *= -1
-        elif aug_type == 2:  # Flip vertically (negate sin_angle)
+        elif aug_type == 2: 
             augmented[:, self.sin_angle_idx] *= -1
-        elif aug_type == 3:  # Flip both (negate both cos_angle and sin_angle)
+        elif aug_type == 3: 
             augmented[:, self.cos_angle_idx] *= -1
             augmented[:, self.sin_angle_idx] *= -1
         
