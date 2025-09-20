@@ -36,6 +36,7 @@ components:
   use_rope: true
   use_flash_attention: true
   compile_model: true
+  compile_mode: "default"
   
 mlm:
   masking_ratio: 0.25

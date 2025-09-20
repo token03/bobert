@@ -2,7 +2,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Type, TypeVar
+
 from rotary_embedding_torch import RotaryEmbedding
 
 from .components import (
@@ -11,6 +12,8 @@ from .components import (
     create_ffn_layer
 )
 from ..data.types import BeatmapMetadata, HitObjectVector
+
+T = TypeVar('T', bound='BertEncoder')
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(
@@ -73,10 +76,16 @@ class BertEncoder(nn.Module):
         norm_type: str = 'rmsnorm',
         ffn_type: str = 'swiglu',
         local_attention_window: int = 128,
+        use_flash_attention: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_layers = n_layers
         self.attention_type = attention_type
+        self.norm_type = norm_type
+        self.ffn_type = ffn_type
+        self.use_flash_attention = use_flash_attention
 
         self.feature_info = HitObjectVector.get_feature_info()
 
@@ -116,8 +125,53 @@ class BertEncoder(nn.Module):
         else:
             self.rotary_emb = None
 
+    @classmethod
+    def from_config(cls: Type[T], config: Dict[str, Any]) -> T:
+        model_config = config['model']
+        components_config = config.get('components', {})
+        
+        dim_feedforward = model_config['d_model'] * model_config.get('dim_feedforward_mult', 4)
+        attention_type = 'rope' if components_config.get('use_rope', True) else 'standard'
+        
+        return cls(
+            d_model=model_config['d_model'],
+            n_heads=model_config['n_heads'],
+            n_layers=model_config['n_layers'],
+            dim_feedforward=dim_feedforward,
+            dropout=model_config.get('dropout', 0.1),
+            attention_type=attention_type,
+            norm_type=components_config.get('norm_type', 'rmsnorm'),
+            ffn_type=components_config.get('ffn_type', 'swiglu'),
+            use_flash_attention=components_config.get('use_flash_attention', True)
+        )
+
+    def get_summary(self) -> Dict[str, Any]:
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        return {
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'model_size_mb': total_params * 4 / (1024 * 1024),  
+            'parameter_efficiency': trainable_params / total_params if total_params > 0 else 0
+        }
+
+    def print_info(self):
+        summary = self.get_summary()
+        
+        print(f"\n--- BERT Encoder Information ---")
+        print(f"Total Parameters: {summary['trainable_parameters'] / 1e6:.2f}M")
+        print(f"Model Dimension: {self.d_model}")
+        print(f"Number of Heads: {self.n_heads}")
+        print(f"Number of Layers: {self.n_layers}")
+        print(f"Attention Type: {self.attention_type}")
+        print(f"Normalization Type: {self.norm_type}")
+        print(f"FFN Type: {self.ffn_type}")
+        print(f"Flash Attention: {self.use_flash_attention}")
+        print("-" * 30)
+
+
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
-        """Embeds a batch of hit object sequences using categorical embeddings."""
         cont_features = x[:, :, self.cont_indices]
         projected_cont = self.continuous_proj(cont_features)
 
@@ -139,12 +193,10 @@ class BertEncoder(nn.Module):
         metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Embeds sequences, adds metadata token, and creates full attention mask."""
         x_embed = self.embed_sequences(x)
 
-        # Ensure metadata is properly shaped and projected
         if metadata.dim() == 1:
-            metadata = metadata.unsqueeze(0)  # Add batch dimension if missing
+            metadata = metadata.unsqueeze(0)
         
         meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
         full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
@@ -156,10 +208,8 @@ class BertEncoder(nn.Module):
 
     def encode(self, embeddings: torch.Tensor, attention_mask: torch.Tensor, max_seqlen: int) -> torch.Tensor:
         """Runs the transformer encoder layers on already-embedded inputs."""
-
         seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
         cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-
         packed_output = embeddings[attention_mask]
 
         for layer in self.layers:
@@ -181,9 +231,7 @@ class BertEncoder(nn.Module):
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
         full_embeddings, full_attention_mask = self._embed(x, metadata, attention_mask)
-
         max_seqlen = full_embeddings.shape[1]
-
         output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         return output
 
@@ -193,6 +241,7 @@ class BertForMaskedModeling(nn.Module):
         super().__init__()
         self.bert = bert_model
         self.masking_ratio = masking_ratio
+        self.is_compiled = False
 
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
         self.feature_info = HitObjectVector.get_feature_info()
@@ -210,6 +259,31 @@ class BertForMaskedModeling(nn.Module):
             name: nn.Linear(bert_model.d_model, info['cardinality'])
             for name, info in self.feature_info['categorical'].items()
         })
+        
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForMaskedModeling':
+        base_model = BertEncoder.from_config(config)
+        masking_ratio = config.get('mlm', {}).get('masking_ratio', 0.15)
+        model = cls(base_model, masking_ratio)
+        model = model.to(device)
+        
+        if config.get('components', {}).get('compile_model', False):
+            print("Compiling BERT model with torch.compile...")
+            model = torch.compile(model, mode=config.get('components', {}).get('compile_mode', 'default'))
+            model.is_compiled = True
+        
+        return model
+
+    def print_info(self):
+        self.bert.print_info()
+        print(f"\n--- MLM Head Information ---")
+        print(f"Task: Masked Modeling")
+        print(f"Masking Ratio: {self.masking_ratio}")
+        print(f"Model Compiled: {self.is_compiled}")
+        print("-" * 30)
+
+    def get_summary(self) -> Dict[str, Any]:
+        return self.bert.get_summary()
 
     def forward(
         self,
