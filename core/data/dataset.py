@@ -1,7 +1,7 @@
+# dataset.py
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from typing import Tuple, List, Optional
-from .types import HitObjectVector
 from .transforms import BeatmapNormalizer, BeatmapAugmenter, BeatmapTransform
 
 def collate_fn(
@@ -47,7 +47,8 @@ class BeatmapDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         vectors, metadata = self.beatmap_data[idx]
-        return self.transform(vectors, metadata)
+        normalized_vectors, normalized_metadata = self.transform(vectors, metadata)
+        return normalized_vectors, normalized_metadata
 
 class MaskedBeatmapDataset(BeatmapDataset):
 
@@ -117,10 +118,12 @@ def create_dataloaders(
     val_transform = BeatmapTransform(normalizer, augment=False)
     val_dataset = BeatmapDataset(val_data, val_transform)
 
+    actual_vector_dim = train_data[0][0].shape[1] 
+    
     collate_with_args = lambda batch: collate_fn(
         batch,
         max_seq_len=config['data']['max_seq_len'],
-        vector_dim=config['data']['in_channels'],
+        vector_dim=actual_vector_dim,
         device=device
     )
 

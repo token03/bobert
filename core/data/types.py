@@ -1,81 +1,210 @@
-from typing import NamedTuple
+# types.py
+from typing import NamedTuple, List, Dict, Any, Optional, Tuple
 import numpy as np
+from enum import Enum
+
+DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
+
+class NormalizationType(Enum):
+    CATEGORICAL = "categorical"
+    STANDARD = "standard"
+    LOG = "log"
+    MINMAX = "minmax"
+    NONE = "none"
+
+def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
+    """
+    Vectorized function to find the index of the closest bin for each value in a numpy array.
+    Handles boundary conditions where values are <= 0 or >= the last bin.
+    """
+    bins_arr = np.array(bins)
+
+    diffs = np.abs(values[:, np.newaxis] - bins_arr)
+
+    result = np.argmin(diffs, axis=1)
+
+    result[values <= 0] = 0
+    result[values >= bins_arr[-1]] = len(bins) - 1
+    
+    return result
 
 class HitObjectVector(NamedTuple):
-    """Represents a single hit object's vector data."""
     distance_diff: float
-    angle_cos: float
-    angle_sin: float
-    time_diff: float
-    abs_x: float
-    abs_y: float
-    # One-hot encoded object types (3 values: circle, slider, spinner)
-    is_circle: int
-    is_slider: int
-    is_spinner: int
+    cos_angle: float
+    sin_angle: float
+    velocity: float
+    cos_inner_angle: float
+    sin_inner_angle: float
+    object_type: int
     is_new_combo: int
-    # One-hot encoded slider curve types (4 values: B, C, L, P)
-    slider_curve_b: int
-    slider_curve_c: int
-    slider_curve_l: int
-    slider_curve_p: int
+    slider_curve_type: int
     slider_num_anchors: int
     slider_pixel_length: float
-    duration_beats: float
-
+    time_diff_bin: int
+    duration_bin: int
+    kiai_time: int
+    
     @classmethod
     def get_field_names(cls):
-        """Returns list of field names in order."""
         return list(cls._fields)
     
     @classmethod
     def get_vector_dim(cls):
-        """Returns the total vector dimension."""
         return len(cls._fields)
+
+    @classmethod
+    def get_feature_info(cls):
+        field_names = cls.get_field_names()
+        
+        categorical_features = [
+            'object_type', 'is_new_combo', 'slider_curve_type',
+            'time_diff_bin', 'duration_bin', 'kiai_time'
+        ]
+        
+        continuous_features = [f for f in field_names if f not in categorical_features]
+        
+        cat_cardinalities = {
+            'object_type': 3,
+            'is_new_combo': 2,
+            'slider_curve_type': 5,
+            'time_diff_bin': len(DURATION_BINS),
+            'duration_bin': len(DURATION_BINS),
+            'kiai_time': 2
+        }
+
+        info = {
+            'categorical': {
+                name: {
+                    'index': field_names.index(name),
+                    'cardinality': cat_cardinalities[name]
+                } for name in categorical_features
+            },
+            'continuous': {
+                name: field_names.index(name) for name in continuous_features
+            },
+            'names': field_names
+        }
+        return info
+
+    @classmethod
+    def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
+        return {
+            'distance_diff': NormalizationType.LOG,
+            'cos_angle': NormalizationType.STANDARD,
+            'sin_angle': NormalizationType.STANDARD,
+            'velocity': NormalizationType.LOG,
+            'cos_inner_angle': NormalizationType.STANDARD,
+            'sin_inner_angle': NormalizationType.STANDARD,
+            'object_type': NormalizationType.CATEGORICAL,
+            'is_new_combo': NormalizationType.CATEGORICAL,
+            'slider_curve_type': NormalizationType.CATEGORICAL,
+            'slider_num_anchors': NormalizationType.LOG,
+            'slider_pixel_length': NormalizationType.LOG,
+            'time_diff_bin': NormalizationType.CATEGORICAL,
+            'duration_bin': NormalizationType.CATEGORICAL,
+            'kiai_time': NormalizationType.CATEGORICAL
+        }
     
-    def to_array(self):
-        """Convert to numpy array with proper type handling."""
-        return np.array([
-            float(self.distance_diff),
-            float(self.angle_cos),
-            float(self.angle_sin),
-            float(self.time_diff),
-            float(self.abs_x),
-            float(self.abs_y),
-            float(self.is_circle),
-            float(self.is_slider),
-            float(self.is_spinner),
-            float(self.is_new_combo),
-            float(self.slider_curve_b),
-            float(self.slider_curve_c),
-            float(self.slider_curve_l),
-            float(self.slider_curve_p),
-            float(self.slider_num_anchors),
-            float(self.slider_pixel_length),
-            float(self.duration_beats)
-        ], dtype=np.float32)
+    @classmethod
+    def get_field_descriptions(cls) -> Dict[str, str]:
+        return {
+            'distance_diff': "Distance to previous hit object in pixels",
+            'cos_angle': "Cosine of angle formed with previous two hit objects",
+            'sin_angle': "Sine of angle formed with previous two hit objects",
+            'velocity': "Velocity to previous hit object (pixels/ms)",
+            'cos_inner_angle': "Cosine of inner angle for sliders (0 if not a slider)",
+            'sin_inner_angle': "Sine of inner angle for sliders (0 if not a slider)",
+            'object_type': "Type of hit object (circle, slider, spinner)",
+            'is_new_combo': "Whether this hit object starts a new combo",
+            'slider_curve_type': "Curve type of slider (0 if not a slider)",
+            'slider_num_anchors': "Number of anchor points in slider (0 if not a slider)",
+            'slider_pixel_length': "Pixel length of slider (0 if not a slider)",
+            'time_diff_bin': "Quantized time difference to previous hit object",
+            'duration_bin': "Quantized duration of the hit object",
+            'kiai_time': "Whether the hit object is in kiai time"
+        }
 
 class BeatmapMetadata(NamedTuple):
-    """Represents beatmap metadata."""
     ar: float
     od: float
     cs: float
+    hp_drain: float
+    slider_multiplier: float
+    slider_tick: float
     difficulty_rating: float
     bpm: float
 
     @classmethod
     def get_field_names(cls):
-        """Returns list of field names in order."""
         return list(cls._fields)
     
     @classmethod
     def get_metadata_dim(cls):
-        """Returns the total metadata dimension."""
         return len(cls._fields)
     
-    def to_array(self):
-        """Convert to numpy array."""
-        return np.array(self, dtype=np.float32)
+    @classmethod
+    def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
+        return {
+            'ar': NormalizationType.STANDARD,
+            'od': NormalizationType.STANDARD,
+            'cs': NormalizationType.STANDARD,
+            'hp_drain': NormalizationType.STANDARD,
+            'slider_multiplier': NormalizationType.STANDARD,
+            'slider_tick': NormalizationType.STANDARD,
+            'difficulty_rating': NormalizationType.STANDARD,
+            'bpm': NormalizationType.LOG
+        }
+
+    @classmethod
+    def get_field_descriptions(cls) -> Dict[str, str]:
+        return {
+            'ar': "Approach Rate",
+            'od': "Overall Difficulty",
+            'cs': "Circle Size",
+            'hp_drain': "HP Drain Rate",
+            'slider_multiplier': "Slider Velocity Multiplier",
+            'slider_tick': "Slider Tick Rate",
+            'difficulty_rating': "Star Difficulty Rating",
+            'bpm': "Beats Per Minute"
+        }
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()
 METADATA_DIM = BeatmapMetadata.get_metadata_dim()
+
+class RawTimingPoint(NamedTuple):
+    """Represents a raw timing point from the .osu file."""
+    time: int
+    beat_length: float
+    uninherited: bool
+    effects: int
+
+class RawHitObject(NamedTuple):
+    x: int
+    y: int
+    time: int
+    object_type: int 
+    is_new_combo: int
+    
+    curve_type: Optional[str]       
+    curve_points: Optional[List[Tuple[int, int]]]
+    slides: Optional[int]
+    pixel_length: Optional[float]
+
+    end_time: int
+    
+    hit_sound: int
+
+class RawBeatmap(NamedTuple):
+    beatmap_id: int
+    category: str
+    hp_drain: float
+    cs: float
+    od: float
+    ar: float
+    slider_multiplier: float
+    slider_tick: float
+    main_bpm: float
+    difficulty_rating: float
+    
+    timing_points: List[RawTimingPoint]
+    hit_objects: List[RawHitObject]

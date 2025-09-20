@@ -1,325 +1,237 @@
+# loader.py
 import os
-import sqlite3
 import sys
-import itertools
+from typing import Tuple, List, Optional, Dict
 import gdown
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, random_split, WeightedRandomSampler
 from tqdm import tqdm
-from typing import Tuple, List, Dict, Any, Optional
-from scipy.stats import gaussian_kde
-from scipy.interpolate import interp1d
-from scipy.ndimage import gaussian_filter1d
-from .types import HitObjectVector, BeatmapMetadata
+
+from .types import HitObjectVector, BeatmapMetadata, NormalizationType, DURATION_BINS, quantize_to_bins
 from .transforms import BeatmapNormalizer
 
-def setup_database(db_path: str, colab_url: Optional[str] = None) -> str:
+def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
         import google.colab # type: ignore
-        if not os.path.exists('/content/beatmaps.db') and colab_url:
-            print("Downloading database for Colab environment...")
-            gdown.download(colab_url, '/content/beatmaps.db', quiet=False)
-        return '/content/beatmaps.db'
+        colab_path = '/content/beatmap_dataset'
+        if not os.path.exists(colab_path) and colab_url:
+            print("Downloading dataset for Colab environment...")
+            zip_path = '/content/beatmap_dataset.zip'
+            gdown.download(colab_url, zip_path, quiet=False)
+            print("Unzipping dataset...")
+            import zipfile
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall('/content/')
+            os.remove(zip_path)
+        return colab_path
     except ImportError:
-        return db_path
+        return dataset_path
 
-
-def load_and_group_data_from_db(
-    db_path: str,
-    chunk_size: int = 1000,
-    max_seq_len: Optional[int] = None
+def _engineer_features_vectorized(
+    beatmaps_df: pd.DataFrame,
+    hitobjects_df: pd.DataFrame
 ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-    print("Connecting to database...")
-    con = sqlite3.connect(db_path)
-    cursor = con.cursor()
+    print("Engineering features for all beatmaps (vectorized)...")
+    df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
 
-    print("Fetching valid beatmap IDs and all metadata...")
-    metadata_df = pd.read_sql_query(
-        """
-        SELECT id, ar, od, circle_size as cs, difficulty_rating, main_bpm
-        FROM beatmaps
-        WHERE main_bpm IS NOT NULL
-        ORDER BY id
-        """,
-        con
-    )
-    valid_map_ids = metadata_df['id'].tolist()
+    map_counts = df['beatmap_id'].value_counts()
+    valid_beatmap_ids = map_counts[map_counts >= 2].index
+    if len(valid_beatmap_ids) < len(beatmaps_df):
+        df = df[df['beatmap_id'].isin(valid_beatmap_ids)].copy()
 
-    metadata_dict = {
-        row.id: BeatmapMetadata(
-            ar=row.ar,
-            od=row.od,
-            cs=row.cs,
-            difficulty_rating=row.difficulty_rating,
-            bpm=row.main_bpm
-        ).to_array()
-        for row in metadata_df.itertuples(index=False)
-    }
+    df.sort_values(['beatmap_id', 'time'], inplace=True)
+    grouped = df.groupby('beatmap_id')
 
-    print(f"Found {len(valid_map_ids)} beatmaps with complete metadata.")
+    prev_end_time = grouped['end_time'].shift(1)
+    prev_end_x = grouped['x'].shift(1)
+    prev_end_y = grouped['y'].shift(1)
 
-    processed_data = []
-    num_chunks = (len(valid_map_ids) + chunk_size - 1) // chunk_size
+    first_in_group = ~df.duplicated('beatmap_id', keep='first')
+    prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
+    prev_end_x.loc[first_in_group] = 256
+    prev_end_y.loc[first_in_group] = 192
+
+    df['time_diff_ms'] = df['time'] - prev_end_time
+    df['beat_length_ms'] = 60000.0 / df['main_bpm'].replace(0, np.nan)
+    df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
+
+    df['x_diff'] = df['x'] - prev_end_x
+    df['y_diff'] = df['y'] - prev_end_y
+    df['distance_diff'] = np.hypot(df['x_diff'], df['y_diff'])
+
+    df['cos_angle'] = (df['x_diff'] / df['distance_diff'].replace(0, 1)).fillna(1.0)
+    df['sin_angle'] = (df['y_diff'] / df['distance_diff'].replace(0, 1)).fillna(0.0)
+    df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
+
+    next_x = grouped['x'].shift(-1)
+    next_y = grouped['y'].shift(-1)
+
+    vec_ba_x = prev_end_x - df['x']
+    vec_ba_y = prev_end_y - df['y']
+    vec_bc_x = next_x - df['x']
+    vec_bc_y = next_y - df['y']
+
+    norm_ba = np.hypot(vec_ba_x, vec_ba_y)
+    norm_bc = np.hypot(vec_bc_x, vec_bc_y)
+    norm_prod = (norm_ba * norm_bc).replace(0, 1)
+
+    dot_product = vec_ba_x * vec_bc_x + vec_ba_y * vec_bc_y
+    cross_product = vec_ba_x * vec_bc_y - vec_ba_y * vec_bc_x
+
+    df['cos_inner_angle'] = np.clip(dot_product / norm_prod, -1.0, 1.0)
+    df['sin_inner_angle'] = np.clip(cross_product / norm_prod, -1.0, 1.0)
+
+    last_in_group = ~df.duplicated('beatmap_id', keep='last')
+    df.loc[last_in_group, 'cos_inner_angle'] = 1.0
+    df.loc[last_in_group, 'sin_inner_angle'] = 0.0
+
+    df['duration_ms'] = df['end_time'] - df['time']
+    df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
+
+    df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
+
+    if 'curve_type' in df.columns:
+        curve_type_mapping = {'B': 0, 'L': 1, 'P': 2, 'C': 3}
+        df['slider_curve_type'] = df['curve_type'].map(curve_type_mapping).fillna(4).astype(int)
+    else:
+        df['slider_curve_type'] = np.where(df['pixel_length'] > 0, 0, 4).astype(int)
+
+    df['slider_num_anchors'] = np.where(df['pixel_length'] > 0, 2, 0).astype(int)
+
+    if 'kiai_time' not in df.columns:
+        df['kiai_time'] = 0
+
+    df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
+    df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
+
+    if 'main_bpm' in df.columns:
+            df.rename(columns={'main_bpm': 'bpm'}, inplace=True)
 
     vector_field_names = HitObjectVector.get_field_names()
-    vector_fields_str = ', '.join(vector_field_names)
-    vector_query_template = f"""
-        SELECT beatmap_id, {vector_fields_str}
-        FROM beatmap_vectors
-        WHERE beatmap_id IN ({{placeholders}})
-        ORDER BY beatmap_id
-    """
+    meta_field_names = BeatmapMetadata.get_field_names()
 
-    indices = {name: vector_field_names.index(name) for name in vector_field_names}
-    indices_to_clamp_and_log = [
-        indices['time_diff'], indices['duration_beats'], indices['distance_diff'],
-        indices['slider_pixel_length'], indices['slider_num_anchors']
+    vector_df = df[['beatmap_id'] + vector_field_names]
+    meta_df = df[['beatmap_id'] + meta_field_names].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
+
+    final_data = []
+    print("Converting processed dataframes to tensors...")
+    for beatmap_id, group in tqdm(vector_df.groupby('beatmap_id'), total=vector_df['beatmap_id'].nunique()):
+        vectors = group[vector_field_names].to_numpy(dtype=np.float32)
+        metadata = meta_df.loc[beatmap_id].to_numpy(dtype=np.float32)
+        final_data.append((torch.from_numpy(vectors), torch.from_numpy(metadata)))
+
+    return final_data
+
+def load_and_process_data_from_parquet(
+    dataset_path: str,
+    max_seq_len: Optional[int] = None
+) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+    print("Loading raw data from Parquet dataset...")
+    beatmaps_path = os.path.join(dataset_path, 'beatmaps')
+    hitobjects_path = os.path.join(dataset_path, 'hitobjects')
+
+    if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
+        raise FileNotFoundError(
+            f"Parquet dataset not found at '{dataset_path}'. "
+            f"Please run create_dataset.py first."
+        )
+
+    beatmaps_df = pd.read_parquet(beatmaps_path)
+    hitobjects_df = pd.read_parquet(hitobjects_path)
+
+    print(f"Loaded {len(beatmaps_df)} beatmaps and {len(hitobjects_df)} hit objects.")
+
+    processed_data = _engineer_features_vectorized(beatmaps_df, hitobjects_df)
+
+    vector_norm_specs = HitObjectVector.get_normalization_specs()
+    meta_norm_specs = BeatmapMetadata.get_normalization_specs()
+    vector_field_names = HitObjectVector.get_field_names()
+    meta_field_names = BeatmapMetadata.get_field_names()
+
+    log_vec_indices = [
+        i for i, name in enumerate(vector_field_names)
+        if vector_norm_specs.get(name) == NormalizationType.LOG
+    ]
+    log_meta_indices = [
+        i for i, name in enumerate(meta_field_names)
+        if meta_norm_specs.get(name) == NormalizationType.LOG
     ]
 
-    for i in tqdm(
-        range(0, len(valid_map_ids), chunk_size),
-        total=num_chunks,
-        desc="Processing Chunks",
-        dynamic_ncols=True,
-        leave=True,
-        file=sys.stdout
-    ):
-        chunk_ids = valid_map_ids[i:i + chunk_size]
-        placeholders = ','.join('?' for _ in chunk_ids)
-        query = vector_query_template.format(placeholders=placeholders)
+    final_data = []
+    print("Applying log transforms and filtering by sequence length...")
+    for vectors, metadata in tqdm(processed_data):
+        if max_seq_len and vectors.shape[0] > max_seq_len:
+            vectors = vectors[:max_seq_len]
 
-        cursor.execute(query, chunk_ids)
+        for idx in log_vec_indices:
+            vectors[:, idx].clamp_(min=0.0)
+            vectors[:, idx] = torch.log1p(vectors[:, idx])
 
-        for map_pk, group_iter in itertools.groupby(cursor, key=lambda row: row[0]):
-            vectors_list = [row[1:] for row in group_iter]
+        for idx in log_meta_indices:
+            metadata[idx] = torch.log1p(metadata[idx])
 
-            if not vectors_list:
-                continue
+        final_data.append((vectors, metadata))
 
-            meta_np = metadata_dict.get(map_pk)
-            if meta_np is None:
-                continue
+    print("Finished loading and processing all data.")
+    return final_data
 
-            vectors_tensor = torch.tensor(vectors_list, dtype=torch.float32)
+def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, descriptions: Dict, stats: Dict):
+    print(f"\n--- {title}:")
+    print("-" * 70)
+    print(f"{'Field Name':<20} {'Type':<12} {'Param 1':<12} {'Param 2':<12} {'Description'}")
+    print("-" * 70)
 
-            for idx in indices_to_clamp_and_log:
-                vectors_tensor[:, idx].clamp_(min=0.0)
-                vectors_tensor[:, idx] = torch.log1p(vectors_tensor[:, idx])
+    for field_name in field_names:
+        norm_type = norm_specs[field_name]
+        description = descriptions.get(field_name, 'Unknown field')
+        param1_str, param2_str = "N/A", "N/A"
+        type_str = str(norm_type.value)
 
-            vectors_tensor[:, indices['abs_x']] = (vectors_tensor[:, indices['abs_x']] / 256.0) - 1.0
-            vectors_tensor[:, indices['abs_y']] = (vectors_tensor[:, indices['abs_y']] / 192.0) - 1.0
+        if norm_type == NormalizationType.CATEGORICAL:
+            type_str = "categorical"
+        elif field_name in stats:
+            param1, param2 = stats[field_name]
+            param1_str = f"{param1:.4f}"
+            param2_str = f"{param2:.4f}"
+            if norm_type == NormalizationType.STANDARD:
+                type_str = "mean/std"
+            elif norm_type == NormalizationType.LOG:
+                type_str = "log+norm"
+            elif norm_type == NormalizationType.MINMAX:
+                type_str = "min/max"
 
-            if max_seq_len and vectors_tensor.shape[0] > max_seq_len:
-                vectors_tensor = vectors_tensor[:max_seq_len]
-
-            metadata_tensor = torch.from_numpy(meta_np)
-            bpm_idx = BeatmapMetadata.get_field_names().index('bpm')
-            metadata_tensor[bpm_idx] = torch.log1p(metadata_tensor[bpm_idx])
-
-            processed_data.append((vectors_tensor, metadata_tensor))
-
-    con.close()
-    print("Finished processing all data.")
-    return processed_data
+        print(f"{field_name:<20} {type_str:<12} {param1_str:<12} {param2_str:<12} {description}")
 
 
 def calculate_normalization_stats(
     train_data: List[Tuple[torch.Tensor, torch.Tensor]],
     include_augmentation: bool = True
 ) -> BeatmapNormalizer:
-    """Create a BeatmapNormalizer from training data with statistics printing."""
     normalizer = BeatmapNormalizer.from_data(train_data, include_augmentation)
-    
-    # Print statistics
-    vector_field_names = HitObjectVector.get_field_names()
-    
+
     print("\n" + "="*70)
     print("                    NORMALIZATION STATISTICS")
     print("="*70)
-    print("\n--- VECTOR STATISTICS:")
-    print("-" * 70)
-    print(f"{'Field Name':<20} {'Mean':<12} {'Std Dev':<12} {'Normalized':<11} {'Description'}")
-    print("-" * 70)
 
-    field_descriptions = {
-        'distance_diff': 'Distance between objects (log)', 'angle_cos': 'Angle cosine component',
-        'angle_sin': 'Angle sine component', 'time_diff': 'Time difference (log)',
-        'abs_x': 'Absolute X position (scaled)', 'abs_y': 'Absolute Y position (scaled)',
-        'is_circle': 'Circle object flag', 'is_slider': 'Slider object flag',
-        'is_spinner': 'Spinner object flag', 'is_new_combo': 'New combo flag',
-        'slider_curve_b': 'Bezier curve flag', 'slider_curve_c': 'Catmull curve flag',
-        'slider_curve_l': 'Linear curve flag', 'slider_curve_p': 'Perfect curve flag',
-        'slider_num_anchors': 'Number of anchors (log)', 'slider_pixel_length': 'Slider pixel length (log)',
-        'duration_beats': 'Duration in beats (log)'
-    }
+    _print_stats_table(
+        "VECTOR STATISTICS",
+        HitObjectVector.get_field_names(),
+        HitObjectVector.get_normalization_specs(),
+        HitObjectVector.get_field_descriptions(),
+        normalizer.get_vector_stats()
+    )
 
-    for i, field_name in enumerate(vector_field_names):
-        is_normalized = "Yes" if normalizer.normalization_mask[i] else "No"
-        description = field_descriptions.get(field_name, 'Unknown field')
-        print(f"{field_name:<20} {normalizer.vector_mean[i]:<12.4f} {normalizer.vector_std[i]:<12.4f} {is_normalized:<11} {description}")
-
-    print("\n--- METADATA STATISTICS:")
-    print("-" * 70)
-    print(f"{'Field Name':<20} {'Mean':<12} {'Std Dev':<12} {'Description'}")
-    print("-" * 70)
-
-    metadata_field_names = BeatmapMetadata.get_field_names()
-    metadata_descriptions = {
-        'ar': 'Approach Rate', 'od': 'Overall Difficulty', 'cs': 'Circle Size',
-        'difficulty_rating': 'Star Rating', 'bpm': 'Beats Per Minute'
-    }
-
-    for i, field_name in enumerate(metadata_field_names):
-        description = metadata_descriptions.get(field_name, 'Unknown field')
-        print(f"{field_name:<20} {normalizer.meta_mean[i]:<12.4f} {normalizer.meta_std[i]:<12.4f} {description}")
+    _print_stats_table(
+        "METADATA STATISTICS",
+        BeatmapMetadata.get_field_names(),
+        BeatmapMetadata.get_normalization_specs(),
+        BeatmapMetadata.get_field_descriptions(),
+        normalizer.get_metadata_stats()
+    )
 
     print("="*70)
-    
     return normalizer
-
-
-def create_weighted_sampler(
-    data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3,
-    expand_for_augmentation: bool = False
-) -> WeightedRandomSampler:
-    print("Creating weighted sampler for difficulty balancing...")
-
-    all_difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
-
-    if expand_for_augmentation:
-        all_difficulty_ratings = np.tile(all_difficulty_ratings, 4)
-
-    bins = [0, 5, 6, 7, 8, 9, 10, np.inf]
-    binned_ratings = pd.cut(all_difficulty_ratings, bins=bins, right=False, labels=False)
-    class_counts = np.bincount(binned_ratings, minlength=len(bins)-1)
-
-    print("\n--- Difficulty Distribution ---")
-    for i in range(len(bins)-1):
-        lower, upper = bins[i], bins[i+1]
-        count = class_counts[i]
-        total_maps = len(all_difficulty_ratings)
-        percentage = (count / total_maps * 100) if total_maps > 0 else 0
-        if np.isinf(upper):
-            print(f"{lower:2.0f}★+  : {count:7d} maps ({percentage:5.2f}%)")
-        else:
-            print(f"{lower:2.0f}-{upper:2.0f}★ : {count:7d} maps ({percentage:5.2f}%)")
-    print("-" * 35)
-
-    class_weights = 1.0 / (class_counts + 1e-8)
-    sample_weights = class_weights[binned_ratings]
-    sample_weights = torch.from_numpy(sample_weights).double()
-
-    return WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-
-
-def create_kde_sampler(
-    data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3,
-    bandwidth: float = 0.5,
-    expand_for_augmentation: bool = False,
-    num_bins: int = 100
-) -> WeightedRandomSampler:
-    print(f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}...")
-
-    difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
-
-    if expand_for_augmentation:
-        difficulty_ratings = np.tile(difficulty_ratings, 4)
-
-    min_rating, max_rating = difficulty_ratings.min(), difficulty_ratings.max()
-    bin_edges = np.linspace(min_rating - 0.5, max_rating + 0.5, num_bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-    hist, _ = np.histogram(difficulty_ratings, bins=bin_edges, density=True)
-
-    sigma = bandwidth * num_bins / (max_rating - min_rating + 1.0)
-    smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode='reflect')
-
-    interp_func = interp1d(bin_centers, smoothed_hist, kind='linear',
-                          bounds_error=False, fill_value=smoothed_hist.min())
-
-    density_values = interp_func(difficulty_ratings)
-    density_values = np.maximum(density_values, 1e-8)
-
-    sample_weights = 1.0 / density_values
-    sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
-    sample_weights = torch.from_numpy(sample_weights).double()
-
-    print(f"KDE sampling - Min weight: {sample_weights.min():.4f}, Max weight: {sample_weights.max():.4f}")
-
-    return WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-
-
-def create_temperature_sampler(
-    data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: int = 3,
-    temperature: float = 2.0,
-    expand_for_augmentation: bool = False
-) -> WeightedRandomSampler:
-    print(f"Creating temperature sampler with temperature={temperature}...")
-
-    difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
-
-    if expand_for_augmentation:
-        difficulty_ratings = np.tile(difficulty_ratings, 4)
-
-    hist, bin_edges = np.histogram(difficulty_ratings, bins=50, density=True)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-    scaled_hist = np.exp(np.log(hist + 1e-8) / temperature)
-    scaled_hist = scaled_hist / np.sum(scaled_hist)
-
-    interp_func = interp1d(bin_centers, scaled_hist, kind='cubic',
-                          bounds_error=False, fill_value='extrapolate')
-
-    interpolated_weights = interp_func(difficulty_ratings)
-    interpolated_weights = np.maximum(interpolated_weights, 1e-8)
-
-    sample_weights = 1.0 / interpolated_weights
-    sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
-    sample_weights = torch.from_numpy(sample_weights).double()
-
-    print(f"Temperature sampling - Min weight: {sample_weights.min():.4f}, Max weight: {sample_weights.max():.4f}")
-
-    return WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-
-
-def create_sampler_from_config(
-    data: List[Tuple[torch.Tensor, torch.Tensor]],
-    config: Dict[str, Any]
-) -> WeightedRandomSampler:
-    sampling_config = config.get('training', {}).get('sampling', {})
-    method = sampling_config.get('method', 'weighted')
-    difficulty_index = sampling_config.get('difficulty_index', 3)
-    expand_for_augmentation = sampling_config.get('expand_for_augmentation', True)
-
-    if method == 'kde':
-        bandwidth = sampling_config.get('kde_bandwidth', 0.5)
-        return create_kde_sampler(data, difficulty_index, bandwidth, expand_for_augmentation)
-    elif method == 'temperature':
-        temperature = sampling_config.get('temperature', 2.0)
-        return create_temperature_sampler(data, difficulty_index, temperature, expand_for_augmentation)
-    elif method == 'weighted':
-        return create_weighted_sampler(data, difficulty_index, expand_for_augmentation)
-    else:
-        print(f"Unknown sampling method '{method}', falling back to weighted sampling")
-        return create_weighted_sampler(data, difficulty_index, expand_for_augmentation)
-
 
 def print_data_summary(all_data: List[Tuple[torch.Tensor, torch.Tensor]]):
     if not all_data:
