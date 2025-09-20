@@ -166,11 +166,34 @@ class HitObjectVector(NamedTuple):
     def to_array(self):
         return np.array(self, dtype=np.float32)
 
+    @classmethod
+    def get_field_descriptions(cls) -> Dict[str, str]:
+        """Get human-readable descriptions for each field."""
+        return {
+            'distance_diff': 'Distance difference',
+            'cos_angle': 'Cosine of angle',
+            'sin_angle': 'Sine of angle',
+            'velocity': 'Velocity',
+            'cos_inner_angle': 'Cosine of inner angle',
+            'sin_inner_angle': 'Sine of inner angle',
+            'object_type': 'Object type (categorical)',
+            'is_new_combo': 'New combo flag (categorical)', 
+            'slider_curve_type': 'Slider curve type (categorical)',
+            'slider_num_anchors': 'Number of anchors (log)',
+            'slider_pixel_length': 'Slider pixel length (log)',
+            'time_diff_bin': 'Time diff bin (categorical)',
+            'duration_bin': 'Duration bin (categorical)',
+            'kiai_time': 'Kiai time (categorical)',
+        }
+
 class BeatmapMetadata(NamedTuple):
     """Represents beatmap metadata."""
     ar: float
     od: float
     cs: float
+    hp_drain: float
+    slider_multiplier: float
+    slider_tick: float
     difficulty_rating: float
     bpm: float
 
@@ -188,12 +211,29 @@ class BeatmapMetadata(NamedTuple):
             'ar': NormalizationType.STANDARD,
             'od': NormalizationType.STANDARD,
             'cs': NormalizationType.STANDARD,
+            'hp_drain': NormalizationType.STANDARD,
+            'slider_multiplier': NormalizationType.STANDARD,
+            'slider_tick': NormalizationType.STANDARD,
             'difficulty_rating': NormalizationType.STANDARD,
             'bpm': NormalizationType.LOG
         }
     
     def to_array(self):
         return np.array(self, dtype=np.float32)
+
+    @classmethod
+    def get_field_descriptions(cls) -> Dict[str, str]:
+        """Get human-readable descriptions for each field."""
+        return {
+            'ar': 'Approach Rate',
+            'od': 'Overall Difficulty',
+            'cs': 'Circle Size',
+            'hp_drain': 'HP Drain Rate',
+            'slider_multiplier': 'Slider Multiplier',
+            'slider_tick': 'Slider Tick Rate',
+            'difficulty_rating': 'Star Rating',
+            'bpm': 'Beats Per Minute (log)'
+        }
 
 
 class BeatmapData(NamedTuple):
@@ -235,6 +275,9 @@ class BeatmapData(NamedTuple):
             ar=self.ar,
             od=self.od,
             cs=self.circle_size,
+            hp_drain=self.hp_drain,
+            slider_multiplier=self.slider_multiplier,
+            slider_tick=self.slider_tick,
             difficulty_rating=self.difficulty_rating,
             bpm=self.main_bpm
         )

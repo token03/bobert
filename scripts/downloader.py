@@ -133,13 +133,31 @@ def extract_beatmap_info(input_file):
     except FileNotFoundError:
         print(f"Error: Input file not found at {input_file}")
         return []
-    pattern1 = r'(\d+\.?\d*)★\((\d+)\)'; matches1 = re.findall(pattern1, content)
-    if matches1: return [(id_str, round(float(sr_str), 2)) for sr_str, id_str in matches1]
-    pattern2 = r'\((\d+)\)'; matches2 = re.findall(pattern2, content)
-    if matches2: return [(id_str, None) for id_str in matches2]
+    
+    # Pattern 1: Star rating and ID format like "5.2★(123456)"
+    pattern1 = r'(\d+\.?\d*)★\((\d+)\)'
+    matches1 = re.findall(pattern1, content)
+    if matches1: 
+        return [(id_str, round(float(sr_str), 2)) for sr_str, id_str in matches1]
+    
+    # Pattern 2: Just ID in parentheses like "(123456)"
+    pattern2 = r'\((\d+)\)'
+    matches2 = re.findall(pattern2, content)
+    if matches2: 
+        return [(id_str, None) for id_str in matches2]
+    
+    # Pattern 3: Lines with just beatmap IDs
     lines = content.strip().split('\n')
-    potential_ids = [line.strip() for line in lines if line.strip().isdigit()]
-    if potential_ids: return [(id_str, None) for id_str in potential_ids]
+    potential_ids = []
+    for line in lines:
+        line = line.strip()
+        # Check if line is purely numeric (beatmap ID)
+        if line.isdigit() and len(line) >= 5:  # Beatmap IDs are typically 5+ digits
+            potential_ids.append(line)
+    
+    if potential_ids: 
+        return [(id_str, None) for id_str in potential_ids]
+    
     return []
 
 def inject_star_rating(file_path, star_rating):

@@ -10,7 +10,7 @@ from .components import (
     create_norm_layer,
     create_ffn_layer
 )
-from ..data.types import HitObjectVector
+from ..data.types import BeatmapMetadata, HitObjectVector
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(
@@ -69,7 +69,6 @@ class BertEncoder(nn.Module):
         n_layers: int,
         dim_feedforward: int,
         dropout: float = 0.1,
-        metadata_dim: int = 5,
         attention_type: str = 'rope',
         norm_type: str = 'rmsnorm',
         ffn_type: str = 'swiglu',
@@ -96,6 +95,8 @@ class BertEncoder(nn.Module):
 
         combined_dim = cont_proj_dim + total_cat_embed_dim
         self.embedding_proj = nn.Linear(combined_dim, d_model)
+
+        metadata_dim = BeatmapMetadata.get_metadata_dim()
 
         self.metadata_proj = nn.Linear(metadata_dim, d_model)
         self.metadata_token = nn.Parameter(torch.randn(1, 1, d_model))
@@ -141,6 +142,10 @@ class BertEncoder(nn.Module):
         """Embeds sequences, adds metadata token, and creates full attention mask."""
         x_embed = self.embed_sequences(x)
 
+        # Ensure metadata is properly shaped and projected
+        if metadata.dim() == 1:
+            metadata = metadata.unsqueeze(0)  # Add batch dimension if missing
+        
         meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
         full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
 

@@ -39,10 +39,30 @@ def load_and_group_data_from_db(
     con = sqlite3.connect(db_path)
     cursor = con.cursor()
 
-    print("Fetching valid beatmap IDs and all metadata...")
+    cursor.execute("PRAGMA table_info(beatmaps)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    
+    metadata_field_names = BeatmapMetadata.get_field_names()
+    available_fields = []
+    for field in metadata_field_names:
+        if field == 'cs':
+            db_field = 'circle_size'
+        elif field == 'bpm':
+            db_field = 'main_bpm'
+        else:
+            db_field = field
+            
+        if db_field in existing_columns:
+            available_fields.append((field, db_field))
+    
+    if not available_fields:
+        raise ValueError("No required metadata fields found in database")
+
+    print("Fetching valid beatmap IDs and available metadata...")
+    field_select = ', '.join([f"{db_field} as {field}" for field, db_field in available_fields])
     metadata_df = pd.read_sql_query(
-        """
-        SELECT id, ar, od, circle_size as cs, difficulty_rating, main_bpm
+        f"""
+        SELECT id, {field_select}
         FROM beatmaps
         WHERE main_bpm IS NOT NULL
         ORDER BY id
@@ -50,19 +70,19 @@ def load_and_group_data_from_db(
         con
     )
     valid_map_ids = metadata_df['id'].tolist()
+    metadata_dict = {}
+    for row in metadata_df.itertuples(index=False):
+        metadata_values = np.zeros(len(metadata_field_names), dtype=np.float32)
+        
+        for i, field_name in enumerate(metadata_field_names):
+            if hasattr(row, field_name):
+                metadata_values[i] = getattr(row, field_name)
+            else:
+                raise ValueError(f"Missing metadata field '{field_name}' for beatmap ID {row.id}")
 
-    metadata_dict = {
-        row.id: BeatmapMetadata(
-            ar=row.ar,
-            od=row.od,
-            cs=row.cs,
-            difficulty_rating=row.difficulty_rating,
-            bpm=row.main_bpm
-        ).to_array()
-        for row in metadata_df.itertuples(index=False)
-    }
+        metadata_dict[row.id] = metadata_values
 
-    print(f"Found {len(valid_map_ids)} beatmaps with complete metadata.")
+    print(f"Found {len(valid_map_ids)} beatmaps with metadata ({len(available_fields)}/{len(metadata_field_names)} fields available).")
 
     processed_data = []
     num_chunks = (len(valid_map_ids) + chunk_size - 1) // chunk_size
@@ -120,8 +140,7 @@ def load_and_group_data_from_db(
 
             metadata_tensor = torch.from_numpy(meta_np)
             
-            meta_field_names = BeatmapMetadata.get_field_names()
-            for i, field_name in enumerate(meta_field_names):
+            for i, field_name in enumerate(metadata_field_names):
                 if meta_norm_specs[field_name] == NormalizationType.LOG:
                     metadata_tensor[i] = torch.log1p(metadata_tensor[i])
 
@@ -140,6 +159,7 @@ def calculate_normalization_stats(
 
     vector_field_names = HitObjectVector.get_field_names()
     vector_norm_specs = HitObjectVector.get_normalization_specs()
+    vector_descriptions = HitObjectVector.get_field_descriptions()
     vector_stats = normalizer.get_vector_stats()
 
     print("\n" + "="*70)
@@ -150,23 +170,9 @@ def calculate_normalization_stats(
     print(f"{'Field Name':<20} {'Type':<12} {'Param 1':<12} {'Param 2':<12} {'Description'}")
     print("-" * 70)
 
-    field_descriptions = {
-        'distance_diff': 'Distance difference',
-        'cos_angle': 'Cosine of angle',
-        'sin_angle': 'Sine of angle',
-        'object_type': 'Object type (categorical)',
-        'is_new_combo': 'New combo flag (categorical)', 
-        'slider_curve_type': 'Slider curve type (categorical)',
-        'slider_num_anchors': 'Number of anchors (log)',
-        'slider_pixel_length': 'Slider pixel length (log)',
-        'time_diff_bin': 'Time diff bin (categorical)',
-        'duration_bin': 'Duration bin (categorical)',
-        'kiai_time': 'Kiai time (categorical)',
-    }
-
     for field_name in vector_field_names:
         norm_type = vector_norm_specs[field_name]
-        description = field_descriptions.get(field_name, 'Unknown field')
+        description = vector_descriptions.get(field_name, 'Unknown field')
         
         if norm_type == NormalizationType.CATEGORICAL:
             param1_str, param2_str = "N/A", "N/A"
@@ -197,11 +203,8 @@ def calculate_normalization_stats(
 
     metadata_field_names = BeatmapMetadata.get_field_names()
     meta_norm_specs = BeatmapMetadata.get_normalization_specs()
+    metadata_descriptions = BeatmapMetadata.get_field_descriptions()
     meta_stats = normalizer.get_metadata_stats()
-    metadata_descriptions = {
-        'ar': 'Approach Rate', 'od': 'Overall Difficulty', 'cs': 'Circle Size',
-        'difficulty_rating': 'Star Rating', 'bpm': 'Beats Per Minute (log)'
-    }
 
     for field_name in metadata_field_names:
         norm_type = meta_norm_specs[field_name]

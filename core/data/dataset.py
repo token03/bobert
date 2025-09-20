@@ -48,7 +48,8 @@ class BeatmapDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         vectors, metadata = self.beatmap_data[idx]
-        return self.transform(vectors, metadata)
+        normalized_vectors, normalized_metadata = self.transform(vectors, metadata)
+        return normalized_vectors, normalized_metadata
 
 class MaskedBeatmapDataset(BeatmapDataset):
 

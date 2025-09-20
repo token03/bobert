@@ -23,7 +23,6 @@ def create_bert_encoder(config: Dict[str, Any], device: torch.device) -> BertEnc
         n_layers=model_config['n_layers'],
         dim_feedforward=dim_feedforward,
         dropout=model_config.get('dropout', 0.1),
-        metadata_dim=5,  
         attention_type=attention_type,
         norm_type=norm_type,
         ffn_type=ffn_type

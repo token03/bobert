@@ -216,8 +216,6 @@ def parse_osu_file(file_path, print_info=False):
         if len(parsed_objects) < 2:
             return None 
 
-        prev_velocity = 0.0
-
         for i in range(1, len(parsed_objects)):
             prev_obj = parsed_objects[i-1]
             curr_obj = parsed_objects[i]
@@ -266,8 +264,6 @@ def parse_osu_file(file_path, print_info=False):
                 kiai_time=is_kiai
             )
             data['vectors'].append(vector)
-            
-            prev_velocity = current_velocity
 
         data.pop('hit_objects_lines', None)
         

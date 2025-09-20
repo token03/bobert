@@ -143,7 +143,6 @@ class BeatmapNormalizer:
         if include_augmentation:
             print("Including data augmentation in normalization statistics...")
             augmented_vectors_list = []
-            distance_diff_idx = vector_field_names.index('distance_diff')
             cos_angle_idx = vector_field_names.index('cos_angle')
             sin_angle_idx = vector_field_names.index('sin_angle')
             
