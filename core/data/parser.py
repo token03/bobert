@@ -2,46 +2,58 @@
 import os
 import bisect
 from collections import Counter
-from typing import Optional, List, Dict
+from typing import Optional, List, NamedTuple
 from .types import RawBeatmap, RawHitObject, RawTimingPoint
 
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
 OBJECT_TYPE_SPINNER = 2
 
-def _find_timing_points_for_obj(t: int, timing_points: List[RawTimingPoint]):
-    idx = bisect.bisect_right([p.time for p in timing_points], t) - 1
-    if idx < 0:
-        return None, None
+class TimingSection(NamedTuple):
+    start_time: int
+    uninherited: RawTimingPoint
+    effective: RawTimingPoint
 
-    effective_point = timing_points[idx]
-    uninherited_point = None
-    for i in range(idx, -1, -1):
-        if timing_points[i].uninherited:
-            uninherited_point = timing_points[i]
-            break
-    return uninherited_point, effective_point
+def _preprocess_timing_points(timing_points: List[RawTimingPoint]) -> List[TimingSection]:
+    """Pre-processes timing points into sections for O(log n) lookups."""
+    if not timing_points:
+        return []
+        
+    sections = []
+    last_uninherited = None
+    
+    for point in timing_points:
+        if point.uninherited:
+            last_uninherited = point
+        
+        if last_uninherited is None:
+            last_uninherited = RawTimingPoint(time=point.time, beat_length=500.0, uninherited=True, effects=0)
 
-def _calculate_main_bpm(timing_points: List[RawTimingPoint], hit_objects: List[Dict]) -> Optional[float]:
-    if not timing_points or not hit_objects:
+        sections.append(TimingSection(start_time=point.time, uninherited=last_uninherited, effective=point))
+    return sections
+
+def _calculate_main_bpm_from_sections(sections: List[TimingSection], hit_objects_times: List[int]) -> Optional[float]:
+    """Calculates BPM efficiently using pre-processed timing sections."""
+    if not sections or not hit_objects_times:
         return None
 
     beat_lengths = []
-    for obj in hit_objects:
-        uninherited_tp, _ = _find_timing_points_for_obj(obj['time'], timing_points)
-        if uninherited_tp:
-            beat_lengths.append(uninherited_tp.beat_length)
+    section_start_times = [s.start_time for s in sections]
+
+    for t in hit_objects_times:
+        idx = bisect.bisect_right(section_start_times, t) - 1
+        if idx >= 0:
+            beat_lengths.append(sections[idx].uninherited.beat_length)
 
     if not beat_lengths:
-        for tp in timing_points:
-            if tp.uninherited and tp.beat_length > 0:
-                return round(60000.0 / tp.beat_length)
+        for section in sections:
+            if section.uninherited.beat_length > 0:
+                return round(60000.0 / section.uninherited.beat_length)
         return None
 
     most_common_beat_length = Counter(beat_lengths).most_common(1)[0][0]
-    if most_common_beat_length <= 0:
-        return None
-
+    if most_common_beat_length <= 0: return None
+    
     return round(60000.0 / most_common_beat_length)
 
 def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
@@ -51,7 +63,7 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
         'category': 'unknown', 'main_bpm': 120.0, 'difficulty_rating': 0.0
     }
     
-    raw_timing_points = []
+    raw_timing_points_lines = []
     raw_hit_objects_lines = []
 
     try:
@@ -89,7 +101,7 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                          except:
                              pass
                 elif section == 'timingpoints':
-                    raw_timing_points.append(line)
+                    raw_timing_points_lines.append(line)
                 elif section == 'hitobjects':
                     raw_hit_objects_lines.append(line)
 
@@ -97,7 +109,7 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
             return None
 
         timing_points = []
-        for line in raw_timing_points:
+        for line in raw_timing_points_lines:
             parts = line.split(',')
             if len(parts) >= 2 and float(parts[1]) != 0:
                 timing_points.append(RawTimingPoint(
@@ -111,8 +123,9 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
         if not timing_points:
             return None
 
-        temp_hit_objects = [{'time': int(line.split(',')[2])} for line in raw_hit_objects_lines]
-        data['main_bpm'] = _calculate_main_bpm(timing_points, temp_hit_objects)
+        timing_sections = _preprocess_timing_points(timing_points)
+        hit_object_times = [int(line.split(',')[2]) for line in raw_hit_objects_lines]
+        data['main_bpm'] = _calculate_main_bpm_from_sections(timing_sections, hit_object_times)
 
         hit_objects = []
         for line in raw_hit_objects_lines:
@@ -122,14 +135,14 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
             except (ValueError, IndexError):
                 continue
             
-            is_circle = type_flags & 0b1
-            is_slider = type_flags & 0b10
-            is_spinner = type_flags & 0b1000
+            is_circle = type_flags & 1
+            is_slider = type_flags & 2
+            is_spinner = type_flags & 8
             
             obj_type = OBJECT_TYPE_CIRCLE if is_circle else OBJECT_TYPE_SLIDER if is_slider else OBJECT_TYPE_SPINNER if is_spinner else -1
             if obj_type == -1: continue
 
-            new_combo = 1 if (type_flags & 0b100) else 0
+            new_combo = 1 if (type_flags & 4) else 0
 
             curve_type, curve_points, slides, pixel_length = None, None, None, None
             end_time = time

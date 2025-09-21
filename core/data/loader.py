@@ -1,6 +1,5 @@
 # loader.py
 import os
-import sys
 from typing import Tuple, List, Optional, Dict
 import gdown
 import numpy as np
@@ -88,25 +87,13 @@ def _engineer_features_vectorized(
 
     df['duration_ms'] = df['end_time'] - df['time']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
-
     df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
-
-    if 'curve_type' in df.columns:
-        curve_type_mapping = {'B': 0, 'L': 1, 'P': 2, 'C': 3}
-        df['slider_curve_type'] = df['curve_type'].map(curve_type_mapping).fillna(4).astype(int)
-    else:
-        df['slider_curve_type'] = np.where(df['pixel_length'] > 0, 0, 4).astype(int)
-
+    df['slider_curve_type'] = np.where(df['pixel_length'] > 0, 0, 4).astype(int)
     df['slider_num_anchors'] = np.where(df['pixel_length'] > 0, 2, 0).astype(int)
-
-    if 'kiai_time' not in df.columns:
-        df['kiai_time'] = 0
-
+    if 'kiai_time' not in df.columns: df['kiai_time'] = 0
     df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
     df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
-
-    if 'main_bpm' in df.columns:
-            df.rename(columns={'main_bpm': 'bpm'}, inplace=True)
+    if 'main_bpm' in df.columns: df.rename(columns={'main_bpm': 'bpm'}, inplace=True)
 
     vector_field_names = HitObjectVector.get_field_names()
     meta_field_names = BeatmapMetadata.get_field_names()
@@ -114,13 +101,21 @@ def _engineer_features_vectorized(
     vector_df = df[['beatmap_id'] + vector_field_names]
     meta_df = df[['beatmap_id'] + meta_field_names].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
 
-    final_data = []
     print("Converting processed dataframes to tensors...")
-    for beatmap_id, group in tqdm(vector_df.groupby('beatmap_id'), total=vector_df['beatmap_id'].nunique()):
-        vectors = group[vector_field_names].to_numpy(dtype=np.float32)
-        metadata = meta_df.loc[beatmap_id].to_numpy(dtype=np.float32)
-        final_data.append((torch.from_numpy(vectors), torch.from_numpy(metadata)))
+    
+    all_vectors_np = vector_df[vector_field_names].to_numpy(dtype=np.float32)
+    ids = vector_df['beatmap_id'].to_numpy()
+    
+    split_indices = np.where(ids[:-1] != ids[1:])[0] + 1
+    vector_arrays = np.split(all_vectors_np, split_indices)
 
+    unique_ids = ids[np.concatenate(([0], split_indices))]
+    all_meta_np = meta_df.loc[unique_ids].to_numpy(dtype=np.float32)
+    
+    final_data = [
+        (torch.from_numpy(vectors), torch.from_numpy(metadata))
+        for vectors, metadata in tqdm(zip(vector_arrays, all_meta_np), total=len(unique_ids))
+    ]
     return final_data
 
 def load_and_process_data_from_parquet(
