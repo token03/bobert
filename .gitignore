@@ -6,11 +6,8 @@ venv/
 .ipynb_checkpoints/
 
 # Data & Checkpoints
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/*.txt
 data/*.json
+data/**/*.txt
 data/**/*.osu
 data/**/*.parquet
 

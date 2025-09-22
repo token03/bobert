@@ -12,6 +12,9 @@ dependencies = [
     "tqdm",
     "gdown",
     "pyarrow>=21.0.0",
+    "ossapi>=5.3.3",
+    "python-dotenv>=1.1.1",
+    "rich>=14.1.0",
 ]
 
 [project.optional-dependencies]
