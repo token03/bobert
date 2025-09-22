@@ -52,7 +52,7 @@ def _engineer_features_vectorized(
     prev_end_y.loc[first_in_group] = 192
 
     df['time_diff_ms'] = df['time'] - prev_end_time
-    df['beat_length_ms'] = 60000.0 / df['main_bpm'].replace(0, np.nan)
+    df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
     df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
 
     df['x_diff'] = df['x'] - prev_end_x
@@ -88,12 +88,14 @@ def _engineer_features_vectorized(
     df['duration_ms'] = df['end_time'] - df['time']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
     df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
-    df['slider_curve_type'] = np.where(df['pixel_length'] > 0, 0, 4).astype(int)
-    df['slider_num_anchors'] = np.where(df['pixel_length'] > 0, 2, 0).astype(int)
+    
+    curve_type_map = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
+    df['slider_curve_type'] = df['curve_type_char'].map(curve_type_map).fillna(4).astype(int)
+    df['slider_num_anchors'] = df['num_anchors']
+    
     if 'kiai_time' not in df.columns: df['kiai_time'] = 0
     df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
     df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
-    if 'main_bpm' in df.columns: df.rename(columns={'main_bpm': 'bpm'}, inplace=True)
 
     vector_field_names = HitObjectVector.get_field_names()
     meta_field_names = BeatmapMetadata.get_field_names()
@@ -180,7 +182,7 @@ def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, des
     for field_name in field_names:
         norm_type = norm_specs[field_name]
         description = descriptions.get(field_name, 'Unknown field')
-        param1_str, param2_str = "N/A", "N/A"
+        param1_str, param2_str = "N/A", "N.A."
         type_str = str(norm_type.value)
 
         if norm_type == NormalizationType.CATEGORICAL:

@@ -1,6 +1,6 @@
 data:
-  # db_path: './data/beatmap_dataset_test/'
-  db_path: './data/beatmap_dataset/'
+  db_path: './data/beatmap_dataset_test/'
+  # db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
   chunk_size: 1000
@@ -23,7 +23,7 @@ training:
     method: "kde"  
     kde_bandwidth: 0.5
     temperature: 2.0  
-    expand_for_augmentation: true
+    expand_for_augmentation: false
   
 model:
   d_model: 512

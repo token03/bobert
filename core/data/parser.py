@@ -15,7 +15,6 @@ class TimingSection(NamedTuple):
     effective: RawTimingPoint
 
 def _preprocess_timing_points(timing_points: List[RawTimingPoint]) -> List[TimingSection]:
-    """Pre-processes timing points into sections for O(log n) lookups."""
     if not timing_points:
         return []
         
@@ -32,35 +31,11 @@ def _preprocess_timing_points(timing_points: List[RawTimingPoint]) -> List[Timin
         sections.append(TimingSection(start_time=point.time, uninherited=last_uninherited, effective=point))
     return sections
 
-def _calculate_main_bpm_from_sections(sections: List[TimingSection], hit_objects_times: List[int]) -> Optional[float]:
-    """Calculates BPM efficiently using pre-processed timing sections."""
-    if not sections or not hit_objects_times:
-        return None
-
-    beat_lengths = []
-    section_start_times = [s.start_time for s in sections]
-
-    for t in hit_objects_times:
-        idx = bisect.bisect_right(section_start_times, t) - 1
-        if idx >= 0:
-            beat_lengths.append(sections[idx].uninherited.beat_length)
-
-    if not beat_lengths:
-        for section in sections:
-            if section.uninherited.beat_length > 0:
-                return round(60000.0 / section.uninherited.beat_length)
-        return None
-
-    most_common_beat_length = Counter(beat_lengths).most_common(1)[0][0]
-    if most_common_beat_length <= 0: return None
-    
-    return round(60000.0 / most_common_beat_length)
-
 def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
     data = {
         'beatmap_id': None, 'hp_drain': 5.0, 'cs': 5.0, 'od': 5.0,
         'ar': 5.0, 'slider_multiplier': 1.4, 'slider_tick': 1.0,
-        'category': 'unknown', 'main_bpm': 120.0, 'difficulty_rating': 0.0
+        'category': 'unknown', 'difficulty_rating': 0.0
     }
     
     raw_timing_points_lines = []
@@ -72,17 +47,20 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
         with open(file_path, 'r', encoding='utf-8') as f:
             section = None
             for line in f:
-                line = line.strip()
-                if not line or line.startswith('//'): continue
-                if line.startswith('[') and line.endswith(']'):
-                    section = line[1:-1].lower()
+                line_stripped = line.strip()
+                if not line_stripped: continue
+
+                if line_stripped.startswith('[') and line_stripped.endswith(']'):
+                    section = line_stripped[1:-1].lower()
                     continue
 
+                if line_stripped.startswith('//'): continue
+
                 if section == 'metadata':
-                    if line.lower().startswith('beatmapid:'):
-                        data['beatmap_id'] = int(line.split(':')[1])
+                    if line_stripped.lower().startswith('beatmapid:'):
+                        data['beatmap_id'] = int(line_stripped.split(':')[1])
                 elif section == 'difficulty':
-                    parts = line.split(':', 1)
+                    parts = line_stripped.split(':', 1)
                     if len(parts) == 2:
                         key, value = parts[0].strip().lower(), parts[1].strip()
                         try:
@@ -93,17 +71,12 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                             elif key == 'approachrate': data['ar'] = val_float
                             elif key == 'slidermultiplier': data['slider_multiplier'] = val_float
                             elif key == 'slidertickrate': data['slider_tick'] = val_float
+                            elif key == 'difficultyrating': data['difficulty_rating'] = val_float
                         except ValueError: continue
-                elif section == 'events':
-                     if 'difficultyrating' in line.lower():
-                         try:
-                             data['difficulty_rating'] = float(line.split(':')[-1])
-                         except:
-                             pass
                 elif section == 'timingpoints':
-                    raw_timing_points_lines.append(line)
+                    raw_timing_points_lines.append(line_stripped)
                 elif section == 'hitobjects':
-                    raw_hit_objects_lines.append(line)
+                    raw_hit_objects_lines.append(line_stripped)
 
         if data['beatmap_id'] is None or not raw_hit_objects_lines:
             return None
@@ -122,10 +95,9 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
         
         if not timing_points:
             return None
-
+        
         timing_sections = _preprocess_timing_points(timing_points)
-        hit_object_times = [int(line.split(',')[2]) for line in raw_hit_objects_lines]
-        data['main_bpm'] = _calculate_main_bpm_from_sections(timing_sections, hit_object_times)
+        section_start_times = [s.start_time for s in timing_sections]
 
         hit_objects = []
         for line in raw_hit_objects_lines:
@@ -154,6 +126,21 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                     curve_points = [(int(p.split(':')[0]), int(p.split(':')[1])) for p in curve_data[1:]]
                     slides = int(parts[6])
                     pixel_length = float(parts[7])
+
+                    idx = bisect.bisect_right(section_start_times, time) - 1
+                    if idx >= 0:
+                        section = timing_sections[idx]
+                        beat_length_ms = section.uninherited.beat_length
+                        
+                        sv_multiplier = 1.0
+                        if not section.effective.uninherited and section.effective.beat_length < 0:
+                            sv_multiplier = -100.0 / section.effective.beat_length
+                        
+                        if beat_length_ms > 0 and data['slider_multiplier'] > 0 and sv_multiplier > 0:
+                            slider_velocity = data['slider_multiplier'] * 100.0 * sv_multiplier
+                            time_per_slide_ms = (pixel_length / slider_velocity) * beat_length_ms
+                            end_time = time + int(time_per_slide_ms * slides)
+
                 except (ValueError, IndexError): continue
             elif obj_type == OBJECT_TYPE_SPINNER:
                 try:

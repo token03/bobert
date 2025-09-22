@@ -42,6 +42,7 @@ class HitObjectVector(NamedTuple):
     slider_pixel_length: float
     time_diff_bin: int
     duration_bin: int
+    bpm: float
     kiai_time: int
     
     @classmethod
@@ -102,6 +103,7 @@ class HitObjectVector(NamedTuple):
             'slider_pixel_length': NormalizationType.LOG,
             'time_diff_bin': NormalizationType.CATEGORICAL,
             'duration_bin': NormalizationType.CATEGORICAL,
+            'bpm': NormalizationType.LOG,
             'kiai_time': NormalizationType.CATEGORICAL
         }
     
@@ -121,6 +123,7 @@ class HitObjectVector(NamedTuple):
             'slider_pixel_length': "Pixel length of slider (0 if not a slider)",
             'time_diff_bin': "Quantized time difference to previous hit object",
             'duration_bin': "Quantized duration of the hit object",
+            'bpm': "Beats Per Minute at the time of the hit object",
             'kiai_time': "Whether the hit object is in kiai time"
         }
 
@@ -132,7 +135,6 @@ class BeatmapMetadata(NamedTuple):
     slider_multiplier: float
     slider_tick: float
     difficulty_rating: float
-    bpm: float
 
     @classmethod
     def get_field_names(cls):
@@ -152,7 +154,6 @@ class BeatmapMetadata(NamedTuple):
             'slider_multiplier': NormalizationType.STANDARD,
             'slider_tick': NormalizationType.STANDARD,
             'difficulty_rating': NormalizationType.STANDARD,
-            'bpm': NormalizationType.LOG
         }
 
     @classmethod
@@ -165,7 +166,6 @@ class BeatmapMetadata(NamedTuple):
             'slider_multiplier': "Slider Velocity Multiplier",
             'slider_tick': "Slider Tick Rate",
             'difficulty_rating': "Star Difficulty Rating",
-            'bpm': "Beats Per Minute"
         }
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()
@@ -203,7 +203,6 @@ class RawBeatmap(NamedTuple):
     ar: float
     slider_multiplier: float
     slider_tick: float
-    main_bpm: float
     difficulty_rating: float
     
     timing_points: List[RawTimingPoint]
