@@ -11,15 +11,15 @@ from ..data.types import BeatmapMetadata
 
 def create_weighted_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: Optional[int] = None,
+    difficulty_ratings: Optional[np.ndarray] = None,
     expand_for_augmentation: bool = False
 ) -> WeightedRandomSampler:
     print("Creating weighted sampler for difficulty balancing...")
 
-    if difficulty_index is None:
-        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
+    if difficulty_ratings is None:
+        raise ValueError("difficulty_ratings must be provided as a separate array")
 
-    all_difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
+    all_difficulty_ratings = difficulty_ratings.copy()
 
     if expand_for_augmentation:
         all_difficulty_ratings = np.tile(all_difficulty_ratings, 4)
@@ -53,26 +53,26 @@ def create_weighted_sampler(
 
 def create_kde_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: Optional[int] = None,
+    difficulty_ratings: Optional[np.ndarray] = None,
     bandwidth: float = 0.5,
     expand_for_augmentation: bool = False,
     num_bins: int = 100
 ) -> WeightedRandomSampler:
     print(f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}...")
 
-    if difficulty_index is None:
-        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
+    if difficulty_ratings is None:
+        raise ValueError("difficulty_ratings must be provided as a separate array")
 
-    difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
+    difficulty_ratings_array = difficulty_ratings.copy()
 
     if expand_for_augmentation:
-        difficulty_ratings = np.tile(difficulty_ratings, 4)
+        difficulty_ratings_array = np.tile(difficulty_ratings_array, 4)
 
-    min_rating, max_rating = difficulty_ratings.min(), difficulty_ratings.max()
+    min_rating, max_rating = difficulty_ratings_array.min(), difficulty_ratings_array.max()
     bin_edges = np.linspace(min_rating - 0.5, max_rating + 0.5, num_bins + 1)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-    hist, _ = np.histogram(difficulty_ratings, bins=bin_edges, density=True)
+    hist, _ = np.histogram(difficulty_ratings_array, bins=bin_edges, density=True)
 
     sigma = bandwidth * num_bins / (max_rating - min_rating + 1.0)
     smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode='reflect')
@@ -80,7 +80,7 @@ def create_kde_sampler(
     interp_func = interp1d(bin_centers, smoothed_hist, kind='linear',
                           bounds_error=False, fill_value=smoothed_hist.min())
 
-    density_values = interp_func(difficulty_ratings)
+    density_values = interp_func(difficulty_ratings_array)
     density_values = np.maximum(density_values, 1e-8)
 
     sample_weights = 1.0 / density_values
@@ -98,21 +98,21 @@ def create_kde_sampler(
 
 def create_temperature_sampler(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    difficulty_index: Optional[int] = None,
+    difficulty_ratings: Optional[np.ndarray] = None,
     temperature: float = 2.0,
     expand_for_augmentation: bool = False
 ) -> WeightedRandomSampler:
     print(f"Creating temperature sampler with temperature={temperature}...")
 
-    if difficulty_index is None:
-        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
+    if difficulty_ratings is None:
+        raise ValueError("difficulty_ratings must be provided as a separate array")
 
-    difficulty_ratings = np.array([item[1][difficulty_index].item() for item in data])
+    difficulty_ratings_array = difficulty_ratings.copy()
 
     if expand_for_augmentation:
-        difficulty_ratings = np.tile(difficulty_ratings, 4)
+        difficulty_ratings_array = np.tile(difficulty_ratings_array, 4)
 
-    hist, bin_edges = np.histogram(difficulty_ratings, bins=50, density=True)
+    hist, bin_edges = np.histogram(difficulty_ratings_array, bins=50, density=True)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
     scaled_hist = np.exp(np.log(hist + 1e-8) / temperature)
@@ -121,7 +121,7 @@ def create_temperature_sampler(
     interp_func = interp1d(bin_centers, scaled_hist, kind='cubic',
                           bounds_error=False, fill_value='extrapolate')
 
-    interpolated_weights = interp_func(difficulty_ratings)
+    interpolated_weights = interp_func(difficulty_ratings_array)
     interpolated_weights = np.maximum(interpolated_weights, 1e-8)
 
     sample_weights = 1.0 / interpolated_weights
@@ -139,23 +139,24 @@ def create_temperature_sampler(
 
 def create_sampler_from_config(
     data: List[Tuple[torch.Tensor, torch.Tensor]],
-    config: Dict[str, Any]
+    config: Dict[str, Any],
+    difficulty_ratings: Optional[np.ndarray] = None
 ) -> WeightedRandomSampler:
     sampling_config = config.get('training', {}).get('sampling', {})
     method = sampling_config.get('method', 'weighted')
-    difficulty_index = sampling_config.get('difficulty_index', None)
-    if difficulty_index is None:
-        difficulty_index = BeatmapMetadata.get_field_names().index('difficulty_rating')
     expand_for_augmentation = sampling_config.get('expand_for_augmentation', True)
+
+    if difficulty_ratings is None:
+        raise ValueError("difficulty_ratings must be provided as a separate array")
 
     if method == 'kde':
         bandwidth = sampling_config.get('kde_bandwidth', 0.5)
-        return create_kde_sampler(data, difficulty_index, bandwidth, expand_for_augmentation)
+        return create_kde_sampler(data, difficulty_ratings, bandwidth, expand_for_augmentation)
     elif method == 'temperature':
         temperature = sampling_config.get('temperature', 2.0)
-        return create_temperature_sampler(data, difficulty_index, temperature, expand_for_augmentation)
+        return create_temperature_sampler(data, difficulty_ratings, temperature, expand_for_augmentation)
     elif method == 'weighted':
-        return create_weighted_sampler(data, difficulty_index, expand_for_augmentation)
+        return create_weighted_sampler(data, difficulty_ratings, expand_for_augmentation)
     else:
         print(f"Unknown sampling method '{method}', falling back to weighted sampling")
-        return create_weighted_sampler(data, difficulty_index, expand_for_augmentation)
+        return create_weighted_sampler(data, difficulty_ratings, expand_for_augmentation)

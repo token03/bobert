@@ -23,7 +23,7 @@ training:
     method: "kde"  
     kde_bandwidth: 0.5
     temperature: 2.0  
-    expand_for_augmentation: false
+    expand_for_augmentation: true
   
 model:
   d_model: 512

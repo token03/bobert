@@ -30,7 +30,7 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
 def _engineer_features_vectorized(
     beatmaps_df: pd.DataFrame,
     hitobjects_df: pd.DataFrame
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray]:
     print("Engineering features for all beatmaps (vectorized)...")
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
 
@@ -102,6 +102,8 @@ def _engineer_features_vectorized(
 
     vector_df = df[['beatmap_id'] + vector_field_names]
     meta_df = df[['beatmap_id'] + meta_field_names].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
+    
+    difficulty_df = df[['beatmap_id', 'difficulty_rating']].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
 
     print("Converting processed dataframes to tensors...")
     
@@ -113,17 +115,18 @@ def _engineer_features_vectorized(
 
     unique_ids = ids[np.concatenate(([0], split_indices))]
     all_meta_np = meta_df.loc[unique_ids].to_numpy(dtype=np.float32)
+    all_difficulty_ratings = difficulty_df.loc[unique_ids]['difficulty_rating'].to_numpy(dtype=np.float32)
     
     final_data = [
         (torch.from_numpy(vectors), torch.from_numpy(metadata))
         for vectors, metadata in tqdm(zip(vector_arrays, all_meta_np), total=len(unique_ids))
     ]
-    return final_data
+    return final_data, all_difficulty_ratings
 
 def load_and_process_data_from_parquet(
     dataset_path: str,
     max_seq_len: Optional[int] = None
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray]:
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
     hitobjects_path = os.path.join(dataset_path, 'hitobjects')
@@ -139,7 +142,7 @@ def load_and_process_data_from_parquet(
 
     print(f"Loaded {len(beatmaps_df)} beatmaps and {len(hitobjects_df)} hit objects.")
 
-    processed_data = _engineer_features_vectorized(beatmaps_df, hitobjects_df)
+    processed_data, difficulty_ratings = _engineer_features_vectorized(beatmaps_df, hitobjects_df)
 
     vector_norm_specs = HitObjectVector.get_normalization_specs()
     meta_norm_specs = BeatmapMetadata.get_normalization_specs()
@@ -171,7 +174,7 @@ def load_and_process_data_from_parquet(
         final_data.append((vectors, metadata))
 
     print("Finished loading and processing all data.")
-    return final_data
+    return final_data, difficulty_ratings
 
 def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, descriptions: Dict, stats: Dict):
     print(f"\n--- {title}:")

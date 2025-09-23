@@ -134,7 +134,6 @@ class BeatmapMetadata(NamedTuple):
     hp_drain: float
     slider_multiplier: float
     slider_tick: float
-    difficulty_rating: float
 
     @classmethod
     def get_field_names(cls):
@@ -153,7 +152,6 @@ class BeatmapMetadata(NamedTuple):
             'hp_drain': NormalizationType.STANDARD,
             'slider_multiplier': NormalizationType.STANDARD,
             'slider_tick': NormalizationType.STANDARD,
-            'difficulty_rating': NormalizationType.STANDARD,
         }
 
     @classmethod
@@ -165,7 +163,6 @@ class BeatmapMetadata(NamedTuple):
             'hp_drain': "HP Drain Rate",
             'slider_multiplier': "Slider Velocity Multiplier",
             'slider_tick': "Slider Tick Rate",
-            'difficulty_rating': "Star Difficulty Rating",
         }
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()
