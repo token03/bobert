@@ -5,7 +5,6 @@ from typing import List, Tuple, Optional, Set, Dict
 from .types import HitObjectVector, BeatmapMetadata, NormalizationType
 
 class BeatmapNormalizer:
-
     def __init__(
         self,
         vector_stats: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
