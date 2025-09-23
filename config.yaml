@@ -16,9 +16,6 @@ training:
   checkpoint_dir: "./checkpoints/bert"
   grad_clip_norm: 1.0
   
-  use_class_weights: true
-  class_weighting_method: "inverse_frequency" 
-  
   sampling:
     method: "kde"  
     kde_bandwidth: 0.5

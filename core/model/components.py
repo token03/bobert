@@ -6,10 +6,9 @@ import math
 from typing import Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
-from einops import rearrange
 
-class BaseAttention(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
+class MultiHeadAttentionWithRoPE(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, local_window_size: int = 128, is_global: bool = True):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
@@ -20,14 +19,8 @@ class BaseAttention(nn.Module):
         self.wk = nn.Linear(d_model, d_model, bias=False)
         self.wv = nn.Linear(d_model, d_model, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
-        self.dropout = dropout
-        
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        raise NotImplementedError("Subclasses must implement forward method")
 
-class MultiHeadAttentionWithRoPE(BaseAttention):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, local_window_size: int = 128, is_global: bool = True):
-        super().__init__(d_model, n_heads, dropout)
+        self.dropout = dropout
         self.local_window_size = local_window_size
         self.is_global = is_global
 
@@ -73,59 +66,6 @@ class MultiHeadAttentionWithRoPE(BaseAttention):
         
         return self.wo(output)
 
-class StandardMultiHeadAttention(BaseAttention):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, **kwargs):
-        super().__init__(d_model, n_heads, dropout)
-        self.pos_embed = nn.Parameter(torch.randn(1, 2048, d_model) * 0.02)  
-        
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        cu_seqlens: torch.Tensor = kwargs.get("cu_seqlens")
-        max_seqlen: int = kwargs.get("max_seqlen")
-        
-        total_tokens, _ = x.shape
-        
-        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        position_ids = torch.cat([torch.arange(s, device=x.device, dtype=torch.long) for s in seqlens])
-        pos_embeds = self.pos_embed[0, position_ids, :]
-        x = x + pos_embeds
-        
-        q, k, v = self.wq(x), self.wk(x), self.wv(x)
-        
-        q = q.view(total_tokens, self.n_heads, self.d_head)
-        k = k.view(total_tokens, self.n_heads, self.d_head)
-        v = v.view(total_tokens, self.n_heads, self.d_head)
-
-        qkv = torch.stack([q, k, v], dim=1)
-        qkv = qkv.view(total_tokens, 3, self.n_heads, self.d_head)
-
-        output = flash_attn_varlen_qkvpacked_func(
-            qkv,
-            cu_seqlens,
-            max_seqlen,
-            dropout_p=self.dropout if self.training else 0.0,
-            causal=False,
-            window_size=(-1, -1)
-        )
-        
-        output = output.view(total_tokens, self.d_model)
-        
-        return self.wo(output)
-
-def create_attention_layer(
-    attention_type: str,
-    d_model: int, 
-    n_heads: int, 
-    dropout: float = 0.1,
-    local_window_size: int = 128,
-    is_global: bool = True 
-) -> BaseAttention:
-    if attention_type == 'rope':
-        return MultiHeadAttentionWithRoPE(d_model, n_heads, dropout, local_window_size, is_global=is_global)
-    elif attention_type == 'standard':
-        return StandardMultiHeadAttention(d_model, n_heads, dropout)
-    else:
-        raise ValueError(f"Unknown attention type: {attention_type}")
-
 class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-6):
         super().__init__()
@@ -138,15 +78,6 @@ class RMSNorm(nn.Module):
         hidden_states = x * torch.rsqrt(variance + self.eps)
         return (self.weight * hidden_states).to(input_dtype)
 
-
-def create_norm_layer(norm_type: str, d_model: int) -> nn.Module:
-    if norm_type == 'rmsnorm':
-        return RMSNorm(d_model)
-    elif norm_type == 'layernorm':
-        return nn.LayerNorm(d_model)
-    else:
-        raise ValueError(f"Unknown norm type: {norm_type}")
-
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, dim_feedforward: int):
         super().__init__()
@@ -157,25 +88,48 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-class StandardFFN(nn.Module):
-    def __init__(self, d_model: int, dim_feedforward: int, dropout: float = 0.1):
+class TransformerEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dim_feedforward: int,
+        dropout: float = 0.1,
+        is_global: bool = True,
+        local_window_size: int = 128
+    ):
         super().__init__()
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear2(self.dropout(F.gelu(self.linear1(x))))
+        self.is_global = is_global
 
-def create_ffn_layer(
-    ffn_type: str,
-    d_model: int, 
-    dim_feedforward: int, 
-    dropout: float = 0.1
-) -> nn.Module:
-    if ffn_type == 'swiglu':
-        return SwiGLU(d_model, dim_feedforward)
-    elif ffn_type == 'standard':
-        return StandardFFN(d_model, dim_feedforward, dropout)
-    else:
-        raise ValueError(f"Unknown FFN type: {ffn_type}")
+        self.self_attn = MultiHeadAttentionWithRoPE(
+            d_model, n_heads, dropout, local_window_size, is_global=is_global
+        )
+
+        self.ffn = SwiGLU(d_model, dim_feedforward)
+
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
+
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        src: torch.Tensor,
+        rotary_emb: Optional[RotaryEmbedding] = None,
+        cu_seqlens: torch.Tensor = None,
+        max_seqlen: int = None
+    ) -> torch.Tensor:
+        src2 = self.self_attn(
+            self.norm1(src),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            rotary_emb=rotary_emb,
+        )
+
+        src = src + self.dropout1(src2)
+
+        src2 = self.ffn(self.norm2(src))
+        src = src + self.dropout2(src2)
+
+        return src

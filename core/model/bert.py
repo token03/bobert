@@ -6,63 +6,10 @@ from typing import Optional, Tuple, Dict, Any, Type, TypeVar
 
 from rotary_embedding_torch import RotaryEmbedding
 
-from .components import (
-    create_attention_layer,
-    create_norm_layer,
-    create_ffn_layer
-)
+from .components import TransformerEncoderLayer
 from ..data.types import BeatmapMetadata, HitObjectVector
 
 T = TypeVar('T', bound='BertEncoder')
-
-class TransformerEncoderLayer(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        dim_feedforward: int,
-        dropout: float = 0.1,
-        attention_type: str = 'rope',
-        norm_type: str = 'rmsnorm',
-        ffn_type: str = 'swiglu',
-        is_global: bool = True,
-        local_window_size: int = 128
-    ):
-        super().__init__()
-        self.is_global = is_global
-
-        self.self_attn = create_attention_layer(
-            attention_type, d_model, n_heads, dropout, local_window_size, is_global=is_global
-        )
-        self.ffn = create_ffn_layer(ffn_type, d_model, dim_feedforward, dropout)
-
-        self.norm1 = create_norm_layer(norm_type, d_model)
-        self.norm2 = create_norm_layer(norm_type, d_model)
-
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        src: torch.Tensor,
-        rotary_emb: Optional[RotaryEmbedding] = None,
-        cu_seqlens: torch.Tensor = None,
-        max_seqlen: int = None
-    ) -> torch.Tensor:
-        src2 = self.self_attn(
-            self.norm1(src),
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            rotary_emb=rotary_emb,
-        )
-
-        src = src + self.dropout1(src2)
-
-        src2 = self.ffn(self.norm2(src))
-        src = src + self.dropout2(src2)
-
-        return src
-
 
 class BertEncoder(nn.Module):
     def __init__(
@@ -72,9 +19,6 @@ class BertEncoder(nn.Module):
         n_layers: int,
         dim_feedforward: int,
         dropout: float = 0.1,
-        attention_type: str = 'rope',
-        norm_type: str = 'rmsnorm',
-        ffn_type: str = 'swiglu',
         local_attention_window: int = 128,
         use_flash_attention: bool = True,
     ):
@@ -82,9 +26,6 @@ class BertEncoder(nn.Module):
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
-        self.attention_type = attention_type
-        self.norm_type = norm_type
-        self.ffn_type = ffn_type
         self.use_flash_attention = use_flash_attention
 
         self.feature_info = HitObjectVector.get_feature_info()
@@ -113,17 +54,13 @@ class BertEncoder(nn.Module):
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
                 d_model, n_heads, dim_feedforward, dropout,
-                attention_type, norm_type, ffn_type,
                 is_global=((i + 1) % 3 == 0),
                 local_window_size=local_attention_window
             )
             for i in range(n_layers)
         ])
 
-        if attention_type == 'rope':
-            self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads)
-        else:
-            self.rotary_emb = None
+        self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads)
 
     @classmethod
     def from_config(cls: Type[T], config: Dict[str, Any]) -> T:
@@ -131,7 +68,6 @@ class BertEncoder(nn.Module):
         components_config = config.get('components', {})
         
         dim_feedforward = model_config['d_model'] * model_config.get('dim_feedforward_mult', 4)
-        attention_type = 'rope' if components_config.get('use_rope', True) else 'standard'
         
         return cls(
             d_model=model_config['d_model'],
@@ -139,9 +75,6 @@ class BertEncoder(nn.Module):
             n_layers=model_config['n_layers'],
             dim_feedforward=dim_feedforward,
             dropout=model_config.get('dropout', 0.1),
-            attention_type=attention_type,
-            norm_type=components_config.get('norm_type', 'rmsnorm'),
-            ffn_type=components_config.get('ffn_type', 'swiglu'),
             use_flash_attention=components_config.get('use_flash_attention', True)
         )
 
@@ -164,9 +97,6 @@ class BertEncoder(nn.Module):
         print(f"Model Dimension: {self.d_model}")
         print(f"Number of Heads: {self.n_heads}")
         print(f"Number of Layers: {self.n_layers}")
-        print(f"Attention Type: {self.attention_type}")
-        print(f"Normalization Type: {self.norm_type}")
-        print(f"FFN Type: {self.ffn_type}")
         print(f"Flash Attention: {self.use_flash_attention}")
         print("-" * 30)
 
