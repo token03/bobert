@@ -15,6 +15,7 @@ from core.training.metrics import MetricsTracker, PretrainEpochMetrics
 from core.training.optimization import create_optimizer, create_scheduler
 from .loss import mlm_loss_fn
 from core.logger import TrainingLogger
+from ..data.transforms import BeatmapNormalizer
 
 class MLMTrainer:
     def __init__(
@@ -27,6 +28,7 @@ class MLMTrainer:
         config: Dict[str, Any],
         device: torch.device,
         checkpoint_manager: CheckpointManager,
+        normalizer: BeatmapNormalizer,
         loss_fn: Callable = mlm_loss_fn
     ):
         self.model = model
@@ -37,6 +39,7 @@ class MLMTrainer:
         self.config = config
         self.device = device
         self.checkpoint_manager = checkpoint_manager
+        self.normalizer = normalizer
         self.loss_fn = loss_fn
         
         self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
@@ -167,7 +170,9 @@ class MLMTrainer:
 
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
-                epoch, val_metrics
+                epoch, val_metrics,
+                vector_stats=self.normalizer.get_vector_stats(),
+                meta_stats=self.normalizer.get_metadata_stats()
             )
             
             self.logger.log_epoch_end(
@@ -188,7 +193,8 @@ def setup_training(
     train_dataloader: torch.utils.data.DataLoader,
     val_dataloader: torch.utils.data.DataLoader,
     config: Dict[str, Any],
-    device: torch.device
+    device: torch.device,
+    normalizer: BeatmapNormalizer
 ) -> Tuple[MLMTrainer, CheckpointManager]:
     grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
@@ -203,7 +209,8 @@ def setup_training(
     
     trainer = MLMTrainer(
         model, train_dataloader, val_dataloader,
-        optimizer, scheduler, config, device, checkpoint_manager
+        optimizer, scheduler, config, device, checkpoint_manager,
+        normalizer=normalizer
     )
     
     return trainer, checkpoint_manager

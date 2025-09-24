@@ -14,6 +14,7 @@ from .checkpoint import CheckpointManager
 from .metrics import MetricsTracker
 from .optimization import create_optimizer, create_scheduler
 from .loss import contrastive_loss_fn
+from ..data.transforms import BeatmapNormalizer
 
 class FineTuningTrainer:
     def __init__(
@@ -26,6 +27,7 @@ class FineTuningTrainer:
         config: Dict[str, Any],
         device: torch.device,
         checkpoint_manager: CheckpointManager,
+        normalizer: BeatmapNormalizer,
         user_tag_encoder: Dict[str, int],
         collection_label_encoder: Dict[str, int]
     ):
@@ -37,6 +39,7 @@ class FineTuningTrainer:
         self.config = config
         self.device = device
         self.checkpoint_manager = checkpoint_manager
+        self.normalizer = normalizer
         self.loss_fn = contrastive_loss_fn
         self.user_tag_encoder = user_tag_encoder
         self.collection_label_encoder = collection_label_encoder
@@ -187,11 +190,15 @@ class FineTuningTrainer:
 
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
-                epoch, val_metrics, suffix=f"epoch_{epoch+1}"
+                epoch, val_metrics, suffix=f"epoch_{epoch+1}",
+                vector_stats=self.normalizer.get_vector_stats(),
+                meta_stats=self.normalizer.get_metadata_stats()
             )
             self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
-                epoch, val_metrics, suffix="latest"
+                epoch, val_metrics, suffix="latest",
+                vector_stats=self.normalizer.get_vector_stats(),
+                meta_stats=self.normalizer.get_metadata_stats()
             )
 
             print(f"Epoch {epoch+1}/{num_epochs} | Time: {epoch_duration:.2f}s | "
@@ -209,6 +216,7 @@ def setup_finetuning(
     val_dataloader: DataLoader,
     config: Dict[str, Any],
     device: torch.device,
+    normalizer: BeatmapNormalizer,
     user_tag_encoder: Dict[str, int],
     collection_label_encoder: Dict[str, int]
 ) -> Tuple[FineTuningTrainer, CheckpointManager]:
@@ -232,6 +240,7 @@ def setup_finetuning(
         config=config,
         device=device,
         checkpoint_manager=checkpoint_manager,
+        normalizer=normalizer,
         user_tag_encoder=user_tag_encoder,
         collection_label_encoder=collection_label_encoder
     )

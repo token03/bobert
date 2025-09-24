@@ -23,7 +23,9 @@ class CheckpointManager:
         scaler: Optional[torch.cuda.amp.GradScaler],
         epoch: int,
         metrics: Dict[str, float],
-        suffix: str = "latest"
+        suffix: str = "latest",
+        vector_stats: Optional[Dict[str, Any]] = None,
+        meta_stats: Optional[Dict[str, Any]] = None
     ):
         checkpoint_data = {
             'epoch': epoch,
@@ -38,6 +40,12 @@ class CheckpointManager:
         if scaler is not None:
             checkpoint_data['scaler_state_dict'] = scaler.state_dict()
             
+        if vector_stats is not None:
+            checkpoint_data['vector_stats'] = vector_stats
+        
+        if meta_stats is not None:
+            checkpoint_data['meta_stats'] = meta_stats
+            
         checkpoint_path = self.get_checkpoint_path(suffix)
         torch.save(checkpoint_data, checkpoint_path)
         return checkpoint_path
@@ -50,7 +58,7 @@ class CheckpointManager:
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
         suffix: str = "latest",
         device: torch.device = torch.device('cpu')
-    ) -> Tuple[int, Dict[str, float]]:
+    ) -> Tuple[int, Dict[str, float], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         checkpoint_path = self.get_checkpoint_path(suffix)
         
         if not os.path.exists(checkpoint_path):
@@ -89,8 +97,28 @@ class CheckpointManager:
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
-        return checkpoint['epoch'], checkpoint.get('metrics', {})
+        vector_stats = checkpoint.get('vector_stats')
+        meta_stats = checkpoint.get('meta_stats')
+        
+        return checkpoint['epoch'], checkpoint.get('metrics', {}), vector_stats, meta_stats
     
+    def load_normalization_stats(self, suffix: str = "latest") -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Loads only the normalization stats from a checkpoint."""
+        checkpoint_path = self.get_checkpoint_path(suffix)
+        if not os.path.exists(checkpoint_path):
+            print(f"Warning: Checkpoint for stats not found at {checkpoint_path}")
+            return None
+        
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        vector_stats = checkpoint.get('vector_stats')
+        meta_stats = checkpoint.get('meta_stats')
+        
+        if vector_stats and meta_stats:
+            return vector_stats, meta_stats
+        
+        print(f"Warning: Normalization stats not found in checkpoint {checkpoint_path}")
+        return None
+
     def checkpoint_exists(self, suffix: str = "latest") -> bool:
         """Checks if a checkpoint exists."""
         return os.path.exists(self.get_checkpoint_path(suffix))
