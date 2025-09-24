@@ -103,7 +103,6 @@ class CheckpointManager:
         return checkpoint['epoch'], checkpoint.get('metrics', {}), vector_stats, meta_stats
     
     def load_normalization_stats(self, suffix: str = "latest") -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-        """Loads only the normalization stats from a checkpoint."""
         checkpoint_path = self.get_checkpoint_path(suffix)
         if not os.path.exists(checkpoint_path):
             print(f"Warning: Checkpoint for stats not found at {checkpoint_path}")
@@ -120,5 +119,4 @@ class CheckpointManager:
         return None
 
     def checkpoint_exists(self, suffix: str = "latest") -> bool:
-        """Checks if a checkpoint exists."""
         return os.path.exists(self.get_checkpoint_path(suffix))

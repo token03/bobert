@@ -142,3 +142,25 @@ def create_dataloaders(
     )
 
     return train_dataloader, val_dataloader
+
+class FinetuningDataset(Dataset):
+    def __init__(self, beatmap_data, ratings, labels, tags, transform):
+        self.beatmap_data = beatmap_data
+        self.ratings = ratings
+        self.labels = labels
+        self.tags = tags
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.beatmap_data)
+
+    def __getitem__(self, idx):
+        vectors, metadata = self.beatmap_data[idx]
+        norm_vectors, norm_metadata = self.transform(vectors, metadata)
+        return (
+            norm_vectors,
+            norm_metadata,
+            torch.tensor(self.ratings[idx], dtype=torch.float32),
+            self.labels[idx],
+            self.tags[idx]
+        )
