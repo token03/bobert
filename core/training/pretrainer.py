@@ -1,5 +1,6 @@
-# trainer.py
+# pretrainer.py
 import time
+import math
 from core.data.types import HitObjectVector
 from typing import Dict, Any, Optional, Tuple, Callable
 from tqdm.auto import tqdm
@@ -40,6 +41,7 @@ class MLMTrainer:
         
         self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
+        self.grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
         
         self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()
@@ -63,47 +65,59 @@ class MLMTrainer:
             cat_feat_names=self.cat_feat_names
         )
         
-        print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}")
-    
+        print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}, Grad Accum: {self.grad_accum_steps}")
+        if self.train_dataloader.batch_sampler is not None:
+            effective_batch_size = self.train_dataloader.batch_sampler.batch_size * self.grad_accum_steps
+        else:
+            effective_batch_size = self.train_dataloader.batch_size * self.grad_accum_steps
+        print(f"Effective batch size: {effective_batch_size}")
+
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         total_loss = 0.0
-        num_batches = 0
+        self.optimizer.zero_grad(set_to_none=True)
         
+        num_update_steps = math.ceil(len(self.train_dataloader) / self.grad_accum_steps)
         progress_bar = tqdm(
-            self.train_dataloader, 
-            desc=f"Epoch {epoch+1} [Train]", 
+            total=num_update_steps,
+            desc=f"Epoch {epoch+1} [Train]",
             dynamic_ncols=True
         )
         
-        for vectors, attention_mask, metadata in progress_bar:
+        data_iter = iter(self.train_dataloader)
+        for i in range(len(self.train_dataloader)):
+            vectors, attention_mask, metadata = next(data_iter)
             vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
-            self.optimizer.zero_grad(set_to_none=True)
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                 predictions, targets, mask = self.model(vectors, metadata, attention_mask)
                 loss = self.loss_fn(predictions, targets, mask)
+                scaled_loss = loss / self.grad_accum_steps
             
-            self.scaler.scale(loss).backward()
+            self.scaler.scale(scaled_loss).backward()
             
-            if self.grad_clip_norm > 0:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-            
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            
-            if self.scheduler is not None: self.scheduler.step()
+            if (i + 1) % self.grad_accum_steps == 0 or (i + 1) == len(self.train_dataloader):
+                if self.grad_clip_norm > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                if self.scheduler is not None: self.scheduler.step()
+                
+                progress_bar.update(1)
             
             total_loss += loss.item()
-            num_batches += 1
             
             progress_bar.set_postfix({
                 "Loss": f"{loss.item():.4f}",
                 "LR": f"{self.optimizer.param_groups[0]['lr']:.2e}"
             })
-        
-        avg_loss = total_loss / max(num_batches, 1)
+            
+        progress_bar.close()
+        avg_loss = total_loss / len(self.train_dataloader)
         return {'loss': avg_loss, 'learning_rate': self.optimizer.param_groups[0]['lr']}
     
     def validate_epoch(self, epoch: int) -> Dict[str, Any]:
@@ -113,7 +127,13 @@ class MLMTrainer:
         self.val_metrics.reset()
         
         with torch.no_grad():
-            for vectors, attention_mask, metadata in self.val_dataloader:
+            progress_bar = tqdm(
+                self.val_dataloader,
+                desc=f"Epoch {epoch+1} [Validate]",
+                dynamic_ncols=True,
+                leave=False
+            )
+            for vectors, attention_mask, metadata in progress_bar:
                 vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
                 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
@@ -170,7 +190,9 @@ def setup_training(
     config: Dict[str, Any],
     device: torch.device
 ) -> Tuple[MLMTrainer, CheckpointManager]:
-    total_steps = len(train_dataloader) * config['training']['num_epochs']
+    grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
+    total_steps = num_update_steps_per_epoch * config['training']['num_epochs']
 
     optimizer = create_optimizer(model, config) 
     scheduler = create_scheduler(optimizer, config, total_steps)

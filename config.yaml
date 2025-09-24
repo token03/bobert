@@ -15,7 +15,7 @@ training:
   use_amp: true
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
   
   sampling:
     method: "kde"  

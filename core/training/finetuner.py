@@ -1,5 +1,6 @@
 # finetuner.py
 import time
+import math
 from typing import Dict, Any, Optional, Tuple, List
 from tqdm.auto import tqdm
 
@@ -78,7 +79,6 @@ class FineTuningTrainer:
         }
         
         if any(collection_labels):
-            # Check for model attribute before accessing it
             num_collection_classes = self.model.module.collection_label_head.out_features if isinstance(self.model, nn.DataParallel) else self.model.collection_label_head.out_features
             encoded_collections = self._encode_labels(collection_labels, self.collection_label_encoder, num_collection_classes)
             labels_dict['collection_labels'] = encoded_collections
@@ -92,7 +92,6 @@ class FineTuningTrainer:
         return vectors, attention_mask, metadata, labels_dict
 
     def _run_step(self, batch: Tuple, is_train: bool) -> Dict[str, float]:
-        # This function is now only for validation and a single micro-step
         vectors, attention_mask, metadata, labels = self._prepare_batch(batch)
         
         with torch.set_grad_enabled(is_train):
@@ -101,7 +100,6 @@ class FineTuningTrainer:
                 losses = self.loss_fn(predictions, labels, self.config)
         
         if is_train:
-             # Scale the loss by accumulation steps
             scaled_loss = losses['total_loss'] / self.grad_accum_steps
             self.scaler.scale(scaled_loss).backward()
         
@@ -109,25 +107,24 @@ class FineTuningTrainer:
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        self.optimizer.zero_grad(set_to_none=True) # Zero grad at the beginning of the epoch
-        
+        self.optimizer.zero_grad(set_to_none=True)
         epoch_losses = {}
         
+        num_update_steps = math.ceil(len(self.train_dataloader) / self.grad_accum_steps)
         progress_bar = tqdm(
-            self.train_dataloader, 
-            desc=f"Epoch {epoch+1} [Train]", 
+            total=num_update_steps,
+            desc=f"Epoch {epoch+1} [Train]",
             dynamic_ncols=True
         )
         
-        for i, batch in enumerate(progress_bar):
-            # This is now a micro-batch
+        data_iter = iter(self.train_dataloader)
+        for i in range(len(self.train_dataloader)):
+            batch = next(data_iter)
             step_losses = self._run_step(batch, is_train=True)
             
-            # Accumulate losses for logging
             for k, v in step_losses.items():
                 epoch_losses[k] = epoch_losses.get(k, 0.0) + v
             
-            # Perform optimizer step after accumulating gradients
             if (i + 1) % self.grad_accum_steps == 0 or (i + 1) == len(self.train_dataloader):
                 if self.grad_clip_norm > 0:
                     self.scaler.unscale_(self.optimizer)
@@ -138,12 +135,15 @@ class FineTuningTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 
                 if self.scheduler: self.scheduler.step()
+                
+                progress_bar.update(1)
 
             progress_bar.set_postfix({
                 "Loss": f"{step_losses['total_loss']:.4f}",
                 "LR": f"{self.optimizer.param_groups[0]['lr']:.2e}"
             })
             
+        progress_bar.close()
         avg_losses = {k: v / len(self.train_dataloader) for k, v in epoch_losses.items()}
         avg_losses['learning_rate'] = self.optimizer.param_groups[0]['lr']
         return avg_losses
@@ -161,7 +161,6 @@ class FineTuningTrainer:
             )
             for batch in progress_bar:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    # We can use the original _run_step for validation as it doesn't backprop
                     vectors, attention_mask, metadata, labels = self._prepare_batch(batch)
                     predictions = self.model(vectors, metadata, attention_mask)
                     step_losses = self.loss_fn(predictions, labels, self.config)
@@ -173,7 +172,6 @@ class FineTuningTrainer:
         return avg_losses
 
     def train(self, start_epoch: int = 0):
-        # This part remains mostly the same
         num_epochs = self.config['training']['num_epochs']
         print(f"Starting fine-tuning from epoch {start_epoch+1}/{num_epochs}...")
         
@@ -214,8 +212,9 @@ def setup_finetuning(
     user_tag_encoder: Dict[str, int],
     collection_label_encoder: Dict[str, int]
 ) -> Tuple[FineTuningTrainer, CheckpointManager]:
-    # This part remains the same
-    total_steps = len(train_dataloader) * config['training']['num_epochs']
+    grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
+    total_steps = num_update_steps_per_epoch * config['training']['num_epochs']
     
     optimizer = create_optimizer(model, config)
     scheduler = create_scheduler(optimizer, config, total_steps)
