@@ -20,25 +20,16 @@ training:
     method: "kde"  
     kde_bandwidth: 0.5
     num_bins: 200
-    expand_for_augmentation: true
+    expand_for_augmentation: false
+
+contrastive:
+  user_tag_classes: 42
+  collection_label_classes: 5
+  temperature: 0.1
+  user_tag_weight: 1.0
+  collection_label_weight: 1.0
+  difficulty_rating_weight: 1.0
   
-fine_tuning:
-  enabled: false
-  checkpoint_path: "./checkpoints/bert/checkpoint_epoch_4.pth"
-  freeze_base_model: false
-  learning_rate: 1e-5
-  num_epochs: 3
-  difficulty_weight: 0.4
-  collection_label_weight: 0.4
-  user_tag_weight: 0.2
-
-  batching:
-    batch_size: 8
-    mix_difficulty: true
-    mix_collection_labels: true
-    mix_user_tags: false
-    
-
 model:
   d_model: 512
   n_heads: 8
@@ -47,10 +38,10 @@ model:
   dropout: 0.1
   
 components:
-  use_rope: true
   use_flash_attention: true
   compile_model: true
   compile_mode: "default"
   
 mlm:
   masking_ratio: 0.25
+

@@ -59,14 +59,25 @@ class CheckpointManager:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         
         state_dict = checkpoint['model_state_dict']
-        if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+        
+        compiled_model_prefix = '_orig_mod.'
+        is_checkpoint_compiled = any(key.startswith(compiled_model_prefix) for key in state_dict.keys())
+        is_model_compiled = getattr(model, 'is_compiled', False)
+        
+        if is_checkpoint_compiled and not is_model_compiled:
             new_state_dict = {}
             for key, value in state_dict.items():
-                if key.startswith('_orig_mod.'):
-                    new_key = key[len('_orig_mod.'):]
+                if key.startswith(compiled_model_prefix):
+                    new_key = key[len(compiled_model_prefix):]
                     new_state_dict[new_key] = value
                 else:
                     new_state_dict[key] = value
+            state_dict = new_state_dict
+        elif not is_checkpoint_compiled and is_model_compiled:
+            new_state_dict = {}
+            for key, value in state_dict.items():
+                compiled_key = compiled_model_prefix + key
+                new_state_dict[compiled_key] = value
             state_dict = new_state_dict
         
         model.load_state_dict(state_dict)

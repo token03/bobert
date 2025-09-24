@@ -1,45 +1,44 @@
 # loss.py
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, Any
-from torch.nn import functional as F
 
 from core.data.types import HitObjectVector
 
+@torch.compile
 def mlm_loss_fn(
     predictions: Dict[str, Any], 
     targets: torch.Tensor, 
     mask: torch.Tensor
 ) -> torch.Tensor:
     num_masked = torch.sum(mask)
-    if num_masked == 0:
-        return torch.tensor(0.0, device=targets.device, requires_grad=True)
-
     feature_info = HitObjectVector.get_feature_info()
-    total_loss = torch.tensor(0.0, device=targets.device)
-
-    standard_cont_names = [name for name in feature_info['continuous'] if 'angle' not in name]
-    standard_cont_indices = [feature_info['continuous'][name] for name in standard_cont_names]
+    total_loss = torch.zeros((), device=targets.device)
     
-    if standard_cont_indices:
+    standard_cont_names = [name for name in feature_info['continuous'] if 'angle' not in name]
+    if standard_cont_names:
+        standard_cont_indices = [feature_info['continuous'][name] for name in standard_cont_names]
+        
         cont_preds = predictions['standard_continuous']
         cont_targets = targets[..., standard_cont_indices]
+        
         cont_loss = F.mse_loss(cont_preds, cont_targets, reduction='none')
-        masked_cont_loss = cont_loss[mask].sum()
-        total_loss += masked_cont_loss
+        total_loss += cont_loss[mask].sum()
 
     angle_names = sorted([name for name in feature_info['continuous'] if 'angle' in name])
-    angle_indices = [feature_info['continuous'][name] for name in angle_names]
+    if angle_names:
+        angle_indices = [feature_info['continuous'][name] for name in angle_names]
     
-    angle_preds = predictions['angle'] 
-    angle_targets = targets[..., angle_indices]
-    
-    angle_targets_reshaped = angle_targets.view(*angle_targets.shape[:-1], -1, 2)
-    angle_targets_norm = F.normalize(angle_targets_reshaped, p=2, dim=-1)
-    angle_targets_norm = angle_targets_norm.view_as(angle_targets)
-    
-    angle_loss = F.mse_loss(angle_preds, angle_targets_norm, reduction='none')
-    masked_angle_loss = angle_loss[mask].sum()
-    total_loss += masked_angle_loss
+        angle_preds = predictions['angle'] 
+        angle_targets = targets[..., angle_indices]
+        
+        angle_targets_reshaped = angle_targets.view(*angle_targets.shape[:-1], -1, 2)
+        angle_targets_norm = F.normalize(angle_targets_reshaped, p=2, dim=-1)
+        angle_targets_norm = angle_targets_norm.view_as(angle_targets)
+        
+        angle_loss = F.mse_loss(angle_preds, angle_targets_norm, reduction='none')
+        total_loss += angle_loss[mask].sum()
 
     for name, info in feature_info['categorical'].items():
         cat_logits = predictions['categorical'][name]
@@ -49,9 +48,118 @@ def mlm_loss_fn(
         flat_targets = cat_targets.view(-1)
         
         cat_loss = F.cross_entropy(flat_logits, flat_targets, reduction='none')
-        cat_loss = cat_loss.view(mask.shape) 
+        cat_loss = cat_loss.view(mask.shape)
         
-        masked_cat_loss = cat_loss[mask].sum()
-        total_loss += masked_cat_loss
+        total_loss += cat_loss[mask].sum()
 
-    return total_loss / num_masked
+    return total_loss / (num_masked + 1e-9)
+
+
+def _multi_label_contrastive_loss(projections: torch.Tensor, labels: torch.Tensor, temperature: float) -> torch.Tensor:
+    projections = F.normalize(projections, p=2, dim=1)
+    sim_matrix = torch.matmul(projections, projections.T) / temperature
+    positive_mask = (torch.matmul(labels.float(), labels.float().T) > 0).float()
+    
+    diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
+    positive_mask.masked_fill_(diag_mask, 0)
+    
+    n_positives_per_anchor = positive_mask.sum(dim=1)
+    
+    sim_matrix_masked = sim_matrix.clone()
+    sim_matrix_masked.masked_fill_(diag_mask, -torch.inf)
+    log_prob = F.log_softmax(sim_matrix_masked, dim=1)
+    
+    log_prob_pos = (positive_mask * log_prob).sum(dim=1)
+    
+    loss_per_anchor = -log_prob_pos / n_positives_per_anchor.clamp(min=1.0)
+    
+    valid_anchors_mask = n_positives_per_anchor > 0
+    final_loss = loss_per_anchor[valid_anchors_mask].mean()
+    
+    return torch.nan_to_num(final_loss, nan=0.0)
+
+
+def _continuous_contrastive_loss(projections: torch.Tensor, values: torch.Tensor, embedding_temp: float, label_temp: float) -> torch.Tensor:
+    projections = F.normalize(projections, p=2, dim=1)
+    sim_matrix = torch.matmul(projections, projections.T) / embedding_temp
+    
+    values = values.contiguous().view(-1, 1)
+    pairwise_dist_sq = torch.cdist(values, values, p=2).pow(2)
+    soft_positive_mask = torch.exp(-pairwise_dist_sq / label_temp)
+    
+    diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
+    soft_positive_mask.masked_fill_(diag_mask, 0)
+    
+    row_sum = soft_positive_mask.sum(dim=1).clamp(min=1e-9)
+    normalized_soft_mask = soft_positive_mask / row_sum.unsqueeze(1)
+    
+    sim_matrix_masked = sim_matrix.clone()
+    sim_matrix_masked.masked_fill_(diag_mask, -torch.inf)
+    log_prob = F.log_softmax(sim_matrix_masked, dim=1)
+    
+    loss = -(normalized_soft_mask * log_prob).sum(dim=1).mean()
+    
+    return loss
+
+@torch.compile
+def contrastive_loss_fn(
+    predictions: Dict[str, torch.Tensor],
+    labels: Dict[str, torch.Tensor],
+    config: Dict[str, Any]
+) -> Dict[str, torch.Tensor]:
+    losses = {}
+    total_loss = torch.zeros((), device=predictions['cls_representation'].device)
+    
+    contrastive_config = config.get('contrastive', {})
+    temperature = contrastive_config.get('temperature', 0.1)
+    difficulty_label_temp = contrastive_config.get('difficulty_label_temp', 1.0)
+    
+    user_tag_weight = contrastive_config.get('user_tag_weight', 1.0)
+    collection_label_weight = contrastive_config.get('collection_label_weight', 1.0)
+    difficulty_rating_weight = contrastive_config.get('difficulty_rating_weight', 1.0)
+
+    if 'user_tags' in labels:
+        user_tag_loss = F.binary_cross_entropy_with_logits(
+            predictions['user_tag_logits'], labels['user_tags'].float()
+        )
+        losses['user_tag_loss'] = user_tag_loss
+        total_loss += user_tag_weight * user_tag_loss
+    
+    if 'collection_labels' in labels:
+        collection_label_loss = F.binary_cross_entropy_with_logits(
+            predictions['collection_label_logits'], labels['collection_labels'].float()
+        )
+        losses['collection_label_loss'] = collection_label_loss
+        total_loss += collection_label_weight * collection_label_loss
+
+    if 'difficulty_ratings' in labels:
+        difficulty_rating_loss = F.mse_loss(
+            predictions['difficulty_rating_preds'], labels['difficulty_ratings']
+        )
+        losses['difficulty_rating_loss'] = difficulty_rating_loss
+        total_loss += difficulty_rating_weight * difficulty_rating_loss
+
+    if 'user_tags' in labels and 'user_tag_projection' in predictions:
+        user_tag_contrastive_loss = _multi_label_contrastive_loss(
+            predictions['user_tag_projection'], labels['user_tags'], temperature
+        )
+        losses['user_tag_contrastive_loss'] = user_tag_contrastive_loss
+        total_loss += user_tag_weight * user_tag_contrastive_loss
+        
+    if 'collection_labels' in labels and 'collection_label_projection' in predictions:
+        collection_label_contrastive_loss = _multi_label_contrastive_loss(
+            predictions['collection_label_projection'], labels['collection_labels'], temperature
+        )
+        losses['collection_label_contrastive_loss'] = collection_label_contrastive_loss
+        total_loss += collection_label_weight * collection_label_contrastive_loss
+
+    if 'difficulty_ratings' in labels and 'difficulty_rating_projection' in predictions:
+        difficulty_contrastive_loss = _continuous_contrastive_loss(
+            predictions['difficulty_rating_projection'], labels['difficulty_ratings'],
+            embedding_temp=temperature, label_temp=difficulty_label_temp
+        )
+        losses['difficulty_contrastive_loss'] = difficulty_contrastive_loss
+        total_loss += difficulty_rating_weight * difficulty_contrastive_loss
+
+    losses['total_loss'] = total_loss
+    return losses

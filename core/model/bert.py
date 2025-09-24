@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Dict, Any, Type, TypeVar
+from typing import Tuple, Dict, Any, Type, TypeVar, Optional
 
 from rotary_embedding_torch import RotaryEmbedding
 
@@ -89,18 +89,6 @@ class BertEncoder(nn.Module):
             'parameter_efficiency': trainable_params / total_params if total_params > 0 else 0
         }
 
-    def print_info(self):
-        summary = self.get_summary()
-        
-        print(f"\n--- BERT Encoder Information ---")
-        print(f"Total Parameters: {summary['trainable_parameters'] / 1e6:.2f}M")
-        print(f"Model Dimension: {self.d_model}")
-        print(f"Number of Heads: {self.n_heads}")
-        print(f"Number of Layers: {self.n_layers}")
-        print(f"Flash Attention: {self.use_flash_attention}")
-        print("-" * 30)
-
-
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
         cont_features = x[:, :, self.cont_indices]
         projected_cont = self.continuous_proj(cont_features)
@@ -137,7 +125,6 @@ class BertEncoder(nn.Module):
         return full_embeddings, full_attention_mask
 
     def encode(self, embeddings: torch.Tensor, attention_mask: torch.Tensor, max_seqlen: int) -> torch.Tensor:
-        """Runs the transformer encoder layers on already-embedded inputs."""
         seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
         cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
         packed_output = embeddings[attention_mask]
@@ -204,14 +191,6 @@ class BertForMaskedModeling(nn.Module):
         
         return model
 
-    def print_info(self):
-        self.bert.print_info()
-        print(f"\n--- MLM Head Information ---")
-        print(f"Task: Masked Modeling")
-        print(f"Masking Ratio: {self.masking_ratio}")
-        print(f"Model Compiled: {self.is_compiled}")
-        print("-" * 30)
-
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
 
@@ -274,3 +253,68 @@ class BertForMaskedModeling(nn.Module):
         }
 
         return predictions, x, is_masked
+
+
+class BertForContrastiveFineTuning(nn.Module):
+    def __init__(self, bert_model: BertEncoder, user_tag_classes: int = 1000, collection_label_classes: int = 100):
+        super().__init__()
+        self.bert = bert_model
+        self.d_model = bert_model.d_model
+        
+        self.user_tag_classes = user_tag_classes
+        if self.user_tag_classes > 0:
+            self.user_tag_head = nn.Linear(self.d_model, user_tag_classes)
+            self.user_tag_projection = nn.Linear(self.d_model, self.d_model)
+            
+        self.collection_label_head = nn.Linear(self.d_model, collection_label_classes)
+        self.difficulty_rating_head = nn.Linear(self.d_model, 1)  
+        
+        self.collection_label_projection = nn.Linear(self.d_model, self.d_model)
+        self.difficulty_rating_projection = nn.Linear(self.d_model, self.d_model)
+        
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
+        base_model = BertEncoder.from_config(config)
+        
+        contrastive_config = config.get('contrastive', {})
+        user_tag_classes = contrastive_config.get('user_tag_classes', 0) 
+        collection_label_classes = contrastive_config.get('collection_label_classes', 100)
+
+        model = cls(base_model, user_tag_classes, collection_label_classes)
+        model = model.to(device)
+        
+        if config.get('components', {}).get('compile_model', False):
+            print("Compiling Contrastive BERT model with torch.compile...")
+            model = torch.compile(model, mode=config.get('components', {}).get('compile_mode', 'default'))
+            model.is_compiled = True
+        
+        return model
+
+    def get_summary(self) -> Dict[str, Any]:
+        return self.bert.get_summary()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        metadata: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        full_embeddings, full_attention_mask = self.bert._embed(x, metadata, attention_mask)
+        max_seqlen = full_embeddings.shape[1]
+        encoded_output = self.bert.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
+        
+        cls_representation = encoded_output[:, 0, :] 
+        
+        predictions = {
+            'collection_label_logits': self.collection_label_head(cls_representation),
+            'difficulty_rating_preds': self.difficulty_rating_head(cls_representation).squeeze(-1),
+            'collection_label_projection': self.collection_label_projection(cls_representation),
+            'difficulty_rating_projection': self.difficulty_rating_projection(cls_representation),
+            'cls_representation': cls_representation
+        }
+        
+        if self.user_tag_classes > 0:
+            predictions['user_tag_logits'] = self.user_tag_head(cls_representation)
+            predictions['user_tag_projection'] = self.user_tag_projection(cls_representation)
+            
+        return predictions

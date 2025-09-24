@@ -1,5 +1,6 @@
 # loader.py
 import os
+import json
 from typing import Tuple, List, Optional, Dict
 import gdown
 import numpy as np
@@ -175,3 +176,56 @@ def load_dataset(
 
     print("Finished loading and processing all data.")
     return final_data, difficulty_ratings
+
+
+def load_finetuning_dataset(
+    dataset_path: str,
+    max_seq_len: Optional[int] = None,
+    labels_path: str = "./data/labels.json",
+    tags_path: str = "./data/tags.json"
+) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray, List[List[str]], List[List[str]]]:
+    print("Loading fine-tuning dataset with labels and tags...")
+    
+    processed_data, difficulty_ratings = load_dataset(dataset_path, max_seq_len)
+    
+    labels_dict = {}
+    tags_dict = {}
+    
+    if os.path.exists(labels_path):
+        print(f"Loading labels from {labels_path}...")
+        with open(labels_path, 'r') as f:
+            labels_dict = json.load(f)
+    
+    if os.path.exists(tags_path):
+        print(f"Loading tags from {tags_path}...")
+        with open(tags_path, 'r') as f:
+            tags_dict = json.load(f)
+
+    print("Loading raw data to extract beatmap IDs...")
+    beatmaps_path = os.path.join(dataset_path, 'beatmaps')
+    hitobjects_path = os.path.join(dataset_path, 'hitobjects')
+    
+    beatmaps_df = pd.read_parquet(beatmaps_path)
+    hitobjects_df = pd.read_parquet(hitobjects_path)
+    
+    df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
+    map_counts = df['beatmap_id'].value_counts()
+    valid_beatmap_ids = map_counts[map_counts >= 2].index
+    if len(valid_beatmap_ids) < len(beatmaps_df):
+        df = df[df['beatmap_id'].isin(valid_beatmap_ids)].copy()
+    
+    df_sorted = df.sort_values(['beatmap_id', 'time'])
+    unique_ids = df_sorted['beatmap_id'].drop_duplicates().values
+    
+    print("Matching beatmap IDs with labels and tags...")
+    all_labels = []
+    all_tags = []
+    for beatmap_id in unique_ids:
+        str_beatmap_id = str(beatmap_id)
+        labels = labels_dict.get(str_beatmap_id, [])
+        tags = tags_dict.get(str_beatmap_id, [])
+        all_labels.append(labels)
+        all_tags.append(tags)
+    
+    print("Finished loading fine-tuning dataset.")
+    return processed_data, difficulty_ratings, all_labels, all_tags
