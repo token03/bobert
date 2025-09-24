@@ -116,7 +116,9 @@ class BertEncoder(nn.Module):
         if metadata.dim() == 1:
             metadata = metadata.unsqueeze(0)
         
-        meta_embed = self.metadata_proj(metadata).unsqueeze(1) + self.metadata_token
+        projected_meta = self.metadata_proj(metadata).unsqueeze(1)
+        meta_embed = projected_meta + self.metadata_token.to(projected_meta.dtype)
+        
         full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
 
         meta_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)

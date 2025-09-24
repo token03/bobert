@@ -1,9 +1,11 @@
 # sampler.py
+from collections import defaultdict
+import random 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import WeightedRandomSampler
-from typing import Tuple, List, Dict, Any, Optional
+from torch.utils.data import WeightedRandomSampler, Sampler
+from typing import Tuple, List, Dict, Any, Optional, Iterator
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from ..data.types import BeatmapMetadata
@@ -50,3 +52,80 @@ def create_kde_sampler(
         num_samples=len(sample_weights),
         replacement=True
     )
+
+def create_contrastive_sampler(
+    labels: List[List[str]],
+    batch_size: int = 8,
+    num_positives_per_anchor: int = 1
+) -> Sampler[List[int]]:
+    return ContrastiveBatchSampler(labels, batch_size=batch_size, num_positives_per_anchor=num_positives_per_anchor)
+
+class ContrastiveBatchSampler(Sampler[List[int]]):
+    def __init__(self, labels: List[List[str]], batch_size: int, num_positives_per_anchor: int = 1):
+        super().__init__(labels)
+        self.labels = labels
+        self.batch_size = batch_size
+        self.num_positives_per_anchor = num_positives_per_anchor
+        
+        if batch_size < num_positives_per_anchor + 1:
+            raise ValueError("batch_size must be at least num_positives_per_anchor + 1")
+
+        self.label_to_indices = defaultdict(list)
+        for i, sample_labels in enumerate(labels):
+            for label in sample_labels:
+                self.label_to_indices[label].append(i)
+
+        self.usable_labels = {
+            label: indices for label, indices in self.label_to_indices.items() if len(indices) > 1
+        }
+        
+        self.indices_with_pairs = sorted(list(
+            {idx for label in self.usable_labels for idx in self.usable_labels[label]}
+        ))
+        
+        if not self.indices_with_pairs:
+            raise ValueError("No data points share any labels. Cannot create positive pairs.")
+            
+        print(f"ContrastiveBatchSampler: Found {len(self.usable_labels)} labels with >1 members.")
+        print(f"Total data points with potential pairs: {len(self.indices_with_pairs)}")
+
+    def __iter__(self) -> Iterator[List[int]]:
+        available_indices = list(self.indices_with_pairs)
+        random.shuffle(available_indices)
+        
+        batch = []
+        all_indices_pool = list(range(len(self.labels)))
+
+        while len(available_indices) > 0:
+            anchor_idx = available_indices.pop()
+            
+            anchor_labels = [l for l in self.labels[anchor_idx] if l in self.usable_labels]
+            if not anchor_labels:
+                continue 
+
+            chosen_label = random.choice(anchor_labels)
+            
+            positive_candidates = [i for i in self.usable_labels[chosen_label] if i != anchor_idx]
+            if len(positive_candidates) < self.num_positives_per_anchor:
+                continue 
+
+            positives = random.sample(positive_candidates, self.num_positives_per_anchor)
+            
+            current_group = [anchor_idx] + positives
+            batch.extend(current_group)
+
+            if len(batch) >= self.batch_size:
+                num_to_sample = self.batch_size - len(current_group)
+                
+                potential_negatives = [i for i in all_indices_pool if i not in current_group]
+                negatives = random.sample(potential_negatives, min(num_to_sample, len(potential_negatives)))
+                
+                final_batch = current_group + negatives
+                final_batch = final_batch[:self.batch_size] 
+                random.shuffle(final_batch)
+                
+                yield final_batch
+                batch = []
+
+    def __len__(self) -> int:
+        return len(self.indices_with_pairs) // (self.num_positives_per_anchor + 1) // (self.batch_size // (self.num_positives_per_anchor + 1))

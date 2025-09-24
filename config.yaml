@@ -13,19 +13,21 @@ training:
   warmup_ratio: 0.05
   min_lr: 1e-6
   use_amp: true
-  checkpoint_dir: "./checkpoints/bert"
+  checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
+  gradient_accumulation_steps: 8
   
   sampling:
     method: "kde"  
     kde_bandwidth: 0.5
     num_bins: 200
-    expand_for_augmentation: false
+    expand_for_augmentation: true
 
 contrastive:
   user_tag_classes: 42
   collection_label_classes: 5
   temperature: 0.1
+  num_positives_per_anchor: 2
   user_tag_weight: 1.0
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0

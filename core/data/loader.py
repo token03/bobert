@@ -9,7 +9,6 @@ import torch
 from tqdm import tqdm
 
 from .types import HitObjectVector, BeatmapMetadata, NormalizationType, DURATION_BINS, quantize_to_bins
-from .transforms import BeatmapNormalizer
 
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
@@ -195,6 +194,8 @@ def load_finetuning_dataset(
         print(f"Loading labels from {labels_path}...")
         with open(labels_path, 'r') as f:
             labels_dict = json.load(f)
+    else:
+        print(f"Warning: Labels file not found at {labels_path}. Proceeding without collection labels.")
     
     if os.path.exists(tags_path):
         print(f"Loading tags from {tags_path}...")
@@ -227,5 +228,25 @@ def load_finetuning_dataset(
         all_labels.append(labels)
         all_tags.append(tags)
     
+    initial_count = len(processed_data)
+    print(f"Initial fine-tuning dataset size: {initial_count} beatmaps.")
+
+    indices_to_keep = [i for i, labels in enumerate(all_labels) if labels]
+    
+    if len(indices_to_keep) < initial_count:
+        removed_count = initial_count - len(indices_to_keep)
+        print(f"Filtering out {removed_count} beatmaps without any collection labels...")
+
+        processed_data = [processed_data[i] for i in indices_to_keep]
+        difficulty_ratings = difficulty_ratings[indices_to_keep]
+        all_labels = [all_labels[i] for i in indices_to_keep]
+        all_tags = [all_tags[i] for i in indices_to_keep]
+    
+    final_count = len(processed_data)
+    if final_count == 0 and initial_count > 0:
+        raise ValueError("No beatmaps with labels found in the dataset. Cannot proceed with fine-tuning. "
+                         "Please check your labels file and ensure it corresponds to the dataset.")
+    
+    print(f"Final fine-tuning dataset size: {final_count} beatmaps.")
     print("Finished loading fine-tuning dataset.")
     return processed_data, difficulty_ratings, all_labels, all_tags

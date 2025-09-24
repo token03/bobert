@@ -56,13 +56,19 @@ def mlm_loss_fn(
 
 
 def _multi_label_contrastive_loss(projections: torch.Tensor, labels: torch.Tensor, temperature: float) -> torch.Tensor:
-    projections = F.normalize(projections, p=2, dim=1)
+    epsilon = 1e-8
+    projections = F.normalize(projections + epsilon, p=2, dim=1)
+    
     sim_matrix = torch.matmul(projections, projections.T) / temperature
+    
     positive_mask = (torch.matmul(labels.float(), labels.float().T) > 0).float()
     
     diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
     positive_mask.masked_fill_(diag_mask, 0)
     
+    if positive_mask.sum() == 0:
+        return torch.tensor(0.0, device=projections.device)
+
     n_positives_per_anchor = positive_mask.sum(dim=1)
     
     sim_matrix_masked = sim_matrix.clone()
@@ -80,7 +86,9 @@ def _multi_label_contrastive_loss(projections: torch.Tensor, labels: torch.Tenso
 
 
 def _continuous_contrastive_loss(projections: torch.Tensor, values: torch.Tensor, embedding_temp: float, label_temp: float) -> torch.Tensor:
-    projections = F.normalize(projections, p=2, dim=1)
+    epsilon = 1e-8
+    projections = F.normalize(projections + epsilon, p=2, dim=1)
+    
     sim_matrix = torch.matmul(projections, projections.T) / embedding_temp
     
     values = values.contiguous().view(-1, 1)
@@ -90,7 +98,7 @@ def _continuous_contrastive_loss(projections: torch.Tensor, values: torch.Tensor
     diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
     soft_positive_mask.masked_fill_(diag_mask, 0)
     
-    row_sum = soft_positive_mask.sum(dim=1).clamp(min=1e-9)
+    row_sum = soft_positive_mask.sum(dim=1).clamp(min=epsilon) 
     normalized_soft_mask = soft_positive_mask / row_sum.unsqueeze(1)
     
     sim_matrix_masked = sim_matrix.clone()
@@ -99,7 +107,7 @@ def _continuous_contrastive_loss(projections: torch.Tensor, values: torch.Tensor
     
     loss = -(normalized_soft_mask * log_prob).sum(dim=1).mean()
     
-    return loss
+    return torch.nan_to_num(loss, nan=0.0) 
 
 @torch.compile
 def contrastive_loss_fn(
