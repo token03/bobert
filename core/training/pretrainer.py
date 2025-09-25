@@ -45,8 +45,8 @@ class MLMTrainer:
         self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
         self.grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
-        
-        self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
+
+        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()
         self.feature_info = HitObjectVector.get_feature_info()
 

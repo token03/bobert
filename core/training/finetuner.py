@@ -48,7 +48,7 @@ class FineTuningTrainer:
         self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
         self.grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
         
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = torch.amp.GradScaler(device=device.type, enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()
 
         print(f"FineTuningTrainer initialized - AMP: {self.use_amp}, Device: {device}, Grad Accum: {self.grad_accum_steps}")
@@ -175,7 +175,7 @@ class FineTuningTrainer:
         return avg_losses
 
     def train(self, start_epoch: int = 0):
-        num_epochs = self.config['training']['num_epochs']
+        num_epochs = self.config['contrastive']['num_epochs']
         print(f"Starting fine-tuning from epoch {start_epoch+1}/{num_epochs}...")
         
         for epoch in range(start_epoch, num_epochs):
@@ -190,12 +190,6 @@ class FineTuningTrainer:
 
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
-                epoch, val_metrics, suffix=f"epoch_{epoch+1}",
-                vector_stats=self.normalizer.get_vector_stats(),
-                meta_stats=self.normalizer.get_metadata_stats()
-            )
-            self.checkpoint_manager.save_checkpoint(
-                self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics, suffix="latest",
                 vector_stats=self.normalizer.get_vector_stats(),
                 meta_stats=self.normalizer.get_metadata_stats()
@@ -203,7 +197,6 @@ class FineTuningTrainer:
 
             print(f"Epoch {epoch+1}/{num_epochs} | Time: {epoch_duration:.2f}s | "
                   f"Train Loss: {train_metrics['total_loss']:.4f} | "
-
                   f"Val Loss: {val_metrics['total_loss']:.4f} | "
                   f"Checkpoint saved to {checkpoint_path}")
         

@@ -1,4 +1,4 @@
-# label.py
+# label.py 
 import re
 import sys
 import os
@@ -7,17 +7,17 @@ import concurrent.futures
 from pathlib import Path
 import argparse
 from tqdm import tqdm
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Tuple
 
-BEATMAP_ID_REGEX = re.compile(r'\b(\d{5,8})\b')
+BEATMAP_ID_REGEX = re.compile(r'\((\d{5,8})\)')
 
-def process_file_chunk(file_paths: List[Path]) -> Dict[str, List[str]]:
-    local_labels: Dict[str, List[str]] = {}
+def process_file_chunk(file_paths: List[Path]) -> Dict[int, List[str]]:
+    local_labels: Dict[int, List[str]] = {}
     for file_path in file_paths:
-        label = file_path.stem  
+        label = file_path.stem
         try:
             content = file_path.read_text(encoding='utf-8')
-            found_ids: Set[str] = set(BEATMAP_ID_REGEX.findall(content))
+            found_ids: Set[int] = {int(id_str) for id_str in BEATMAP_ID_REGEX.findall(content)}
             for beatmap_id in found_ids:
                 local_labels.setdefault(beatmap_id, []).append(label)
         except (IOError, UnicodeDecodeError) as e:
@@ -66,7 +66,7 @@ def main():
     chunk_size = max(1, len(all_txt_files) // (worker_threads * 2))
     chunks = [all_txt_files[i:i + chunk_size] for i in range(0, len(all_txt_files), chunk_size)]
 
-    final_labels: Dict[str, List[str]] = {}
+    final_labels: Dict[int, Set[str]] = {}
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_threads) as executor:
         future_to_chunk = {executor.submit(process_file_chunk, chunk): chunk for chunk in chunks}
@@ -80,16 +80,20 @@ def main():
             try:
                 chunk_result = future.result()
                 for beatmap_id, labels in chunk_result.items():
-                    final_labels.setdefault(beatmap_id, []).extend(labels)
+                    final_labels.setdefault(beatmap_id, set()).update(labels)
             except Exception as exc:
                 print(f'\nA chunk generated an exception: {exc}', file=sys.stderr)
 
-    print(f"\nProcessed {len(all_txt_files)} files and found {len(final_labels)} unique beatmap IDs.")
+    final_labels_with_lists = {k: sorted(list(v)) for k, v in final_labels.items()}
+
+    final_labels_str_keys = {str(k): v for k, v in final_labels_with_lists.items()}
+
+    print(f"\nProcessed {len(all_txt_files)} files and found {len(final_labels_str_keys)} unique beatmap IDs.")
     print(f"Saving aggregated labels to '{output_file.name}'...")
 
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(final_labels, f, sort_keys=True, indent=2)
+            json.dump(final_labels_str_keys, f, sort_keys=True, indent=2)
     except IOError as e:
         print(f"Error: Failed to write to output file '{output_file}': {e}", file=sys.stderr)
         sys.exit(1)

@@ -143,6 +143,17 @@ def create_dataloaders(
 
     return train_dataloader, val_dataloader
 
+def finetuning_collate_fn(batch, max_seq_len, vector_dim, device):
+    vectors, metadata, ratings, labels, tags = zip(*batch)
+    
+    padded_vectors, attention_mask, stacked_metadata = collate_fn(
+        list(zip(vectors, metadata)), max_seq_len, vector_dim, device
+    )
+    
+    stacked_ratings = torch.stack(ratings).to(device)
+    
+    return padded_vectors, attention_mask, stacked_metadata, stacked_ratings, labels, tags
+
 class FinetuningDataset(Dataset):
     def __init__(self, beatmap_data, ratings, labels, tags, transform):
         self.beatmap_data = beatmap_data

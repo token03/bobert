@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.config import load_config
-from core.data.loader import load_dataset
+from core.data.loader import load_dataset 
 from core.data.transforms import BeatmapNormalizer, BeatmapTransform
 from core.data.dataset import collate_fn
 from core.model.bert import BertForContrastiveFineTuning
@@ -25,47 +25,59 @@ from core.training.checkpoint import CheckpointManager
 import umap
 import plotly.graph_objects as go
 
-# --- Constants ---
 DEFAULT_SAMPLE_SIZE = 500
 CONFIG_PATH = "./config.yaml"
 CHECKPOINT_DIR = "checkpoints"
 PRETRAIN_MODEL_NAME = "model"
 FINETUNED_MODEL_NAME = "model_finetuned"
 
-# --- Helper Functions (No changes here) ---
-
 def get_beatmap_ids_in_order(dataset_path: str) -> pd.DataFrame:
-    print("Reading beatmap IDs from source...")
-    beatmaps_df = pd.read_parquet(os.path.join(dataset_path, 'beatmaps'))
-    hitobjects_df = pd.read_parquet(os.path.join(dataset_path, 'hitobjects'))
-    df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
-    map_counts = df['beatmap_id'].value_counts()
-    valid_beatmap_ids = map_counts[map_counts >= 2].index
-    if len(valid_beatmap_ids) < len(beatmaps_df):
-        df = df[df['beatmap_id'].isin(valid_beatmap_ids)].copy()
-    df_sorted = df.sort_values(['beatmap_id', 'time'])
-    columns_to_select = ['beatmap_id']
-    if 'beatmapset_id' in df_sorted.columns:
-        columns_to_select.append('beatmapset_id')
-    unique_beatmap_info = df_sorted[columns_to_select].drop_duplicates('beatmap_id')
-    return unique_beatmap_info
+    print("Reading beatmap IDs from source (memory-efficient)...")
+    beatmaps_path = os.path.join(dataset_path, 'beatmaps')
+    hitobjects_path = os.path.join(dataset_path, 'hitobjects')
 
-def load_model_and_normalizer(config: dict, device: torch.device, full_dataset: list) -> tuple:
+    if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
+        raise FileNotFoundError(f"Required Parquet files not found in {dataset_path}")
+
+    ho_ids = pd.read_parquet(hitobjects_path, columns=['beatmap_id'])
+    
+    map_counts = ho_ids['beatmap_id'].value_counts()
+    valid_beatmap_ids = map_counts[map_counts >= 2].index
+
+    beatmaps_df = pd.read_parquet(beatmaps_path)
+    
+    final_beatmaps_df = beatmaps_df[beatmaps_df['beatmap_id'].isin(valid_beatmap_ids)].copy()
+
+    initial_count = len(final_beatmaps_df)
+    final_beatmaps_df.drop_duplicates(subset=['beatmap_id'], keep='first', inplace=True)
+    final_count = len(final_beatmaps_df)
+    if initial_count != final_count:
+        print(f"Warning: Removed {initial_count - final_count} duplicate beatmap IDs from the source list.")
+
+    columns_to_select = ['beatmap_id']
+        
+    return final_beatmaps_df[columns_to_select].reset_index(drop=True)
+
+def load_model_and_normalizer(config: dict, device: torch.device) -> tuple:
     print("Loading model and normalization stats...")
     model = BertForContrastiveFineTuning.from_config(config, device)
     model.eval()
     pretrain_manager = CheckpointManager(CHECKPOINT_DIR, model_name=PRETRAIN_MODEL_NAME)
+    
+    print("Attempting to load normalization stats from pre-trained checkpoint...")
     stats = pretrain_manager.load_normalization_stats()
+
     if stats is None:
-        print("\n" + "="*80)
-        print("WARNING: Could not load normalization stats from pre-trained checkpoint.")
-        print("Calculating new normalization stats from the loaded dataset for this run.")
-        print("="*80 + "\n")
-        normalizer = BeatmapNormalizer.from_data(full_dataset, include_augmentation=False)
-    else:
-        vector_stats, meta_stats = stats
-        normalizer = BeatmapNormalizer(vector_stats=vector_stats, meta_stats=meta_stats)
-        print("Successfully created normalizer from pre-trained stats.")
+        raise FileNotFoundError(
+            f"Could not load normalization stats from pre-trained checkpoint. "
+            f"Ensure a checkpoint for '{PRETRAIN_MODEL_NAME}' exists in the '{CHECKPOINT_DIR}' "
+            "directory and contains the necessary normalization stats."
+        )
+
+    vector_stats, meta_stats = stats
+    normalizer = BeatmapNormalizer(vector_stats=vector_stats, meta_stats=meta_stats)
+    print("Successfully created normalizer from pre-trained stats.")
+
     finetune_manager = CheckpointManager(CHECKPOINT_DIR, model_name=FINETUNED_MODEL_NAME)
     ckpt_path = finetune_manager.get_checkpoint_path('latest')
     if not os.path.exists(ckpt_path):
@@ -148,20 +160,29 @@ def main():
     
     config = load_config("config", config_dir=".")
 
-    all_data, all_ratings = load_dataset(dataset_path, config['data']['max_seq_len'])
     all_ids_df = get_beatmap_ids_in_order(dataset_path)
+    num_beatmaps = len(all_ids_df)
 
-    model, normalizer = load_model_and_normalizer(config, device, all_data)
+    if num_beatmaps == 0:
+        print("Error: No valid beatmaps found in the dataset.", file=sys.stderr)
+        sys.exit(1)
 
-    num_beatmaps = min(len(all_data), len(all_ids_df))
     sample_size = min(args.sample_size, num_beatmaps)
-
     print(f"Sampling {sample_size} beatmaps from a total of {num_beatmaps}...")
-    indices = random.sample(range(num_beatmaps), sample_size)
-    
-    sampled_data = [all_data[i] for i in indices]
-    sampled_ratings = all_ratings[indices]
-    sampled_ids_df = all_ids_df.iloc[indices]
+    sampled_ids_df = all_ids_df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+    ids_to_load = sampled_ids_df['beatmap_id'].tolist()
+
+    sampled_data, sampled_ratings, loaded_ids = load_dataset(
+        dataset_path, 
+        config['data']['max_seq_len'],
+        ids_to_load=ids_to_load
+    )
+
+    if len(loaded_ids) != len(ids_to_load):
+        print(f"Warning: Requested {len(ids_to_load)} maps, but loaded {len(loaded_ids)}. "
+              "This may be due to filtering or missing data for some IDs.")
+
+    model, normalizer = load_model_and_normalizer(config, device)
  
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
         embeddings = generate_embeddings(model, normalizer, sampled_data, config, device)
@@ -172,30 +193,19 @@ def main():
 
     print("Creating interactive visualization with Plotly...")
     
-    has_set_id = 'beatmapset_id' in sampled_ids_df.columns
+    custom_data = loaded_ids
+    
+    if not (len(embeddings_2d) == len(sampled_ratings) == len(custom_data)):
+        print("ERROR: Mismatch in lengths of data for plotting. Aborting.", file=sys.stderr)
+        print(f"Embeddings: {len(embeddings_2d)}, Ratings: {len(sampled_ratings)}, Custom Data: {len(custom_data)}", file=sys.stderr)
+        sys.exit(1)
 
-    if has_set_id:
-        print("Found beatmapset_id, will generate links to beatmap sets (/s/).")
-        custom_data = np.stack((
-            sampled_ids_df['beatmapset_id'].values,
-            sampled_ids_df['beatmap_id'].values
-        ), axis=-1)
-        hovertemplate = (
-            "<b>Set ID:</b> %{customdata[0]}<br>"
-            "<b>Map ID:</b> %{customdata[1]}<br>"
-            "<b>Difficulty:</b> %{marker.color:.2f}<br>"
-            "<b>Click to open beatmap set</b>"
-            "<extra></extra>"
-        )
-    else:
-        print("Warning: beatmapset_id not found. Generating links to individual beatmaps (/b/).")
-        custom_data = sampled_ids_df['beatmap_id'].values
-        hovertemplate = (
-            "<b>Map ID:</b> %{customdata}<br>"
-            "<b>Difficulty:</b> %{marker.color:.2f}<br>"
-            "<b>Click to open beatmap</b>"
-            "<extra></extra>"
-        )
+    hovertemplate = (
+        "<b>Map ID:</b> %{customdata}<br>"
+        "<b>Difficulty:</b> %{marker.color:.2f}<br>"
+        "<b>Click to open beatmap</b>"
+        "<extra></extra>"
+    )
 
     fig = go.Figure(data=go.Scatter(
         x=embeddings_2d[:, 0], y=embeddings_2d[:, 1], mode='markers',
@@ -214,10 +224,6 @@ def main():
         hovermode='closest'
     )
 
-    # --- START: FINAL FIX FOR CLICKABLE LINKS ---
-    
-    # This raw JavaScript code is passed to Plotly, which will wrap it in <script> tags correctly.
-    # The <script> tags are NOT included in the string itself.
     js_script = """
     window.addEventListener('load', function() {
         var plot_div = document.querySelector('.plotly-graph-div');
@@ -258,7 +264,6 @@ def main():
     print(f"\n--- Visualization Complete! ---")
     print(f"Interactive graph saved to: {os.path.abspath(output_file)}")
     print("You can now open this file in a browser. Clicking on a point will open the beatmap link.")
-    # --- END: FINAL FIX FOR CLICKABLE LINKS ---
 
 
 if __name__ == "__main__":

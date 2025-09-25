@@ -1,9 +1,10 @@
 data:
-  db_path: './data/beatmap_dataset_test/'
-  # db_path: './data/beatmap_dataset/'
+  # db_path: './data/beatmap_dataset_test/'
+  db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
-  chunk_size: 1000
+  max_samples_per_class:
+    aim: 1500
     
 training:
   batch_size: 8
@@ -27,10 +28,11 @@ contrastive:
   user_tag_classes: 42
   collection_label_classes: 5
   temperature: 0.1
-  num_positives_per_anchor: 2
-  user_tag_weight: 1.0
+  num_positives_per_anchor: 1
+  user_tag_weight: 0.0
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0
+  num_epochs: 5
   
 model:
   d_model: 512

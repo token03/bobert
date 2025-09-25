@@ -67,8 +67,10 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
         self.batch_size = batch_size
         self.num_positives_per_anchor = num_positives_per_anchor
         
-        if batch_size < num_positives_per_anchor + 1:
-            raise ValueError("batch_size must be at least num_positives_per_anchor + 1")
+        self.group_size = self.num_positives_per_anchor + 1
+
+        if batch_size < self.group_size:
+            raise ValueError(f"batch_size ({batch_size}) must be at least num_positives_per_anchor + 1 ({self.group_size})")
 
         self.label_to_indices = defaultdict(list)
         for i, sample_labels in enumerate(labels):
@@ -76,7 +78,8 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
                 self.label_to_indices[label].append(i)
 
         self.usable_labels = {
-            label: indices for label, indices in self.label_to_indices.items() if len(indices) > 1
+            label: indices for label, indices in self.label_to_indices.items()
+            if len(indices) >= self.group_size
         }
         
         self.indices_with_pairs = sorted(list(
@@ -84,48 +87,61 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
         ))
         
         if not self.indices_with_pairs:
-            raise ValueError("No data points share any labels. Cannot create positive pairs.")
+            raise ValueError("No data points share any labels. Cannot create positive groups.")
             
-        print(f"ContrastiveBatchSampler: Found {len(self.usable_labels)} labels with >1 members.")
-        print(f"Total data points with potential pairs: {len(self.indices_with_pairs)}")
+        print(f"ContrastiveBatchSampler: Found {len(self.usable_labels)} labels with >={self.group_size} members.")
+        print(f"Total data points that can be anchors: {len(self.indices_with_pairs)}")
 
     def __iter__(self) -> Iterator[List[int]]:
-        available_indices = list(self.indices_with_pairs)
-        random.shuffle(available_indices)
+        available_anchors = self.indices_with_pairs.copy()
+        random.shuffle(available_anchors)
         
-        batch = []
-        all_indices_pool = list(range(len(self.labels)))
+        anchor_iterator = iter(available_anchors)
+        has_more_anchors = True
 
-        while len(available_indices) > 0:
-            anchor_idx = available_indices.pop()
+        while has_more_anchors:
+            batch_indices = []
             
-            anchor_labels = [l for l in self.labels[anchor_idx] if l in self.usable_labels]
-            if not anchor_labels:
-                continue 
+            while len(batch_indices) + self.group_size <= self.batch_size:
+                try:
+                    anchor_idx = next(anchor_iterator)
+                except StopIteration:
+                    has_more_anchors = False
+                    break
+                
+                valid_anchor_labels = [l for l in self.labels[anchor_idx] if l in self.usable_labels]
+                if not valid_anchor_labels:
+                    continue
 
-            chosen_label = random.choice(anchor_labels)
+                chosen_label = random.choice(valid_anchor_labels)
+                
+                positive_candidates = [i for i in self.usable_labels[chosen_label] if i != anchor_idx]
+                
+                if len(positive_candidates) < self.num_positives_per_anchor:
+                    continue
+
+                positives = random.sample(positive_candidates, self.num_positives_per_anchor)
+                
+                batch_indices.extend([anchor_idx] + positives)
+
+            if not batch_indices:
+                break
             
-            positive_candidates = [i for i in self.usable_labels[chosen_label] if i != anchor_idx]
-            if len(positive_candidates) < self.num_positives_per_anchor:
-                continue 
+            num_negatives_needed = self.batch_size - len(batch_indices)
+            if num_negatives_needed > 0:
+                current_batch_set = set(batch_indices)
+                all_indices_set = set(range(len(self.labels)))
+                potential_negatives = list(all_indices_set - current_batch_set)
+                
+                num_to_sample = min(num_negatives_needed, len(potential_negatives))
+                negatives = random.sample(potential_negatives, num_to_sample)
+                batch_indices.extend(negatives)
 
-            positives = random.sample(positive_candidates, self.num_positives_per_anchor)
-            
-            current_group = [anchor_idx] + positives
-            batch.extend(current_group)
-
-            if len(batch) >= self.batch_size:
-                num_to_sample = self.batch_size - len(current_group)
-                
-                potential_negatives = [i for i in all_indices_pool if i not in current_group]
-                negatives = random.sample(potential_negatives, min(num_to_sample, len(potential_negatives)))
-                
-                final_batch = current_group + negatives
-                final_batch = final_batch[:self.batch_size] 
-                random.shuffle(final_batch)
-                
-                yield final_batch
-                batch = []
+            random.shuffle(batch_indices)
+            yield batch_indices
 
     def __len__(self) -> int:
-        return len(self.indices_with_pairs) // (self.num_positives_per_anchor + 1) // (self.batch_size // (self.num_positives_per_anchor + 1))
+        num_groups_per_batch = self.batch_size // self.group_size
+        if num_groups_per_batch == 0:
+            return 0
+        return (len(self.indices_with_pairs) + num_groups_per_batch - 1) // num_groups_per_batch
