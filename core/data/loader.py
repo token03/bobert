@@ -42,7 +42,7 @@ def _engineer_features_vectorized(
         df = df[df['beatmap_id'].isin(valid_beatmap_ids)].copy()
 
     df.sort_values(['beatmap_id', 'time'], inplace=True)
-    grouped = df.groupby('beatmap_id')
+    grouped = df.groupby('beatmap_id', observed=False)
 
     prev_end_time = grouped['end_time'].shift(1)
     prev_end_x = grouped['x'].shift(1)

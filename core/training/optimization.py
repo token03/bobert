@@ -1,4 +1,5 @@
 from pytorch_optimizer import get_wsd_schedule
+from pytorch_optimizer import AdamW
 from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
@@ -19,7 +20,7 @@ def create_optimizer(
     if optimizer_type.lower() == 'adamw':
         return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     elif optimizer_type.lower() == 'adam':
-        return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        return AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     elif optimizer_type.lower() == 'sgd':
         momentum = float(phase_config.get('momentum', 0.9))
         return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)

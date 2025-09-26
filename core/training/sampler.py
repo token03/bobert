@@ -62,7 +62,7 @@ def create_contrastive_sampler(
 
 class ContrastiveBatchSampler(Sampler[List[int]]):
     def __init__(self, labels: List[List[str]], batch_size: int, num_positives_per_anchor: int = 1):
-        super().__init__(labels)
+        super().__init__()
         self.labels = labels
         self.batch_size = batch_size
         self.num_positives_per_anchor = num_positives_per_anchor
