@@ -16,6 +16,8 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "rich>=14.1.0",
     "torchmetrics>=1.8.2",
+    "pytorch-optimizer>=3.8.0"
+
 ]
 
 [project.optional-dependencies]

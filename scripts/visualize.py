@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import random
+import json
 from pathlib import Path
 
 import torch
@@ -30,6 +31,7 @@ CONFIG_PATH = "./config.yaml"
 CHECKPOINT_DIR = "checkpoints"
 PRETRAIN_MODEL_NAME = "model"
 FINETUNED_MODEL_NAME = "model_finetuned"
+LABELS_PATH = "./data/labels.json"
 
 def get_beatmap_ids_in_order(dataset_path: str) -> pd.DataFrame:
     print("Reading beatmap IDs from source (memory-efficient)...")
@@ -160,15 +162,37 @@ def main():
     
     config = load_config("config", config_dir=".")
 
+    # --- MODIFICATION START ---
+    # Load labeled beatmap IDs to exclude them from the visualization sample.
+    labeled_ids = set()
+    if os.path.exists(LABELS_PATH):
+        print(f"Loading labels from {LABELS_PATH} to exclude from visualization...")
+        with open(LABELS_PATH, 'r') as f:
+            labels_dict = json.load(f)
+        # Get IDs for beatmaps that have one or more labels.
+        labeled_ids = {int(bid) for bid, labels in labels_dict.items() if labels}
+        print(f"Found {len(labeled_ids)} labeled beatmaps to exclude.")
+    else:
+        print(f"Warning: Labels file not found at {LABELS_PATH}. No beatmaps will be excluded.")
+
     all_ids_df = get_beatmap_ids_in_order(dataset_path)
+
+    # Filter out the labeled IDs from the potential sampling pool.
+    if labeled_ids:
+        initial_count = len(all_ids_df)
+        all_ids_df = all_ids_df[~all_ids_df['beatmap_id'].isin(labeled_ids)]
+        num_excluded = initial_count - len(all_ids_df)
+        print(f"Excluded {num_excluded} labeled beatmaps from the sampling pool.")
+    # --- MODIFICATION END ---
+    
     num_beatmaps = len(all_ids_df)
 
     if num_beatmaps == 0:
-        print("Error: No valid beatmaps found in the dataset.", file=sys.stderr)
+        print("Error: No valid, unlabeled beatmaps found in the dataset.", file=sys.stderr)
         sys.exit(1)
 
     sample_size = min(args.sample_size, num_beatmaps)
-    print(f"Sampling {sample_size} beatmaps from a total of {num_beatmaps}...")
+    print(f"Sampling {sample_size} beatmaps from a total of {num_beatmaps} unlabeled candidates...")
     sampled_ids_df = all_ids_df.sample(n=sample_size, random_state=42).reset_index(drop=True)
     ids_to_load = sampled_ids_df['beatmap_id'].tolist()
 

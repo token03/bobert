@@ -1,35 +1,9 @@
-import math
+from pytorch_optimizer import get_wsd_schedule
 from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler
-
-class CosineWarmupScheduler(_LRScheduler):
-    def __init__(
-        self,
-        optimizer: Optimizer,
-        warmup_steps: int,
-        total_steps: int,
-        base_lr: float,
-        min_lr: float,
-        last_epoch: int = -1
-    ):
-        self.warmup_steps = warmup_steps
-        self.total_steps = total_steps
-        self.base_lr = base_lr
-        self.min_lr = min_lr
-        super().__init__(optimizer, last_epoch)
-    
-    def get_lr(self):
-        if self.last_epoch < self.warmup_steps:
-            return [self.min_lr + (self.base_lr - self.min_lr) * self.last_epoch / self.warmup_steps
-                   for _ in self.optimizer.param_groups]
-        else:
-            progress = (self.last_epoch - self.warmup_steps) / (self.total_steps - self.warmup_steps)
-            cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
-            return [self.min_lr + (self.base_lr - self.min_lr) * cosine_decay
-                   for _ in self.optimizer.param_groups]
+from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> Optimizer:
     training_config = config['training']
@@ -53,21 +27,37 @@ def create_scheduler(
     optimizer: Optimizer, 
     config: Dict[str, Any], 
     total_steps: int
-) -> Optional[_LRScheduler]:
+) -> Optional[LRScheduler]:
     training_config = config['training']
     
-    scheduler_type = training_config.get('scheduler', 'cosine_warmup')
+    base_lr = float(training_config['learning_rate'])
+    min_lr = float(training_config.get('min_lr', 1e-6))
     
-    if scheduler_type == 'none':
-        return None
-    elif scheduler_type == 'cosine_warmup':
-        warmup_ratio = float(training_config.get('warmup_ratio', 0.05))
-        warmup_steps = int(warmup_ratio * total_steps)
-        base_lr = float(training_config['learning_rate'])
-        min_lr = float(training_config.get('min_lr', 1e-6))
-        
-        return CosineWarmupScheduler(
-            optimizer, warmup_steps, total_steps, base_lr, min_lr
-        )
-    else:
-        raise ValueError(f"Unknown scheduler type: {scheduler_type}")
+    warmup_ratio = float(training_config.get('warmup_ratio', 0.05))
+    stable_ratio = float(training_config.get('stable_ratio', 0.1))
+    
+    cooldown_type = training_config.get('cooldown_type', 'cosine') 
+    num_cycles = float(training_config.get('num_cycles', 0.5)) 
+    
+    num_warmup_steps = int(warmup_ratio * total_steps)
+    num_stable_steps = int(stable_ratio * total_steps)
+    
+    if num_warmup_steps + num_stable_steps >= total_steps:
+            raise ValueError("The sum of warmup and stable steps must be less than total_steps.")
+
+    num_decay_steps = total_steps - num_warmup_steps - num_stable_steps
+    
+    min_lr_ratio = min_lr / base_lr if base_lr > 0 else 0.0
+
+    print(f"Scheduler: WSD with {num_warmup_steps} warmup, {num_stable_steps} stable, {num_decay_steps} decay steps.")
+    print(f"Cooldown type: {cooldown_type}, Min LR Ratio: {min_lr_ratio:.4f}")
+    
+    return get_wsd_schedule(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_stable_steps=num_stable_steps,
+        num_decay_steps=num_decay_steps,
+        min_lr_ratio=min_lr_ratio,
+        cooldown_type=cooldown_type,
+        num_cycles=num_cycles
+    )
