@@ -117,14 +117,14 @@ def contrastive_loss_fn(
 ) -> Dict[str, torch.Tensor]:
     losses = {}
     total_loss = torch.zeros((), device=predictions['cls_representation'].device)
-    
-    contrastive_config = config.get('contrastive', {})
-    temperature = contrastive_config.get('temperature', 0.1)
-    difficulty_label_temp = contrastive_config.get('difficulty_label_temp', 1.0)
-    
-    user_tag_weight = contrastive_config.get('user_tag_weight', 1.0)
-    collection_label_weight = contrastive_config.get('collection_label_weight', 1.0)
-    difficulty_rating_weight = contrastive_config.get('difficulty_rating_weight', 1.0)
+
+    finetuning_config = config.get('finetuning', {})
+    temperature = finetuning_config.get('temperature', 0.1)
+    difficulty_label_temp = finetuning_config.get('difficulty_label_temp', 1.0)
+
+    user_tag_weight = finetuning_config.get('user_tag_weight', 1.0)
+    collection_label_weight = finetuning_config.get('collection_label_weight', 1.0)
+    difficulty_rating_weight = finetuning_config.get('difficulty_rating_weight', 1.0)
 
     if 'user_tags' in labels:
         user_tag_loss = F.binary_cross_entropy_with_logits(

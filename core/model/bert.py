@@ -182,7 +182,7 @@ class BertForMaskedModeling(nn.Module):
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForMaskedModeling':
         base_model = BertEncoder.from_config(config)
-        masking_ratio = config.get('mlm', {}).get('masking_ratio', 0.15)
+        masking_ratio = config['pretraining'].get('masking_ratio', 0.15)
         model = cls(base_model, masking_ratio)
         model = model.to(device)
         
@@ -278,9 +278,9 @@ class BertForContrastiveFineTuning(nn.Module):
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
         base_model = BertEncoder.from_config(config)
         
-        contrastive_config = config.get('contrastive', {})
-        user_tag_classes = contrastive_config.get('user_tag_classes', 0) 
-        collection_label_classes = contrastive_config.get('collection_label_classes', 100)
+        finetuning_config = config.get('finetuning', {})
+        user_tag_classes = finetuning_config.get('user_tag_classes', 0) 
+        collection_label_classes = finetuning_config.get('collection_label_classes', 100)
 
         model = cls(base_model, user_tag_classes, collection_label_classes)
         model = model.to(device)

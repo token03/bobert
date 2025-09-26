@@ -133,7 +133,7 @@ def generate_embeddings(model, normalizer, data_subset, config, device) -> np.nd
         batch, max_seq_len=config['data']['max_seq_len'], vector_dim=actual_vector_dim, device=device
     )
     dataloader = DataLoader(
-        dataset, batch_size=config['training']['batch_size'], shuffle=False, collate_fn=collate_with_args
+        dataset, batch_size=config['pretraining']['batch_size'], shuffle=False, collate_fn=collate_with_args
     )
     all_embeddings = []
     for batch in tqdm(dataloader, desc="Generating Embeddings"):

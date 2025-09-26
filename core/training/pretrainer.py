@@ -42,9 +42,9 @@ class MLMTrainer:
         self.normalizer = normalizer
         self.loss_fn = loss_fn
         
-        self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
-        self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
-        self.grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
+        self.use_amp = config['pretraining'].get('use_amp', False) and device.type == 'cuda'
+        self.grad_clip_norm = config['pretraining'].get('grad_clip_norm', 1.0)
+        self.grad_accum_steps = config['pretraining'].get('gradient_accumulation_steps', 1)
 
         self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()
@@ -154,7 +154,7 @@ class MLMTrainer:
         return results
 
     def train(self, start_epoch: int = 0) -> MetricsTracker:
-        num_epochs = self.config['training']['num_epochs']
+        num_epochs = self.config['pretraining']['num_epochs']
         
         self.logger.log_training_start(start_epoch, num_epochs, self.config)
         
@@ -196,14 +196,14 @@ def setup_training(
     device: torch.device,
     normalizer: BeatmapNormalizer
 ) -> Tuple[MLMTrainer, CheckpointManager]:
-    grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
+    grad_accum_steps = config['pretraining'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
-    total_steps = num_update_steps_per_epoch * config['training']['num_epochs']
+    total_steps = num_update_steps_per_epoch * config['pretraining']['num_epochs']
 
-    optimizer = create_optimizer(model, config) 
-    scheduler = create_scheduler(optimizer, config, total_steps)
+    optimizer = create_optimizer(model, config, 'pretraining')
+    scheduler = create_scheduler(optimizer, config, total_steps, 'pretraining')
     
-    checkpoint_dir = config['training']['checkpoint_dir']
+    checkpoint_dir = config['pretraining']['checkpoint_dir']
     model_name = config['model'].get('type', 'model')
     checkpoint_manager = CheckpointManager(checkpoint_dir, model_name)
     

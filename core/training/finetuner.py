@@ -44,9 +44,9 @@ class FineTuningTrainer:
         self.user_tag_encoder = user_tag_encoder
         self.collection_label_encoder = collection_label_encoder
         
-        self.use_amp = config['training'].get('use_amp', False) and device.type == 'cuda'
-        self.grad_clip_norm = config['training'].get('grad_clip_norm', 1.0)
-        self.grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
+        self.use_amp = config['pretraining'].get('use_amp', False) and device.type == 'cuda'
+        self.grad_clip_norm = config['pretraining'].get('grad_clip_norm', 1.0)
+        self.grad_accum_steps = config['pretraining'].get('gradient_accumulation_steps', 1)
         
         self.scaler = torch.amp.GradScaler(device=device.type, enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()
@@ -175,7 +175,7 @@ class FineTuningTrainer:
         return avg_losses
 
     def train(self, start_epoch: int = 0):
-        num_epochs = self.config['contrastive']['num_epochs']
+        num_epochs = self.config['finetuning']['num_epochs']
         print(f"Starting fine-tuning from epoch {start_epoch+1}/{num_epochs}...")
         
         for epoch in range(start_epoch, num_epochs):
@@ -213,14 +213,14 @@ def setup_finetuning(
     user_tag_encoder: Dict[str, int],
     collection_label_encoder: Dict[str, int]
 ) -> Tuple[FineTuningTrainer, CheckpointManager]:
-    grad_accum_steps = config['training'].get('gradient_accumulation_steps', 1)
+    grad_accum_steps = config['finetuning'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
-    total_steps = num_update_steps_per_epoch * config['training']['num_epochs']
-    
-    optimizer = create_optimizer(model, config)
-    scheduler = create_scheduler(optimizer, config, total_steps)
-    
-    checkpoint_dir = config['training']['checkpoint_dir']
+    total_steps = num_update_steps_per_epoch * config['finetuning']['num_epochs']
+
+    optimizer = create_optimizer(model, config, 'finetuning')
+    scheduler = create_scheduler(optimizer, config, total_steps, 'finetuning')
+
+    checkpoint_dir = config['finetuning']['checkpoint_dir']
     model_name = config['model'].get('type', 'model') + "_finetuned"
     checkpoint_manager = CheckpointManager(checkpoint_dir, model_name)
     

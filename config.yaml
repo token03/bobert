@@ -1,39 +1,11 @@
 data:
-  # db_path: './data/beatmap_dataset_test/'
-  db_path: './data/beatmap_dataset/'
+  db_path: './data/beatmap_dataset_test/'
+  # db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
   max_samples_per_class:
     aim: 1500
-    
-training:
-  batch_size: 8
-  num_epochs: 5
-  learning_rate: 5e-4
-  weight_decay: 0.05
-  warmup_ratio: 0.05
-  min_lr: 1e-6
-  use_amp: true
-  checkpoint_dir: "./checkpoints"
-  grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
-  
-  sampling:
-    method: "kde"  
-    kde_bandwidth: 0.5
-    num_bins: 200
-    expand_for_augmentation: true
 
-contrastive:
-  user_tag_classes: 42
-  collection_label_classes: 5
-  temperature: 0.1
-  num_positives_per_anchor: 1
-  user_tag_weight: 0.0
-  collection_label_weight: 1.0
-  difficulty_rating_weight: 1.0
-  num_epochs: 3
-  
 model:
   d_model: 512
   n_heads: 8
@@ -44,8 +16,46 @@ model:
 components:
   use_flash_attention: true
   compile_model: true
-  compile_mode: "default"
-  
-mlm:
-  masking_ratio: 0.25
+  compile_mode: "default" 
+    
+pretraining:
+  batch_size: 8
+  num_epochs: 5
+  learning_rate: 5e-4
+  weight_decay: 0.05
+  warmup_ratio: 0.05
+  stable_ratio: 0.1
+  min_lr: 1e-6
+  use_amp: true
+  checkpoint_dir: "./checkpoints"
+  grad_clip_norm: 1.0
+  gradient_accumulation_steps: 4
 
+  masking_ratio: 0.25
+  
+  sampling:
+    method: "kde"  
+    kde_bandwidth: 0.5
+    num_bins: 200
+    expand_for_augmentation: true
+
+finetuning:
+  batch_size: 8
+  num_epochs: 3
+  learning_rate: 5e-5
+  weight_decay: 0.05
+  warmup_ratio: 0.05
+  stable_ratio: 0.1
+  min_lr: 1e-6
+  use_amp: true
+  checkpoint_dir: "./checkpoints"
+  grad_clip_norm: 1.0
+  gradient_accumulation_steps: 4
+
+  user_tag_classes: 42
+  collection_label_classes: 5
+  temperature: 0.1
+  num_positives_per_anchor: 1
+  user_tag_weight: 0.0
+  collection_label_weight: 1.0
+  difficulty_rating_weight: 1.0

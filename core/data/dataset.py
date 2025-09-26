@@ -107,7 +107,7 @@ def create_dataloaders(
     if hasattr(val_data, 'dataset'):
         val_data = [val_data.dataset[i] for i in val_data.indices]
 
-    use_augmented_dataset = config.get('training', {}).get('sampling', {}).get('expand_for_augmentation', True)
+    use_augmented_dataset = config['pretraining']['sampling'].get('expand_for_augmentation', True)
 
     if use_augmented_dataset:
         train_dataset = AugmentedBeatmapDataset(train_data, normalizer)
@@ -129,14 +129,14 @@ def create_dataloaders(
 
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=config['training']['batch_size'],
+        batch_size=config['pretraining']['batch_size'],
         sampler=sampler,
         collate_fn=collate_with_args
     )
 
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=config['training']['batch_size'],
+        batch_size=config['pretraining']['batch_size'],
         shuffle=False,
         collate_fn=collate_with_args
     )

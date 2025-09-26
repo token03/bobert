@@ -56,8 +56,8 @@ class TrainingLogger:
         """Prints the header before training begins."""
         print(f"\n--- Starting Training ---")
         print(f"Epochs: {start_epoch + 1} to {num_epochs}")
-        print(f"Batch Size: {config['training']['batch_size']}")
-        print(f"Learning Rate: {config['training']['learning_rate']}")
+        print(f"Batch Size: {config['pretraining']['batch_size']}")
+        print(f"Learning Rate: {config['pretraining']['learning_rate']}")
         print("-" * 60)
 
     def log_epoch_end(

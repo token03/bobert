@@ -5,19 +5,23 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 
-def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> Optimizer:
-    training_config = config['training']
+def create_optimizer(
+    model: nn.Module, 
+    config: Dict[str, Any], 
+    phase: str
+) -> Optimizer:
+    phase_config = config[phase]
     
-    optimizer_type = training_config.get('optimizer', 'adamw')
-    lr = float(training_config['learning_rate'])  
-    weight_decay = float(training_config.get('weight_decay', 0.0))  
-    
+    optimizer_type = phase_config.get('optimizer', 'adamw')
+    weight_decay = float(phase_config.get('weight_decay', 0.0))
+    lr = float(phase_config['learning_rate'])
+
     if optimizer_type.lower() == 'adamw':
         return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     elif optimizer_type.lower() == 'adam':
         return torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     elif optimizer_type.lower() == 'sgd':
-        momentum = float(training_config.get('momentum', 0.9))
+        momentum = float(phase_config.get('momentum', 0.9))
         return torch.optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
     else:
         raise ValueError(f"Unknown optimizer type: {optimizer_type}")
@@ -26,18 +30,19 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any]) -> Optimizer:
 def create_scheduler(
     optimizer: Optimizer, 
     config: Dict[str, Any], 
-    total_steps: int
+    total_steps: int,
+    phase: str
 ) -> Optional[LRScheduler]:
-    training_config = config['training']
+    phase_config = config[phase]
     
-    base_lr = float(training_config['learning_rate'])
-    min_lr = float(training_config.get('min_lr', 1e-6))
+    base_lr = float(phase_config['learning_rate'])
+    min_lr = float(phase_config.get('min_lr', 1e-6))
     
-    warmup_ratio = float(training_config.get('warmup_ratio', 0.05))
-    stable_ratio = float(training_config.get('stable_ratio', 0.1))
+    warmup_ratio = float(phase_config.get('warmup_ratio', 0.05))
+    stable_ratio = float(phase_config.get('stable_ratio', 0.1))
     
-    cooldown_type = training_config.get('cooldown_type', 'cosine') 
-    num_cycles = float(training_config.get('num_cycles', 0.5)) 
+    cooldown_type = phase_config.get('cooldown_type', 'cosine') 
+    num_cycles = float(phase_config.get('num_cycles', 0.5)) 
     
     num_warmup_steps = int(warmup_ratio * total_steps)
     num_stable_steps = int(stable_ratio * total_steps)
