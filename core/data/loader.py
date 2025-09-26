@@ -187,6 +187,33 @@ def load_dataset(
 
         final_data.append((vectors, metadata))
 
+    print("Running final data integrity check...")
+    final_data_validated = []
+    validated_ids = []
+    validated_difficulty_ratings = []
+    
+    for i, (vectors, metadata) in enumerate(tqdm(final_data, desc="Validating Tensors")):
+        beatmap_id = loaded_ids[i]
+        has_nan = torch.isnan(vectors).any() or torch.isnan(metadata).any()
+        has_inf = torch.isinf(vectors).any() or torch.isinf(metadata).any()
+        
+        if has_nan or has_inf:
+            print(f"WARNING: Skipping beatmap ID {beatmap_id} due to NaN/Inf values found after processing.")
+            if has_nan: print(f"NaN found in vectors: {torch.isnan(vectors).any()}, metadata: {torch.isnan(metadata).any()}")
+            if has_inf: print(f"Inf found in vectors: {torch.isinf(vectors).any()}, metadata: {torch.isinf(metadata).any()}")
+            continue
+
+        if np.isnan(difficulty_ratings[i]) or np.isinf(difficulty_ratings[i]):
+            print(f"WARNING: Skipping beatmap ID {beatmap_id} due to invalid difficulty rating: {difficulty_ratings[i]}")
+            continue
+            
+        final_data_validated.append((vectors, metadata))
+        validated_ids.append(beatmap_id)
+        validated_difficulty_ratings.append(difficulty_ratings[i])
+
+    if len(final_data_validated) < len(final_data):
+        print(f"WARNING: Dropped {len(final_data) - len(final_data_validated)} beatmaps due to data integrity issues.")
+
     print("Finished loading and processing all data.")
     return final_data, difficulty_ratings, loaded_ids
 
