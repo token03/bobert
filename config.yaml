@@ -25,6 +25,7 @@ pretraining:
 
   learning_rate: 5e-4
   min_lr: 1e-6
+  cooldown_type: "cosine"
   weight_decay: 0.05
   warmup_ratio: 0.05
   stable_ratio: 0.1
@@ -32,7 +33,7 @@ pretraining:
   use_amp: true
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 16
 
   masking_ratio: 0.25
   
@@ -48,9 +49,10 @@ finetuning:
 
   learning_rate: 5e-5
   min_lr: 1e-6
+  cooldown_type: "linear"
   weight_decay: 0.05
   warmup_ratio: 0.05
-  stable_ratio: 0.1
+  stable_ratio: 0.0
 
   use_amp: true
   checkpoint_dir: "./checkpoints"
