@@ -162,14 +162,11 @@ def main():
     
     config = load_config("config", config_dir=".")
 
-    # --- MODIFICATION START ---
-    # Load labeled beatmap IDs to exclude them from the visualization sample.
     labeled_ids = set()
     if os.path.exists(LABELS_PATH):
         print(f"Loading labels from {LABELS_PATH} to exclude from visualization...")
         with open(LABELS_PATH, 'r') as f:
             labels_dict = json.load(f)
-        # Get IDs for beatmaps that have one or more labels.
         labeled_ids = {int(bid) for bid, labels in labels_dict.items() if labels}
         print(f"Found {len(labeled_ids)} labeled beatmaps to exclude.")
     else:
@@ -177,13 +174,11 @@ def main():
 
     all_ids_df = get_beatmap_ids_in_order(dataset_path)
 
-    # Filter out the labeled IDs from the potential sampling pool.
     if labeled_ids:
         initial_count = len(all_ids_df)
         all_ids_df = all_ids_df[~all_ids_df['beatmap_id'].isin(labeled_ids)]
         num_excluded = initial_count - len(all_ids_df)
         print(f"Excluded {num_excluded} labeled beatmaps from the sampling pool.")
-    # --- MODIFICATION END ---
     
     num_beatmaps = len(all_ids_df)
 

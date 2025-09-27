@@ -8,7 +8,6 @@ from torch.utils.data import WeightedRandomSampler, Sampler
 from typing import Tuple, List, Dict, Any, Optional, Iterator
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
-from ..data.types import BeatmapMetadata
 import bisect
 
 def create_kde_sampler(
@@ -22,7 +21,7 @@ def create_kde_sampler(
     if difficulty_ratings is None:
         raise ValueError("difficulty_ratings must be provided as a separate array")
 
-    difficulty_ratings_array = difficulty_ratings.copy()
+    difficulty_ratings_array = np.asarray(difficulty_ratings)
 
     if expand_for_augmentation:
         difficulty_ratings_array = np.tile(difficulty_ratings_array, 4)
@@ -85,7 +84,7 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
                  kde_bins: int = 100):
         super().__init__()
         self.labels = labels
-        self.difficulty_ratings = difficulty_ratings
+        self.difficulty_ratings = np.asarray(difficulty_ratings)
         self.batch_size = batch_size
         self.positive_difficulty_threshold = positive_difficulty_threshold
         self.hard_negative_difficulty_threshold = hard_negative_difficulty_threshold

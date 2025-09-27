@@ -194,7 +194,6 @@ def load_dataset(
         except (FileNotFoundError, json.JSONDecodeError):
             difficulty_cache = {}
 
-        jobs_to_run = []
         ids_needing_recalc = set()
         for i, (vectors, _) in enumerate(processed_data):
             if vectors.shape[0] > max_seq_len:

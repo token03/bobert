@@ -7,6 +7,7 @@ venv/
 
 # Data & Checkpoints
 data/*.json
+data/**/*.json
 data/**/*.txt
 data/**/*.osu
 data/**/*.parquet
