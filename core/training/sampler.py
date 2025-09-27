@@ -56,36 +56,43 @@ def create_kde_sampler(
 
 def create_contrastive_sampler(
     labels: List[List[str]],
-    difficulty_ratings: List[float],
+    difficulty_ratings: np.ndarray,
     config: Dict[str, Any]
 ) -> Sampler[List[int]]:
     finetuning_config = config['finetuning']
+    sampler_config = finetuning_config.get('sampler', {})
+    
     return ContrastiveBatchSampler(
         labels=labels,
         difficulty_ratings=difficulty_ratings,
         batch_size=config['pretraining']['batch_size'],
         positive_difficulty_threshold=finetuning_config['positive_difficulty_threshold'],
         hard_negative_difficulty_threshold=finetuning_config['hard_negative_difficulty_threshold'],
-        max_ease_factor=finetuning_config.get('sampler_max_ease_factor', 5.0)
+        max_ease_factor=sampler_config.get('max_ease_factor', 5.0),
+        kde_bandwidth=sampler_config.get('kde_bandwidth', 0.25),
+        kde_bins=sampler_config.get('kde_bins', 100)
     )
 
 class ContrastiveBatchSampler(Sampler[List[int]]):
     def __init__(self,
                  labels: List[List[str]],
-                 difficulty_ratings: List[float],
+                 difficulty_ratings: np.ndarray,
                  batch_size: int,
                  positive_difficulty_threshold: float,
                  hard_negative_difficulty_threshold: float,
-                 max_ease_factor: float = 5.0):
+                 max_ease_factor: float = 5.0,
+                 kde_bandwidth: float = 0.25,
+                 kde_bins: int = 100):
         super().__init__()
         self.labels = labels
-        self.difficulty_ratings = np.array(difficulty_ratings)
+        self.difficulty_ratings = difficulty_ratings
         self.batch_size = batch_size
         self.positive_difficulty_threshold = positive_difficulty_threshold
         self.hard_negative_difficulty_threshold = hard_negative_difficulty_threshold
         self.max_ease_factor = max_ease_factor
         self.num_samples = len(labels)
         self.indices = list(range(self.num_samples))
+        self.max_tries_per_quad = 10 
 
         print("Initializing ContrastiveBatchSampler...")
         self.label_to_indices = defaultdict(list)
@@ -119,13 +126,29 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
         print(f"Found {len(self.usable_labels)} usable labels for creating pairs.")
         print(f"Total potential anchors: {len(self.anchorable_indices)}")
 
-    def _find_candidate(self, anchor_idx, candidates, exclude_indices, rating_range):
-        valid_candidates = []
-        for c_idx in candidates:
-            if c_idx != anchor_idx and c_idx not in exclude_indices:
-                if rating_range[0] <= self.difficulty_ratings[c_idx] <= rating_range[1]:
-                    valid_candidates.append(c_idx)
-        return random.choice(valid_candidates) if valid_candidates else None
+        print("Calculating anchor sampling weights using KDE for difficulty balancing...")
+        anchorable_ratings = self.difficulty_ratings[self.anchorable_indices]
+
+        min_r, max_r = anchorable_ratings.min(), anchorable_ratings.max()
+        bin_edges = np.linspace(min_r - 0.5, max_r + 0.5, kde_bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        hist, _ = np.histogram(anchorable_ratings, bins=bin_edges, density=True)
+        
+        sigma = kde_bandwidth * kde_bins / (max_r - min_r + 1.0)
+        smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode='reflect')
+        
+        smoothed_hist[smoothed_hist < 1e-8] = 1e-8
+        
+        interp_func = interp1d(bin_centers, smoothed_hist, kind='linear',
+                              bounds_error=False, fill_value=(smoothed_hist[0], smoothed_hist[-1]))
+
+        densities = interp_func(anchorable_ratings)
+        weights = 1.0 / densities
+        
+        self.anchor_sampling_weights = weights / np.sum(weights)
+
+        print(f"KDE Anchor Sampling - Min weight: {self.anchor_sampling_weights.min():.6f}, Max weight: {self.anchor_sampling_weights.max():.6f}")
 
     def _find_positive(self, anchor_idx: int, anchor_labels: List[str], exclude_indices: set) -> Optional[int]:
         anchor_rating = self.difficulty_ratings[anchor_idx]
@@ -185,56 +208,60 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
             if candidates:
                 return random.choice(candidates)
         return None
+    
 
     def __iter__(self) -> Iterator[List[int]]:
-        available_anchors = self.anchorable_indices.copy()
-        random.shuffle(available_anchors)
+        num_batches = self.__len__()
         
-        anchor_iterator = iter(available_anchors)
-
-        while True:
+        for _ in range(num_batches):
             batch_indices = set()
             
             while len(batch_indices) + 4 <= self.batch_size:
-                try:
-                    anchor = next(anchor_iterator)
-                except StopIteration:
+                quadruplet_found = False
+                for _ in range(self.max_tries_per_quad):
+                    anchor = np.random.choice(
+                        self.anchorable_indices,
+                        p=self.anchor_sampling_weights
+                    )
+                    
+                    if anchor in batch_indices:
+                        continue
+
+                    positive = self._find_positive(anchor, self.labels[anchor], batch_indices)
+                    if positive is None:
+                        continue
+
+                    hn1 = self._find_hard_negative1(anchor, self.labels[anchor], batch_indices | {anchor, positive})
+                    if hn1 is None:
+                        continue
+
+                    hn2 = self._find_hard_negative2(anchor, batch_indices | {anchor, positive, hn1})
+                    if hn2 is None:
+                        continue
+                    
+                    batch_indices.update([anchor, positive, hn1, hn2])
+                    quadruplet_found = True
+                    break 
+                
+                if not quadruplet_found:
                     break
-
-                if anchor in batch_indices: continue
-
-                positive = self._find_positive(anchor, self.labels[anchor], batch_indices)
-                if positive is None: continue
-
-                hn1 = self._find_hard_negative1(anchor, self.labels[anchor], batch_indices | {anchor, positive})
-                if hn1 is None: continue
-
-                hn2 = self._find_hard_negative2(anchor, batch_indices | {anchor, positive, hn1})
-                if hn2 is None: continue
-
-                batch_indices.update([anchor, positive, hn1, hn2])
-
-            if not batch_indices and not available_anchors:
-                break
             
             num_to_fill = self.batch_size - len(batch_indices)
             if num_to_fill > 0:
                 potential_fillers = list(set(self.indices) - batch_indices)
                 num_to_sample = min(num_to_fill, len(potential_fillers))
-                fillers = random.sample(potential_fillers, num_to_sample)
-                batch_indices.update(fillers)
-
-            if not batch_indices:
-                 if not list(anchor_iterator): break 
-                 else: continue
+                if num_to_sample > 0:
+                    fillers = random.sample(potential_fillers, num_to_sample)
+                    batch_indices.update(fillers)
             
+            if not batch_indices:
+                continue
+
             final_batch = list(batch_indices)
             random.shuffle(final_batch)
             yield final_batch
-            
-            if not list(anchor_iterator) and len(batch_indices) < self.batch_size:
-                 break 
-
 
     def __len__(self) -> int:
-        return (len(self.anchorable_indices) + 3) // 4
+        num_quadruplets_per_epoch = len(self.anchorable_indices)
+        quadruplets_per_batch = self.batch_size // 4
+        return (num_quadruplets_per_epoch + quadruplets_per_batch - 1) // quadruplets_per_batch
