@@ -9,8 +9,33 @@ import torch
 from tqdm import tqdm
 import random
 from collections import defaultdict
+import concurrent.futures
+import itertools
+import rosu_pp_py as rosu
+
 
 from .types import HitObjectVector, BeatmapMetadata, NormalizationType, DURATION_BINS, quantize_to_bins
+
+def _recalculate_difficulty_worker(
+    beatmap_id: int, seq_len: int, raw_beatmap_path: str
+) -> Optional[float]:
+    osu_file_path = os.path.join(raw_beatmap_path, f"{beatmap_id}.osu")
+    if not os.path.exists(osu_file_path):
+        return None
+    try:
+        with open(osu_file_path, 'r', encoding='utf-8') as f:
+            beatmap = rosu.Beatmap(content=f.read())
+        
+        diff_attrs = rosu.Difficulty()
+        
+        gradual_result = diff_attrs.gradual_difficulty(beatmap)
+        target_attrs = next(itertools.islice(gradual_result, seq_len - 1, None), None)
+
+        if target_attrs:
+            return target_attrs.stars
+        return None
+    except Exception as e:
+        return None
 
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
@@ -128,7 +153,8 @@ def _engineer_features_vectorized(
 def load_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
-    ids_to_load: Optional[List[int]] = None 
+    ids_to_load: Optional[List[int]] = None,
+    raw_beatmap_path: str = "./data/raw"
 ) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray, np.ndarray]:
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
@@ -158,6 +184,60 @@ def load_dataset(
 
     processed_data, difficulty_ratings, loaded_ids = _engineer_features_vectorized(beatmaps_df, hitobjects_df)
 
+    if max_seq_len is not None:
+        print(f"Recalculating difficulty ratings for sequences truncated to {max_seq_len}...")
+        cache_path = os.path.join(dataset_path, f"difficulty_cache_seq_{max_seq_len}.json")
+        
+        try:
+            with open(cache_path, 'r') as f:
+                difficulty_cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            difficulty_cache = {}
+
+        jobs_to_run = []
+        ids_needing_recalc = set()
+        for i, (vectors, _) in enumerate(processed_data):
+            if vectors.shape[0] > max_seq_len:
+                beatmap_id = str(loaded_ids[i])
+                if beatmap_id not in difficulty_cache:
+                    ids_needing_recalc.add(loaded_ids[i])
+        
+        if ids_needing_recalc:
+            if not os.path.isdir(raw_beatmap_path):
+                print(f"WARNING: Raw beatmap path '{raw_beatmap_path}' not found.")
+                print("Difficulty recalculation for truncated maps will fail, and these maps will be skipped.")
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future_to_id = {
+                    executor.submit(_recalculate_difficulty_worker, bid, max_seq_len, raw_beatmap_path): bid
+                    for bid in ids_needing_recalc
+                }
+                for future in tqdm(concurrent.futures.as_completed(future_to_id), total=len(future_to_id), desc="Recalculating Stars"):
+                    beatmap_id = future_to_id[future]
+                    new_rating = future.result()
+                    if new_rating is not None:
+                        difficulty_cache[str(beatmap_id)] = new_rating
+            
+            with open(cache_path, 'w') as f:
+                json.dump(difficulty_cache, f)
+
+        updated_data, updated_ratings, updated_ids = [], [], []
+        for i, ((vectors, metadata), rating, bid) in enumerate(zip(processed_data, difficulty_ratings, loaded_ids)):
+            if vectors.shape[0] > max_seq_len:
+                new_rating = difficulty_cache.get(str(bid))
+                if new_rating is not None:
+                    updated_data.append((vectors[:max_seq_len], metadata))
+                    updated_ratings.append(new_rating)
+                    updated_ids.append(bid)
+            else:
+                updated_data.append((vectors, metadata))
+                updated_ratings.append(rating)
+                updated_ids.append(bid)
+        
+        processed_data = updated_data
+        difficulty_ratings = np.array(updated_ratings)
+        loaded_ids = np.array(updated_ids)
+
     vector_norm_specs = HitObjectVector.get_normalization_specs()
     meta_norm_specs = BeatmapMetadata.get_normalization_specs()
     vector_field_names = HitObjectVector.get_field_names()
@@ -173,11 +253,8 @@ def load_dataset(
     ]
 
     final_data = []
-    print("Applying log transforms and filtering by sequence length...")
+    print("Applying log transforms...")
     for vectors, metadata in tqdm(processed_data):
-        if max_seq_len and vectors.shape[0] > max_seq_len:
-            vectors = vectors[:max_seq_len]
-
         for idx in log_vec_indices:
             vectors[:, idx].clamp_(min=0.0)
             vectors[:, idx] = torch.log1p(vectors[:, idx])
