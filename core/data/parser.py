@@ -123,7 +123,19 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                 try:
                     curve_data = parts[5].split('|')
                     curve_type = curve_data[0]
-                    curve_points = [(int(p.split(':')[0]), int(p.split(':')[1])) for p in curve_data[1:]]
+                    
+                    raw_points = [(int(p.split(':')[0]), int(p.split(':')[1])) for p in curve_data[1:]]
+                    if raw_points:
+                        unique_points_with_hardness = []
+                        for i, p in enumerate(raw_points):
+                            is_hard_anchor_marker = (i > 0 and p == raw_points[i-1])
+                            if not is_hard_anchor_marker:
+                                unique_points_with_hardness.append([p[0], p[1], 0]) 
+                            elif unique_points_with_hardness:
+                                unique_points_with_hardness[-1][2] = 1 
+                        
+                        curve_points = [tuple(p) for p in unique_points_with_hardness]
+
                     slides = int(parts[6])
                     pixel_length = float(parts[7])
 

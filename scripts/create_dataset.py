@@ -30,11 +30,12 @@ HITOBJECTS_SCHEMA = pa.schema([
     ('time', pa.int32()), ('object_type', pa.int8()), ('is_new_combo', pa.int8()),
     ('hit_sound', pa.int32()), ('end_time', pa.int32()), ('pixel_length', pa.float32()),
     ('bpm', pa.float32()), ('curve_type_char', pa.string()), ('num_anchors', pa.int32()),
-    ('kiai_time', pa.int8())
+    ('kiai_time', pa.int8()), ('slider_repeats', pa.int32()), ('hard_anchor_ratio', pa.float32()),
+    ('slider_end_x', pa.int32()), ('slider_end_y', pa.int32())
 ])
 CURVEPOINTS_SCHEMA = pa.schema([
     ('beatmap_id', pa.int64()), ('hitobject_time', pa.int32()), ('point_index', pa.int32()),
-    ('x', pa.int32()), ('y', pa.int32())
+    ('x', pa.int32()), ('y', pa.int32()), ('is_hard', pa.int8())
 ])
 
 def worker(tasks_queue: mp.Queue, temp_dir: str):
@@ -74,21 +75,33 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
                         if section.effective.effects & 1:
                             kiai = 1
                     
-                    num_anchors = len(ho.curve_points) if ho.curve_points else 0
+                    num_anchors = 0
+                    num_hard_anchors = 0
+                    slider_end_x, slider_end_y = 0, 0
                     
+                    if ho.curve_points:
+                        num_anchors = len(ho.curve_points)
+                        num_hard_anchors = sum(p[2] for p in ho.curve_points)
+                        end_point = ho.curve_points[-1]
+                        slider_end_x, slider_end_y = end_point[0], end_point[1]
+                    
+                    hard_anchor_ratio = (num_hard_anchors / num_anchors) if num_anchors > 0 else 0.0
+                    slider_repeats = (ho.slides - 1) if ho.slides is not None else 0
+
                     hitobjects_buffer.append({
                         'beatmap_id': raw_beatmap.beatmap_id, 'category': raw_beatmap.category, 'x': ho.x, 'y': ho.y, 'time': ho.time,
                         'object_type': ho.object_type, 'is_new_combo': ho.is_new_combo, 'hit_sound': ho.hit_sound,
                         'end_time': ho.end_time, 'pixel_length': ho.pixel_length or 0.0,
                         'bpm': bpm, 'curve_type_char': ho.curve_type or '', 'num_anchors': num_anchors,
-                        'kiai_time': kiai
+                        'kiai_time': kiai, 'slider_repeats': slider_repeats, 'hard_anchor_ratio': hard_anchor_ratio,
+                        'slider_end_x': slider_end_x, 'slider_end_y': slider_end_y
                     })
 
                     if ho.curve_points:
-                        for i, (p_x, p_y) in enumerate(ho.curve_points):
+                        for i, (p_x, p_y, is_hard) in enumerate(ho.curve_points):
                             curvepoints_buffer.append({
                                 'beatmap_id': raw_beatmap.beatmap_id, 'hitobject_time': ho.time,
-                                'point_index': i, 'x': p_x, 'y': p_y
+                                'point_index': i, 'x': p_x, 'y': p_y, 'is_hard': is_hard
                             })
         except Exception:
             pass

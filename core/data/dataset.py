@@ -2,7 +2,7 @@
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from typing import Tuple, List, Optional
-from .transforms import BeatmapNormalizer, BeatmapAugmenter, BeatmapTransform
+from .transforms import BeatmapNormalizer, BeatmapTransform
 
 def collate_fn(
     batch: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -65,35 +65,6 @@ class MaskedBeatmapDataset(BeatmapDataset):
         mask_prob = torch.full((seq_len,), self.masking_ratio)
         return torch.bernoulli(mask_prob).bool()
 
-
-class AugmentedBeatmapDataset(BeatmapDataset):
-
-    def __init__(
-        self,
-        beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]],
-        normalizer: BeatmapNormalizer
-    ):
-        self.beatmap_data = beatmap_data
-        self.normalizer = normalizer
-        self.augmenter = BeatmapAugmenter()
-        self.base_length = len(beatmap_data)
-
-    def __len__(self) -> int:
-        return self.base_length * 4
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        base_idx = idx % self.base_length
-        aug_type = idx // self.base_length
-
-        vectors, metadata = self.beatmap_data[base_idx]
-        augmented_vectors = self.augmenter.apply_augmentation(vectors, aug_type)
-        
-        normalized_vectors = self.normalizer.normalize_vectors(augmented_vectors)
-        normalized_metadata = self.normalizer.normalize_metadata(metadata)
-
-        return normalized_vectors, normalized_metadata
-
-
 def create_dataloaders(
     train_data: List[Tuple[torch.Tensor, torch.Tensor]],
     val_data: List[Tuple[torch.Tensor, torch.Tensor]],
@@ -107,13 +78,8 @@ def create_dataloaders(
     if hasattr(val_data, 'dataset'):
         val_data = [val_data.dataset[i] for i in val_data.indices]
 
-    use_augmented_dataset = config['pretraining']['sampling'].get('expand_for_augmentation', True)
-
-    if use_augmented_dataset:
-        train_dataset = AugmentedBeatmapDataset(train_data, normalizer)
-    else:
-        train_transform = BeatmapTransform(normalizer, augment=True)
-        train_dataset = BeatmapDataset(train_data, train_transform)
+    train_transform = BeatmapTransform(normalizer, augment=True)
+    train_dataset = BeatmapDataset(train_data, train_transform)
 
     val_transform = BeatmapTransform(normalizer, augment=False)
     val_dataset = BeatmapDataset(val_data, val_transform)

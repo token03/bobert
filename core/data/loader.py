@@ -85,11 +85,9 @@ def _engineer_features_vectorized(
     df['x_diff'] = df['x'] - prev_end_x
     df['y_diff'] = df['y'] - prev_end_y
     df['distance_diff'] = np.hypot(df['x_diff'], df['y_diff'])
-
-    df['cos_angle'] = (df['x_diff'] / df['distance_diff'].replace(0, 1)).fillna(1.0)
-    df['sin_angle'] = (df['y_diff'] / df['distance_diff'].replace(0, 1)).fillna(0.0)
     df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
 
+    # Inner angle (curvature) calculation
     next_x = grouped['x'].shift(-1)
     next_y = grouped['y'].shift(-1)
 
@@ -115,6 +113,18 @@ def _engineer_features_vectorized(
     df['duration_ms'] = df['end_time'] - df['time']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
     df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
+
+    is_slider = df['object_type'] == 1
+    
+    df['slider_velocity'] = 0.0
+    df.loc[is_slider, 'slider_velocity'] = (df.loc[is_slider, 'pixel_length'] / df.loc[is_slider, 'duration_ms'].replace(0, 1)).fillna(0.0)
+    
+    slider_end_to_end_dist = np.hypot(df['slider_end_x'] - df['x'], df['slider_end_y'] - df['y'])
+    df['slider_tortuosity'] = 1.0 
+    df.loc[is_slider, 'slider_tortuosity'] = (df.loc[is_slider, 'pixel_length'] / slider_end_to_end_dist.loc[is_slider].replace(0, 1)).fillna(1.0)
+    
+    df['slider_repeats'] = df['slider_repeats'].fillna(0).astype(int)
+    df['hard_anchor_ratio'] = df['hard_anchor_ratio'].fillna(0.0)
     
     curve_type_map = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
     df['slider_curve_type'] = df['curve_type_char'].map(curve_type_map).fillna(4).astype(int)

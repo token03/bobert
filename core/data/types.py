@@ -30,8 +30,6 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
 
 class HitObjectVector(NamedTuple):
     distance_diff: float
-    cos_angle: float
-    sin_angle: float
     velocity: float
     cos_inner_angle: float
     sin_inner_angle: float
@@ -40,6 +38,10 @@ class HitObjectVector(NamedTuple):
     slider_curve_type: int
     slider_num_anchors: int
     slider_pixel_length: float
+    slider_repeats: int
+    slider_velocity: float
+    slider_tortuosity: float
+    hard_anchor_ratio: float
     time_diff_bin: int
     duration_bin: int
     bpm: float
@@ -91,8 +93,6 @@ class HitObjectVector(NamedTuple):
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
         return {
             'distance_diff': NormalizationType.LOG,
-            'cos_angle': NormalizationType.STANDARD,
-            'sin_angle': NormalizationType.STANDARD,
             'velocity': NormalizationType.LOG,
             'cos_inner_angle': NormalizationType.STANDARD,
             'sin_inner_angle': NormalizationType.STANDARD,
@@ -101,6 +101,10 @@ class HitObjectVector(NamedTuple):
             'slider_curve_type': NormalizationType.CATEGORICAL,
             'slider_num_anchors': NormalizationType.LOG,
             'slider_pixel_length': NormalizationType.LOG,
+            'slider_repeats': NormalizationType.LOG,
+            'slider_velocity': NormalizationType.LOG,
+            'slider_tortuosity': NormalizationType.LOG,
+            'hard_anchor_ratio': NormalizationType.STANDARD,
             'time_diff_bin': NormalizationType.CATEGORICAL,
             'duration_bin': NormalizationType.CATEGORICAL,
             'bpm': NormalizationType.LOG,
@@ -111,8 +115,6 @@ class HitObjectVector(NamedTuple):
     def get_field_descriptions(cls) -> Dict[str, str]:
         return {
             'distance_diff': "Distance to previous hit object in pixels",
-            'cos_angle': "Cosine of angle formed with previous two hit objects",
-            'sin_angle': "Sine of angle formed with previous two hit objects",
             'velocity': "Velocity to previous hit object (pixels/ms)",
             'cos_inner_angle': "Cosine of inner angle for sliders (0 if not a slider)",
             'sin_inner_angle': "Sine of inner angle for sliders (0 if not a slider)",
@@ -121,6 +123,10 @@ class HitObjectVector(NamedTuple):
             'slider_curve_type': "Curve type of slider (0 if not a slider)",
             'slider_num_anchors': "Number of anchor points in slider (0 if not a slider)",
             'slider_pixel_length': "Pixel length of slider (0 if not a slider)",
+            'slider_repeats': "Number of slider repeats (slides - 1)",
+            'slider_velocity': "Calculated velocity of the slider (pixels/ms)",
+            'slider_tortuosity': "Ratio of slider path length to end-to-end distance",
+            'hard_anchor_ratio': "Ratio of hard anchors to total anchors in a slider",
             'time_diff_bin': "Quantized time difference to previous hit object",
             'duration_bin': "Quantized duration of the hit object",
             'bpm': "Beats Per Minute at the time of the hit object",
@@ -183,7 +189,7 @@ class RawHitObject(NamedTuple):
     is_new_combo: int
     
     curve_type: Optional[str]       
-    curve_points: Optional[List[Tuple[int, int]]]
+    curve_points: Optional[List[Tuple[int, int, int]]]
     slides: Optional[int]
     pixel_length: Optional[float]
 

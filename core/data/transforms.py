@@ -4,6 +4,62 @@ import numpy as np
 from typing import List, Tuple, Optional, Set, Dict
 from .types import HitObjectVector, BeatmapMetadata, NormalizationType
 
+def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, descriptions: Dict, stats: Dict):
+    print(f"\n--- {title}:")
+    print("-" * 80)
+    print(f"{'Field Name':<22} {'Type':<12} {'Param 1':<12} {'Param 2':<12} {'Description'}")
+    print("-" * 80)
+
+    for field_name in field_names:
+        norm_type = norm_specs[field_name]
+        description = descriptions.get(field_name, 'Unknown field')
+        param1_str, param2_str = "N/A", "N/A"
+        type_str = str(norm_type.value)
+
+        if norm_type == NormalizationType.CATEGORICAL:
+            type_str = "categorical"
+        elif field_name in stats:
+            param1, param2 = stats[field_name]
+            param1_str = f"{param1:.4f}"
+            param2_str = f"{param2:.4f}"
+            if norm_type == NormalizationType.STANDARD:
+                type_str = "mean/std"
+            elif norm_type == NormalizationType.LOG:
+                type_str = "log+norm"
+            elif norm_type == NormalizationType.MINMAX:
+                type_str = "min/max"
+
+        print(f"{field_name:<22} {type_str:<12} {param1_str:<12} {param2_str:<12} {description}")
+
+def create_normalizer_from_data(
+    train_data: List[Tuple[torch.Tensor, torch.Tensor]]
+) -> 'BeatmapNormalizer':
+    normalizer = BeatmapNormalizer.from_data(train_data)
+
+    print("\n" + "="*80)
+    print("                    NORMALIZATION STATISTICS")
+    print("="*80)
+
+    _print_stats_table(
+        "VECTOR STATISTICS",
+        HitObjectVector.get_field_names(),
+        HitObjectVector.get_normalization_specs(),
+        HitObjectVector.get_field_descriptions(),
+        normalizer.get_vector_stats()
+    )
+
+    _print_stats_table(
+        "METADATA STATISTICS",
+        BeatmapMetadata.get_field_names(),
+        BeatmapMetadata.get_normalization_specs(),
+        BeatmapMetadata.get_field_descriptions(),
+        normalizer.get_metadata_stats()
+    )
+
+    print("="*80)
+    return normalizer
+
+
 class BeatmapNormalizer:
     def __init__(
         self,
@@ -77,7 +133,6 @@ class BeatmapNormalizer:
     def from_data(
         cls,
         train_data: List[Tuple[torch.Tensor, torch.Tensor]],
-        include_augmentation: bool = True,
         epsilon: float = 1e-8
     ) -> 'BeatmapNormalizer':
         print("Calculating normalization statistics...")
@@ -86,32 +141,8 @@ class BeatmapNormalizer:
         vector_norm_specs = HitObjectVector.get_normalization_specs()
         meta_norm_specs = BeatmapMetadata.get_normalization_specs()
 
-        all_vectors_list = [data[0] for data in train_data]
-        all_metadata_list = [data[1] for data in train_data]
-
-        if include_augmentation:
-            print("Including data augmentation in normalization statistics...")
-            augmented_vectors_list = []
-            cos_angle_idx = vector_field_names.index('cos_angle')
-            sin_angle_idx = vector_field_names.index('sin_angle')
-
-            for vectors in all_vectors_list:
-                augmented_vectors_list.append(vectors)
-                flipped_x = vectors.clone()
-                flipped_x[:, cos_angle_idx] *= -1
-                augmented_vectors_list.append(flipped_x)
-                flipped_y = vectors.clone()
-                flipped_y[:, sin_angle_idx] *= -1
-                augmented_vectors_list.append(flipped_y)
-                flipped_xy = vectors.clone()
-                flipped_xy[:, cos_angle_idx] *= -1
-                flipped_xy[:, sin_angle_idx] *= -1
-                augmented_vectors_list.append(flipped_xy)
-            all_vectors_tensor = torch.cat(augmented_vectors_list, dim=0)
-        else:
-            all_vectors_tensor = torch.cat(all_vectors_list, dim=0)
-
-        all_metadata_tensor = torch.stack(all_metadata_list, dim=0)
+        all_vectors_tensor = torch.cat([data[0] for data in train_data], dim=0)
+        all_metadata_tensor = torch.stack([data[1] for data in train_data], dim=0)
 
         vector_stats = {}
         for i, field_name in enumerate(vector_field_names):
@@ -143,29 +174,14 @@ class BeatmapNormalizer:
 
 
 class BeatmapAugmenter:
-    def __init__(self):
-        vector_field_names = HitObjectVector.get_field_names()
-        self.cos_angle_idx = vector_field_names.index('cos_angle')
-        self.sin_angle_idx = vector_field_names.index('sin_angle')
-
     def apply_augmentation(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
-        augmented = vectors.clone()
-        if aug_type == 1:
-            augmented[:, self.cos_angle_idx] *= -1
-        elif aug_type == 2:
-            augmented[:, self.sin_angle_idx] *= -1
-        elif aug_type == 3:
-            augmented[:, self.cos_angle_idx] *= -1
-            augmented[:, self.sin_angle_idx] *= -1
-        return augmented
+        return vectors.clone()
 
     def random_augmentation(self, vectors: torch.Tensor) -> torch.Tensor:
-        aug_type = torch.randint(0, 4, (1,)).item()
-        return self.apply_augmentation(vectors, aug_type)
+        return self.apply_augmentation(vectors, 0)
 
 
 class BeatmapTransform:
-
     def __init__(
         self,
         normalizer: BeatmapNormalizer,
