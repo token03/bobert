@@ -215,7 +215,7 @@ def load_dataset(
         print(f"WARNING: Dropped {len(final_data) - len(final_data_validated)} beatmaps due to data integrity issues.")
 
     print("Finished loading and processing all data.")
-    return final_data, difficulty_ratings, loaded_ids
+    return final_data_validated, np.array(validated_difficulty_ratings), np.array(validated_ids)
 
 def load_finetuning_dataset(
     dataset_path: str,

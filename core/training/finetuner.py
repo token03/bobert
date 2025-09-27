@@ -60,6 +60,7 @@ class FineTuningTrainer:
 
 
     def _encode_labels(self, labels: List[List[str]], encoder: Dict[str, int], num_classes: int) -> torch.Tensor:
+        # ... (code unchanged)
         batch_size = len(labels)
         encoded_tensor = torch.zeros(batch_size, num_classes, device=self.device)
         for i, sample_labels in enumerate(labels):
@@ -71,14 +72,15 @@ class FineTuningTrainer:
         return encoded_tensor
     
     def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        vectors, attention_mask, metadata, difficulty_ratings, collection_labels, user_tags = batch
+        vectors, attention_mask, metadata, difficulty_ratings, collection_labels, user_tags, positive_mask = batch
         
         vectors = vectors.to(self.device, non_blocking=True)
         attention_mask = attention_mask.to(self.device, non_blocking=True)
         metadata = metadata.to(self.device, non_blocking=True)
         
         labels_dict = {
-            'difficulty_ratings': difficulty_ratings.to(self.device, non_blocking=True)
+            'difficulty_ratings': difficulty_ratings.to(self.device, non_blocking=True),
+            'positive_mask': positive_mask.to(self.device, non_blocking=True)
         }
         
         if any(collection_labels):
@@ -95,6 +97,7 @@ class FineTuningTrainer:
         return vectors, attention_mask, metadata, labels_dict
 
     def _run_step(self, batch: Tuple, is_train: bool) -> Dict[str, float]:
+        # ... (code unchanged)
         vectors, attention_mask, metadata, labels = self._prepare_batch(batch)
         
         with torch.set_grad_enabled(is_train):
@@ -109,6 +112,7 @@ class FineTuningTrainer:
         return {k: v.item() for k, v in losses.items()}
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
+        # ... (code unchanged)
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         epoch_losses = {}
@@ -150,7 +154,7 @@ class FineTuningTrainer:
         avg_losses = {k: v / len(self.train_dataloader) for k, v in epoch_losses.items()}
         avg_losses['learning_rate'] = self.optimizer.param_groups[0]['lr']
         return avg_losses
-    
+
     def validate_epoch(self) -> Dict[str, float]:
         self.model.eval()
         epoch_losses = {}
@@ -175,6 +179,7 @@ class FineTuningTrainer:
         return avg_losses
 
     def train(self, start_epoch: int = 0):
+        # ... (code unchanged)
         num_epochs = self.config['finetuning']['num_epochs']
         print(f"Starting fine-tuning from epoch {start_epoch+1}/{num_epochs}...")
         
@@ -203,6 +208,7 @@ class FineTuningTrainer:
         print("Fine-tuning finished.")
         return self.metrics_tracker
 
+
 def setup_finetuning(
     model: nn.Module,
     train_dataloader: DataLoader,
@@ -213,6 +219,7 @@ def setup_finetuning(
     user_tag_encoder: Dict[str, int],
     collection_label_encoder: Dict[str, int]
 ) -> Tuple[FineTuningTrainer, CheckpointManager]:
+    # ... (code unchanged)
     grad_accum_steps = config['finetuning'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
     total_steps = num_update_steps_per_epoch * config['finetuning']['num_epochs']

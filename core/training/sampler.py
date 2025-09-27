@@ -1,6 +1,6 @@
 # sampler.py
 from collections import defaultdict
-import random 
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -9,6 +9,7 @@ from typing import Tuple, List, Dict, Any, Optional, Iterator
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from ..data.types import BeatmapMetadata
+import bisect
 
 def create_kde_sampler(
     difficulty_ratings: Optional[np.ndarray] = None,
@@ -55,93 +56,185 @@ def create_kde_sampler(
 
 def create_contrastive_sampler(
     labels: List[List[str]],
-    batch_size: int = 8,
-    num_positives_per_anchor: int = 1
+    difficulty_ratings: List[float],
+    config: Dict[str, Any]
 ) -> Sampler[List[int]]:
-    return ContrastiveBatchSampler(labels, batch_size=batch_size, num_positives_per_anchor=num_positives_per_anchor)
+    finetuning_config = config['finetuning']
+    return ContrastiveBatchSampler(
+        labels=labels,
+        difficulty_ratings=difficulty_ratings,
+        batch_size=config['pretraining']['batch_size'],
+        positive_difficulty_threshold=finetuning_config['positive_difficulty_threshold'],
+        hard_negative_difficulty_threshold=finetuning_config['hard_negative_difficulty_threshold'],
+        max_ease_factor=finetuning_config.get('sampler_max_ease_factor', 5.0)
+    )
 
 class ContrastiveBatchSampler(Sampler[List[int]]):
-    def __init__(self, labels: List[List[str]], batch_size: int, num_positives_per_anchor: int = 1):
+    def __init__(self,
+                 labels: List[List[str]],
+                 difficulty_ratings: List[float],
+                 batch_size: int,
+                 positive_difficulty_threshold: float,
+                 hard_negative_difficulty_threshold: float,
+                 max_ease_factor: float = 5.0):
         super().__init__()
         self.labels = labels
+        self.difficulty_ratings = np.array(difficulty_ratings)
         self.batch_size = batch_size
-        self.num_positives_per_anchor = num_positives_per_anchor
-        
-        self.group_size = self.num_positives_per_anchor + 1
+        self.positive_difficulty_threshold = positive_difficulty_threshold
+        self.hard_negative_difficulty_threshold = hard_negative_difficulty_threshold
+        self.max_ease_factor = max_ease_factor
+        self.num_samples = len(labels)
+        self.indices = list(range(self.num_samples))
 
-        if batch_size < self.group_size:
-            raise ValueError(f"batch_size ({batch_size}) must be at least num_positives_per_anchor + 1 ({self.group_size})")
-
+        print("Initializing ContrastiveBatchSampler...")
         self.label_to_indices = defaultdict(list)
         for i, sample_labels in enumerate(labels):
             for label in sample_labels:
                 self.label_to_indices[label].append(i)
 
-        self.usable_labels = {
-            label: indices for label, indices in self.label_to_indices.items()
-            if len(indices) >= self.group_size
+        self.label_to_sorted_by_diff = {}
+        for label, indices in self.label_to_indices.items():
+            if len(indices) > 1:
+                sorted_indices = sorted(indices, key=lambda i: self.difficulty_ratings[i])
+                self.label_to_sorted_by_diff[label] = {
+                    'indices': sorted_indices,
+                    'ratings': self.difficulty_ratings[sorted_indices]
+                }
+        
+        sorted_all_indices = sorted(self.indices, key=lambda i: self.difficulty_ratings[i])
+        self.all_indices_sorted_by_diff = {
+            'indices': sorted_all_indices,
+            'ratings': self.difficulty_ratings[sorted_all_indices]
         }
         
-        self.indices_with_pairs = sorted(list(
-            {idx for label in self.usable_labels for idx in self.usable_labels[label]}
-        ))
+        self.usable_labels = set(self.label_to_sorted_by_diff.keys())
+        self.anchorable_indices = sorted(list({
+            idx for label in self.usable_labels for idx in self.label_to_indices[label]
+        }))
+
+        if not self.anchorable_indices:
+            raise ValueError("No data points share any labels. Cannot create positive pairs.")
+
+        print(f"Found {len(self.usable_labels)} usable labels for creating pairs.")
+        print(f"Total potential anchors: {len(self.anchorable_indices)}")
+
+    def _find_candidate(self, anchor_idx, candidates, exclude_indices, rating_range):
+        valid_candidates = []
+        for c_idx in candidates:
+            if c_idx != anchor_idx and c_idx not in exclude_indices:
+                if rating_range[0] <= self.difficulty_ratings[c_idx] <= rating_range[1]:
+                    valid_candidates.append(c_idx)
+        return random.choice(valid_candidates) if valid_candidates else None
+
+    def _find_positive(self, anchor_idx: int, anchor_labels: List[str], exclude_indices: set) -> Optional[int]:
+        anchor_rating = self.difficulty_ratings[anchor_idx]
+        potential_labels = list(set(anchor_labels) & self.usable_labels)
+        if not potential_labels: return None
+        random.shuffle(potential_labels)
         
-        if not self.indices_with_pairs:
-            raise ValueError("No data points share any labels. Cannot create positive groups.")
+        for ease_factor in np.linspace(1.0, self.max_ease_factor, 5):
+            threshold = self.positive_difficulty_threshold * ease_factor
+            min_r, max_r = anchor_rating - threshold, anchor_rating + threshold
             
-        print(f"ContrastiveBatchSampler: Found {len(self.usable_labels)} labels with >={self.group_size} members.")
-        print(f"Total data points that can be anchors: {len(self.indices_with_pairs)}")
+            for label in potential_labels:
+                sorted_data = self.label_to_sorted_by_diff[label]
+                start_idx = bisect.bisect_left(sorted_data['ratings'], min_r)
+                end_idx = bisect.bisect_right(sorted_data['ratings'], max_r)
+                
+                candidates = [i for i in sorted_data['indices'][start_idx:end_idx] if i != anchor_idx and i not in exclude_indices]
+                if candidates:
+                    return random.choice(candidates)
+        return None
+
+    def _find_hard_negative1(self, anchor_idx: int, anchor_labels: List[str], exclude_indices: set) -> Optional[int]:
+        anchor_rating = self.difficulty_ratings[anchor_idx]
+        potential_labels = list(set(anchor_labels) & self.usable_labels)
+        if not potential_labels: return None
+        
+        label = random.choice(potential_labels)
+        sorted_data = self.label_to_sorted_by_diff[label]
+
+        low_candidates = [i for i in sorted_data['indices'] if self.difficulty_ratings[i] < anchor_rating - self.hard_negative_difficulty_threshold]
+        high_candidates = [i for i in sorted_data['indices'] if self.difficulty_ratings[i] > anchor_rating + self.hard_negative_difficulty_threshold]
+        
+        all_candidates = [c for c in low_candidates + high_candidates if c not in exclude_indices]
+        return random.choice(all_candidates) if all_candidates else None
+
+    def _find_hard_negative2(self, anchor_idx: int, exclude_indices: set) -> Optional[int]:
+        anchor_rating = self.difficulty_ratings[anchor_idx]
+        anchor_labels = set(self.labels[anchor_idx])
+
+        for ease_factor in np.linspace(1.0, self.max_ease_factor, 5):
+            threshold = self.positive_difficulty_threshold * ease_factor
+            min_r, max_r = anchor_rating - threshold, anchor_rating + threshold
+
+            sorted_data = self.all_indices_sorted_by_diff
+            start_idx = bisect.bisect_left(sorted_data['ratings'], min_r)
+            end_idx = bisect.bisect_right(sorted_data['ratings'], max_r)
+            
+            candidates = []
+            candidate_indices = sorted_data['indices'][start_idx:end_idx]
+            if len(candidate_indices) > 200: 
+                 candidate_indices = random.sample(candidate_indices, 200)
+
+            for c_idx in candidate_indices:
+                if c_idx not in exclude_indices and not anchor_labels.intersection(self.labels[c_idx]):
+                    candidates.append(c_idx)
+            
+            if candidates:
+                return random.choice(candidates)
+        return None
 
     def __iter__(self) -> Iterator[List[int]]:
-        available_anchors = self.indices_with_pairs.copy()
+        available_anchors = self.anchorable_indices.copy()
         random.shuffle(available_anchors)
         
         anchor_iterator = iter(available_anchors)
-        has_more_anchors = True
 
-        while has_more_anchors:
-            batch_indices = []
+        while True:
+            batch_indices = set()
             
-            while len(batch_indices) + self.group_size <= self.batch_size:
+            while len(batch_indices) + 4 <= self.batch_size:
                 try:
-                    anchor_idx = next(anchor_iterator)
+                    anchor = next(anchor_iterator)
                 except StopIteration:
-                    has_more_anchors = False
                     break
-                
-                valid_anchor_labels = [l for l in self.labels[anchor_idx] if l in self.usable_labels]
-                if not valid_anchor_labels:
-                    continue
 
-                chosen_label = random.choice(valid_anchor_labels)
-                
-                positive_candidates = [i for i in self.usable_labels[chosen_label] if i != anchor_idx]
-                
-                if len(positive_candidates) < self.num_positives_per_anchor:
-                    continue
+                if anchor in batch_indices: continue
 
-                positives = random.sample(positive_candidates, self.num_positives_per_anchor)
-                
-                batch_indices.extend([anchor_idx] + positives)
+                positive = self._find_positive(anchor, self.labels[anchor], batch_indices)
+                if positive is None: continue
 
-            if not batch_indices:
+                hn1 = self._find_hard_negative1(anchor, self.labels[anchor], batch_indices | {anchor, positive})
+                if hn1 is None: continue
+
+                hn2 = self._find_hard_negative2(anchor, batch_indices | {anchor, positive, hn1})
+                if hn2 is None: continue
+
+                batch_indices.update([anchor, positive, hn1, hn2])
+
+            if not batch_indices and not available_anchors:
                 break
             
-            num_negatives_needed = self.batch_size - len(batch_indices)
-            if num_negatives_needed > 0:
-                current_batch_set = set(batch_indices)
-                all_indices_set = set(range(len(self.labels)))
-                potential_negatives = list(all_indices_set - current_batch_set)
-                
-                num_to_sample = min(num_negatives_needed, len(potential_negatives))
-                negatives = random.sample(potential_negatives, num_to_sample)
-                batch_indices.extend(negatives)
+            num_to_fill = self.batch_size - len(batch_indices)
+            if num_to_fill > 0:
+                potential_fillers = list(set(self.indices) - batch_indices)
+                num_to_sample = min(num_to_fill, len(potential_fillers))
+                fillers = random.sample(potential_fillers, num_to_sample)
+                batch_indices.update(fillers)
 
-            random.shuffle(batch_indices)
-            yield batch_indices
+            if not batch_indices:
+                 if not list(anchor_iterator): break 
+                 else: continue
+            
+            final_batch = list(batch_indices)
+            random.shuffle(final_batch)
+            yield final_batch
+            
+            if not list(anchor_iterator) and len(batch_indices) < self.batch_size:
+                 break 
+
 
     def __len__(self) -> int:
-        num_groups_per_batch = self.batch_size // self.group_size
-        if num_groups_per_batch == 0:
-            return 0
-        return (len(self.indices_with_pairs) + num_groups_per_batch - 1) // num_groups_per_batch
+        return (len(self.anchorable_indices) + 3) // 4

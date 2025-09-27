@@ -25,7 +25,7 @@ INDEXER_THREADS = os.cpu_count() * 2 if os.cpu_count() else 4
 CACHE_FILE_NAME = 'beatmap_index.json'
 
 API_CONFIG = {
-    'https://catboy.best/osu/{id}': 0.4,
+    'https://catboy.best/osu/{id}': 2,
     'https://osu.direct/api/osu/{id}': 0.8,
 }
 

@@ -55,27 +55,24 @@ def mlm_loss_fn(
     return total_loss / (num_masked + 1e-9)
 
 
-def _multi_label_contrastive_loss(projections: torch.Tensor, labels: torch.Tensor, temperature: float) -> torch.Tensor:
+def _dynamic_supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch.Tensor, temperature: float) -> torch.Tensor:
+    if positive_mask.sum() == 0:
+        return torch.tensor(0.0, device=projections.device)
+
     epsilon = 1e-8
     projections = F.normalize(projections + epsilon, p=2, dim=1)
     
     sim_matrix = torch.matmul(projections, projections.T) / temperature
     
-    positive_mask = (torch.matmul(labels.float(), labels.float().T) > 0).float()
-    
     diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
-    positive_mask.masked_fill_(diag_mask, 0)
-    
-    if positive_mask.sum() == 0:
-        return torch.tensor(0.0, device=projections.device)
-
-    n_positives_per_anchor = positive_mask.sum(dim=1)
-    
     sim_matrix_masked = sim_matrix.clone()
     sim_matrix_masked.masked_fill_(diag_mask, -torch.inf)
+    
     log_prob = F.log_softmax(sim_matrix_masked, dim=1)
     
-    log_prob_pos = (positive_mask * log_prob).sum(dim=1)
+    log_prob_pos = (positive_mask.float() * log_prob).sum(dim=1)
+    
+    n_positives_per_anchor = positive_mask.sum(dim=1)
     
     loss_per_anchor = -log_prob_pos / n_positives_per_anchor.clamp(min=1.0)
     
@@ -84,30 +81,6 @@ def _multi_label_contrastive_loss(projections: torch.Tensor, labels: torch.Tenso
     
     return torch.nan_to_num(final_loss, nan=0.0)
 
-
-def _continuous_contrastive_loss(projections: torch.Tensor, values: torch.Tensor, embedding_temp: float, label_temp: float) -> torch.Tensor:
-    epsilon = 1e-8
-    projections = F.normalize(projections + epsilon, p=2, dim=1)
-    
-    sim_matrix = torch.matmul(projections, projections.T) / embedding_temp
-    
-    values = values.contiguous().view(-1, 1)
-    pairwise_dist_sq = torch.cdist(values, values, p=2).pow(2)
-    soft_positive_mask = torch.exp(-pairwise_dist_sq / label_temp)
-    
-    diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
-    soft_positive_mask.masked_fill_(diag_mask, 0)
-    
-    row_sum = soft_positive_mask.sum(dim=1).clamp(min=epsilon) 
-    normalized_soft_mask = soft_positive_mask / row_sum.unsqueeze(1)
-    
-    sim_matrix_masked = sim_matrix.clone()
-    sim_matrix_masked.masked_fill_(diag_mask, -torch.inf)
-    log_prob = F.log_softmax(sim_matrix_masked, dim=1)
-    
-    loss = -(normalized_soft_mask * log_prob).sum(dim=1).mean()
-    
-    return torch.nan_to_num(loss, nan=0.0) 
 
 @torch.compile
 def contrastive_loss_fn(
@@ -120,7 +93,6 @@ def contrastive_loss_fn(
 
     finetuning_config = config.get('finetuning', {})
     temperature = finetuning_config.get('temperature', 0.1)
-    difficulty_label_temp = finetuning_config.get('difficulty_label_temp', 1.0)
 
     user_tag_weight = finetuning_config.get('user_tag_weight', 1.0)
     collection_label_weight = finetuning_config.get('collection_label_weight', 1.0)
@@ -147,27 +119,29 @@ def contrastive_loss_fn(
         losses['difficulty_rating_loss'] = difficulty_rating_loss
         total_loss += difficulty_rating_weight * difficulty_rating_loss
 
-    if 'user_tags' in labels and 'user_tag_projection' in predictions:
-        user_tag_contrastive_loss = _multi_label_contrastive_loss(
-            predictions['user_tag_projection'], labels['user_tags'], temperature
-        )
-        losses['user_tag_contrastive_loss'] = user_tag_contrastive_loss
-        total_loss += user_tag_weight * user_tag_contrastive_loss
+    if 'positive_mask' in labels:
+        positive_mask = labels['positive_mask']
         
-    if 'collection_labels' in labels and 'collection_label_projection' in predictions:
-        collection_label_contrastive_loss = _multi_label_contrastive_loss(
-            predictions['collection_label_projection'], labels['collection_labels'], temperature
-        )
-        losses['collection_label_contrastive_loss'] = collection_label_contrastive_loss
-        total_loss += collection_label_weight * collection_label_contrastive_loss
+        if 'user_tag_projection' in predictions:
+            user_tag_contrastive_loss = _dynamic_supervised_contrastive_loss(
+                predictions['user_tag_projection'], positive_mask, temperature
+            )
+            losses['user_tag_contrastive_loss'] = user_tag_contrastive_loss
+            total_loss += user_tag_weight * user_tag_contrastive_loss
+            
+        if 'collection_label_projection' in predictions:
+            collection_label_contrastive_loss = _dynamic_supervised_contrastive_loss(
+                predictions['collection_label_projection'], positive_mask, temperature
+            )
+            losses['collection_label_contrastive_loss'] = collection_label_contrastive_loss
+            total_loss += collection_label_weight * collection_label_contrastive_loss
 
-    if 'difficulty_ratings' in labels and 'difficulty_rating_projection' in predictions:
-        difficulty_contrastive_loss = _continuous_contrastive_loss(
-            predictions['difficulty_rating_projection'], labels['difficulty_ratings'],
-            embedding_temp=temperature, label_temp=difficulty_label_temp
-        )
-        losses['difficulty_contrastive_loss'] = difficulty_contrastive_loss
-        total_loss += difficulty_rating_weight * difficulty_contrastive_loss
+        if 'difficulty_rating_projection' in predictions:
+            difficulty_contrastive_loss = _dynamic_supervised_contrastive_loss(
+                predictions['difficulty_rating_projection'], positive_mask, temperature
+            )
+            losses['difficulty_contrastive_loss'] = difficulty_contrastive_loss
+            total_loss += difficulty_rating_weight * difficulty_contrastive_loss
 
     losses['total_loss'] = total_loss
     return losses
