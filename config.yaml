@@ -21,11 +21,13 @@ components:
 pretraining:
   batch_size: 8
   num_epochs: 5
+
   learning_rate: 5e-4
+  min_lr: 1e-6
   weight_decay: 0.05
   warmup_ratio: 0.05
   stable_ratio: 0.1
-  min_lr: 1e-6
+
   use_amp: true
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
@@ -42,11 +44,13 @@ pretraining:
 finetuning:
   batch_size: 8
   num_epochs: 3
+
   learning_rate: 5e-5
+  min_lr: 1e-6
   weight_decay: 0.05
   warmup_ratio: 0.05
   stable_ratio: 0.1
-  min_lr: 1e-6
+
   use_amp: true
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
@@ -58,6 +62,7 @@ finetuning:
   user_tag_weight: 0.0
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0
-  positive_difficulty_threshold: 0.2
+  positive_difficulty_threshold: 0.3
   hard_negative_difficulty_threshold: 0.6
-  sampler_max_ease_factor: 3.0
+  sampler_max_ease_factor: 1.0
+  validation_k_values: [1, 5, 10, 25]

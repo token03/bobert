@@ -6,12 +6,13 @@ from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
 
 from .checkpoint import CheckpointManager
-from .metrics import MetricsTracker
+from .metrics import MetricsTracker, FineTuneEpochMetrics
 from .optimization import create_optimizer, create_scheduler
 from .loss import contrastive_loss_fn
 from ..data.transforms import BeatmapNormalizer
@@ -50,6 +51,7 @@ class FineTuningTrainer:
         
         self.scaler = torch.amp.GradScaler(device=device.type, enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()
+        self.val_metrics_computer = FineTuneEpochMetrics(config).to(device)
 
         print(f"FineTuningTrainer initialized - AMP: {self.use_amp}, Device: {device}, Grad Accum: {self.grad_accum_steps}")
         if self.train_dataloader.batch_sampler is not None:
@@ -58,9 +60,7 @@ class FineTuningTrainer:
             effective_batch_size = self.train_dataloader.batch_size * self.grad_accum_steps
         print(f"Effective batch size: {effective_batch_size}")
 
-
     def _encode_labels(self, labels: List[List[str]], encoder: Dict[str, int], num_classes: int) -> torch.Tensor:
-        # ... (code unchanged)
         batch_size = len(labels)
         encoded_tensor = torch.zeros(batch_size, num_classes, device=self.device)
         for i, sample_labels in enumerate(labels):
@@ -97,7 +97,6 @@ class FineTuningTrainer:
         return vectors, attention_mask, metadata, labels_dict
 
     def _run_step(self, batch: Tuple, is_train: bool) -> Dict[str, float]:
-        # ... (code unchanged)
         vectors, attention_mask, metadata, labels = self._prepare_batch(batch)
         
         with torch.set_grad_enabled(is_train):
@@ -112,7 +111,6 @@ class FineTuningTrainer:
         return {k: v.item() for k, v in losses.items()}
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        # ... (code unchanged)
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         epoch_losses = {}
@@ -157,29 +155,48 @@ class FineTuningTrainer:
 
     def validate_epoch(self) -> Dict[str, float]:
         self.model.eval()
-        epoch_losses = {}
-        
+        self.val_metrics_computer.reset_batch_metrics()
+
+        all_embeddings = []
+        all_ratings = []
+        all_labels = []
+
+        print("Running validation...")
         with torch.no_grad():
-            progress_bar = tqdm(
-                self.val_dataloader, 
-                desc=f"Validation", 
-                dynamic_ncols=True,
-                leave=False
-            )
-            for batch in progress_bar:
+            for batch in tqdm(self.val_dataloader, desc="Validation", leave=False, dynamic_ncols=True):
+                vectors, attention_mask, metadata, ratings, labels, _, _ = batch
+                
+                vectors_dev = vectors.to(self.device, non_blocking=True)
+                attention_mask_dev = attention_mask.to(self.device, non_blocking=True)
+                metadata_dev = metadata.to(self.device, non_blocking=True)
+
+                labels_dict = {
+                    'difficulty_ratings': ratings.to(self.device, non_blocking=True)
+                }
+
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    vectors, attention_mask, metadata, labels = self._prepare_batch(batch)
-                    predictions = self.model(vectors, metadata, attention_mask)
-                    step_losses = self.loss_fn(predictions, labels, self.config)
-                
-                    for k, v in step_losses.items():
-                            epoch_losses[k] = epoch_losses.get(k, 0.0) + v.item()
-                
-        avg_losses = {k: v / len(self.val_dataloader) for k, v in epoch_losses.items()}
-        return avg_losses
+                    predictions = self.model(vectors_dev, metadata_dev, attention_mask_dev)
+                    step_losses = self.loss_fn(predictions, labels_dict, self.config)
+                    embeddings = predictions.get('collection_label_projection', predictions['cls_representation'])
+
+                self.val_metrics_computer.update_batch_metrics({k: v.item() for k,v in step_losses.items()})
+
+                all_embeddings.append(embeddings.cpu())
+                all_ratings.append(ratings.cpu())
+                all_labels.extend(labels)
+
+        batch_metrics = self.val_metrics_computer.compute_batch_metrics()
+
+        embedding_metrics = self.val_metrics_computer.compute_embedding_metrics(
+            all_embeddings=torch.cat(all_embeddings, dim=0).to(self.device),
+            all_ratings=torch.cat(all_ratings, dim=0).to(self.device),
+            all_labels=all_labels
+        )
+        
+        all_metrics = {**batch_metrics, **embedding_metrics}
+        return all_metrics
 
     def train(self, start_epoch: int = 0):
-        # ... (code unchanged)
         num_epochs = self.config['finetuning']['num_epochs']
         print(f"Starting fine-tuning from epoch {start_epoch+1}/{num_epochs}...")
         
@@ -192,18 +209,24 @@ class FineTuningTrainer:
             self.metrics_tracker.log_epoch(epoch, train_metrics, val_metrics)
             
             epoch_duration = time.time() - epoch_start_time
-
-            checkpoint_path = self.checkpoint_manager.save_checkpoint(
+            
+            self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics, suffix="latest",
                 vector_stats=self.normalizer.get_vector_stats(),
                 meta_stats=self.normalizer.get_metadata_stats()
             )
 
+            r1 = val_metrics.get('Recall@1', 0.0)
+            r5 = val_metrics.get('Recall@5', 0.0)
+            r10 = val_metrics.get('Recall@10', 0.0)
+            rho = val_metrics.get('SpearmanRho', 0.0)
+            ndcg10 = val_metrics.get('nDCG@10', 0.0)
+            
             print(f"Epoch {epoch+1}/{num_epochs} | Time: {epoch_duration:.2f}s | "
                   f"Train Loss: {train_metrics['total_loss']:.4f} | "
-                  f"Val Loss: {val_metrics['total_loss']:.4f} | "
-                  f"Checkpoint saved to {checkpoint_path}")
+                  f"Val Loss: {val_metrics.get('total_loss', 0.0):.4f} | "
+                  f"R@1: {r1:.3f} | R@5: {r5:.3f} | R@10: {r10:.3f} | Rho: {rho:.3f} | nDCG@10: {ndcg10:.3f}")
         
         print("Fine-tuning finished.")
         return self.metrics_tracker
@@ -219,7 +242,6 @@ def setup_finetuning(
     user_tag_encoder: Dict[str, int],
     collection_label_encoder: Dict[str, int]
 ) -> Tuple[FineTuningTrainer, CheckpointManager]:
-    # ... (code unchanged)
     grad_accum_steps = config['finetuning'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
     total_steps = num_update_steps_per_epoch * config['finetuning']['num_epochs']
