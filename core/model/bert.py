@@ -75,6 +75,7 @@ class BertEncoder(nn.Module):
             n_layers=model_config['n_layers'],
             dim_feedforward=dim_feedforward,
             dropout=model_config.get('dropout', 0.1),
+            local_attention_window=model_config.get('local_attention_window', 128),
             use_flash_attention=components_config.get('use_flash_attention', True)
         )
 
@@ -234,7 +235,7 @@ class BertForMaskedModeling(nn.Module):
         max_seqlen = full_encoder_input.shape[1]
         encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
 
-        sequence_output = encoded_output[:, 1:, :]
+        sequence_output = encoded_output[:, 1:, :].contiguous()
 
         standard_cont_preds = self.standard_continuous_head(sequence_output)
         angle_preds_raw = self.angle_head(sequence_output)

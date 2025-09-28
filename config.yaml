@@ -1,11 +1,11 @@
 data:
-  db_path: './data/beatmap_dataset_test/'
-  # db_path: './data/beatmap_dataset/'
+  # db_path: './data/beatmap_dataset_test/'
+  db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
   max_samples_per_class:
-    aim: 1200
-    tech: 1200
+    aim: 1500
+    tech: 1500
 
 model:
   d_model: 512
@@ -13,6 +13,7 @@ model:
   n_layers: 6
   dim_feedforward_mult: 4
   dropout: 0.1
+  local_attention_window: 128
   
 components:
   use_flash_attention: true
@@ -33,7 +34,7 @@ pretraining:
   use_amp: true
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 8
 
   masking_ratio: 0.25
   
@@ -47,7 +48,7 @@ finetuning:
   batch_size: 8
   num_epochs: 3
 
-  learning_rate: 5e-5
+  learning_rate: 3e-5
   min_lr: 1e-6
   cooldown_type: "linear"
   weight_decay: 0.05
@@ -67,8 +68,8 @@ finetuning:
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0
 
-  positive_difficulty_threshold: 0.3
-  hard_negative_difficulty_threshold: 0.6
+  positive_difficulty_threshold: 0.25
+  hard_negative_difficulty_threshold: 0.5
   sampler:
     max_ease_factor: 1.0
     kde_bandwidth: 0.35

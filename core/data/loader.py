@@ -13,7 +13,6 @@ import concurrent.futures
 import itertools
 import rosu_pp_py as rosu
 
-
 from .types import HitObjectVector, BeatmapMetadata, NormalizationType, DURATION_BINS, quantize_to_bins
 
 def _recalculate_difficulty_worker(
@@ -69,63 +68,118 @@ def _engineer_features_vectorized(
     df.sort_values(['beatmap_id', 'time'], inplace=True)
     grouped = df.groupby('beatmap_id', observed=False)
 
-    prev_end_time = grouped['end_time'].shift(1)
-    prev_end_x = grouped['x'].shift(1)
-    prev_end_y = grouped['y'].shift(1)
+    df['end_x'] = df['x']
+    df['end_y'] = df['y']
+    is_slider = df['object_type'] == 1
+    df['slider_repeats'] = df['slider_repeats'].fillna(0).astype(int)
+    ends_at_tail = is_slider & (df['slider_repeats'] % 2 == 0)
+    df.loc[ends_at_tail, 'end_x'] = df.loc[ends_at_tail, 'slider_end_x']
+    df.loc[ends_at_tail, 'end_y'] = df.loc[ends_at_tail, 'slider_end_y']
 
+    prev_end_x = grouped['end_x'].shift(1)
+    prev_end_y = grouped['end_y'].shift(1)
     first_in_group = ~df.duplicated('beatmap_id', keep='first')
-    prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
-    prev_end_x.loc[first_in_group] = 256
+    prev_end_x.loc[first_in_group] = 256  
     prev_end_y.loc[first_in_group] = 192
 
-    df['time_diff_ms'] = df['time'] - prev_end_time
-    df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
-    df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
+    V_arrival_x = df['x'] - prev_end_x
+    V_arrival_y = df['y'] - prev_end_y
 
-    df['x_diff'] = df['x'] - prev_end_x
-    df['y_diff'] = df['y'] - prev_end_y
-    df['distance_diff'] = np.hypot(df['x_diff'], df['y_diff'])
+    V_entry_x = pd.Series(0.0, index=df.index)
+    V_entry_y = pd.Series(0.0, index=df.index)
+    is_linear_slider = is_slider & (df['num_anchors'] <= 2)
+    is_complex_slider = is_slider & (df['num_anchors'] > 2)
+    
+    V_entry_x.loc[is_linear_slider] = df.loc[is_linear_slider, 'slider_end_x'] - df.loc[is_linear_slider, 'x']
+    V_entry_y.loc[is_linear_slider] = df.loc[is_linear_slider, 'slider_end_y'] - df.loc[is_linear_slider, 'y']
+    
+    has_first_anchor = is_complex_slider & df['first_anchor_x'].notna()
+    V_entry_x.loc[has_first_anchor] = df.loc[has_first_anchor, 'first_anchor_x'] - df.loc[has_first_anchor, 'x']
+    V_entry_y.loc[has_first_anchor] = df.loc[has_first_anchor, 'first_anchor_y'] - df.loc[has_first_anchor, 'y']
+    
+    fallback_complex = is_complex_slider & df['first_anchor_x'].isna()
+    V_entry_x.loc[fallback_complex] = df.loc[fallback_complex, 'slider_end_x'] - df.loc[fallback_complex, 'x']
+    V_entry_y.loc[fallback_complex] = df.loc[fallback_complex, 'slider_end_y'] - df.loc[fallback_complex, 'y']
+
+    df['V_exit_x'] = 0.0
+    df['V_exit_y'] = 0.0
+    is_circle = df['object_type'] == 0
+    
+    df.loc[is_circle, 'V_exit_x'] = V_arrival_x
+    df.loc[is_circle, 'V_exit_y'] = V_arrival_y
+    
+    ends_at_head = is_slider & (df['slider_repeats'] % 2 != 0)
+    
+    linear_ends_at_tail = is_linear_slider & ~ends_at_head
+    df.loc[linear_ends_at_tail, 'V_exit_x'] = df.loc[linear_ends_at_tail, 'slider_end_x'] - df.loc[linear_ends_at_tail, 'x']
+    df.loc[linear_ends_at_tail, 'V_exit_y'] = df.loc[linear_ends_at_tail, 'slider_end_y'] - df.loc[linear_ends_at_tail, 'y']
+    
+    complex_ends_at_tail = is_complex_slider & ~ends_at_head
+    has_last_anchor_tail = complex_ends_at_tail & df['last_anchor_x'].notna()
+    df.loc[has_last_anchor_tail, 'V_exit_x'] = df.loc[has_last_anchor_tail, 'slider_end_x'] - df.loc[has_last_anchor_tail, 'last_anchor_x']
+    df.loc[has_last_anchor_tail, 'V_exit_y'] = df.loc[has_last_anchor_tail, 'slider_end_y'] - df.loc[has_last_anchor_tail, 'last_anchor_y']
+    
+    fallback_complex_tail = complex_ends_at_tail & df['last_anchor_x'].isna()
+    df.loc[fallback_complex_tail, 'V_exit_x'] = df.loc[fallback_complex_tail, 'slider_end_x'] - df.loc[fallback_complex_tail, 'x']
+    df.loc[fallback_complex_tail, 'V_exit_y'] = df.loc[fallback_complex_tail, 'slider_end_y'] - df.loc[fallback_complex_tail, 'y']
+    
+    df.loc[ends_at_head, 'V_exit_x'] = -V_entry_x.loc[ends_at_head]
+    df.loc[ends_at_head, 'V_exit_y'] = -V_entry_y.loc[ends_at_head]
+    
+    prev_V_exit_x = grouped['V_exit_x'].shift(1)
+    prev_V_exit_y = grouped['V_exit_y'].shift(1)
+    prev_V_exit_x.loc[first_in_group] = V_arrival_x.loc[first_in_group]
+    prev_V_exit_y.loc[first_in_group] = V_arrival_y.loc[first_in_group]
+
+    df['distance_diff'] = np.hypot(V_arrival_x, V_arrival_y)
+    
+    df['slide_length'] = 0.0
+    df.loc[is_slider, 'slide_length'] = np.hypot(
+        df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x'],
+        df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
+    )
+
+    def calculate_angles(v1_x, v1_y, v2_x, v2_y):
+        norm1 = np.hypot(v1_x, v1_y)
+        norm2 = np.hypot(v2_x, v2_y)
+        norm_prod = (norm1 * norm2).replace(0, 1)
+        
+        dot_product = v1_x * v2_x + v1_y * v2_y
+        cross_product = v1_x * v2_y - v1_y * v2_x
+        
+        cos_angle = np.clip(dot_product / norm_prod, -1.0, 1.0)
+        sin_angle = np.clip(cross_product / norm_prod, -1.0, 1.0)
+        
+        is_zero_vector = (norm1 == 0) | (norm2 == 0)
+        cos_angle[is_zero_vector] = 1.0
+        sin_angle[is_zero_vector] = 0.0
+        
+        return cos_angle, sin_angle
+
+    df['cos_flow_angle'], df['sin_flow_angle'] = calculate_angles(
+        prev_V_exit_x, prev_V_exit_y, V_arrival_x, V_arrival_y
+    )
+    df['cos_entry_angle'], df['sin_entry_angle'] = calculate_angles(
+        V_arrival_x, V_arrival_y, V_entry_x, V_entry_y
+    )
+
+    prev_end_time = grouped['end_time'].shift(1)
+    prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 # Arbitrary pre-start time
+    df['time_diff_ms'] = df['time'] - prev_end_time
     df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
 
-    # Inner angle (curvature) calculation
-    next_x = grouped['x'].shift(-1)
-    next_y = grouped['y'].shift(-1)
-
-    vec_ba_x = prev_end_x - df['x']
-    vec_ba_y = prev_end_y - df['y']
-    vec_bc_x = next_x - df['x']
-    vec_bc_y = next_y - df['y']
-
-    norm_ba = np.hypot(vec_ba_x, vec_ba_y)
-    norm_bc = np.hypot(vec_bc_x, vec_bc_y)
-    norm_prod = (norm_ba * norm_bc).replace(0, 1)
-
-    dot_product = vec_ba_x * vec_bc_x + vec_ba_y * vec_bc_y
-    cross_product = vec_ba_x * vec_bc_y - vec_ba_y * vec_bc_x
-
-    df['cos_inner_angle'] = np.clip(dot_product / norm_prod, -1.0, 1.0)
-    df['sin_inner_angle'] = np.clip(cross_product / norm_prod, -1.0, 1.0)
-
-    last_in_group = ~df.duplicated('beatmap_id', keep='last')
-    df.loc[last_in_group, 'cos_inner_angle'] = 1.0
-    df.loc[last_in_group, 'sin_inner_angle'] = 0.0
-
     df['duration_ms'] = df['end_time'] - df['time']
+    df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
+    df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
-    df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
-
-    is_slider = df['object_type'] == 1
     
+    df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
     df['slider_velocity'] = 0.0
     df.loc[is_slider, 'slider_velocity'] = (df.loc[is_slider, 'pixel_length'] / df.loc[is_slider, 'duration_ms'].replace(0, 1)).fillna(0.0)
-    
-    slider_end_to_end_dist = np.hypot(df['slider_end_x'] - df['x'], df['slider_end_y'] - df['y'])
     df['slider_tortuosity'] = 1.0 
-    df.loc[is_slider, 'slider_tortuosity'] = (df.loc[is_slider, 'pixel_length'] / slider_end_to_end_dist.loc[is_slider].replace(0, 1)).fillna(1.0)
+    df.loc[is_slider, 'slider_tortuosity'] = (df.loc[is_slider, 'pixel_length'] / df.loc[is_slider, 'slide_length'].replace(0, 1)).fillna(1.0)
     
-    df['slider_repeats'] = df['slider_repeats'].fillna(0).astype(int)
     df['hard_anchor_ratio'] = df['hard_anchor_ratio'].fillna(0.0)
-    
     curve_type_map = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
     df['slider_curve_type'] = df['curve_type_char'].map(curve_type_map).fillna(4).astype(int)
     df['slider_num_anchors'] = df['num_anchors']
@@ -169,26 +223,82 @@ def load_dataset(
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
     hitobjects_path = os.path.join(dataset_path, 'hitobjects')
+    curvepoints_path = os.path.join(dataset_path, 'curvepoints')
 
     if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
         raise FileNotFoundError(
             f"Parquet dataset not found at '{dataset_path}'. "
             f"Please run create_dataset.py first."
         )
-
-    beatmaps_df = pd.read_parquet(beatmaps_path)
-    hitobjects_df = pd.read_parquet(hitobjects_path)
+    
+    filters = [('beatmap_id', 'in', ids_to_load)] if ids_to_load else None
 
     if ids_to_load:
-        print(f"Filtering dataset to {len(ids_to_load)} specific beatmap IDs before processing.")
-        beatmaps_df = beatmaps_df[beatmaps_df['beatmap_id'].isin(ids_to_load)]
-        hitobjects_df = hitobjects_df[hitobjects_df['beatmap_id'].isin(ids_to_load)]
+        print(f"Applying filters to load {len(ids_to_load)} specific beatmap IDs from Parquet files.")
+    
+    beatmaps_df = pd.read_parquet(beatmaps_path, filters=filters)
+    
+    hitobjects_df = pd.read_parquet(hitobjects_path, filters=filters)
 
+    if ids_to_load:
         id_cat = pd.Categorical(beatmaps_df['beatmap_id'], categories=ids_to_load, ordered=True)
         beatmaps_df = beatmaps_df.assign(beatmap_id=id_cat).sort_values('beatmap_id')
         
         id_cat_ho = pd.Categorical(hitobjects_df['beatmap_id'], categories=ids_to_load, ordered=True)
         hitobjects_df = hitobjects_df.assign(beatmap_id=id_cat_ho).sort_values('beatmap_id')
+
+
+    if os.path.exists(curvepoints_path):
+        print("Loading and processing curve point data with filters...")
+        curvepoints_df = pd.read_parquet(curvepoints_path, filters=filters)
+        
+        if not curvepoints_df.empty:
+            first_anchors = curvepoints_df[curvepoints_df['point_index'] == 1][
+                ['beatmap_id', 'hitobject_time', 'x', 'y']
+            ].rename(columns={'x': 'first_anchor_x', 'y': 'first_anchor_y'})
+            
+            last_indices = curvepoints_df.groupby(['beatmap_id', 'hitobject_time'], observed=False)['point_index'].max() - 1
+            last_indices = last_indices.reset_index().rename(columns={'point_index': 'last_anchor_index'})
+            last_indices = last_indices[last_indices['last_anchor_index'] > 0] 
+            
+            last_anchors_df = pd.merge(
+                curvepoints_df, last_indices,
+                left_on=['beatmap_id', 'hitobject_time', 'point_index'],
+                right_on=['beatmap_id', 'hitobject_time', 'last_anchor_index']
+            )
+            last_anchors = last_anchors_df[
+                ['beatmap_id', 'hitobject_time', 'x', 'y']
+            ].rename(columns={'x': 'last_anchor_x', 'y': 'last_anchor_y'})
+            
+            del curvepoints_df, last_indices, last_anchors_df
+            
+            hitobjects_df = pd.merge(
+                hitobjects_df, 
+                first_anchors, 
+                how='left',
+                left_on=['beatmap_id', 'time'], 
+                right_on=['beatmap_id', 'hitobject_time']
+            ).drop(columns=['hitobject_time'])
+            
+            hitobjects_df = pd.merge(
+                hitobjects_df, 
+                last_anchors, 
+                how='left',
+                left_on=['beatmap_id', 'time'], 
+                right_on=['beatmap_id', 'hitobject_time']
+            ).drop(columns=['hitobject_time'])
+        else:
+            print("WARNING: Curve points data was empty after filtering. Angle features will use fallbacks.")
+            hitobjects_df['first_anchor_x'] = np.nan
+            hitobjects_df['first_anchor_y'] = np.nan
+            hitobjects_df['last_anchor_x'] = np.nan
+            hitobjects_df['last_anchor_y'] = np.nan
+    else:
+        print("WARNING: Curve points data not found. Angle features will be based on fallbacks.")
+        hitobjects_df['first_anchor_x'] = np.nan
+        hitobjects_df['first_anchor_y'] = np.nan
+        hitobjects_df['last_anchor_x'] = np.nan
+        hitobjects_df['last_anchor_y'] = np.nan
 
     print(f"Loaded {len(beatmaps_df)} beatmaps and {len(hitobjects_df)} hit objects.")
 
@@ -310,7 +420,7 @@ def load_finetuning_dataset(
     tags_path: str = "./data/tags.json",
     max_samples_per_class: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray, List[List[str]], List[List[str]]]:
-    print("Loading fine-tuning dataset with labels and tags (memory-efficiently)...")
+    print("Loading fine-tuning dataset with labels and tags...")
 
     if not os.path.exists(labels_path):
         raise FileNotFoundError(f"Labels file not found at {labels_path}. "

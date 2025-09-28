@@ -13,10 +13,6 @@ class NormalizationType(Enum):
     NONE = "none"
 
 def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
-    """
-    Vectorized function to find the index of the closest bin for each value in a numpy array.
-    Handles boundary conditions where values are <= 0 or >= the last bin.
-    """
     bins_arr = np.array(bins)
 
     diffs = np.abs(values[:, np.newaxis] - bins_arr)
@@ -29,15 +25,18 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
     return result
 
 class HitObjectVector(NamedTuple):
-    distance_diff: float
+    distance_diff: float 
     velocity: float
-    cos_inner_angle: float
-    sin_inner_angle: float
+    cos_flow_angle: float
+    sin_flow_angle: float
+    cos_entry_angle: float
+    sin_entry_angle: float
     object_type: int
     is_new_combo: int
     slider_curve_type: int
     slider_num_anchors: int
     slider_pixel_length: float
+    slide_length: float
     slider_repeats: int
     slider_velocity: float
     slider_tortuosity: float
@@ -50,6 +49,14 @@ class HitObjectVector(NamedTuple):
     @classmethod
     def get_field_names(cls):
         return list(cls._fields)
+
+    @staticmethod
+    def get_raw_field_names() -> List[str]:
+        return [
+            'x', 'y', 'slider_end_x', 'slider_end_y', 'slider_repeats', 
+            'num_anchors', 'pixel_length', 'curve_type_char', 
+            'hard_anchor_ratio'
+        ]
     
     @classmethod
     def get_vector_dim(cls):
@@ -94,13 +101,16 @@ class HitObjectVector(NamedTuple):
         return {
             'distance_diff': NormalizationType.LOG,
             'velocity': NormalizationType.LOG,
-            'cos_inner_angle': NormalizationType.STANDARD,
-            'sin_inner_angle': NormalizationType.STANDARD,
+            'cos_flow_angle': NormalizationType.STANDARD,
+            'sin_flow_angle': NormalizationType.STANDARD,
+            'cos_entry_angle': NormalizationType.STANDARD,
+            'sin_entry_angle': NormalizationType.STANDARD,
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'slider_curve_type': NormalizationType.CATEGORICAL,
             'slider_num_anchors': NormalizationType.LOG,
             'slider_pixel_length': NormalizationType.LOG,
+            'slide_length': NormalizationType.LOG,
             'slider_repeats': NormalizationType.LOG,
             'slider_velocity': NormalizationType.LOG,
             'slider_tortuosity': NormalizationType.LOG,
@@ -114,15 +124,18 @@ class HitObjectVector(NamedTuple):
     @classmethod
     def get_field_descriptions(cls) -> Dict[str, str]:
         return {
-            'distance_diff': "Distance to previous hit object in pixels",
+            'distance_diff': "Distance from previous hit object's end point (jump distance)",
             'velocity': "Velocity to previous hit object (pixels/ms)",
-            'cos_inner_angle': "Cosine of inner angle for sliders (0 if not a slider)",
-            'sin_inner_angle': "Sine of inner angle for sliders (0 if not a slider)",
+            'cos_flow_angle': "Cosine of angle between previous object's exit path and current object's arrival path",
+            'sin_flow_angle': "Sine of angle between previous object's exit path and current object's arrival path",
+            'cos_entry_angle': "Cosine of angle between arrival path and slider's entry path (1.0 for circles)",
+            'sin_entry_angle': "Sine of angle between arrival path and slider's entry path (0.0 for circles)",
             'object_type': "Type of hit object (circle, slider, spinner)",
             'is_new_combo': "Whether this hit object starts a new combo",
             'slider_curve_type': "Curve type of slider (0 if not a slider)",
             'slider_num_anchors': "Number of anchor points in slider (0 if not a slider)",
-            'slider_pixel_length': "Pixel length of slider (0 if not a slider)",
+            'slider_pixel_length': "Pixel length of slider's curve path (0 if not a slider)",
+            'slide_length': "Straight-line distance between slider start and end (0 if not a slider)",
             'slider_repeats': "Number of slider repeats (slides - 1)",
             'slider_velocity': "Calculated velocity of the slider (pixels/ms)",
             'slider_tortuosity': "Ratio of slider path length to end-to-end distance",
@@ -175,7 +188,6 @@ VECTOR_DIM = HitObjectVector.get_vector_dim()
 METADATA_DIM = BeatmapMetadata.get_metadata_dim()
 
 class RawTimingPoint(NamedTuple):
-    """Represents a raw timing point from the .osu file."""
     time: int
     beat_length: float
     uninherited: bool

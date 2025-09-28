@@ -31,7 +31,7 @@ def mlm_loss_fn(
         angle_indices = [feature_info['continuous'][name] for name in angle_names]
     
         angle_preds = predictions['angle'] 
-        angle_targets = targets[..., angle_indices]
+        angle_targets = targets[..., angle_indices].contiguous() 
         
         angle_targets_reshaped = angle_targets.view(*angle_targets.shape[:-1], -1, 2)
         angle_targets_norm = F.normalize(angle_targets_reshaped, p=2, dim=-1)
@@ -42,7 +42,7 @@ def mlm_loss_fn(
 
     for name, info in feature_info['categorical'].items():
         cat_logits = predictions['categorical'][name]
-        cat_targets = targets[..., info['index']].long()
+        cat_targets = targets[..., info['index']].long().contiguous()
         
         flat_logits = cat_logits.view(-1, info['cardinality'])
         flat_targets = cat_targets.view(-1)
