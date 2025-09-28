@@ -27,6 +27,9 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
 class HitObjectVector(NamedTuple):
     distance_diff: float 
     velocity: float
+    acceleration: float
+    dist_from_cluster: float
+    angular_jerk: float
     cos_flow_angle: float
     sin_flow_angle: float
     cos_entry_angle: float
@@ -101,6 +104,9 @@ class HitObjectVector(NamedTuple):
         return {
             'distance_diff': NormalizationType.LOG,
             'velocity': NormalizationType.LOG,
+            'acceleration': NormalizationType.LOG,
+            'dist_from_cluster': NormalizationType.LOG,
+            'angular_jerk': NormalizationType.LOG,
             'cos_flow_angle': NormalizationType.STANDARD,
             'sin_flow_angle': NormalizationType.STANDARD,
             'cos_entry_angle': NormalizationType.STANDARD,
@@ -126,6 +132,9 @@ class HitObjectVector(NamedTuple):
         return {
             'distance_diff': "Distance from previous hit object's end point (jump distance)",
             'velocity': "Velocity to previous hit object (pixels/ms)",
+            'acceleration': "Magnitude of acceleration (change in velocity) from the previous movement (pixels/ms^2)",
+            'dist_from_cluster': "Distance from the current hit object to the exponentially weighted moving average of recent object positions (clusteroid)",
+            'angular_jerk': "Magnitude of the rate of change of angular velocity of the flow angle (radians/ms^2)",
             'cos_flow_angle': "Cosine of angle between previous object's exit path and current object's arrival path",
             'sin_flow_angle': "Sine of angle between previous object's exit path and current object's arrival path",
             'cos_entry_angle': "Cosine of angle between arrival path and slider's entry path (1.0 for circles)",

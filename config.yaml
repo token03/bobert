@@ -13,7 +13,7 @@ model:
   n_layers: 6
   dim_feedforward_mult: 4
   dropout: 0.1
-  local_attention_window: 128
+  local_attention_window: 256
   
 components:
   use_flash_attention: true
@@ -37,6 +37,7 @@ pretraining:
   gradient_accumulation_steps: 8
 
   masking_ratio: 0.25
+  mean_span_length: 3
   
   sampling:
     method: "kde"  
@@ -68,7 +69,7 @@ finetuning:
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0
 
-  positive_difficulty_threshold: 0.25
+  positive_difficulty_threshold: 0.2
   hard_negative_difficulty_threshold: 0.5
   sampler:
     max_ease_factor: 1.0
