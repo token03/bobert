@@ -70,6 +70,7 @@ def _engineer_features_vectorized(
 
     df['end_x'] = df['x']
     df['end_y'] = df['y']
+    is_circle = df['object_type'] == 0
     is_slider = df['object_type'] == 1
     df['slider_repeats'] = df['slider_repeats'].fillna(0).astype(int)
     ends_at_tail = is_slider & (df['slider_repeats'] % 2 == 0)
@@ -82,67 +83,20 @@ def _engineer_features_vectorized(
     prev_end_x.loc[first_in_group] = 256  
     prev_end_y.loc[first_in_group] = 192
 
+    # Distance from previous object's start to current object's start
+    prev_start_x = grouped['x'].shift(1)
+    prev_start_y = grouped['y'].shift(1)
+    prev_start_x.loc[first_in_group] = 256
+    prev_start_y.loc[first_in_group] = 192
+    df['distance_diff_head'] = np.hypot(df['x'] - prev_start_x, df['y'] - prev_start_y)
+
+    # Vector from previous object's end to current object's start
     V_arrival_x = df['x'] - prev_end_x
     V_arrival_y = df['y'] - prev_end_y
-
+    df['distance_diff_end'] = np.hypot(V_arrival_x, V_arrival_y)
     
-    next_start_x = grouped['x'].shift(-1)
-    next_start_y = grouped['y'].shift(-1)
-    
-    V_departure_x = (next_start_x - df['end_x']).fillna(0.0)
-    V_departure_y = (next_start_y - df['end_y']).fillna(0.0)
-
-
-    V_entry_x = pd.Series(0.0, index=df.index)
-    V_entry_y = pd.Series(0.0, index=df.index)
-    is_linear_slider = is_slider & (df['num_anchors'] <= 2)
-    is_complex_slider = is_slider & (df['num_anchors'] > 2)
-    
-    V_entry_x.loc[is_linear_slider] = df.loc[is_linear_slider, 'slider_end_x'] - df.loc[is_linear_slider, 'x']
-    V_entry_y.loc[is_linear_slider] = df.loc[is_linear_slider, 'slider_end_y'] - df.loc[is_linear_slider, 'y']
-    
-    has_first_anchor = is_complex_slider & df['first_anchor_x'].notna()
-    V_entry_x.loc[has_first_anchor] = df.loc[has_first_anchor, 'first_anchor_x'] - df.loc[has_first_anchor, 'x']
-    V_entry_y.loc[has_first_anchor] = df.loc[has_first_anchor, 'first_anchor_y'] - df.loc[has_first_anchor, 'y']
-    
-    fallback_complex = is_complex_slider & df['first_anchor_x'].isna()
-    V_entry_x.loc[fallback_complex] = df.loc[fallback_complex, 'slider_end_x'] - df.loc[fallback_complex, 'x']
-    V_entry_y.loc[fallback_complex] = df.loc[fallback_complex, 'slider_end_y'] - df.loc[fallback_complex, 'y']
-
-    df['V_exit_x'] = 0.0
-    df['V_exit_y'] = 0.0
-    is_circle = df['object_type'] == 0
-    
-    df.loc[is_circle, 'V_exit_x'] = V_arrival_x
-    df.loc[is_circle, 'V_exit_y'] = V_arrival_y
-    
-    ends_at_head = is_slider & (df['slider_repeats'] % 2 != 0)
-    
-    linear_ends_at_tail = is_linear_slider & ~ends_at_head
-    df.loc[linear_ends_at_tail, 'V_exit_x'] = df.loc[linear_ends_at_tail, 'slider_end_x'] - df.loc[linear_ends_at_tail, 'x']
-    df.loc[linear_ends_at_tail, 'V_exit_y'] = df.loc[linear_ends_at_tail, 'slider_end_y'] - df.loc[linear_ends_at_tail, 'y']
-    
-    complex_ends_at_tail = is_complex_slider & ~ends_at_head
-    has_last_anchor_tail = complex_ends_at_tail & df['last_anchor_x'].notna()
-    df.loc[has_last_anchor_tail, 'V_exit_x'] = df.loc[has_last_anchor_tail, 'slider_end_x'] - df.loc[has_last_anchor_tail, 'last_anchor_x']
-    df.loc[has_last_anchor_tail, 'V_exit_y'] = df.loc[has_last_anchor_tail, 'slider_end_y'] - df.loc[has_last_anchor_tail, 'last_anchor_y']
-    
-    fallback_complex_tail = complex_ends_at_tail & df['last_anchor_x'].isna()
-    df.loc[fallback_complex_tail, 'V_exit_x'] = df.loc[fallback_complex_tail, 'slider_end_x'] - df.loc[fallback_complex_tail, 'x']
-    df.loc[fallback_complex_tail, 'V_exit_y'] = df.loc[fallback_complex_tail, 'slider_end_y'] - df.loc[fallback_complex_tail, 'y']
-    
-    df.loc[ends_at_head, 'V_exit_x'] = -V_entry_x.loc[ends_at_head]
-    df.loc[ends_at_head, 'V_exit_y'] = -V_entry_y.loc[ends_at_head]
-    
-    prev_V_exit_x = grouped['V_exit_x'].shift(1)
-    prev_V_exit_y = grouped['V_exit_y'].shift(1)
-    prev_V_exit_x.loc[first_in_group] = V_arrival_x.loc[first_in_group]
-    prev_V_exit_y.loc[first_in_group] = V_arrival_y.loc[first_in_group]
-
-    df['distance_diff'] = np.hypot(V_arrival_x, V_arrival_y)
-    
-    df['slide_length'] = 0.0
-    df.loc[is_slider, 'slide_length'] = np.hypot(
+    df['slider_absolute_length'] = 0.0
+    df.loc[is_slider, 'slider_absolute_length'] = np.hypot(
         df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x'],
         df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
     )
@@ -163,19 +117,57 @@ def _engineer_features_vectorized(
         sin_angle[is_zero_vector] = 0.0
         
         return cos_angle, sin_angle
+    
+    # --- Start of Inner Angle Calculation ---
+    # Vector from current slider head to its tail
+    V_slider_abs_x = pd.Series(0.0, index=df.index)
+    V_slider_abs_y = pd.Series(0.0, index=df.index)
+    V_slider_abs_x.loc[is_slider] = df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x']
+    V_slider_abs_y.loc[is_slider] = df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
+    
+    # Vector from current object start to next object start (departure vector)
+    next_start_x = grouped['x'].shift(-1)
+    next_start_y = grouped['y'].shift(-1)
+    V_departure_x = (next_start_x - df['x']).fillna(0.0)
+    V_departure_y = (next_start_y - df['y']).fillna(0.0)
 
-    df['cos_flow_angle'], df['sin_flow_angle'] = calculate_angles(
-        prev_V_exit_x, prev_V_exit_y, V_arrival_x, V_arrival_y
-    )
+    # Conditionally select the second vector for the inner angle calculation
+    V_inner_second_leg_x = pd.Series(0.0, index=df.index)
+    V_inner_second_leg_y = pd.Series(0.0, index=df.index)
+    V_inner_second_leg_x.loc[is_circle] = V_departure_x.loc[is_circle]
+    V_inner_second_leg_y.loc[is_circle] = V_departure_y.loc[is_circle]
+    V_inner_second_leg_x.loc[is_slider] = V_slider_abs_x.loc[is_slider]
+    V_inner_second_leg_y.loc[is_slider] = V_slider_abs_y.loc[is_slider]
+
+    # Calculate inner angle: angle between arrival vector and the conditional second vector
     df['cos_inner_angle'], df['sin_inner_angle'] = calculate_angles(
-        V_arrival_x, V_arrival_y, V_departure_x, V_departure_y
+        V_arrival_x, V_arrival_y, V_inner_second_leg_x, V_inner_second_leg_y
     )
+    # --- End of Inner Angle Calculation ---
+
+    # Angle of slider body relative to the arrival vector
+    df['cos_slider_absolute_angle'], df['sin_slider_absolute_angle'] = calculate_angles(
+        V_arrival_x, V_arrival_y, V_slider_abs_x, V_slider_abs_y
+    )
+
+    # Angle of current jump vector relative to previous jump vector (flow)
+    df['V_arrival_x'] = V_arrival_x
+    df['V_arrival_y'] = V_arrival_y
+    prev_V_arrival_x = grouped['V_arrival_x'].shift(1)
+    prev_V_arrival_y = grouped['V_arrival_y'].shift(1)
+    prev_V_arrival_x.loc[first_in_group] = df.loc[first_in_group, 'V_arrival_x']
+    prev_V_arrival_y.loc[first_in_group] = df.loc[first_in_group, 'V_arrival_y']
+    
+    df['cos_relative_angle'], df['sin_relative_angle'] = calculate_angles(
+        prev_V_arrival_x, prev_V_arrival_y, V_arrival_x, V_arrival_y
+    )
+    df.drop(columns=['V_arrival_x', 'V_arrival_y'], inplace=True)
 
     prev_end_time = grouped['end_time'].shift(1)
     prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 
     df['time_diff_ms'] = df['time'] - prev_end_time
     
-    df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
+    df['velocity'] = (df['distance_diff_end'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
 
     df['duration_ms'] = df['end_time'] - df['time']
     df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
@@ -183,10 +175,7 @@ def _engineer_features_vectorized(
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
     
     df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
-    df['slider_tortuosity'] = 1.0 
-    df.loc[is_slider, 'slider_tortuosity'] = (df.loc[is_slider, 'pixel_length'] / df.loc[is_slider, 'slide_length'].replace(0, 1)).fillna(1.0)
     
-    df['hard_anchor_ratio'] = df['hard_anchor_ratio'].fillna(0.0)
     curve_type_map = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
     df['slider_curve_type'] = df['curve_type_char'].map(curve_type_map).fillna(4).astype(int)
     df['slider_num_anchors'] = df['num_anchors']
@@ -230,7 +219,6 @@ def load_dataset(
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
     hitobjects_path = os.path.join(dataset_path, 'hitobjects')
-    curvepoints_path = os.path.join(dataset_path, 'curvepoints')
 
     if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
         raise FileNotFoundError(
@@ -253,59 +241,6 @@ def load_dataset(
         
         id_cat_ho = pd.Categorical(hitobjects_df['beatmap_id'], categories=ids_to_load, ordered=True)
         hitobjects_df = hitobjects_df.assign(beatmap_id=id_cat_ho).sort_values('beatmap_id')
-
-
-    if os.path.exists(curvepoints_path):
-        print("Loading and processing curve point data with filters...")
-        curvepoints_df = pd.read_parquet(curvepoints_path, filters=filters)
-        
-        if not curvepoints_df.empty:
-            first_anchors = curvepoints_df[curvepoints_df['point_index'] == 1][
-                ['beatmap_id', 'hitobject_time', 'x', 'y']
-            ].rename(columns={'x': 'first_anchor_x', 'y': 'first_anchor_y'})
-            
-            last_indices = curvepoints_df.groupby(['beatmap_id', 'hitobject_time'], observed=False)['point_index'].max() - 1
-            last_indices = last_indices.reset_index().rename(columns={'point_index': 'last_anchor_index'})
-            last_indices = last_indices[last_indices['last_anchor_index'] > 0] 
-            
-            last_anchors_df = pd.merge(
-                curvepoints_df, last_indices,
-                left_on=['beatmap_id', 'hitobject_time', 'point_index'],
-                right_on=['beatmap_id', 'hitobject_time', 'last_anchor_index']
-            )
-            last_anchors = last_anchors_df[
-                ['beatmap_id', 'hitobject_time', 'x', 'y']
-            ].rename(columns={'x': 'last_anchor_x', 'y': 'last_anchor_y'})
-            
-            del curvepoints_df, last_indices, last_anchors_df
-            
-            hitobjects_df = pd.merge(
-                hitobjects_df, 
-                first_anchors, 
-                how='left',
-                left_on=['beatmap_id', 'time'], 
-                right_on=['beatmap_id', 'hitobject_time']
-            ).drop(columns=['hitobject_time'])
-            
-            hitobjects_df = pd.merge(
-                hitobjects_df, 
-                last_anchors, 
-                how='left',
-                left_on=['beatmap_id', 'time'], 
-                right_on=['beatmap_id', 'hitobject_time']
-            ).drop(columns=['hitobject_time'])
-        else:
-            print("WARNING: Curve points data was empty after filtering. Angle features will use fallbacks.")
-            hitobjects_df['first_anchor_x'] = np.nan
-            hitobjects_df['first_anchor_y'] = np.nan
-            hitobjects_df['last_anchor_x'] = np.nan
-            hitobjects_df['last_anchor_y'] = np.nan
-    else:
-        print("WARNING: Curve points data not found. Angle features will be based on fallbacks.")
-        hitobjects_df['first_anchor_x'] = np.nan
-        hitobjects_df['first_anchor_y'] = np.nan
-        hitobjects_df['last_anchor_x'] = np.nan
-        hitobjects_df['last_anchor_y'] = np.nan
 
     print(f"Loaded {len(beatmaps_df)} beatmaps and {len(hitobjects_df)} hit objects.")
 

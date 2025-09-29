@@ -51,7 +51,7 @@ class MLMTrainer:
         self.feature_info = HitObjectVector.get_feature_info()
 
         self.standard_cont_names = [name for name in self.feature_info['continuous'] if 'angle' not in name]
-        self.angle_pair_names = ['flow_angle', 'inner_angle']
+        self.angle_pair_names = ['relative_angle', 'slider_absolute_angle', 'inner_angle']
         self.cat_feat_names = list(self.feature_info['categorical'].keys())
         
         self.val_metrics = PretrainEpochMetrics(
