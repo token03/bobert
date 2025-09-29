@@ -27,23 +27,17 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
 class HitObjectVector(NamedTuple):
     distance_diff: float 
     velocity: float
-    acceleration: float
-    dist_from_cluster: float
-    angular_jerk: float
     cos_flow_angle: float
     sin_flow_angle: float
-    cos_entry_angle: float
-    sin_entry_angle: float
+    cos_inner_angle: float
+    sin_inner_angle: float
     object_type: int
     is_new_combo: int
     slider_curve_type: int
     slider_num_anchors: int
     slider_pixel_length: float
-    slide_length: float
     slider_repeats: int
-    slider_velocity: float
     slider_tortuosity: float
-    hard_anchor_ratio: float
     time_diff_bin: int
     duration_bin: int
     bpm: float
@@ -58,7 +52,6 @@ class HitObjectVector(NamedTuple):
         return [
             'x', 'y', 'slider_end_x', 'slider_end_y', 'slider_repeats', 
             'num_anchors', 'pixel_length', 'curve_type_char', 
-            'hard_anchor_ratio'
         ]
     
     @classmethod
@@ -104,21 +97,16 @@ class HitObjectVector(NamedTuple):
         return {
             'distance_diff': NormalizationType.LOG,
             'velocity': NormalizationType.LOG,
-            'acceleration': NormalizationType.LOG,
-            'dist_from_cluster': NormalizationType.LOG,
-            'angular_jerk': NormalizationType.LOG,
             'cos_flow_angle': NormalizationType.STANDARD,
             'sin_flow_angle': NormalizationType.STANDARD,
-            'cos_entry_angle': NormalizationType.STANDARD,
-            'sin_entry_angle': NormalizationType.STANDARD,
+            'cos_inner_angle': NormalizationType.STANDARD,
+            'sin_inner_angle': NormalizationType.STANDARD,
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'slider_curve_type': NormalizationType.CATEGORICAL,
             'slider_num_anchors': NormalizationType.LOG,
             'slider_pixel_length': NormalizationType.LOG,
-            'slide_length': NormalizationType.LOG,
             'slider_repeats': NormalizationType.LOG,
-            'slider_velocity': NormalizationType.LOG,
             'slider_tortuosity': NormalizationType.LOG,
             'hard_anchor_ratio': NormalizationType.STANDARD,
             'time_diff_bin': NormalizationType.CATEGORICAL,
@@ -132,23 +120,17 @@ class HitObjectVector(NamedTuple):
         return {
             'distance_diff': "Distance from previous hit object's end point (jump distance)",
             'velocity': "Velocity to previous hit object (pixels/ms)",
-            'acceleration': "Magnitude of acceleration (change in velocity) from the previous movement (pixels/ms^2)",
-            'dist_from_cluster': "Distance from the current hit object to the exponentially weighted moving average of recent object positions (clusteroid)",
-            'angular_jerk': "Magnitude of the rate of change of angular velocity of the flow angle (radians/ms^2)",
             'cos_flow_angle': "Cosine of angle between previous object's exit path and current object's arrival path",
             'sin_flow_angle': "Sine of angle between previous object's exit path and current object's arrival path",
-            'cos_entry_angle': "Cosine of angle between arrival path and slider's entry path (1.0 for circles)",
-            'sin_entry_angle': "Sine of angle between arrival path and slider's entry path (0.0 for circles)",
+            'cos_inner_angle': "Cosine of angle between the arrival path and exit path of a hit object",
+            'sin_inner_angle': "Sine of angle between the arrival path and exit path of a hit object",
             'object_type': "Type of hit object (circle, slider, spinner)",
             'is_new_combo': "Whether this hit object starts a new combo",
             'slider_curve_type': "Curve type of slider (0 if not a slider)",
             'slider_num_anchors': "Number of anchor points in slider (0 if not a slider)",
             'slider_pixel_length': "Pixel length of slider's curve path (0 if not a slider)",
-            'slide_length': "Straight-line distance between slider start and end (0 if not a slider)",
             'slider_repeats': "Number of slider repeats (slides - 1)",
-            'slider_velocity': "Calculated velocity of the slider (pixels/ms)",
             'slider_tortuosity': "Ratio of slider path length to end-to-end distance",
-            'hard_anchor_ratio': "Ratio of hard anchors to total anchors in a slider",
             'time_diff_bin': "Quantized time difference to previous hit object",
             'duration_bin': "Quantized duration of the hit object",
             'bpm': "Beats Per Minute at the time of the hit object",

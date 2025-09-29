@@ -85,6 +85,14 @@ def _engineer_features_vectorized(
     V_arrival_x = df['x'] - prev_end_x
     V_arrival_y = df['y'] - prev_end_y
 
+    
+    next_start_x = grouped['x'].shift(-1)
+    next_start_y = grouped['y'].shift(-1)
+    
+    V_departure_x = (next_start_x - df['end_x']).fillna(0.0)
+    V_departure_y = (next_start_y - df['end_y']).fillna(0.0)
+
+
     V_entry_x = pd.Series(0.0, index=df.index)
     V_entry_y = pd.Series(0.0, index=df.index)
     is_linear_slider = is_slider & (df['num_anchors'] <= 2)
@@ -151,7 +159,7 @@ def _engineer_features_vectorized(
         sin_angle = np.clip(cross_product / norm_prod, -1.0, 1.0)
         
         is_zero_vector = (norm1 == 0) | (norm2 == 0)
-        cos_angle[is_zero_vector] = 1.0
+        cos_angle[is_zero_vector] = 1.0 
         sin_angle[is_zero_vector] = 0.0
         
         return cos_angle, sin_angle
@@ -159,13 +167,14 @@ def _engineer_features_vectorized(
     df['cos_flow_angle'], df['sin_flow_angle'] = calculate_angles(
         prev_V_exit_x, prev_V_exit_y, V_arrival_x, V_arrival_y
     )
-    df['cos_entry_angle'], df['sin_entry_angle'] = calculate_angles(
-        V_arrival_x, V_arrival_y, V_entry_x, V_entry_y
+    df['cos_inner_angle'], df['sin_inner_angle'] = calculate_angles(
+        V_arrival_x, V_arrival_y, V_departure_x, V_departure_y
     )
 
     prev_end_time = grouped['end_time'].shift(1)
-    prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 # Arbitrary pre-start time
+    prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 
     df['time_diff_ms'] = df['time'] - prev_end_time
+    
     df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
 
     df['duration_ms'] = df['end_time'] - df['time']
@@ -174,8 +183,6 @@ def _engineer_features_vectorized(
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
     
     df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
-    df['slider_velocity'] = 0.0
-    df.loc[is_slider, 'slider_velocity'] = (df.loc[is_slider, 'pixel_length'] / df.loc[is_slider, 'duration_ms'].replace(0, 1)).fillna(0.0)
     df['slider_tortuosity'] = 1.0 
     df.loc[is_slider, 'slider_tortuosity'] = (df.loc[is_slider, 'pixel_length'] / df.loc[is_slider, 'slide_length'].replace(0, 1)).fillna(1.0)
     
