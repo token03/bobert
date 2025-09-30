@@ -71,13 +71,12 @@ class FineTuningTrainer:
                     encoded_tensor[i, encoder[label]] = 1.0
         return encoded_tensor
     
-    def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        vectors, attention_mask, metadata, difficulty_ratings, collection_labels, user_tags, positive_mask = batch
-        
+    def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        vectors, attention_mask, difficulty_ratings, collection_labels, user_tags, positive_mask = batch
+
         vectors = vectors.to(self.device, non_blocking=True)
         attention_mask = attention_mask.to(self.device, non_blocking=True)
-        metadata = metadata.to(self.device, non_blocking=True)
-        
+
         labels_dict = {
             'difficulty_ratings': difficulty_ratings.to(self.device, non_blocking=True),
             'positive_mask': positive_mask.to(self.device, non_blocking=True)
@@ -94,14 +93,14 @@ class FineTuningTrainer:
             encoded_tags = self._encode_labels(user_tags, self.user_tag_encoder, num_user_tag_classes)
             labels_dict['user_tags'] = encoded_tags
             
-        return vectors, attention_mask, metadata, labels_dict
+        return vectors, attention_mask, labels_dict
 
     def _run_step(self, batch: Tuple, is_train: bool) -> Dict[str, float]:
-        vectors, attention_mask, metadata, labels = self._prepare_batch(batch)
+        vectors, attention_mask, labels = self._prepare_batch(batch)
         
         with torch.set_grad_enabled(is_train):
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                predictions = self.model(vectors, metadata, attention_mask)
+                predictions = self.model(vectors, attention_mask)
                 losses = self.loss_fn(predictions, labels, self.config)
         
         if is_train:
@@ -164,18 +163,17 @@ class FineTuningTrainer:
         print("Running validation...")
         with torch.no_grad():
             for batch in tqdm(self.val_dataloader, desc="Validation", leave=False, dynamic_ncols=True):
-                vectors, attention_mask, metadata, ratings, labels, _, _ = batch
-                
+                vectors, attention_mask, ratings, labels, _, _ = batch
+
                 vectors_dev = vectors.to(self.device, non_blocking=True)
                 attention_mask_dev = attention_mask.to(self.device, non_blocking=True)
-                metadata_dev = metadata.to(self.device, non_blocking=True)
 
                 labels_dict = {
                     'difficulty_ratings': ratings.to(self.device, non_blocking=True)
                 }
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    predictions = self.model(vectors_dev, metadata_dev, attention_mask_dev)
+                    predictions = self.model(vectors_dev, attention_mask_dev)
                     step_losses = self.loss_fn(predictions, labels_dict, self.config)
                     embeddings = predictions.get('collection_label_projection', predictions['cls_representation'])
 
@@ -213,8 +211,7 @@ class FineTuningTrainer:
             self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics, suffix="latest",
-                vector_stats=self.normalizer.get_vector_stats(),
-                meta_stats=self.normalizer.get_metadata_stats()
+                vector_stats=self.normalizer.get_vector_stats()
             )
 
             r1 = val_metrics.get('Recall@1', 0.0)

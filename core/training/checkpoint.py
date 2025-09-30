@@ -24,8 +24,7 @@ class CheckpointManager:
         epoch: int,
         metrics: Dict[str, float],
         suffix: str = "latest",
-        vector_stats: Optional[Dict[str, Any]] = None,
-        meta_stats: Optional[Dict[str, Any]] = None
+        vector_stats: Optional[Dict[str, Any]] = None
     ):
         checkpoint_data = {
             'epoch': epoch,
@@ -42,9 +41,6 @@ class CheckpointManager:
             
         if vector_stats is not None:
             checkpoint_data['vector_stats'] = vector_stats
-        
-        if meta_stats is not None:
-            checkpoint_data['meta_stats'] = meta_stats
             
         checkpoint_path = self.get_checkpoint_path(suffix)
         torch.save(checkpoint_data, checkpoint_path)
@@ -58,7 +54,7 @@ class CheckpointManager:
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
         suffix: str = "latest",
         device: torch.device = torch.device('cpu')
-    ) -> Tuple[int, Dict[str, float], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    ) -> Tuple[int, Dict[str, float], Optional[Dict[str, Any]]]:
         checkpoint_path = self.get_checkpoint_path(suffix)
         
         if not os.path.exists(checkpoint_path):
@@ -98,11 +94,10 @@ class CheckpointManager:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
         vector_stats = checkpoint.get('vector_stats')
-        meta_stats = checkpoint.get('meta_stats')
-        
-        return checkpoint['epoch'], checkpoint.get('metrics', {}), vector_stats, meta_stats
+
+        return checkpoint['epoch'], checkpoint.get('metrics', {}), vector_stats
     
-    def load_normalization_stats(self, suffix: str = "latest") -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    def load_normalization_stats(self, suffix: str = "latest") -> Optional[Dict[str, Any]]:
         checkpoint_path = self.get_checkpoint_path(suffix)
         if not os.path.exists(checkpoint_path):
             print(f"Warning: Checkpoint for stats not found at {checkpoint_path}")
@@ -110,11 +105,10 @@ class CheckpointManager:
         
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         vector_stats = checkpoint.get('vector_stats')
-        meta_stats = checkpoint.get('meta_stats')
-        
-        if vector_stats and meta_stats:
-            return vector_stats, meta_stats
-        
+
+        if vector_stats:
+            return vector_stats
+
         print(f"Warning: Normalization stats not found in checkpoint {checkpoint_path}")
         return None
 

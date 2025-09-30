@@ -89,11 +89,11 @@ class MLMTrainer:
         
         data_iter = iter(self.train_dataloader)
         for i in range(len(self.train_dataloader)):
-            vectors, attention_mask, metadata = next(data_iter)
-            vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
+            vectors, attention_mask = next(data_iter)
+            vectors, attention_mask = vectors.to(self.device), attention_mask.to(self.device)
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                predictions, targets, mask = self.model(vectors, metadata, attention_mask)
+                predictions, targets, mask = self.model(vectors, attention_mask)
                 loss = self.loss_fn(predictions, targets, mask)
                 scaled_loss = loss / self.grad_accum_steps
             
@@ -136,11 +136,11 @@ class MLMTrainer:
                 dynamic_ncols=True,
                 leave=False
             )
-            for vectors, attention_mask, metadata in progress_bar:
-                vectors, attention_mask, metadata = vectors.to(self.device), attention_mask.to(self.device), metadata.to(self.device)
+            for vectors, attention_mask in progress_bar:
+                vectors, attention_mask = vectors.to(self.device), attention_mask.to(self.device)
                 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    predictions, targets, mask = self.model(vectors, metadata, attention_mask)
+                    predictions, targets, mask = self.model(vectors, attention_mask)
                     loss = self.loss_fn(predictions, targets, mask)
                 
                 total_loss += loss.item()
@@ -171,8 +171,7 @@ class MLMTrainer:
             checkpoint_path = self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics,
-                vector_stats=self.normalizer.get_vector_stats(),
-                meta_stats=self.normalizer.get_metadata_stats()
+                vector_stats=self.normalizer.get_vector_stats()
             )
             
             self.logger.log_epoch_end(

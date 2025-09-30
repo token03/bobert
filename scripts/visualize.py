@@ -67,17 +67,16 @@ def load_model_and_normalizer(config: dict, device: torch.device) -> tuple:
     pretrain_manager = CheckpointManager(CHECKPOINT_DIR, model_name=PRETRAIN_MODEL_NAME)
     
     print("Attempting to load normalization stats from pre-trained checkpoint...")
-    stats = pretrain_manager.load_normalization_stats()
+    vector_stats = pretrain_manager.load_normalization_stats()
 
-    if stats is None:
+    if vector_stats is None:
         raise FileNotFoundError(
             f"Could not load normalization stats from pre-trained checkpoint. "
             f"Ensure a checkpoint for '{PRETRAIN_MODEL_NAME}' exists in the '{CHECKPOINT_DIR}' "
             "directory and contains the necessary normalization stats."
         )
 
-    vector_stats, meta_stats = stats
-    normalizer = BeatmapNormalizer(vector_stats=vector_stats, meta_stats=meta_stats)
+    normalizer = BeatmapNormalizer(vector_stats=vector_stats)
     print("Successfully created normalizer from pre-trained stats.")
 
     finetune_manager = CheckpointManager(CHECKPOINT_DIR, model_name=FINETUNED_MODEL_NAME)
@@ -120,15 +119,15 @@ class InferenceDataset(Dataset):
     def __len__(self):
         return len(self.data)
     def __getitem__(self, idx):
-        vectors, metadata = self.data[idx]
-        return self.transform(vectors, metadata)
+        vectors = self.data[idx]
+        return self.transform(vectors)
 
 @torch.no_grad()
 def generate_embeddings(model, normalizer, data_subset, config, device) -> np.ndarray:
     print(f"Generating embeddings for {len(data_subset)} beatmaps...")
     transform = BeatmapTransform(normalizer, augment=False)
     dataset = InferenceDataset(data_subset, transform)
-    actual_vector_dim = data_subset[0][0].shape[1]
+    actual_vector_dim = data_subset[0].shape[1]
     collate_with_args = lambda batch: collate_fn(
         batch, max_seq_len=config['data']['max_seq_len'], vector_dim=actual_vector_dim, device=device
     )
@@ -137,8 +136,8 @@ def generate_embeddings(model, normalizer, data_subset, config, device) -> np.nd
     )
     all_embeddings = []
     for batch in tqdm(dataloader, desc="Generating Embeddings"):
-        vectors, attention_mask, metadata = batch
-        predictions = model(vectors, metadata, attention_mask)
+        vectors, attention_mask = batch
+        predictions = model(vectors, attention_mask)
         all_embeddings.append(predictions['cls_representation'].cpu())
     return torch.cat(all_embeddings, dim=0).float().numpy()
 

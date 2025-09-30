@@ -13,7 +13,7 @@ import concurrent.futures
 import itertools
 import rosu_pp_py as rosu
 
-from .types import HitObjectVector, BeatmapMetadata, NormalizationType, DURATION_BINS, quantize_to_bins
+from .types import HitObjectVector, NormalizationType, DURATION_BINS, quantize_to_bins
 
 def _recalculate_difficulty_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
@@ -56,7 +56,7 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
 def _engineer_features_vectorized(
     beatmaps_df: pd.DataFrame,
     hitobjects_df: pd.DataFrame
-) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray, np.ndarray]:
+) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
     print("Engineering features for all beatmaps (vectorized)...")
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
 
@@ -150,10 +150,8 @@ def _engineer_features_vectorized(
     df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
 
     vector_field_names = HitObjectVector.get_field_names()
-    meta_field_names = BeatmapMetadata.get_field_names()
 
     vector_df = df[['beatmap_id'] + vector_field_names]
-    meta_df = df[['beatmap_id'] + meta_field_names].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
     
     difficulty_df = df[['beatmap_id', 'difficulty_rating']].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
 
@@ -166,12 +164,11 @@ def _engineer_features_vectorized(
     vector_arrays = np.split(all_vectors_np, split_indices)
 
     unique_ids = ids[np.concatenate(([0], split_indices))]
-    all_meta_np = meta_df.loc[unique_ids].to_numpy(dtype=np.float32)
     all_difficulty_ratings = difficulty_df.loc[unique_ids]['difficulty_rating'].to_numpy(dtype=np.float32)
     
     final_data = [
-        (torch.from_numpy(vectors), torch.from_numpy(metadata))
-        for vectors, metadata in tqdm(zip(vector_arrays, all_meta_np), total=len(unique_ids))
+        torch.from_numpy(vectors)
+        for vectors in tqdm(vector_arrays, total=len(unique_ids))
     ]
     return final_data, all_difficulty_ratings, unique_ids
 
@@ -180,7 +177,7 @@ def load_dataset(
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
     raw_beatmap_path: str = "./data/raw"
-) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray, np.ndarray]:
+) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
     hitobjects_path = os.path.join(dataset_path, 'hitobjects')
@@ -222,7 +219,7 @@ def load_dataset(
             difficulty_cache = {}
 
         ids_needing_recalc = set()
-        for i, (vectors, _) in enumerate(processed_data):
+        for i, vectors in enumerate(processed_data):
             if vectors.shape[0] > max_seq_len:
                 beatmap_id = str(loaded_ids[i])
                 if beatmap_id not in difficulty_cache:
@@ -248,15 +245,15 @@ def load_dataset(
                 json.dump(difficulty_cache, f)
 
         updated_data, updated_ratings, updated_ids = [], [], []
-        for i, ((vectors, metadata), rating, bid) in enumerate(zip(processed_data, difficulty_ratings, loaded_ids)):
+        for vectors, rating, bid in zip(processed_data, difficulty_ratings, loaded_ids):
             if vectors.shape[0] > max_seq_len:
                 new_rating = difficulty_cache.get(str(bid))
                 if new_rating is not None:
-                    updated_data.append((vectors[:max_seq_len], metadata))
+                    updated_data.append(vectors[:max_seq_len])
                     updated_ratings.append(new_rating)
                     updated_ids.append(bid)
             else:
-                updated_data.append((vectors, metadata))
+                updated_data.append(vectors)
                 updated_ratings.append(rating)
                 updated_ids.append(bid)
         
@@ -265,52 +262,43 @@ def load_dataset(
         loaded_ids = np.array(updated_ids)
 
     vector_norm_specs = HitObjectVector.get_normalization_specs()
-    meta_norm_specs = BeatmapMetadata.get_normalization_specs()
     vector_field_names = HitObjectVector.get_field_names()
-    meta_field_names = BeatmapMetadata.get_field_names()
 
     log_vec_indices = [
         i for i, name in enumerate(vector_field_names)
         if vector_norm_specs.get(name) == NormalizationType.LOG
     ]
-    log_meta_indices = [
-        i for i, name in enumerate(meta_field_names)
-        if meta_norm_specs.get(name) == NormalizationType.LOG
-    ]
 
     final_data = []
     print("Applying log transforms...")
-    for vectors, metadata in tqdm(processed_data):
+    for vectors in tqdm(processed_data):
         for idx in log_vec_indices:
             vectors[:, idx].clamp_(min=0.0)
             vectors[:, idx] = torch.log1p(vectors[:, idx])
 
-        for idx in log_meta_indices:
-            metadata[idx] = torch.log1p(metadata[idx])
-
-        final_data.append((vectors, metadata))
+        final_data.append(vectors)
 
     print("Running final data integrity check...")
     final_data_validated = []
     validated_ids = []
     validated_difficulty_ratings = []
     
-    for i, (vectors, metadata) in enumerate(tqdm(final_data, desc="Validating Tensors")):
+    for i, vectors in enumerate(tqdm(final_data, desc="Validating Tensors")):
         beatmap_id = loaded_ids[i]
-        has_nan = torch.isnan(vectors).any() or torch.isnan(metadata).any()
-        has_inf = torch.isinf(vectors).any() or torch.isinf(metadata).any()
+        has_nan = torch.isnan(vectors).any()
+        has_inf = torch.isinf(vectors).any()
         
         if has_nan or has_inf:
             print(f"WARNING: Skipping beatmap ID {beatmap_id} due to NaN/Inf values found after processing.")
-            if has_nan: print(f"NaN found in vectors: {torch.isnan(vectors).any()}, metadata: {torch.isnan(metadata).any()}")
-            if has_inf: print(f"Inf found in vectors: {torch.isinf(vectors).any()}, metadata: {torch.isinf(metadata).any()}")
+            if has_nan: print(f"NaN found in vectors: {torch.isnan(vectors).any()}")
+            if has_inf: print(f"Inf found in vectors: {torch.isinf(vectors).any()}")
             continue
 
         if np.isnan(difficulty_ratings[i]) or np.isinf(difficulty_ratings[i]):
             print(f"WARNING: Skipping beatmap ID {beatmap_id} due to invalid difficulty rating: {difficulty_ratings[i]}")
             continue
             
-        final_data_validated.append((vectors, metadata))
+        final_data_validated.append(vectors)
         validated_ids.append(beatmap_id)
         validated_difficulty_ratings.append(difficulty_ratings[i])
 
@@ -326,7 +314,7 @@ def load_finetuning_dataset(
     labels_path: str = "./data/labels.json",
     tags_path: str = "./data/tags.json",
     max_samples_per_class: Optional[Dict[str, int]] = None,
-) -> Tuple[List[Tuple[torch.Tensor, torch.Tensor]], np.ndarray, List[List[str]], List[List[str]]]:
+) -> Tuple[List[torch.Tensor], np.ndarray, List[List[str]], List[List[str]]]:
     print("Loading fine-tuning dataset with labels and tags...")
 
     if not os.path.exists(labels_path):

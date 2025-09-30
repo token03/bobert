@@ -147,46 +147,7 @@ class HitObjectVector(NamedTuple):
             'kiai_time': "Whether the hit object is in kiai time"
         }
 
-class BeatmapMetadata(NamedTuple):
-    ar: float
-    od: float
-    cs: float
-    hp_drain: float
-    slider_multiplier: float
-    slider_tick: float
-
-    @classmethod
-    def get_field_names(cls):
-        return list(cls._fields)
-    
-    @classmethod
-    def get_metadata_dim(cls):
-        return len(cls._fields)
-    
-    @classmethod
-    def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
-        return {
-            'ar': NormalizationType.STANDARD,
-            'od': NormalizationType.STANDARD,
-            'cs': NormalizationType.STANDARD,
-            'hp_drain': NormalizationType.STANDARD,
-            'slider_multiplier': NormalizationType.STANDARD,
-            'slider_tick': NormalizationType.STANDARD,
-        }
-
-    @classmethod
-    def get_field_descriptions(cls) -> Dict[str, str]:
-        return {
-            'ar': "Approach Rate",
-            'od': "Overall Difficulty",
-            'cs': "Circle Size",
-            'hp_drain': "HP Drain Rate",
-            'slider_multiplier': "Slider Velocity Multiplier",
-            'slider_tick': "Slider Tick Rate",
-        }
-
 VECTOR_DIM = HitObjectVector.get_vector_dim()
-METADATA_DIM = BeatmapMetadata.get_metadata_dim()
 
 class RawTimingPoint(NamedTuple):
     time: int

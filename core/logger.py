@@ -130,16 +130,22 @@ class TrainingLogger:
     def log_training_end(self):
         print("\n--- Training Finished ---")
 
-def print_data_summary(all_data: List[Tuple[torch.Tensor, torch.Tensor]]):
+def print_data_summary(all_data: List[Any]):
     if not all_data:
         print("No data loaded!")
         return
 
     total_maps = len(all_data)
-    metadata_dim = all_data[0][1].shape[0]
-    vector_dim = all_data[0][0].shape[1]
 
-    seq_lengths = [data[0].shape[0] for data in all_data]
+    def _extract_vectors(item: Any) -> torch.Tensor:
+        if isinstance(item, tuple):
+            return item[0]
+        return item
+
+    vectors_sample = _extract_vectors(all_data[0])
+    vector_dim = vectors_sample.shape[1]
+
+    seq_lengths = [_extract_vectors(data).shape[0] for data in all_data]
     avg_seq_len = np.mean(seq_lengths)
     max_seq_len = np.max(seq_lengths)
     min_seq_len = np.min(seq_lengths)
@@ -147,6 +153,5 @@ def print_data_summary(all_data: List[Tuple[torch.Tensor, torch.Tensor]]):
     print(f"\n--- Data Summary ---")
     print(f"Total beatmaps: {total_maps}")
     print(f"Vector dimension: {vector_dim}")
-    print(f"Metadata dimension: {metadata_dim}")
     print(f"Sequence length - Min: {min_seq_len}, Max: {max_seq_len}, Avg: {avg_seq_len:.1f}")
     print("-" * 20)

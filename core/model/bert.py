@@ -8,7 +8,7 @@ import math
 from rotary_embedding_torch import RotaryEmbedding
 
 from .components import TransformerEncoderLayer
-from ..data.types import BeatmapMetadata, HitObjectVector
+from ..data.types import HitObjectVector
 
 T = TypeVar('T', bound='BertEncoder')
 
@@ -47,10 +47,7 @@ class BertEncoder(nn.Module):
         combined_dim = cont_proj_dim + total_cat_embed_dim
         self.embedding_proj = nn.Linear(combined_dim, d_model)
 
-        metadata_dim = BeatmapMetadata.get_metadata_dim()
-
-        self.metadata_proj = nn.Linear(metadata_dim, d_model)
-        self.metadata_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
 
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
@@ -110,21 +107,17 @@ class BertEncoder(nn.Module):
     def _embed(
         self,
         x: torch.Tensor,
-        metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         x_embed = self.embed_sequences(x)
+        batch_size = x.shape[0]
 
-        if metadata.dim() == 1:
-            metadata = metadata.unsqueeze(0)
+        cls_tokens = self.cls_token.to(x_embed.dtype).expand(batch_size, -1, -1)
         
-        projected_meta = self.metadata_proj(metadata).unsqueeze(1)
-        meta_embed = projected_meta + self.metadata_token.to(projected_meta.dtype)
-        
-        full_embeddings = torch.cat([meta_embed, x_embed], dim=1)
+        full_embeddings = torch.cat([cls_tokens, x_embed], dim=1)
 
-        meta_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
-        full_attention_mask = torch.cat([meta_mask, attention_mask], dim=1)
+        cls_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
+        full_attention_mask = torch.cat([cls_mask, attention_mask], dim=1)
 
         return full_embeddings, full_attention_mask
 
@@ -148,10 +141,9 @@ class BertEncoder(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        full_embeddings, full_attention_mask = self._embed(x, metadata, attention_mask)
+        full_embeddings, full_attention_mask = self._embed(x, attention_mask)
         max_seqlen = full_embeddings.shape[1]
         output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         return output
@@ -258,7 +250,6 @@ class BertForMaskedModeling(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        metadata: torch.Tensor,
         attention_mask: torch.Tensor
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
         is_masked = self._generate_span_mask(attention_mask)
@@ -281,12 +272,13 @@ class BertForMaskedModeling(nn.Module):
             self.mask_token_embed.to(x_embed.dtype),
             encoder_x_input
         )
-        projected_meta = self.bert.metadata_proj(metadata).unsqueeze(1)
-        meta_embed = projected_meta + self.bert.metadata_token.to(projected_meta.dtype)
-        full_encoder_input = torch.cat([meta_embed, encoder_x_input], dim=1)
+        
+        batch_size = x.shape[0]
+        cls_tokens = self.bert.cls_token.to(encoder_x_input.dtype).expand(batch_size, -1, -1)
+        full_encoder_input = torch.cat([cls_tokens, encoder_x_input], dim=1)
 
-        meta_attn_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
-        full_attention_mask = torch.cat([meta_attn_mask, attention_mask], dim=1)
+        cls_attn_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
+        full_attention_mask = torch.cat([cls_attn_mask, attention_mask], dim=1)
 
         max_seqlen = full_encoder_input.shape[1]
         encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
@@ -312,7 +304,6 @@ class BertForMaskedModeling(nn.Module):
         }
 
         return predictions, x, is_masked
-# ... (BertForContrastiveFineTuning class remains unchanged) ...
 
 class BertForContrastiveFineTuning(nn.Module):
     def __init__(self, bert_model: BertEncoder, user_tag_classes: int = 1000, collection_label_classes: int = 100):
@@ -355,10 +346,9 @@ class BertForContrastiveFineTuning(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        metadata: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        full_embeddings, full_attention_mask = self.bert._embed(x, metadata, attention_mask)
+        full_embeddings, full_attention_mask = self.bert._embed(x, attention_mask)
         max_seqlen = full_embeddings.shape[1]
         encoded_output = self.bert.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         

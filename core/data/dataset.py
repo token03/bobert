@@ -5,38 +5,30 @@ from typing import Tuple, List, Optional
 from .transforms import BeatmapNormalizer, BeatmapTransform
 
 def collate_fn(
-    batch: List[Tuple[torch.Tensor, torch.Tensor]],
+    batch: List[torch.Tensor],
     max_seq_len: int,
     vector_dim: int,
     device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    vectors, metadata = zip(*batch)
-
-    lengths = [min(v.shape[0], max_seq_len) for v in vectors]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    lengths = [min(v.shape[0], max_seq_len) for v in batch]
     max_len_batch = max(lengths) if lengths else 0
 
     padded_vectors = torch.zeros(len(batch), max_len_batch, vector_dim, dtype=torch.float32)
     attention_mask = torch.zeros(len(batch), max_len_batch, dtype=torch.bool)
 
-    for i, (v, length) in enumerate(zip(vectors, lengths)):
+    for i, (v, length) in enumerate(zip(batch, lengths)):
         if length > 0:
             actual_dim = min(v.shape[1], vector_dim)
             padded_vectors[i, :length, :actual_dim] = v[:length, :actual_dim]
             attention_mask[i, :length] = True
 
-    stacked_metadata = torch.stack(metadata, dim=0)
-
-    return (
-        padded_vectors.to(device),
-        attention_mask.to(device),
-        stacked_metadata.to(device)
-    )
+    return padded_vectors.to(device), attention_mask.to(device)
 
 class BeatmapDataset(Dataset):
 
     def __init__(
         self,
-        beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]],
+        beatmap_data: List[torch.Tensor],
         transform: BeatmapTransform
     ):
         self.beatmap_data = beatmap_data
@@ -45,16 +37,16 @@ class BeatmapDataset(Dataset):
     def __len__(self) -> int:
         return len(self.beatmap_data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        vectors, metadata = self.beatmap_data[idx]
-        normalized_vectors, normalized_metadata = self.transform(vectors, metadata)
-        return normalized_vectors, normalized_metadata
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        vectors = self.beatmap_data[idx]
+        normalized_vectors = self.transform(vectors)
+        return normalized_vectors
 
 class MaskedBeatmapDataset(BeatmapDataset):
 
     def __init__(
         self,
-        beatmap_data: List[Tuple[torch.Tensor, torch.Tensor]],
+        beatmap_data: List[torch.Tensor],
         transform: BeatmapTransform,
         masking_ratio: float = 0.15
     ):
@@ -66,8 +58,8 @@ class MaskedBeatmapDataset(BeatmapDataset):
         return torch.bernoulli(mask_prob).bool()
 
 def create_dataloaders(
-    train_data: List[Tuple[torch.Tensor, torch.Tensor]],
-    val_data: List[Tuple[torch.Tensor, torch.Tensor]],
+    train_data: List[torch.Tensor],
+    val_data: List[torch.Tensor],
     normalizer: BeatmapNormalizer,
     config: dict,
     device: torch.device,
@@ -84,7 +76,7 @@ def create_dataloaders(
     val_transform = BeatmapTransform(normalizer, augment=False)
     val_dataset = BeatmapDataset(val_data, val_transform)
 
-    actual_vector_dim = train_data[0][0].shape[1] 
+    actual_vector_dim = train_data[0].shape[1] 
     
     collate_with_args = lambda batch: collate_fn(
         batch,
@@ -110,10 +102,10 @@ def create_dataloaders(
     return train_dataloader, val_dataloader
 
 def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, positive_difficulty_threshold):
-    vectors, metadata, ratings, labels, tags = zip(*batch)
+    vectors, ratings, labels, tags = zip(*batch)
     
-    padded_vectors, attention_mask, stacked_metadata = collate_fn(
-        list(zip(vectors, metadata)), max_seq_len, vector_dim, torch.device('cpu')
+    padded_vectors, attention_mask = collate_fn(
+        list(vectors), max_seq_len, vector_dim, torch.device('cpu')
     )
     
     stacked_ratings = torch.tensor(ratings, dtype=torch.float32)
@@ -139,7 +131,6 @@ def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, positive_diffi
     return (
         padded_vectors.to(device),
         attention_mask.to(device),
-        stacked_metadata.to(device),
         stacked_ratings.to(device),
         labels,
         tags,
@@ -147,7 +138,7 @@ def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, positive_diffi
     )
 
 class FinetuningDataset(Dataset):
-    def __init__(self, beatmap_data, ratings, labels, tags, transform):
+    def __init__(self, beatmap_data: List[torch.Tensor], ratings, labels, tags, transform: BeatmapTransform):
         self.beatmap_data = beatmap_data
         self.ratings = ratings
         self.labels = labels
@@ -158,11 +149,10 @@ class FinetuningDataset(Dataset):
         return len(self.beatmap_data)
 
     def __getitem__(self, idx):
-        vectors, metadata = self.beatmap_data[idx]
-        norm_vectors, norm_metadata = self.transform(vectors, metadata)
+        vectors = self.beatmap_data[idx]
+        norm_vectors = self.transform(vectors)
         return (
             norm_vectors,
-            norm_metadata,
             self.ratings[idx],
             self.labels[idx],
             self.tags[idx]
