@@ -78,6 +78,33 @@ class RMSNorm(nn.Module):
         hidden_states = x * torch.rsqrt(variance + self.eps)
         return (self.weight * hidden_states).to(input_dtype)
 
+class GatedConv1D(nn.Module):
+    def __init__(self, d_model: int, kernel_size: int):
+        super().__init__()
+        self.conv = nn.Conv1d(
+            in_channels=d_model,
+            out_channels=2 * d_model,
+            kernel_size=kernel_size,
+            padding='same' 
+        )
+
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        x = x * attention_mask.unsqueeze(-1).float()
+        
+        x_permuted = x.permute(0, 2, 1)
+        
+        convolved = self.conv(x_permuted)
+        
+        output, gate = convolved.chunk(2, dim=1)
+        
+        gated_output = F.silu(gate) * output
+        
+        gated_output_permuted = gated_output.permute(0, 2, 1)
+        
+        gated_output_permuted = gated_output_permuted * attention_mask.unsqueeze(-1).float()
+        
+        return gated_output_permuted
+
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, dim_feedforward: int):
         super().__init__()

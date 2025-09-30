@@ -138,7 +138,7 @@ def generate_embeddings(model, normalizer, data_subset, config, device) -> np.nd
     for batch in tqdm(dataloader, desc="Generating Embeddings"):
         vectors, attention_mask = batch
         predictions = model(vectors, attention_mask)
-        all_embeddings.append(predictions['cls_representation'].cpu())
+        all_embeddings.append(predictions['sequence_representation'].cpu())
     return torch.cat(all_embeddings, dim=0).float().numpy()
 
 

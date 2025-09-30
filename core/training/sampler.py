@@ -13,7 +13,6 @@ import bisect
 def create_kde_sampler(
     difficulty_ratings: Optional[np.ndarray] = None,
     bandwidth: float = 0.5,
-    expand_for_augmentation: bool = False,
     num_bins: int = 100
 ) -> WeightedRandomSampler:
     print(f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}...")
@@ -22,9 +21,6 @@ def create_kde_sampler(
         raise ValueError("difficulty_ratings must be provided as a separate array")
 
     difficulty_ratings_array = np.asarray(difficulty_ratings)
-
-    if expand_for_augmentation:
-        difficulty_ratings_array = np.tile(difficulty_ratings_array, 4)
 
     min_rating, max_rating = difficulty_ratings_array.min(), difficulty_ratings_array.max()
     bin_edges = np.linspace(min_rating - 0.5, max_rating + 0.5, num_bins + 1)

@@ -1,6 +1,4 @@
 data:
-  db_path: './data/beatmap_dataset_test/'
-  # db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
   max_samples_per_class:
@@ -13,7 +11,9 @@ model:
   n_layers: 6
   dim_feedforward_mult: 4
   dropout: 0.1
-  local_attention_window: 128
+  local_attention_window: 256
+  cnn_kernel_size: 5
+
   
 components:
   use_flash_attention: true
@@ -21,6 +21,7 @@ components:
   compile_mode: "default" 
     
 pretraining:
+  db_path: './data/beatmap_dataset_test/'
   batch_size: 8
   num_epochs: 5
 
@@ -43,9 +44,9 @@ pretraining:
     method: "kde"  
     kde_bandwidth: 0.6
     num_bins: 200
-    expand_for_augmentation: false
 
 finetuning:
+  db_path: './data/beatmap_dataset/'
   checkpoint_dir: "./checkpoints"
   model_name: "model"
   batch_size: 8

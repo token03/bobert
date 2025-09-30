@@ -7,7 +7,7 @@ import math
 
 from rotary_embedding_torch import RotaryEmbedding
 
-from .components import TransformerEncoderLayer
+from .components import TransformerEncoderLayer, GatedConv1D, RMSNorm
 from ..data.types import HitObjectVector
 
 T = TypeVar('T', bound='BertEncoder')
@@ -22,12 +22,14 @@ class BertEncoder(nn.Module):
         dropout: float = 0.1,
         local_attention_window: int = 128,
         use_flash_attention: bool = True,
+        cnn_kernel_size: int = 0,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.use_flash_attention = use_flash_attention
+        self.cnn_kernel_size = cnn_kernel_size
 
         self.feature_info = HitObjectVector.get_feature_info()
 
@@ -47,6 +49,10 @@ class BertEncoder(nn.Module):
         combined_dim = cont_proj_dim + total_cat_embed_dim
         self.embedding_proj = nn.Linear(combined_dim, d_model)
 
+        self.gated_cnn = GatedConv1D(d_model, self.cnn_kernel_size)
+        self.cnn_norm = RMSNorm(d_model)
+        self.cnn_dropout = nn.Dropout(dropout)
+
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
 
         self.layers = nn.ModuleList([
@@ -57,6 +63,8 @@ class BertEncoder(nn.Module):
             )
             for i in range(n_layers)
         ])
+
+        self.final_norm = RMSNorm(d_model)
 
         self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads)
 
@@ -74,7 +82,8 @@ class BertEncoder(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=model_config.get('dropout', 0.1),
             local_attention_window=model_config.get('local_attention_window', 128),
-            use_flash_attention=components_config.get('use_flash_attention', True)
+            use_flash_attention=components_config.get('use_flash_attention', True),
+            cnn_kernel_size=model_config.get('cnn_kernel_size', 0)
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -110,6 +119,11 @@ class BertEncoder(nn.Module):
         attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         x_embed = self.embed_sequences(x)
+
+        cnn_input = self.cnn_norm(x_embed)
+        cnn_output = self.gated_cnn(cnn_input, attention_mask)
+        x_embed = x_embed + self.cnn_dropout(cnn_output)
+
         batch_size = x.shape[0]
 
         cls_tokens = self.cls_token.to(x_embed.dtype).expand(batch_size, -1, -1)
@@ -136,6 +150,9 @@ class BertEncoder(nn.Module):
 
         output = torch.zeros_like(embeddings)
         output[attention_mask] = packed_output
+
+        output = self.final_norm(output)
+
         return output
 
     def forward(
@@ -305,6 +322,7 @@ class BertForMaskedModeling(nn.Module):
 
         return predictions, x, is_masked
 
+
 class BertForContrastiveFineTuning(nn.Module):
     def __init__(self, bert_model: BertEncoder, user_tag_classes: int = 1000, collection_label_classes: int = 100):
         super().__init__()
@@ -352,18 +370,18 @@ class BertForContrastiveFineTuning(nn.Module):
         max_seqlen = full_embeddings.shape[1]
         encoded_output = self.bert.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         
-        cls_representation = encoded_output[:, 0, :] 
+        final_representation = encoded_output[:, 0]
         
         predictions = {
-            'collection_label_logits': self.collection_label_head(cls_representation),
-            'difficulty_rating_preds': self.difficulty_rating_head(cls_representation).squeeze(-1),
-            'collection_label_projection': self.collection_label_projection(cls_representation),
-            'difficulty_rating_projection': self.difficulty_rating_projection(cls_representation),
-            'cls_representation': cls_representation
+            'collection_label_logits': self.collection_label_head(final_representation),
+            'difficulty_rating_preds': self.difficulty_rating_head(final_representation).squeeze(-1),
+            'collection_label_projection': self.collection_label_projection(final_representation),
+            'difficulty_rating_projection': self.difficulty_rating_projection(final_representation),
+            'sequence_representation': final_representation 
         }
         
         if self.user_tag_classes > 0:
-            predictions['user_tag_logits'] = self.user_tag_head(cls_representation)
-            predictions['user_tag_projection'] = self.user_tag_projection(cls_representation)
+            predictions['user_tag_logits'] = self.user_tag_head(final_representation)
+            predictions['user_tag_projection'] = self.user_tag_projection(final_representation)
             
         return predictions

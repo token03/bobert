@@ -175,7 +175,7 @@ class FineTuningTrainer:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                     predictions = self.model(vectors_dev, attention_mask_dev)
                     step_losses = self.loss_fn(predictions, labels_dict, self.config)
-                    embeddings = predictions.get('collection_label_projection', predictions['cls_representation'])
+                    embeddings = predictions.get('collection_label_projection', predictions['sequence_representation'])
 
                 self.val_metrics_computer.update_batch_metrics({k: v.item() for k,v in step_losses.items()})
 

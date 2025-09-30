@@ -123,7 +123,7 @@ def contrastive_loss_fn(
     config: Dict[str, Any]
 ) -> Dict[str, torch.Tensor]:
     losses = {}
-    total_loss = torch.zeros((), device=predictions['cls_representation'].device)
+    total_loss = torch.zeros((), device=predictions['sequence_representation'].device)
 
     finetuning_config = config.get('finetuning', {})
     temperature = finetuning_config.get('temperature', 0.1)
