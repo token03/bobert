@@ -27,7 +27,7 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
 SLIDER_TYPE_INDEX = 1
 
 class HitObjectVector(NamedTuple):
-    distance_diff_end: float
+    distance_diff: float
     velocity: float
     cos_relative_angle: float
     sin_relative_angle: float
@@ -106,7 +106,7 @@ class HitObjectVector(NamedTuple):
     @classmethod
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
         return {
-            'distance_diff_end': NormalizationType.LOG,
+            'distance_diff': NormalizationType.LOG,
             'velocity': NormalizationType.LOG,
             'cos_relative_angle': NormalizationType.STANDARD,
             'sin_relative_angle': NormalizationType.STANDARD,
@@ -128,7 +128,7 @@ class HitObjectVector(NamedTuple):
     @classmethod
     def get_field_descriptions(cls) -> Dict[str, str]:
         return {
-            'distance_diff_end': "Distance from previous hit object's end point (jump distance)",
+            'distance_diff': "Distance from previous hit object",
             'velocity': "Velocity to previous hit object (pixels/ms)",
             'cos_relative_angle': "Cosine of angle between current and previous jump vectors (flow aim)",
             'sin_relative_angle': "Sine of angle between current and previous jump vectors (flow aim)",

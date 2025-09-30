@@ -1,6 +1,6 @@
 data:
-  db_path: './data/beatmap_dataset_test/'
-  # db_path: './data/beatmap_dataset/'
+  # db_path: './data/beatmap_dataset_test/'
+  db_path: './data/beatmap_dataset/'
   max_seq_len: 1023
   val_split: 0.1
   max_samples_per_class:
@@ -37,7 +37,7 @@ pretraining:
   gradient_accumulation_steps: 8
 
   masking_ratio: 0.25
-  mean_span_length: 1
+  mean_span_length: 3
   
   sampling:
     method: "kde"  
@@ -60,7 +60,7 @@ finetuning:
 
   use_amp: true
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
 
   user_tag_classes: 42
   collection_label_classes: 5

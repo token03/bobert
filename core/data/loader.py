@@ -68,31 +68,26 @@ def _engineer_features_vectorized(
     df.sort_values(['beatmap_id', 'time'], inplace=True)
     grouped = df.groupby('beatmap_id', observed=False)
 
-    df['end_x'] = df['x']
-    df['end_y'] = df['y']
-    is_circle = df['object_type'] == 0
+    prev_x = grouped['x'].shift(1)
+    prev_y = grouped['y'].shift(1)
+    prev_time = grouped['time'].shift(1)
+
+    first_in_group = ~df.duplicated('beatmap_id', keep='first')
+    prev_x.loc[first_in_group] = 256 
+    prev_y.loc[first_in_group] = 192
+    prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 
+
+    V_arrival_x = df['x'] - prev_x
+    V_arrival_y = df['y'] - prev_y
+    
+    df['distance_diff'] = np.hypot(V_arrival_x, V_arrival_y)
+    
+    df['time_diff_ms'] = df['time'] - prev_time
+    
+    df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
+    
     is_slider = df['object_type'] == 1
     df['slider_repeats'] = df['slider_repeats'].fillna(0).astype(int)
-    ends_at_tail = is_slider & (df['slider_repeats'] % 2 == 0)
-    df.loc[ends_at_tail, 'end_x'] = df.loc[ends_at_tail, 'slider_end_x']
-    df.loc[ends_at_tail, 'end_y'] = df.loc[ends_at_tail, 'slider_end_y']
-
-    prev_end_x = grouped['end_x'].shift(1)
-    prev_end_y = grouped['end_y'].shift(1)
-    first_in_group = ~df.duplicated('beatmap_id', keep='first')
-    prev_end_x.loc[first_in_group] = 256  
-    prev_end_y.loc[first_in_group] = 192
-
-    # Distance from previous object's start to current object's start
-    prev_start_x = grouped['x'].shift(1)
-    prev_start_y = grouped['y'].shift(1)
-    prev_start_x.loc[first_in_group] = 256
-    prev_start_y.loc[first_in_group] = 192
-
-    # Vector from previous object's end to current object's start
-    V_arrival_x = df['x'] - prev_end_x
-    V_arrival_y = df['y'] - prev_end_y
-    df['distance_diff_end'] = np.hypot(V_arrival_x, V_arrival_y)
     
     df['slider_absolute_length'] = 0.0
     df.loc[is_slider, 'slider_absolute_length'] = np.hypot(
@@ -117,20 +112,15 @@ def _engineer_features_vectorized(
         
         return cos_angle, sin_angle
     
-    # --- Start of Inner Angle Calculation ---
-    # Vector from current slider head to its tail
     V_slider_abs_x = pd.Series(0.0, index=df.index)
     V_slider_abs_y = pd.Series(0.0, index=df.index)
     V_slider_abs_x.loc[is_slider] = df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x']
     V_slider_abs_y.loc[is_slider] = df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
-    # --- End of Inner Angle Calculation ---
 
-    # Angle of slider body relative to the arrival vector
     df['cos_slider_absolute_angle'], df['sin_slider_absolute_angle'] = calculate_angles(
         V_arrival_x, V_arrival_y, V_slider_abs_x, V_slider_abs_y
     )
 
-    # Angle of current jump vector relative to previous jump vector (flow)
     df['V_arrival_x'] = V_arrival_x
     df['V_arrival_y'] = V_arrival_y
     prev_V_arrival_x = grouped['V_arrival_x'].shift(1)
@@ -143,13 +133,8 @@ def _engineer_features_vectorized(
     )
     df.drop(columns=['V_arrival_x', 'V_arrival_y'], inplace=True)
 
-    prev_end_time = grouped['end_time'].shift(1)
-    prev_end_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 
-    df['time_diff_ms'] = df['time'] - prev_end_time
-    
-    df['velocity'] = (df['distance_diff_end'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
-
     df['duration_ms'] = df['end_time'] - df['time']
+    
     df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
     df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
