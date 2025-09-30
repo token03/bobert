@@ -88,7 +88,6 @@ def _engineer_features_vectorized(
     prev_start_y = grouped['y'].shift(1)
     prev_start_x.loc[first_in_group] = 256
     prev_start_y.loc[first_in_group] = 192
-    df['distance_diff_head'] = np.hypot(df['x'] - prev_start_x, df['y'] - prev_start_y)
 
     # Vector from previous object's end to current object's start
     V_arrival_x = df['x'] - prev_end_x
@@ -124,25 +123,6 @@ def _engineer_features_vectorized(
     V_slider_abs_y = pd.Series(0.0, index=df.index)
     V_slider_abs_x.loc[is_slider] = df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x']
     V_slider_abs_y.loc[is_slider] = df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
-    
-    # Vector from current object start to next object start (departure vector)
-    next_start_x = grouped['x'].shift(-1)
-    next_start_y = grouped['y'].shift(-1)
-    V_departure_x = (next_start_x - df['x']).fillna(0.0)
-    V_departure_y = (next_start_y - df['y']).fillna(0.0)
-
-    # Conditionally select the second vector for the inner angle calculation
-    V_inner_second_leg_x = pd.Series(0.0, index=df.index)
-    V_inner_second_leg_y = pd.Series(0.0, index=df.index)
-    V_inner_second_leg_x.loc[is_circle] = V_departure_x.loc[is_circle]
-    V_inner_second_leg_y.loc[is_circle] = V_departure_y.loc[is_circle]
-    V_inner_second_leg_x.loc[is_slider] = V_slider_abs_x.loc[is_slider]
-    V_inner_second_leg_y.loc[is_slider] = V_slider_abs_y.loc[is_slider]
-
-    # Calculate inner angle: angle between arrival vector and the conditional second vector
-    df['cos_inner_angle'], df['sin_inner_angle'] = calculate_angles(
-        V_arrival_x, V_arrival_y, V_inner_second_leg_x, V_inner_second_leg_y
-    )
     # --- End of Inner Angle Calculation ---
 
     # Angle of slider body relative to the arrival vector

@@ -4,7 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from core.data.types import HitObjectVector
+from core.data.types import SLIDER_TYPE_INDEX, HitObjectVector
+
+NA_SLIDER_CURVE_TYPE_INDEX = 4
 
 @torch.compile
 def mlm_loss_fn(
@@ -12,48 +14,80 @@ def mlm_loss_fn(
     targets: torch.Tensor, 
     mask: torch.Tensor
 ) -> torch.Tensor:
-    num_masked = torch.sum(mask)
+    if not torch.any(mask):
+        return torch.tensor(0.0, device=targets.device)
+
     feature_info = HitObjectVector.get_feature_info()
     total_loss = torch.zeros((), device=targets.device)
     
+    actual_object_type = targets[..., feature_info['categorical']['object_type']['index']].long()
+    is_slider_mask = (actual_object_type == SLIDER_TYPE_INDEX)
+    
+    slider_feature_names = set(feature_info['slider'].keys())
+
     standard_cont_names = [name for name in feature_info['continuous'] if 'angle' not in name]
     if standard_cont_names:
-        standard_cont_indices = [feature_info['continuous'][name] for name in standard_cont_names]
-        
         cont_preds = predictions['standard_continuous']
-        cont_targets = targets[..., standard_cont_indices]
         
-        cont_loss = F.mse_loss(cont_preds, cont_targets, reduction='none')
-        total_loss += cont_loss[mask].sum()
+        for i, name in enumerate(standard_cont_names):
+            pred_slice = cont_preds[..., i]
+            target_slice = targets[..., feature_info['continuous'][name]]
+
+            if name in slider_feature_names:
+                zero_target = torch.zeros_like(target_slice)
+                final_target = torch.where(is_slider_mask, target_slice, zero_target)
+            else:
+                final_target = target_slice
+
+            loss = F.mse_loss(pred_slice, final_target, reduction='none')
+            total_loss += loss[mask].sum()
 
     angle_names = sorted([name for name in feature_info['continuous'] if 'angle' in name])
     if angle_names:
-        angle_indices = [feature_info['continuous'][name] for name in angle_names]
-    
-        angle_preds = predictions['angle'] 
-        angle_targets = targets[..., angle_indices].contiguous() 
+        angle_preds_raw = predictions['angle'] 
+        angle_targets_raw = targets[..., [feature_info['continuous'][name] for name in angle_names]].contiguous()
         
-        angle_targets_reshaped = angle_targets.view(*angle_targets.shape[:-1], -1, 2)
+        angle_preds_reshaped = angle_preds_raw.view(*angle_preds_raw.shape[:-1], -1, 2)
+        angle_targets_reshaped = angle_targets_raw.view(*angle_targets_raw.shape[:-1], -1, 2)
+        
         angle_targets_norm = F.normalize(angle_targets_reshaped, p=2, dim=-1)
-        angle_targets_norm = angle_targets_norm.view_as(angle_targets)
-        
-        angle_loss = F.mse_loss(angle_preds, angle_targets_norm, reduction='none')
-        total_loss += angle_loss[mask].sum()
+
+        for i in range(angle_preds_reshaped.shape[-2]): 
+            cos_name = angle_names[i*2] 
+            pred_pair = angle_preds_reshaped[..., i, :]
+            target_pair = angle_targets_norm[..., i, :]
+
+            if cos_name in slider_feature_names:
+                neutral_target = torch.tensor([1.0, 0.0], device=targets.device, dtype=targets.dtype)
+                neutral_target = neutral_target.expand_as(target_pair)
+                
+                final_target = torch.where(is_slider_mask.unsqueeze(-1), target_pair, neutral_target)
+            else:
+                final_target = target_pair
+
+            loss = -(pred_pair * final_target).sum(dim=-1)
+            total_loss += loss[mask].sum()
 
     for name, info in feature_info['categorical'].items():
         cat_logits = predictions['categorical'][name]
-        cat_targets = targets[..., info['index']].long().contiguous()
-        
-        flat_logits = cat_logits.view(-1, info['cardinality'])
-        flat_targets = cat_targets.view(-1)
-        
-        cat_loss = F.cross_entropy(flat_logits, flat_targets, reduction='none')
-        cat_loss = cat_loss.view(mask.shape)
-        
-        total_loss += cat_loss[mask].sum()
+        cat_targets = targets[..., info['index']].long()
 
+        if name in slider_feature_names:
+            na_target = torch.full_like(cat_targets, NA_SLIDER_CURVE_TYPE_INDEX)
+            final_target = torch.where(is_slider_mask, cat_targets, na_target)
+        else:
+            final_target = cat_targets
+            
+        loss = F.cross_entropy(
+            cat_logits.view(-1, info['cardinality']), 
+            final_target.view(-1), 
+            reduction='none'
+        )
+        loss = loss.view(mask.shape)
+        total_loss += loss[mask].sum()
+
+    num_masked = torch.sum(mask)
     return total_loss / (num_masked + 1e-9)
-
 
 def _dynamic_supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch.Tensor, temperature: float) -> torch.Tensor:
     if positive_mask.sum() == 0:

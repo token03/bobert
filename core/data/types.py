@@ -24,14 +24,13 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
     
     return result
 
+SLIDER_TYPE_INDEX = 1
+
 class HitObjectVector(NamedTuple):
     distance_diff_end: float
-    distance_diff_head: float
     velocity: float
     cos_relative_angle: float
     sin_relative_angle: float
-    cos_inner_angle: float
-    sin_inner_angle: float
     object_type: int
     is_new_combo: int
     slider_absolute_length: float
@@ -64,7 +63,13 @@ class HitObjectVector(NamedTuple):
     @classmethod
     def get_feature_info(cls):
         field_names = cls.get_field_names()
-        
+
+        slider_feature_names = [
+            'slider_absolute_length', 'cos_slider_absolute_angle',
+            'sin_slider_absolute_angle', 'slider_num_anchors',
+            'slider_pixel_length', 'slider_repeats'
+        ]
+
         categorical_features = [
             'object_type', 'is_new_combo', 'slider_curve_type',
             'time_diff_bin', 'duration_bin', 'kiai_time'
@@ -91,6 +96,9 @@ class HitObjectVector(NamedTuple):
             'continuous': {
                 name: field_names.index(name) for name in continuous_features
             },
+            'slider': {
+                name: field_names.index(name) for name in slider_feature_names
+            },
             'names': field_names
         }
         return info
@@ -99,12 +107,9 @@ class HitObjectVector(NamedTuple):
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
         return {
             'distance_diff_end': NormalizationType.LOG,
-            'distance_diff_head': NormalizationType.LOG,
             'velocity': NormalizationType.LOG,
             'cos_relative_angle': NormalizationType.STANDARD,
             'sin_relative_angle': NormalizationType.STANDARD,
-            'cos_inner_angle': NormalizationType.STANDARD,
-            'sin_inner_angle': NormalizationType.STANDARD,
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'slider_absolute_length': NormalizationType.LOG,
@@ -124,12 +129,9 @@ class HitObjectVector(NamedTuple):
     def get_field_descriptions(cls) -> Dict[str, str]:
         return {
             'distance_diff_end': "Distance from previous hit object's end point (jump distance)",
-            'distance_diff_head': "Distance from previous hit object's start point",
             'velocity': "Velocity to previous hit object (pixels/ms)",
             'cos_relative_angle': "Cosine of angle between current and previous jump vectors (flow aim)",
             'sin_relative_angle': "Sine of angle between current and previous jump vectors (flow aim)",
-            'cos_inner_angle': "Cosine of angle between arrival vector and: departure vector (for circles) or slider body vector (for sliders).",
-            'sin_inner_angle': "Sine of angle between arrival vector and: departure vector (for circles) or slider body vector (for sliders).",
             'object_type': "Type of hit object (circle, slider, spinner)",
             'is_new_combo': "Whether this hit object starts a new combo",
             'slider_absolute_length': "Straight-line distance from slider head to slider tail",
