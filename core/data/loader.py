@@ -58,6 +58,28 @@ def _engineer_features_vectorized(
     hitobjects_df: pd.DataFrame
 ) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
     print("Engineering features for all beatmaps (vectorized)...")
+
+    print("Checking for out-of-bounds hit objects...")
+    invalid_starts_mask = (
+        (hitobjects_df['x'] < 0) | (hitobjects_df['x'] > 512) |
+        (hitobjects_df['y'] < 0) | (hitobjects_df['y'] > 384)
+    )
+
+    combined_invalid_mask = invalid_starts_mask
+
+    if combined_invalid_mask.any():
+        print(f"Dropping {combined_invalid_mask.sum()} individual invalid hitobjects...")
+        hitobjects_df = hitobjects_df.loc[~combined_invalid_mask].copy()
+
+    counts_after = hitobjects_df['beatmap_id'].value_counts()
+    bad_maps = counts_after[counts_after < 2].index
+    if len(bad_maps) > 0:
+        print(f"WARNING: {len(bad_maps)} beatmaps had too few valid objects and will be removed.")
+        beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(bad_maps)].copy()
+        hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(bad_maps)].copy()
+
+    print(f"{len(beatmaps_df)} maps remaining after cleanup.")
+
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
 
     map_counts = df['beatmap_id'].value_counts()
@@ -80,10 +102,17 @@ def _engineer_features_vectorized(
 
     df['norm_x'] = (df['x'] - 256.0) / 256.0
     df['norm_y'] = (df['y'] - 192.0) / 192.0
+    # Safeguard clamp; filtering should prevent out-of-range values.
+    df['norm_x'] = np.clip(df['norm_x'], -1.0, 1.0)
+    df['norm_y'] = np.clip(df['norm_y'], -1.0, 1.0)
+
 
     # Group 2: Local Geometry (Jump Vector)
     df['delta_x'] = df['x'] - prev_x
     df['delta_y'] = df['y'] - prev_y
+    # Clamp deltas to their theoretical maximums
+    df['delta_x'] = np.clip(df['delta_x'], -512.0, 512.0)
+    df['delta_y'] = np.clip(df['delta_y'], -384.0, 384.0)
     
     # Group 3: Temporal and Rhythmic Context
     df['time_diff_ms'] = df['time'] - prev_time

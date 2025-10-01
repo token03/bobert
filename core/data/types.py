@@ -101,8 +101,8 @@ class HitObjectVector(NamedTuple):
     @classmethod
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
         return {
-            'norm_x': NormalizationType.STANDARD,
-            'norm_y': NormalizationType.STANDARD,
+            'norm_x': NormalizationType.NONE,
+            'norm_y': NormalizationType.NONE,
             'delta_x': NormalizationType.STANDARD,
             'delta_y': NormalizationType.STANDARD,
             'log_time_diff_ms': NormalizationType.STANDARD,

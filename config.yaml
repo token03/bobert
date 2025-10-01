@@ -23,7 +23,7 @@ components:
 pretraining:
   db_path: './data/beatmap_dataset_test/'
   batch_size: 8
-  num_epochs: 5
+  num_epochs: 8
 
   learning_rate: 3e-4
   min_lr: 1e-6

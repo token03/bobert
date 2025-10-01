@@ -156,7 +156,7 @@ class BeatmapTransform:
     def __init__(
         self,
         normalizer: BeatmapNormalizer,
-        augmenter: BeatmapAugmenter,
+        augmenter: Optional[BeatmapAugmenter] = None,
         augment: bool = False
     ):
         self.normalizer = normalizer
