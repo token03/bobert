@@ -1,4 +1,3 @@
-# download.py
 import re
 import sys
 import os
@@ -25,9 +24,13 @@ INDEXER_THREADS = os.cpu_count() * 2 if os.cpu_count() else 4
 CACHE_FILE_NAME = 'beatmap_index.json'
 
 API_CONFIG = {
-    'https://catboy.best/osu/{id}': 2,
-    'https://osu.direct/api/osu/{id}': 0.8,
+    'https://osu.ppy.sh/osu/{id}': 0.2,   
+    'https://osu.direct/api/osu/{id}': 0.8,  
+    'https://catboy.best/osu/{id}': 1.7,  
 }
+
+last_request_time = {api: 0.0 for api in API_CONFIG}
+last_request_lock = threading.Lock()
 
 processed_ids = set()
 processed_ids_lock = threading.Lock()
@@ -197,10 +200,11 @@ def inject_star_rating(file_path, star_rating):
         print(f"Error injecting SR into {os.path.basename(file_path)}: {e}")
 
 
-def download_worker(tasks_queue, api_url_template, delay, output_folder):
+def download_worker(tasks_queue, api_url_template, min_delay, output_folder):
+    global last_request_time
     while True:
         try:
-            beatmap_id, star_rating = tasks_queue.get_nowait()  #Remove output folder argument as it is now available to all download workers
+            beatmap_id, star_rating = tasks_queue.get_nowait()
         except queue.Empty:
             break
 
@@ -209,9 +213,15 @@ def download_worker(tasks_queue, api_url_template, delay, output_folder):
         with processed_ids_lock:
             if beatmap_id in processed_ids:
                 tasks_queue.task_done()
-                time.sleep(delay)
                 continue
             processed_ids.add(beatmap_id)
+
+        # Enforce throttling
+        with last_request_lock:
+            elapsed = time.time() - last_request_time[api_url_template]
+            if elapsed < min_delay:
+                time.sleep(min_delay - elapsed)
+            last_request_time[api_url_template] = time.time()
 
         url = api_url_template.format(id=beatmap_id)
         try:
@@ -228,9 +238,9 @@ def download_worker(tasks_queue, api_url_template, delay, output_folder):
                 processed_ids.discard(beatmap_id)
 
         tasks_queue.task_done()
-        time.sleep(delay)
 
-def process_file(input_file_path, beatmap_index, output_folder): #Modified output_folder argument
+
+def process_file(input_file_path, beatmap_index, output_folder):
     print(f"\n--- Processing {os.path.basename(input_file_path)} ---")
 
     os.makedirs(output_folder, exist_ok=True)
@@ -247,7 +257,6 @@ def process_file(input_file_path, beatmap_index, output_folder): #Modified outpu
     }
 
     found_locally_ids = set()
-
     ids_to_check_and_process = [info for info in beatmap_infos if info[0] not in already_exist_ids]
 
     if beatmap_index:
@@ -271,7 +280,7 @@ def process_file(input_file_path, beatmap_index, output_folder): #Modified outpu
 
     for beatmap_id, star_rating in beatmap_infos:
         if beatmap_id not in processed_ids:
-            tasks_queue.put((beatmap_id, star_rating)) #Removed output_folder argument
+            tasks_queue.put((beatmap_id, star_rating))
 
     print(f"\n--- Summary for {os.path.basename(input_file_path)} ---")
     print(f"Total beatmaps requested: {len(beatmap_infos)}")
@@ -289,8 +298,8 @@ def process_file(input_file_path, beatmap_index, output_folder): #Modified outpu
     print(f"Queued for download: {queued_for_download} maps")
 
     threads = []
-    for api, delay in API_CONFIG.items():
-        thread = threading.Thread(target=download_worker, args=(tasks_queue, api, delay, output_folder), daemon=True) #output_folder here
+    for api, min_delay in API_CONFIG.items():
+        thread = threading.Thread(target=download_worker, args=(tasks_queue, api, min_delay, output_folder), daemon=True)
         threads.append(thread)
         thread.start()
 
@@ -346,8 +355,7 @@ def main():
             sys.exit(1)
 
         for label_file in label_files:
-            process_file(str(label_file), beatmap_index, str(DEFAULT_OUTPUT_DIR)) #Modified output_folder argument
-
+            process_file(str(label_file), beatmap_index, str(DEFAULT_OUTPUT_DIR))
     else:
         input_file_path = Path(args.input_file)
         if not input_file_path.exists():
@@ -363,8 +371,7 @@ def main():
             sys.exit(1)
 
         print(f"--- Processing input file: {input_file_path.resolve()} ---")
-
-        process_file(str(input_file_path), beatmap_index, str(DEFAULT_OUTPUT_DIR))  #Modified output_folder argument
+        process_file(str(input_file_path), beatmap_index, str(DEFAULT_OUTPUT_DIR))
 
     end_time = time.time()
     print(f"\nAll tasks completed in {end_time - start_time:.2f} seconds.")
