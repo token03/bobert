@@ -2,7 +2,7 @@
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler
 from typing import Tuple, List, Optional
-from .transforms import BeatmapNormalizer, BeatmapTransform
+from .transforms import BeatmapAugmenter, BeatmapNormalizer, BeatmapTransform
 
 def collate_fn(
     batch: List[torch.Tensor],
@@ -70,10 +70,12 @@ def create_dataloaders(
     if hasattr(val_data, 'dataset'):
         val_data = [val_data.dataset[i] for i in val_data.indices]
 
-    train_transform = BeatmapTransform(normalizer, augment=True)
+    augmenter = BeatmapAugmenter()
+
+    train_transform = BeatmapTransform(normalizer, augmenter, augment=True)
     train_dataset = BeatmapDataset(train_data, train_transform)
 
-    val_transform = BeatmapTransform(normalizer, augment=False)
+    val_transform = BeatmapTransform(normalizer, augmenter, augment=False)
     val_dataset = BeatmapDataset(val_data, val_transform)
 
     actual_vector_dim = train_data[0].shape[1] 

@@ -118,22 +118,49 @@ class BeatmapNormalizer:
 
 
 class BeatmapAugmenter:
+    def __init__(self):
+        feature_info = HitObjectVector.get_feature_info()
+        self.norm_x_idx = feature_info['continuous']['norm_x']
+        self.norm_y_idx = feature_info['continuous']['norm_y']
+        self.delta_x_idx = feature_info['continuous']['delta_x']
+        self.delta_y_idx = feature_info['continuous']['delta_y']
+        self.slider_end_x_idx = feature_info['continuous']['slider_end_x']
+        self.slider_end_y_idx = feature_info['continuous']['slider_end_y']
+
+    def _flip(self, vectors: torch.Tensor, flip_x: bool, flip_y: bool) -> torch.Tensor:
+        aug_vectors = vectors.clone()
+        if flip_x:
+            aug_vectors[:, self.norm_x_idx] *= -1
+            aug_vectors[:, self.delta_x_idx] *= -1
+            aug_vectors[:, self.slider_end_x_idx] *= -1
+        if flip_y:
+            aug_vectors[:, self.norm_y_idx] *= -1
+            aug_vectors[:, self.delta_y_idx] *= -1
+            aug_vectors[:, self.slider_end_y_idx] *= -1
+            
+        return aug_vectors
+
     def apply_augmentation(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
-        return vectors.clone()
+        if aug_type == 0:
+            return vectors.clone()
+        flip_x = aug_type in [1, 3]
+        flip_y = aug_type in [2, 3]
+        return self._flip(vectors, flip_x, flip_y)
 
     def random_augmentation(self, vectors: torch.Tensor) -> torch.Tensor:
-        return self.apply_augmentation(vectors, 0)
+        aug_type = torch.randint(0, 4, (1,)).item()
+        return self.apply_augmentation(vectors, aug_type)
 
 
 class BeatmapTransform:
     def __init__(
         self,
         normalizer: BeatmapNormalizer,
-        augmenter: Optional[BeatmapAugmenter] = None,
+        augmenter: BeatmapAugmenter,
         augment: bool = False
     ):
         self.normalizer = normalizer
-        self.augmenter = augmenter or BeatmapAugmenter()
+        self.augmenter = augmenter 
         self.augment = augment
 
     def __call__(self, vectors: torch.Tensor) -> torch.Tensor:

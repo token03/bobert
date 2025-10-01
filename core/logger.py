@@ -42,11 +42,9 @@ class TrainingLogger:
     def __init__(
         self,
         standard_cont_names: List[str],
-        angle_pair_names: List[str],
         cat_feat_names: List[str]
     ):
         self.standard_cont_names = standard_cont_names
-        self.angle_pair_names = angle_pair_names
         self.cat_feat_names = cat_feat_names
 
     def log_training_start(self, start_epoch: int, num_epochs: int, config: Dict[str, Any]):
@@ -97,12 +95,6 @@ class TrainingLogger:
                     metrics = val_metrics['continuous_metrics'][name]
                     row = f"  {name:<22} | {metrics['mae']:<15.4f} | {metrics['mean']:<12.4f} | {metrics['std']:<12.4f}"
                     print(row)
-            for name in self.angle_pair_names:
-                if name in val_metrics['continuous_metrics']:
-                    metrics = val_metrics['continuous_metrics'][name]
-                    row = f"  {name:<22} | {metrics['mae_degrees']:<15.4f} (deg) | {'-':<12} | {'-':<12}"
-                    print(row)
-
 
         if 'categorical_metrics' in val_metrics:
             print("-" * 70)

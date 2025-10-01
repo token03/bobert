@@ -181,14 +181,8 @@ class BertForMaskedModeling(nn.Module):
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
         self.feature_info = HitObjectVector.get_feature_info()
 
-        standard_cont_names = [name for name in self.feature_info['continuous'] if 'angle' not in name]
-        self.angle_names = sorted([name for name in self.feature_info['continuous'] if 'angle' in name])
-        
-        num_standard_continuous = len(standard_cont_names)
-        num_angle_features = len(self.angle_names) 
-
-        self.standard_continuous_head = nn.Linear(bert_model.d_model, num_standard_continuous)
-        self.angle_head = nn.Linear(bert_model.d_model, num_angle_features)
+        num_continuous = len(self.feature_info['continuous'])
+        self.continuous_head = nn.Linear(bert_model.d_model, num_continuous)
 
         self.categorical_heads = nn.ModuleDict({
             name: nn.Linear(bert_model.d_model, info['cardinality'])
@@ -302,21 +296,15 @@ class BertForMaskedModeling(nn.Module):
 
         sequence_output = encoded_output[:, 1:, :].contiguous()
 
-        standard_cont_preds = self.standard_continuous_head(sequence_output)
-        angle_preds_raw = self.angle_head(sequence_output)
+        continuous_preds = self.continuous_head(sequence_output)
         
-        angle_preds_reshaped = angle_preds_raw.view(*angle_preds_raw.shape[:-1], -1, 2)
-        normalized_angle_preds = F.normalize(angle_preds_reshaped, p=2, dim=-1)
-        angle_preds = normalized_angle_preds.view_as(angle_preds_raw)
-
         categorical_preds = {
             name: head(sequence_output)
             for name, head in self.categorical_heads.items()
         }
 
         predictions = {
-            'standard_continuous': standard_cont_preds,
-            'angle': angle_preds,
+            'continuous': continuous_preds,
             'categorical': categorical_preds
         }
 

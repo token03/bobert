@@ -13,7 +13,7 @@ import concurrent.futures
 import itertools
 import rosu_pp_py as rosu
 
-from .types import HitObjectVector, NormalizationType, DURATION_BINS, quantize_to_bins
+from .types import HitObjectVector, DURATION_BINS, quantize_to_bins
 
 def _recalculate_difficulty_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
@@ -68,6 +68,7 @@ def _engineer_features_vectorized(
     df.sort_values(['beatmap_id', 'time'], inplace=True)
     grouped = df.groupby('beatmap_id', observed=False)
 
+    # Group 1: Absolute position & Previous object context
     prev_x = grouped['x'].shift(1)
     prev_y = grouped['y'].shift(1)
     prev_time = grouped['time'].shift(1)
@@ -75,88 +76,46 @@ def _engineer_features_vectorized(
     first_in_group = ~df.duplicated('beatmap_id', keep='first')
     prev_x.loc[first_in_group] = 256 
     prev_y.loc[first_in_group] = 192
-    prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200 
+    prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
 
-    V_arrival_x = df['x'] - prev_x
-    V_arrival_y = df['y'] - prev_y
+    df['norm_x'] = (df['x'] - 256.0) / 256.0
+    df['norm_y'] = (df['y'] - 192.0) / 192.0
+
+    # Group 2: Local Geometry (Jump Vector)
+    df['delta_x'] = df['x'] - prev_x
+    df['delta_y'] = df['y'] - prev_y
     
-    df['distance_diff'] = np.hypot(V_arrival_x, V_arrival_y)
-    
+    # Group 3: Temporal and Rhythmic Context
     df['time_diff_ms'] = df['time'] - prev_time
-    
-    df['velocity'] = (df['distance_diff'] / df['time_diff_ms'].replace(0, 1)).fillna(0.0)
-    
-    is_slider = df['object_type'] == 1
-    df['slider_repeats'] = df['slider_repeats'].fillna(0).astype(int)
-    
-    df['slider_absolute_length'] = 0.0
-    df.loc[is_slider, 'slider_absolute_length'] = np.hypot(
-        df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x'],
-        df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
-    )
-
-    def calculate_angles(v1_x, v1_y, v2_x, v2_y):
-        norm1 = np.hypot(v1_x, v1_y)
-        norm2 = np.hypot(v2_x, v2_y)
-        norm_prod = (norm1 * norm2).replace(0, 1)
-        
-        dot_product = v1_x * v2_x + v1_y * v2_y
-        cross_product = v1_x * v2_y - v1_y * v2_x
-        
-        cos_angle = np.clip(dot_product / norm_prod, -1.0, 1.0)
-        sin_angle = np.clip(cross_product / norm_prod, -1.0, 1.0)
-        
-        is_zero_vector = (norm1 == 0) | (norm2 == 0)
-        cos_angle[is_zero_vector] = 1.0 
-        sin_angle[is_zero_vector] = 0.0
-        
-        return cos_angle, sin_angle
-    
-    V_slider_abs_x = pd.Series(0.0, index=df.index)
-    V_slider_abs_y = pd.Series(0.0, index=df.index)
-    V_slider_abs_x.loc[is_slider] = df.loc[is_slider, 'slider_end_x'] - df.loc[is_slider, 'x']
-    V_slider_abs_y.loc[is_slider] = df.loc[is_slider, 'slider_end_y'] - df.loc[is_slider, 'y']
-
-    df['cos_slider_absolute_angle'], df['sin_slider_absolute_angle'] = calculate_angles(
-        V_arrival_x, V_arrival_y, V_slider_abs_x, V_slider_abs_y
-    )
-
-    df['V_arrival_x'] = V_arrival_x
-    df['V_arrival_y'] = V_arrival_y
-    prev_V_arrival_x = grouped['V_arrival_x'].shift(1)
-    prev_V_arrival_y = grouped['V_arrival_y'].shift(1)
-    prev_V_arrival_x.loc[first_in_group] = df.loc[first_in_group, 'V_arrival_x']
-    prev_V_arrival_y.loc[first_in_group] = df.loc[first_in_group, 'V_arrival_y']
-    
-    df['cos_relative_angle'], df['sin_relative_angle'] = calculate_angles(
-        prev_V_arrival_x, prev_V_arrival_y, V_arrival_x, V_arrival_y
-    )
-    df.drop(columns=['V_arrival_x', 'V_arrival_y'], inplace=True)
-
-    df['duration_ms'] = df['end_time'] - df['time']
+    df['log_time_diff_ms'] = np.log1p(df['time_diff_ms'])
     
     df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
     df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
+    df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
+    
+    # Group 4: Object-Specific Properties
+    df['slider_repeats'] = df['slider_repeats'].fillna(0)
+    df['log_slider_pixel_length'] = np.log1p(df['pixel_length'].fillna(0.0))
+    
+    # For non-sliders, end position is the start position
+    df['slider_end_x'] = df['slider_end_x'].fillna(df['x'])
+    df['slider_end_y'] = df['slider_end_y'].fillna(df['y'])
+    # Normalize slider end coordinates
+    df['slider_end_x'] = (df['slider_end_x'] - 256.0) / 256.0
+    df['slider_end_y'] = (df['slider_end_y'] - 192.0) / 192.0
+
+    df['duration_ms'] = df['end_time'] - df['time']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
-    
-    df['slider_pixel_length'] = df['pixel_length'].fillna(0.0)
-    
-    curve_type_map = {'B': 0, 'C': 1, 'L': 2, 'P': 3}
-    df['slider_curve_type'] = df['curve_type_char'].map(curve_type_map).fillna(4).astype(int)
-    df['slider_num_anchors'] = df['num_anchors']
+    df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
     
     if 'kiai_time' not in df.columns: df['kiai_time'] = 0
-    df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
-    df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
 
+    # Final assembly
     vector_field_names = HitObjectVector.get_field_names()
-
     vector_df = df[['beatmap_id'] + vector_field_names]
-    
     difficulty_df = df[['beatmap_id', 'difficulty_rating']].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
 
     print("Converting processed dataframes to tensors...")
-    
     all_vectors_np = vector_df[vector_field_names].to_numpy(dtype=np.float32)
     ids = vector_df['beatmap_id'].to_numpy()
     
@@ -189,18 +148,15 @@ def load_dataset(
         )
     
     filters = [('beatmap_id', 'in', ids_to_load)] if ids_to_load else None
-
     if ids_to_load:
         print(f"Applying filters to load {len(ids_to_load)} specific beatmap IDs from Parquet files.")
     
     beatmaps_df = pd.read_parquet(beatmaps_path, filters=filters)
-    
     hitobjects_df = pd.read_parquet(hitobjects_path, filters=filters)
 
     if ids_to_load:
         id_cat = pd.Categorical(beatmaps_df['beatmap_id'], categories=ids_to_load, ordered=True)
         beatmaps_df = beatmaps_df.assign(beatmap_id=id_cat).sort_values('beatmap_id')
-        
         id_cat_ho = pd.Categorical(hitobjects_df['beatmap_id'], categories=ids_to_load, ordered=True)
         hitobjects_df = hitobjects_df.assign(beatmap_id=id_cat_ho).sort_values('beatmap_id')
 
@@ -211,10 +167,8 @@ def load_dataset(
     if max_seq_len is not None:
         print(f"Recalculating difficulty ratings for sequences truncated to {max_seq_len}...")
         cache_path = os.path.join(dataset_path, f"difficulty_cache_seq_{max_seq_len}.json")
-        
         try:
-            with open(cache_path, 'r') as f:
-                difficulty_cache = json.load(f)
+            with open(cache_path, 'r') as f: difficulty_cache = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             difficulty_cache = {}
 
@@ -229,7 +183,6 @@ def load_dataset(
             if not os.path.isdir(raw_beatmap_path):
                 print(f"WARNING: Raw beatmap path '{raw_beatmap_path}' not found.")
                 print("Difficulty recalculation for truncated maps will fail, and these maps will be skipped.")
-            
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future_to_id = {
                     executor.submit(_recalculate_difficulty_worker, bid, max_seq_len, raw_beatmap_path): bid
@@ -240,7 +193,6 @@ def load_dataset(
                     new_rating = future.result()
                     if new_rating is not None:
                         difficulty_cache[str(beatmap_id)] = new_rating
-            
             with open(cache_path, 'w') as f:
                 json.dump(difficulty_cache, f)
 
@@ -261,37 +213,17 @@ def load_dataset(
         difficulty_ratings = np.array(updated_ratings)
         loaded_ids = np.array(updated_ids)
 
-    vector_norm_specs = HitObjectVector.get_normalization_specs()
-    vector_field_names = HitObjectVector.get_field_names()
-
-    log_vec_indices = [
-        i for i, name in enumerate(vector_field_names)
-        if vector_norm_specs.get(name) == NormalizationType.LOG
-    ]
-
-    final_data = []
-    print("Applying log transforms...")
-    for vectors in tqdm(processed_data):
-        for idx in log_vec_indices:
-            vectors[:, idx].clamp_(min=0.0)
-            vectors[:, idx] = torch.log1p(vectors[:, idx])
-
-        final_data.append(vectors)
-
     print("Running final data integrity check...")
     final_data_validated = []
     validated_ids = []
     validated_difficulty_ratings = []
-    
-    for i, vectors in enumerate(tqdm(final_data, desc="Validating Tensors")):
+    for i, vectors in enumerate(tqdm(processed_data, desc="Validating Tensors")):
         beatmap_id = loaded_ids[i]
         has_nan = torch.isnan(vectors).any()
         has_inf = torch.isinf(vectors).any()
         
         if has_nan or has_inf:
             print(f"WARNING: Skipping beatmap ID {beatmap_id} due to NaN/Inf values found after processing.")
-            if has_nan: print(f"NaN found in vectors: {torch.isnan(vectors).any()}")
-            if has_inf: print(f"Inf found in vectors: {torch.isinf(vectors).any()}")
             continue
 
         if np.isnan(difficulty_ratings[i]) or np.isinf(difficulty_ratings[i]):
@@ -302,8 +234,8 @@ def load_dataset(
         validated_ids.append(beatmap_id)
         validated_difficulty_ratings.append(difficulty_ratings[i])
 
-    if len(final_data_validated) < len(final_data):
-        print(f"WARNING: Dropped {len(final_data) - len(final_data_validated)} beatmaps due to data integrity issues.")
+    if len(final_data_validated) < len(processed_data):
+        print(f"WARNING: Dropped {len(processed_data) - len(final_data_validated)} beatmaps due to data integrity issues.")
 
     print("Finished loading and processing all data.")
     return final_data_validated, np.array(validated_difficulty_ratings), np.array(validated_ids)
