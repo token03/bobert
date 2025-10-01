@@ -44,6 +44,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             position_ids = torch.cat([torch.arange(s, device=x.device, dtype=torch.long) for s in seqlens])
             freqs = all_freqs[position_ids]
             freqs = freqs.view(total_tokens, 1, self.d_head)
+
+            freqs = freqs.to(x.dtype)
             
             q = apply_rotary_emb(freqs, q, seq_dim=0)
             k = apply_rotary_emb(freqs, k, seq_dim=0)
@@ -89,19 +91,16 @@ class GatedConv1D(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        x = x * attention_mask.unsqueeze(-1).float()
+        mask = attention_mask.unsqueeze(-1).to(x.dtype)
+        x = x * mask
         
         x_permuted = x.permute(0, 2, 1)
-        
         convolved = self.conv(x_permuted)
-        
         output, gate = convolved.chunk(2, dim=1)
         
         gated_output = F.silu(gate) * output
-        
         gated_output_permuted = gated_output.permute(0, 2, 1)
-        
-        gated_output_permuted = gated_output_permuted * attention_mask.unsqueeze(-1).float()
+        gated_output_permuted = gated_output_permuted * mask
         
         return gated_output_permuted
 
