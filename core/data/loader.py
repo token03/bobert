@@ -57,94 +57,68 @@ def _engineer_features_vectorized(
     beatmaps_df: pd.DataFrame,
     hitobjects_df: pd.DataFrame
 ) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
-    print("Engineering features for all beatmaps (vectorized)...")
-
-    print("Checking for out-of-bounds hit objects...")
     invalid_starts_mask = (
         (hitobjects_df['x'] < 0) | (hitobjects_df['x'] > 512) |
         (hitobjects_df['y'] < 0) | (hitobjects_df['y'] > 384)
     )
+    if invalid_starts_mask.any():
+        hitobjects_df = hitobjects_df.loc[~invalid_starts_mask].copy()
 
-    combined_invalid_mask = invalid_starts_mask
-
-    if combined_invalid_mask.any():
-        print(f"Dropping {combined_invalid_mask.sum()} individual invalid hitobjects...")
-        hitobjects_df = hitobjects_df.loc[~combined_invalid_mask].copy()
+    high_bpm_maps = hitobjects_df.loc[hitobjects_df['bpm'] > 1000, 'beatmap_id'].unique()
+    if len(high_bpm_maps) > 0:
+        beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(high_bpm_maps)].copy()
+        hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(high_bpm_maps)].copy()
 
     counts_after = hitobjects_df['beatmap_id'].value_counts()
-    bad_maps = counts_after[counts_after < 2].index
+    bad_maps = counts_after[counts_after < 10].index
     if len(bad_maps) > 0:
-        print(f"WARNING: {len(bad_maps)} beatmaps had too few valid objects and will be removed.")
         beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(bad_maps)].copy()
         hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(bad_maps)].copy()
 
-    print(f"{len(beatmaps_df)} maps remaining after cleanup.")
+    if beatmaps_df.empty or hitobjects_df.empty:
+        return [], np.array([]), np.array([])
 
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
-
-    map_counts = df['beatmap_id'].value_counts()
-    valid_beatmap_ids = map_counts[map_counts >= 2].index
-    if len(valid_beatmap_ids) < len(beatmaps_df):
-        df = df[df['beatmap_id'].isin(valid_beatmap_ids)].copy()
-
     df.sort_values(['beatmap_id', 'time'], inplace=True)
-    grouped = df.groupby('beatmap_id', observed=False)
+    grouped = df.groupby('beatmap_id', observed=False, sort=False)
 
-    # Group 1: Absolute position & Previous object context
     prev_x = grouped['x'].shift(1)
     prev_y = grouped['y'].shift(1)
     prev_time = grouped['time'].shift(1)
-
     first_in_group = ~df.duplicated('beatmap_id', keep='first')
-    prev_x.loc[first_in_group] = 256 
+    prev_x.loc[first_in_group] = 256
     prev_y.loc[first_in_group] = 192
     prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
+    df['norm_x'] = np.clip((df['x'] - 256.0) / 256.0, -1.0, 1.0)
+    df['norm_y'] = np.clip((df['y'] - 192.0) / 192.0, -1.0, 1.0)
 
-    df['norm_x'] = (df['x'] - 256.0) / 256.0
-    df['norm_y'] = (df['y'] - 192.0) / 192.0
-    # Safeguard clamp; filtering should prevent out-of-range values.
-    df['norm_x'] = np.clip(df['norm_x'], -1.0, 1.0)
-    df['norm_y'] = np.clip(df['norm_y'], -1.0, 1.0)
-
-
-    # Group 2: Local Geometry (Jump Vector)
-    df['delta_x'] = df['x'] - prev_x
-    df['delta_y'] = df['y'] - prev_y
-    # Clamp deltas to their theoretical maximums
-    df['delta_x'] = np.clip(df['delta_x'], -512.0, 512.0)
-    df['delta_y'] = np.clip(df['delta_y'], -384.0, 384.0)
+    df['delta_x'] = np.clip(df['x'] - prev_x, -512.0, 512.0)
+    df['delta_y'] = np.clip(df['y'] - prev_y, -384.0, 384.0)
     
-    # Group 3: Temporal and Rhythmic Context
     df['time_diff_ms'] = df['time'] - prev_time
     df['log_time_diff_ms'] = np.log1p(df['time_diff_ms'])
-    
     df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
     df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
     df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
     
-    # Group 4: Object-Specific Properties
     df['slider_repeats'] = df['slider_repeats'].fillna(0)
     df['log_slider_pixel_length'] = np.log1p(df['pixel_length'].fillna(0.0))
-    
-    # For non-sliders, end position is the start position
-    df['slider_end_x'] = df['slider_end_x'].fillna(df['x'])
-    df['slider_end_y'] = df['slider_end_y'].fillna(df['y'])
-    # Normalize slider end coordinates
-    df['slider_end_x'] = (df['slider_end_x'] - 256.0) / 256.0
-    df['slider_end_y'] = (df['slider_end_y'] - 192.0) / 192.0
 
+    raw_slider_end_x = df['slider_end_x'].fillna(df['x'])
+    raw_slider_end_y = df['slider_end_y'].fillna(df['y'])
+    
+    df['delta_slider_end_x'] = raw_slider_end_x - df['x']
+    df['delta_slider_end_y'] = raw_slider_end_y - df['y']
+    
     df['duration_ms'] = df['end_time'] - df['time']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
     df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
-    
     if 'kiai_time' not in df.columns: df['kiai_time'] = 0
 
-    # Final assembly
     vector_field_names = HitObjectVector.get_field_names()
     vector_df = df[['beatmap_id'] + vector_field_names]
     difficulty_df = df[['beatmap_id', 'difficulty_rating']].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
 
-    print("Converting processed dataframes to tensors...")
     all_vectors_np = vector_df[vector_field_names].to_numpy(dtype=np.float32)
     ids = vector_df['beatmap_id'].to_numpy()
     
@@ -154,44 +128,63 @@ def _engineer_features_vectorized(
     unique_ids = ids[np.concatenate(([0], split_indices))]
     all_difficulty_ratings = difficulty_df.loc[unique_ids]['difficulty_rating'].to_numpy(dtype=np.float32)
     
-    final_data = [
-        torch.from_numpy(vectors)
-        for vectors in tqdm(vector_arrays, total=len(unique_ids))
-    ]
+    final_data = [torch.from_numpy(vectors) for vectors in vector_arrays]
+
     return final_data, all_difficulty_ratings, unique_ids
 
 def load_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
-    raw_beatmap_path: str = "./data/raw"
+    raw_beatmap_path: str = "./data/raw",
+    chunk_size: int = 2000 
 ) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
+    
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
     hitobjects_path = os.path.join(dataset_path, 'hitobjects')
 
     if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
-        raise FileNotFoundError(
-            f"Parquet dataset not found at '{dataset_path}'. "
-            f"Please run create_dataset.py first."
-        )
+        raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
     
-    filters = [('beatmap_id', 'in', ids_to_load)] if ids_to_load else None
+    print("Loading beatmap metadata...")
     if ids_to_load:
-        print(f"Applying filters to load {len(ids_to_load)} specific beatmap IDs from Parquet files.")
+        print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
+        all_beatmaps_df = pd.read_parquet(beatmaps_path, filters=[('beatmap_id', 'in', ids_to_load)])
+        id_cat = pd.Categorical(all_beatmaps_df['beatmap_id'], categories=ids_to_load, ordered=True)
+        all_beatmaps_df = all_beatmaps_df.assign(beatmap_id=id_cat).sort_values('beatmap_id')
+    else:
+        all_beatmaps_df = pd.read_parquet(beatmaps_path)
+
+    all_beatmap_ids = all_beatmaps_df['beatmap_id'].unique().tolist()
+    print(f"Found metadata for {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}...")
+
+    processed_data_chunks = []
+    difficulty_ratings_chunks = []
+    loaded_ids_chunks = []
+
+    for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
+        chunk_ids = all_beatmap_ids[i:i + chunk_size]
+        
+        beatmaps_df_chunk = all_beatmaps_df[all_beatmaps_df['beatmap_id'].isin(chunk_ids)]
+        
+        hitobjects_df_chunk = pd.read_parquet(hitobjects_path, filters=[('beatmap_id', 'in', chunk_ids)])
+        
+        if hitobjects_df_chunk.empty:
+            continue
+
+        data, ratings, ids = _engineer_features_vectorized(beatmaps_df_chunk, hitobjects_df_chunk)
+        
+        processed_data_chunks.extend(data)
+        difficulty_ratings_chunks.append(ratings)
+        loaded_ids_chunks.append(ids)
+
+    print("Consolidating processed chunks...")
+    processed_data = processed_data_chunks
+    difficulty_ratings = np.concatenate(difficulty_ratings_chunks)
+    loaded_ids = np.concatenate(loaded_ids_chunks)
     
-    beatmaps_df = pd.read_parquet(beatmaps_path, filters=filters)
-    hitobjects_df = pd.read_parquet(hitobjects_path, filters=filters)
-
-    if ids_to_load:
-        id_cat = pd.Categorical(beatmaps_df['beatmap_id'], categories=ids_to_load, ordered=True)
-        beatmaps_df = beatmaps_df.assign(beatmap_id=id_cat).sort_values('beatmap_id')
-        id_cat_ho = pd.Categorical(hitobjects_df['beatmap_id'], categories=ids_to_load, ordered=True)
-        hitobjects_df = hitobjects_df.assign(beatmap_id=id_cat_ho).sort_values('beatmap_id')
-
-    print(f"Loaded {len(beatmaps_df)} beatmaps and {len(hitobjects_df)} hit objects.")
-
-    processed_data, difficulty_ratings, loaded_ids = _engineer_features_vectorized(beatmaps_df, hitobjects_df)
+    print(f"Loaded and processed {len(processed_data)} total beatmaps.")
 
     if max_seq_len is not None:
         print(f"Recalculating difficulty ratings for sequences truncated to {max_seq_len}...")
@@ -241,6 +234,7 @@ def load_dataset(
         processed_data = updated_data
         difficulty_ratings = np.array(updated_ratings)
         loaded_ids = np.array(updated_ids)
+
 
     print("Running final data integrity check...")
     final_data_validated = []

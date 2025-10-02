@@ -23,7 +23,6 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
 SLIDER_TYPE_INDEX = 1
 
 class HitObjectVector(NamedTuple):
-    # Continuous Features
     norm_x: float
     norm_y: float
     delta_x: float
@@ -32,10 +31,9 @@ class HitObjectVector(NamedTuple):
     bpm: float
     log_slider_pixel_length: float
     slider_repeats: float
-    slider_end_x: float
-    slider_end_y: float
+    delta_slider_end_x: float
+    delta_slider_end_y: float
     
-    # Categorical Features
     object_type: int
     is_new_combo: int
     kiai_time: int
@@ -61,9 +59,10 @@ class HitObjectVector(NamedTuple):
     def get_feature_info(cls):
         field_names = cls.get_field_names()
 
+        # Updated slider features
         slider_feature_names = [
             'log_slider_pixel_length', 'slider_repeats', 
-            'slider_end_x', 'slider_end_y', 'duration_bin'
+            'delta_slider_end_x', 'delta_slider_end_y', 'duration_bin'
         ]
 
         categorical_features = [
@@ -109,8 +108,9 @@ class HitObjectVector(NamedTuple):
             'bpm': NormalizationType.STANDARD,
             'log_slider_pixel_length': NormalizationType.STANDARD,
             'slider_repeats': NormalizationType.STANDARD,
-            'slider_end_x': NormalizationType.STANDARD,
-            'slider_end_y': NormalizationType.STANDARD,
+            'delta_slider_end_x': NormalizationType.STANDARD,
+            'delta_slider_end_y': NormalizationType.STANDARD,
+            
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'kiai_time': NormalizationType.CATEGORICAL,
@@ -129,8 +129,9 @@ class HitObjectVector(NamedTuple):
             'bpm': "Beats Per Minute at the time of the hit object",
             'log_slider_pixel_length': "Log-transformed pixel length of slider's curve path",
             'slider_repeats': "Number of slider repeats (slides - 1)",
-            'slider_end_x': "Slider's end x-coordinate, normalized to [-1, 1]",
-            'slider_end_y': "Slider's end y-coordinate, normalized to [-1, 1]",
+            'delta_slider_end_x': "Change in x from start to end of the slider path",
+            'delta_slider_end_y': "Change in y from start to end of the slider path",
+            
             'object_type': "Type of hit object (circle, slider, spinner)",
             'is_new_combo': "Whether this hit object starts a new combo",
             'kiai_time': "Whether the hit object is in kiai time",

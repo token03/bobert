@@ -24,9 +24,9 @@ INDEXER_THREADS = os.cpu_count() * 2 if os.cpu_count() else 4
 CACHE_FILE_NAME = 'beatmap_index.json'
 
 API_CONFIG = {
-    'https://osu.ppy.sh/osu/{id}': 0.2,   
+    # 'https://osu.ppy.sh/osu/{id}': 0.2,   
     'https://osu.direct/api/osu/{id}': 0.8,  
-    'https://catboy.best/osu/{id}': 1.7,  
+    'https://catboy.best/osu/{id}': 2.1,  
 }
 
 last_request_time = {api: 0.0 for api in API_CONFIG}
