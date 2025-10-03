@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any
+import warnings
 
 from core.data.types import SLIDER_TYPE_INDEX, HitObjectVector
 
@@ -59,8 +60,10 @@ def mlm_loss_fn(
     num_masked = torch.sum(mask)
     return total_loss / (num_masked + 1e-9)
 
-def _dynamic_supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch.Tensor, temperature: float) -> torch.Tensor:
+def _supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch.Tensor, temperature: float) -> torch.Tensor:
     if positive_mask.sum() == 0:
+        warnings.warn("No positive pairs found in batch, contrastive loss will be 0. "
+                      "Check sampler logic and `positive_difficulty_threshold`.", UserWarning)
         return torch.tensor(0.0, device=projections.device)
 
     epsilon = 1e-8
@@ -100,6 +103,8 @@ def contrastive_loss_fn(
     user_tag_weight = finetuning_config.get('user_tag_weight', 1.0)
     collection_label_weight = finetuning_config.get('collection_label_weight', 1.0)
     difficulty_rating_weight = finetuning_config.get('difficulty_rating_weight', 1.0)
+    contrastive_weight = finetuning_config.get('contrastive_weight', 1.0)
+
 
     if 'user_tags' in labels:
         user_tag_loss = F.binary_cross_entropy_with_logits(
@@ -122,29 +127,15 @@ def contrastive_loss_fn(
         losses['difficulty_rating_loss'] = difficulty_rating_loss
         total_loss += difficulty_rating_weight * difficulty_rating_loss
 
-    if 'positive_mask' in labels:
+    if 'positive_mask' in labels and 'contrastive_projection' in predictions:
         positive_mask = labels['positive_mask']
         
-        if 'user_tag_projection' in predictions:
-            user_tag_contrastive_loss = _dynamic_supervised_contrastive_loss(
-                predictions['user_tag_projection'], positive_mask, temperature
-            )
-            losses['user_tag_contrastive_loss'] = user_tag_contrastive_loss
-            total_loss += user_tag_weight * user_tag_contrastive_loss
-            
-        if 'collection_label_projection' in predictions:
-            collection_label_contrastive_loss = _dynamic_supervised_contrastive_loss(
-                predictions['collection_label_projection'], positive_mask, temperature
-            )
-            losses['collection_label_contrastive_loss'] = collection_label_contrastive_loss
-            total_loss += collection_label_weight * collection_label_contrastive_loss
+        contrastive_loss = _supervised_contrastive_loss(
+            predictions['contrastive_projection'], positive_mask, temperature
+        )
+        losses['contrastive_loss'] = contrastive_loss
+        total_loss += contrastive_weight * contrastive_loss
 
-        if 'difficulty_rating_projection' in predictions:
-            difficulty_contrastive_loss = _dynamic_supervised_contrastive_loss(
-                predictions['difficulty_rating_projection'], positive_mask, temperature
-            )
-            losses['difficulty_contrastive_loss'] = difficulty_contrastive_loss
-            total_loss += difficulty_rating_weight * difficulty_contrastive_loss
 
     losses['total_loss'] = total_loss
     return losses

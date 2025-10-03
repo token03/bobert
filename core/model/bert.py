@@ -325,8 +325,11 @@ class BertForContrastiveFineTuning(nn.Module):
         self.collection_label_head = nn.Linear(self.d_model, collection_label_classes)
         self.difficulty_rating_head = nn.Linear(self.d_model, 1)  
         
-        self.collection_label_projection = nn.Linear(self.d_model, self.d_model)
-        self.difficulty_rating_projection = nn.Linear(self.d_model, self.d_model)
+        self.contrastive_projection = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.ReLU(),
+            nn.Linear(self.d_model, 128) 
+        )
         
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
@@ -371,13 +374,11 @@ class BertForContrastiveFineTuning(nn.Module):
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),
             'difficulty_rating_preds': self.difficulty_rating_head(final_representation).squeeze(-1),
-            'collection_label_projection': self.collection_label_projection(final_representation),
-            'difficulty_rating_projection': self.difficulty_rating_projection(final_representation),
+            'contrastive_projection': self.contrastive_projection(final_representation),
             'sequence_representation': final_representation 
         }
         
         if self.user_tag_classes > 0:
             predictions['user_tag_logits'] = self.user_tag_head(final_representation)
-            predictions['user_tag_projection'] = self.user_tag_projection(final_representation)
             
         return predictions

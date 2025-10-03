@@ -71,6 +71,7 @@ finetuning:
   user_tag_weight: 0.0
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0
+  contrastive_weight: 2.0
 
   positive_difficulty_threshold: 0.25
   hard_negative_difficulty_threshold: 0.5
