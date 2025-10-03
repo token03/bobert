@@ -10,6 +10,7 @@ import bisect
 from pathlib import Path
 from typing import Optional
 import pandas as pd
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -18,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.parser import parse_osu_file, _preprocess_timing_points
+from core.data.types import SNAP_BINS, MAX_METER_CARDINALITY
 
 BEATMAPS_SCHEMA = pa.schema([
     ('beatmap_id', pa.int64()), ('category', pa.string()), ('hp_drain', pa.float32()),
@@ -31,7 +33,8 @@ HITOBJECTS_SCHEMA = pa.schema([
     ('hit_sound', pa.int32()), ('end_time', pa.int32()), ('pixel_length', pa.float32()),
     ('bpm', pa.float32()), ('curve_type_char', pa.string()), ('num_anchors', pa.int32()),
     ('kiai_time', pa.int8()), ('slider_repeats', pa.int32()), ('hard_anchor_ratio', pa.float32()),
-    ('slider_end_x', pa.int32()), ('slider_end_y', pa.int32())
+    ('slider_end_x', pa.int32()), ('slider_end_y', pa.int32()),
+    ('beat_in_measure', pa.int32()), ('snap_in_beat', pa.int32()), 
 ])
 CURVEPOINTS_SCHEMA = pa.schema([
     ('beatmap_id', pa.int64()), ('hitobject_time', pa.int32()), ('point_index', pa.int32()),
@@ -45,6 +48,8 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
     hitobjects_buffer = []
     curvepoints_buffer = []
     file_counter = 0
+
+    SNAP_BINS_NP = np.array(SNAP_BINS)
 
     while True:
         file_path = tasks_queue.get()
@@ -62,19 +67,49 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
 
                 timing_sections = _preprocess_timing_points(raw_beatmap.timing_points)
                 section_start_times = [s.start_time for s in timing_sections]
+                
+                cumulative_measures = [0.0] * len(timing_sections)
+                if len(timing_sections) > 1:
+                    for i in range(len(timing_sections) - 1):
+                        current_s = timing_sections[i]
+                        next_s = timing_sections[i+1]
+                        beat_length = current_s.uninherited.beat_length
+                        meter = current_s.uninherited.meter
+                        measures_in_section = 0
+                        if beat_length > 0 and meter > 0:
+                            duration_ms = next_s.start_time - current_s.start_time
+                            measures_in_section = duration_ms / (beat_length * meter)
+                        cumulative_measures[i+1] = cumulative_measures[i] + measures_in_section
 
                 for ho in raw_beatmap.hit_objects:
                     bpm = 120.0
                     kiai = 0
                     idx = bisect.bisect_right(section_start_times, ho.time) - 1
+
+                    beat_in_measure, snap_in_beat = 0, 0
                     if idx >= 0:
                         section = timing_sections[idx]
                         beat_length = section.uninherited.beat_length
+                        meter = section.uninherited.meter
+                        
                         if beat_length > 0:
                             bpm = 60000.0 / beat_length
                         if section.effective.effects & 1:
                             kiai = 1
-                    
+                        
+                        if beat_length > 0 and meter > 0:
+                            time_in_section_ms = ho.time - section.start_time
+                            beats_in_section = time_in_section_ms / beat_length
+
+                            beats_in_measure_float = beats_in_section % meter
+                            beat_in_measure = int(beats_in_measure_float)
+
+                            beat_in_measure = min(beat_in_measure, MAX_METER_CARDINALITY - 1)
+
+                            beat_fraction = beats_in_section - np.floor(beats_in_section)
+                            if beat_fraction > 1.0 - 1e-4: beat_fraction = 0.0
+                            snap_in_beat = int(np.argmin(np.abs(SNAP_BINS_NP - beat_fraction)))
+
                     num_anchors = 0
                     num_hard_anchors = 0
                     slider_end_x, slider_end_y = 0, 0
@@ -94,7 +129,8 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
                         'end_time': ho.end_time, 'pixel_length': ho.pixel_length or 0.0,
                         'bpm': bpm, 'curve_type_char': ho.curve_type or '', 'num_anchors': num_anchors,
                         'kiai_time': kiai, 'slider_repeats': slider_repeats, 'hard_anchor_ratio': hard_anchor_ratio,
-                        'slider_end_x': slider_end_x, 'slider_end_y': slider_end_y
+                        'slider_end_x': slider_end_x, 'slider_end_y': slider_end_y,
+                        'beat_in_measure': beat_in_measure, 'snap_in_beat': snap_in_beat, 
                     })
 
                     if ho.curve_points:

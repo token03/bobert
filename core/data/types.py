@@ -3,7 +3,11 @@ from typing import NamedTuple, List, Dict, Any, Optional, Tuple
 import numpy as np
 from enum import Enum
 
+MAX_METER_CARDINALITY = 8
+
 DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
+
+SNAP_BINS = [0, 1/16, 1/12, 1/8, 1/6, 1/4, 1/3, 3/8, 1/2, 5/8, 2/3, 3/4, 5/6, 7/8, 11/12, 15/16]
 
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
@@ -29,16 +33,19 @@ class HitObjectVector(NamedTuple):
     delta_y: float
     log_time_diff_ms: float
     bpm: float
+    
     log_slider_pixel_length: float
     slider_repeats: float
     delta_slider_end_x: float
     delta_slider_end_y: float
+    beat_in_measure: float
     
     object_type: int
     is_new_combo: int
     kiai_time: int
     time_diff_bin: int
     duration_bin: int
+    snap_in_beat: int
     
     @classmethod
     def get_field_names(cls):
@@ -59,15 +66,14 @@ class HitObjectVector(NamedTuple):
     def get_feature_info(cls):
         field_names = cls.get_field_names()
 
-        # Updated slider features
         slider_feature_names = [
             'log_slider_pixel_length', 'slider_repeats', 
             'delta_slider_end_x', 'delta_slider_end_y', 'duration_bin'
         ]
 
         categorical_features = [
-            'object_type', 'is_new_combo', 'kiai_time',
-            'time_diff_bin', 'duration_bin'
+            'object_type', 'is_new_combo', 'kiai_time', 'beat_in_measure',
+            'time_diff_bin', 'duration_bin', 'snap_in_beat', 
         ]
         
         continuous_features = [f for f in field_names if f not in categorical_features]
@@ -76,8 +82,10 @@ class HitObjectVector(NamedTuple):
             'object_type': 3,
             'is_new_combo': 2,
             'kiai_time': 2,
+            'beat_in_measure': MAX_METER_CARDINALITY,
             'time_diff_bin': len(DURATION_BINS),
             'duration_bin': len(DURATION_BINS),
+            'snap_in_beat': len(SNAP_BINS),
         }
 
         info = {
@@ -114,8 +122,10 @@ class HitObjectVector(NamedTuple):
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'kiai_time': NormalizationType.CATEGORICAL,
+            'beat_in_measure': NormalizationType.CATEGORICAL,
             'time_diff_bin': NormalizationType.CATEGORICAL,
             'duration_bin': NormalizationType.CATEGORICAL,
+            'snap_in_beat': NormalizationType.CATEGORICAL,
         }
     
     @classmethod
@@ -135,8 +145,10 @@ class HitObjectVector(NamedTuple):
             'object_type': "Type of hit object (circle, slider, spinner)",
             'is_new_combo': "Whether this hit object starts a new combo",
             'kiai_time': "Whether the hit object is in kiai time",
+            'beat_in_measure': "Which beat of the measure it falls on (categorical, 0-indexed).",
             'time_diff_bin': "Quantized time difference to previous hit object in beats",
             'duration_bin': "Quantized duration of the hit object in beats",
+            'snap_in_beat': "Categorical index of the object's rhythmic snap within a beat.",
         }
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()
@@ -144,6 +156,7 @@ VECTOR_DIM = HitObjectVector.get_vector_dim()
 class RawTimingPoint(NamedTuple):
     time: int
     beat_length: float
+    meter: int
     uninherited: bool
     effects: int
 

@@ -6,7 +6,6 @@ from typing import Dict, Any
 
 from core.data.types import SLIDER_TYPE_INDEX, HitObjectVector
 
-@torch.compile
 def mlm_loss_fn(
     predictions: Dict[str, Any], 
     targets: torch.Tensor, 
@@ -87,7 +86,6 @@ def _dynamic_supervised_contrastive_loss(projections: torch.Tensor, positive_mas
     return torch.nan_to_num(final_loss, nan=0.0)
 
 
-@torch.compile
 def contrastive_loss_fn(
     predictions: Dict[str, torch.Tensor],
     labels: Dict[str, torch.Tensor],

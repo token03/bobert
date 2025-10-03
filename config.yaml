@@ -12,7 +12,7 @@ model:
   dim_feedforward_mult: 4
   dropout: 0.1
   local_attention_window: 256
-  cnn_kernel_size: 5
+  cnn_kernel_size: 15
 
   
 components:
@@ -21,12 +21,12 @@ components:
   compile_mode: "default" 
     
 pretraining:
-  db_path: './data/beatmap_dataset_test/'
-  # db_path: './data/beatmap_datase/'
+  # db_path: './data/beatmap_dataset_test/'
+  db_path: './data/beatmap_dataset/'
   batch_size: 8
   num_epochs: 8
 
-  learning_rate: 3e-4
+  learning_rate: 2e-4
   min_lr: 1e-6
   cooldown_type: "cosine"
   weight_decay: 0.05
@@ -38,8 +38,8 @@ pretraining:
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 8
 
-  masking_ratio: 0.25
-  mean_span_length: 3
+  masking_ratio: 0.3
+  mean_span_length: 4
   
   sampling:
     method: "kde"  
@@ -70,7 +70,7 @@ finetuning:
 
   user_tag_weight: 0.0
   collection_label_weight: 1.0
-  difficulty_rating_weight: 2.0
+  difficulty_rating_weight: 1.0
 
   positive_difficulty_threshold: 0.25
   hard_negative_difficulty_threshold: 0.5

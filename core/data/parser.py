@@ -26,7 +26,7 @@ def _preprocess_timing_points(timing_points: List[RawTimingPoint]) -> List[Timin
             last_uninherited = point
         
         if last_uninherited is None:
-            last_uninherited = RawTimingPoint(time=point.time, beat_length=500.0, uninherited=True, effects=0)
+            last_uninherited = RawTimingPoint(time=point.time, beat_length=500.0, meter=4, uninherited=True, effects=0)
 
         sections.append(TimingSection(start_time=point.time, uninherited=last_uninherited, effective=point))
     return sections
@@ -88,6 +88,7 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                 timing_points.append(RawTimingPoint(
                     time=int(float(parts[0])),
                     beat_length=float(parts[1]),
+                    meter=int(parts[2]) if len(parts) >= 3 else 4,
                     uninherited=len(parts) >= 7 and parts[6] == '1',
                     effects=int(parts[7]) if len(parts) >= 8 else 0
                 ))

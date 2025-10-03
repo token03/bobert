@@ -360,6 +360,14 @@ class BertForContrastiveFineTuning(nn.Module):
         
         final_representation = encoded_output[:, 0]
         
+        # sequence_output = encoded_output[:, 1:] 
+        
+        # mask_expanded = attention_mask.unsqueeze(-1).expand(sequence_output.size()).float()
+        
+        # sum_embeddings = torch.sum(sequence_output * mask_expanded, 1)
+        # sum_mask = torch.clamp(mask_expanded.sum(1), min=1e-9)
+        # final_representation = sum_embeddings / sum_mask
+
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),
             'difficulty_rating_preds': self.difficulty_rating_head(final_representation).squeeze(-1),
