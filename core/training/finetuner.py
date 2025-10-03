@@ -76,9 +76,13 @@ class FineTuningTrainer:
 
         vectors = vectors.to(self.device, non_blocking=True)
         attention_mask = attention_mask.to(self.device, non_blocking=True)
+        
+        norm_difficulty_ratings = self.normalizer.normalize_difficulty(
+            difficulty_ratings.to(self.device, non_blocking=True)
+        )
 
         labels_dict = {
-            'difficulty_ratings': difficulty_ratings.to(self.device, non_blocking=True),
+            'difficulty_ratings': norm_difficulty_ratings,
             'positive_mask': positive_mask.to(self.device, non_blocking=True)
         }
         
@@ -157,7 +161,7 @@ class FineTuningTrainer:
         self.val_metrics_computer.reset_batch_metrics()
 
         all_embeddings = []
-        all_ratings = []
+        all_ratings = [] 
         all_labels = []
 
         print("Running validation...")
@@ -168,8 +172,12 @@ class FineTuningTrainer:
                 vectors_dev = vectors.to(self.device, non_blocking=True)
                 attention_mask_dev = attention_mask.to(self.device, non_blocking=True)
 
+                norm_ratings_dev = self.normalizer.normalize_difficulty(
+                    ratings.to(self.device, non_blocking=True)
+                )
+                
                 labels_dict = {
-                    'difficulty_ratings': ratings.to(self.device, non_blocking=True)
+                    'difficulty_ratings': norm_ratings_dev
                 }
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
@@ -180,7 +188,7 @@ class FineTuningTrainer:
                 self.val_metrics_computer.update_batch_metrics({k: v.item() for k,v in step_losses.items()})
 
                 all_embeddings.append(embeddings.cpu())
-                all_ratings.append(ratings.cpu())
+                all_ratings.append(ratings.cpu()) 
                 all_labels.extend(labels)
 
         batch_metrics = self.val_metrics_computer.compute_batch_metrics()
@@ -208,12 +216,16 @@ class FineTuningTrainer:
             
             epoch_duration = time.time() - epoch_start_time
             
+            stats_to_save = {
+                'vector_stats': self.normalizer.get_vector_stats(),
+                'difficulty_stats': self.normalizer.get_difficulty_stats(),
+            }
+            
             self.checkpoint_manager.save_checkpoint(
                 self.model, self.optimizer, self.scheduler, self.scaler,
                 epoch, val_metrics, suffix="latest",
-                vector_stats=self.normalizer.get_vector_stats()
+                stats=stats_to_save 
             )
-
             r1 = val_metrics.get('Recall@1', 0.0)
             r5 = val_metrics.get('Recall@5', 0.0)
             r10 = val_metrics.get('Recall@10', 0.0)
@@ -239,6 +251,20 @@ def setup_finetuning(
     user_tag_encoder: Dict[str, int],
     collection_label_encoder: Dict[str, int]
 ) -> Tuple[FineTuningTrainer, CheckpointManager]:
+    def _resolve_ratings(dataset) -> Optional[List[float]]:
+        if hasattr(dataset, 'ratings'):
+            return dataset.ratings
+        nested_dataset = getattr(dataset, 'dataset', None)
+        if nested_dataset is None:
+            return None
+        base_ratings = _resolve_ratings(nested_dataset)
+        if base_ratings is None:
+            return None
+        indices = getattr(dataset, 'indices', None)
+        if indices is None:
+            return base_ratings
+        return [base_ratings[i] for i in indices]
+
     grad_accum_steps = config['finetuning'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
     total_steps = num_update_steps_per_epoch * config['finetuning']['num_epochs']
@@ -250,6 +276,15 @@ def setup_finetuning(
     model_name = config['model'].get('type', 'model') + "_finetuned"
     checkpoint_manager = CheckpointManager(checkpoint_dir, model_name)
     
+    if normalizer.get_difficulty_stats() is None:
+        ratings = _resolve_ratings(train_dataloader.dataset)
+        if ratings is None:
+            raise ValueError(
+                "BeatmapNormalizer must be provided with difficulty statistics for fine-tuning, "
+                "but they were missing and the training dataset does not expose raw difficulty ratings."
+            )
+        normalizer.update_difficulty_stats(torch.as_tensor(ratings, dtype=torch.float32))
+
     trainer = FineTuningTrainer(
         model=model,
         train_dataloader=train_dataloader,

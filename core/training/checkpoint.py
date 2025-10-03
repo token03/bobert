@@ -24,7 +24,8 @@ class CheckpointManager:
         epoch: int,
         metrics: Dict[str, float],
         suffix: str = "latest",
-        vector_stats: Optional[Dict[str, Any]] = None
+        vector_stats: Optional[Dict[str, Any]] = None,
+        stats: Optional[Dict[str, Any]] = None
     ):
         checkpoint_data = {
             'epoch': epoch,
@@ -39,6 +40,11 @@ class CheckpointManager:
         if scaler is not None:
             checkpoint_data['scaler_state_dict'] = scaler.state_dict()
             
+        if stats is not None:
+            checkpoint_data['stats'] = stats
+            if vector_stats is None and isinstance(stats, dict) and 'vector_stats' in stats:
+                checkpoint_data['vector_stats'] = stats['vector_stats']
+
         if vector_stats is not None:
             checkpoint_data['vector_stats'] = vector_stats
             
@@ -54,7 +60,7 @@ class CheckpointManager:
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
         suffix: str = "latest",
         device: torch.device = torch.device('cpu')
-    ) -> Tuple[int, Dict[str, float], Optional[Dict[str, Any]]]:
+    ) -> Tuple[int, Dict[str, float], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         checkpoint_path = self.get_checkpoint_path(suffix)
         
         if not os.path.exists(checkpoint_path):
@@ -92,10 +98,11 @@ class CheckpointManager:
             
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        
-        vector_stats = checkpoint.get('vector_stats')
 
-        return checkpoint['epoch'], checkpoint.get('metrics', {}), vector_stats
+        vector_stats = checkpoint.get('vector_stats')
+        stats = checkpoint.get('stats')
+
+        return checkpoint['epoch'], checkpoint.get('metrics', {}), vector_stats, stats
     
     def load_normalization_stats(self, suffix: str = "latest") -> Optional[Dict[str, Any]]:
         checkpoint_path = self.get_checkpoint_path(suffix)
@@ -104,10 +111,16 @@ class CheckpointManager:
             return None
         
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        stats = checkpoint.get('stats')
+        if stats:
+            return stats
+
         vector_stats = checkpoint.get('vector_stats')
 
-        if vector_stats:
-            return vector_stats
+        if vector_stats is not None:
+            if isinstance(vector_stats, dict):
+                return vector_stats
+            return {'vector_stats': vector_stats}
 
         print(f"Warning: Normalization stats not found in checkpoint {checkpoint_path}")
         return None

@@ -65,7 +65,8 @@ def create_contrastive_sampler(
         hard_negative_difficulty_threshold=finetuning_config['hard_negative_difficulty_threshold'],
         max_ease_factor=sampler_config.get('max_ease_factor', 5.0),
         kde_bandwidth=sampler_config.get('kde_bandwidth', 0.25),
-        kde_bins=sampler_config.get('kde_bins', 100)
+        kde_bins=sampler_config.get('kde_bins', 100),
+        use_kde_anchor_sampling=sampler_config.get('use_kde_anchor_sampling', False)
     )
 
 class ContrastiveBatchSampler(Sampler[List[int]]):
@@ -77,7 +78,8 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
                  hard_negative_difficulty_threshold: float,
                  max_ease_factor: float = 5.0,
                  kde_bandwidth: float = 0.25,
-                 kde_bins: int = 100):
+                 kde_bins: int = 100,
+                 use_kde_anchor_sampling: bool = False):
         super().__init__()
         self.labels = labels
         self.difficulty_ratings = np.asarray(difficulty_ratings)
@@ -88,6 +90,7 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
         self.num_samples = len(labels)
         self.indices = list(range(self.num_samples))
         self.max_tries_per_quad = 10 
+        self.use_kde_anchor_sampling = use_kde_anchor_sampling
 
         print("Initializing ContrastiveBatchSampler...")
         self.label_to_indices = defaultdict(list)
@@ -121,29 +124,33 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
         print(f"Found {len(self.usable_labels)} usable labels for creating pairs.")
         print(f"Total potential anchors: {len(self.anchorable_indices)}")
 
-        print("Calculating anchor sampling weights using KDE for difficulty balancing...")
-        anchorable_ratings = self.difficulty_ratings[self.anchorable_indices]
+        if self.use_kde_anchor_sampling:
+            print("Calculating anchor sampling weights using KDE for difficulty balancing...")
+            anchorable_ratings = self.difficulty_ratings[self.anchorable_indices]
 
-        min_r, max_r = anchorable_ratings.min(), anchorable_ratings.max()
-        bin_edges = np.linspace(min_r - 0.5, max_r + 0.5, kde_bins + 1)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+            min_r, max_r = anchorable_ratings.min(), anchorable_ratings.max()
+            bin_edges = np.linspace(min_r - 0.5, max_r + 0.5, kde_bins + 1)
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-        hist, _ = np.histogram(anchorable_ratings, bins=bin_edges, density=True)
-        
-        sigma = kde_bandwidth * kde_bins / (max_r - min_r + 1.0)
-        smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode='reflect')
-        
-        smoothed_hist[smoothed_hist < 1e-8] = 1e-8
-        
-        interp_func = interp1d(bin_centers, smoothed_hist, kind='linear',
-                              bounds_error=False, fill_value=(smoothed_hist[0], smoothed_hist[-1]))
+            hist, _ = np.histogram(anchorable_ratings, bins=bin_edges, density=True)
+            
+            sigma = kde_bandwidth * kde_bins / (max_r - min_r + 1.0)
+            smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode='reflect')
+            
+            smoothed_hist[smoothed_hist < 1e-8] = 1e-8
+            
+            interp_func = interp1d(bin_centers, smoothed_hist, kind='linear',
+                                  bounds_error=False, fill_value=(smoothed_hist[0], smoothed_hist[-1]))
 
-        densities = interp_func(anchorable_ratings)
-        weights = 1.0 / densities
-        
-        self.anchor_sampling_weights = weights / np.sum(weights)
+            densities = interp_func(anchorable_ratings)
+            weights = 1.0 / densities
+            
+            self.anchor_sampling_weights = weights / np.sum(weights)
 
-        print(f"KDE Anchor Sampling - Min weight: {self.anchor_sampling_weights.min():.6f}, Max weight: {self.anchor_sampling_weights.max():.6f}")
+            print(f"KDE Anchor Sampling - Min weight: {self.anchor_sampling_weights.min():.6f}, Max weight: {self.anchor_sampling_weights.max():.6f}")
+        else:
+            self.anchor_sampling_weights = np.full(len(self.anchorable_indices), 1.0 / len(self.anchorable_indices))
+            print("Using uniform anchor sampling for anchors (KDE disabled).")
 
     def _find_positive(self, anchor_idx: int, anchor_labels: List[str], exclude_indices: set) -> Optional[int]:
         anchor_rating = self.difficulty_ratings[anchor_idx]

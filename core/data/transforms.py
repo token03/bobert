@@ -32,9 +32,10 @@ def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, des
         print(f"{field_name:<22} {type_str:<12} {param1_str:<12} {param2_str:<12} {description}")
 
 def create_normalizer_from_data(
-    train_data: List[torch.Tensor]
+    train_data: List[torch.Tensor],
+    difficulty_ratings: np.ndarray
 ) -> 'BeatmapNormalizer':
-    normalizer = BeatmapNormalizer.from_data(train_data)
+    normalizer = BeatmapNormalizer.from_data(train_data, difficulty_ratings)
 
     print("\n" + "="*80)
     print("                    NORMALIZATION STATISTICS")
@@ -47,18 +48,26 @@ def create_normalizer_from_data(
         HitObjectVector.get_field_descriptions(),
         normalizer.get_vector_stats()
     )
-
+    
+    diff_stats = normalizer.get_difficulty_stats()
+    print("\n--- DIFFICULTY RATING STATISTICS:")
+    print("-" * 80)
+    print(f"{'Metric':<22} {'Mean':<12} {'Std':<12} {'Description'}")
+    print("-" * 80)
+    print(f"{'difficulty_rating':<22} {diff_stats[0].item():<12.4f} {diff_stats[1].item():<12.4f} Difficulty rating (stars)")
     print("="*80)
-    return normalizer
 
+    return normalizer
 
 class BeatmapNormalizer:
     def __init__(
         self,
         vector_stats: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
+        difficulty_stats: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         epsilon: float = 1e-8
     ):
         self.vector_stats = vector_stats
+        self.difficulty_stats = difficulty_stats
         self.epsilon = epsilon
         self.vector_norm_specs = HitObjectVector.get_normalization_specs()
 
@@ -90,10 +99,24 @@ class BeatmapNormalizer:
                 denormalized_vectors[:, i] = normalized_vectors[:, i] * (max_val - min_val + self.epsilon) + min_val
         return denormalized_vectors
 
+
+    def normalize_difficulty(self, ratings: torch.Tensor) -> torch.Tensor:
+        if self.difficulty_stats is None:
+            raise ValueError("Difficulty normalization requested but no statistics are set. Call 'update_difficulty_stats' first.")
+        mean, std = self.difficulty_stats
+        return (ratings - mean) / (std + self.epsilon)
+
+    def denormalize_difficulty(self, normalized_ratings: torch.Tensor) -> torch.Tensor:
+        if self.difficulty_stats is None:
+            return normalized_ratings
+        mean, std = self.difficulty_stats
+        return normalized_ratings * (std + self.epsilon) + mean
+
     @classmethod
     def from_data(
         cls,
         train_data: List[torch.Tensor],
+        difficulty_ratings: np.ndarray, 
         epsilon: float = 1e-8
     ) -> 'BeatmapNormalizer':
         print("Calculating normalization statistics...")
@@ -111,10 +134,30 @@ class BeatmapNormalizer:
             elif norm_type == NormalizationType.MINMAX:
                 vector_stats[field_name] = (field_data.min(), field_data.max())
 
-        return cls(vector_stats, epsilon)
+        normalizer = cls(vector_stats=vector_stats, difficulty_stats=None, epsilon=epsilon)
+        difficulty_tensor = torch.from_numpy(difficulty_ratings.astype(np.float32))
+        normalizer.update_difficulty_stats(difficulty_tensor)
+        return normalizer
 
     def get_vector_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
         return self.vector_stats
+
+    def get_difficulty_stats(self) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        return self.difficulty_stats
+
+    def update_difficulty_stats(self, ratings: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if not torch.is_tensor(ratings):
+            ratings = torch.as_tensor(ratings, dtype=torch.float32)
+        if ratings.numel() == 0:
+            raise ValueError("Cannot compute difficulty statistics from an empty ratings tensor.")
+
+        ratings = ratings.to(dtype=torch.float32)
+        mean = ratings.mean()
+        std = torch.clamp(ratings.std(unbiased=False), min=self.epsilon)
+
+        self.difficulty_stats = (mean, std)
+        return self.difficulty_stats
+
 
 
 class BeatmapAugmenter:
