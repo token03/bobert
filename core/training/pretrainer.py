@@ -13,11 +13,11 @@ from torch.optim.lr_scheduler import _LRScheduler
 from core.training.checkpoint import CheckpointManager
 from core.training.metrics import MetricsTracker, PretrainEpochMetrics 
 from core.training.optimization import create_optimizer, create_scheduler
-from .loss import mlm_loss_fn
+from .loss import pretrain_loss_fn
 from core.logger import TrainingLogger
 from ..data.transforms import BeatmapNormalizer
 
-class MLMTrainer:
+class PreTrainer:
     def __init__(
         self,
         model: nn.Module,
@@ -29,7 +29,7 @@ class MLMTrainer:
         device: torch.device,
         checkpoint_manager: CheckpointManager,
         normalizer: BeatmapNormalizer,
-        loss_fn: Callable = mlm_loss_fn
+        loss_fn: Callable = pretrain_loss_fn
     ):
         self.model = model
         self.train_dataloader = train_dataloader
@@ -65,7 +65,7 @@ class MLMTrainer:
             cat_feat_names=self.cat_feat_names
         )
         
-        print(f"Trainer initialized - AMP: {self.use_amp}, Device: {device}, Grad Accum: {self.grad_accum_steps}")
+        print(f"PreTrainer initialized - AMP: {self.use_amp}, Device: {device}, Grad Accum: {self.grad_accum_steps}")
         if self.train_dataloader.batch_sampler is not None:
             effective_batch_size = self.train_dataloader.batch_sampler.batch_size * self.grad_accum_steps
         else:
@@ -74,7 +74,7 @@ class MLMTrainer:
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        total_loss = 0.0
+        epoch_losses = {}
         self.optimizer.zero_grad(set_to_none=True)
         
         num_update_steps = math.ceil(len(self.train_dataloader) / self.grad_accum_steps)
@@ -86,16 +86,18 @@ class MLMTrainer:
         
         data_iter = iter(self.train_dataloader)
         for i in range(len(self.train_dataloader)):
-            vectors, attention_mask = next(data_iter)
-            vectors, attention_mask = vectors.to(self.device), attention_mask.to(self.device)
+            vectors, attention_mask, difficulty_labels = next(data_iter)
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                 predictions, targets, mask = self.model(vectors, attention_mask)
-                loss = self.loss_fn(predictions, targets, mask)
-                scaled_loss = loss / self.grad_accum_steps
+                loss_dict = self.loss_fn(predictions, targets, mask, difficulty_labels, self.config)
+                scaled_loss = loss_dict['total_loss'] / self.grad_accum_steps
             
             self.scaler.scale(scaled_loss).backward()
             
+            for k, v in loss_dict.items():
+                epoch_losses[k] = epoch_losses.get(k, 0.0) + v.item()
+
             if (i + 1) % self.grad_accum_steps == 0 or (i + 1) == len(self.train_dataloader):
                 if self.grad_clip_norm > 0:
                     self.scaler.unscale_(self.optimizer)
@@ -109,16 +111,17 @@ class MLMTrainer:
                 
                 progress_bar.update(1)
             
-            total_loss += loss.item()
-            
             progress_bar.set_postfix({
-                "Loss": f"{loss.item():.4f}",
+                "Loss": f"{loss_dict['total_loss'].item():.4f}",
+                "MLM": f"{loss_dict['mlm_loss'].item():.4f}",
+                "Pred": f"{loss_dict.get('difficulty_loss', torch.tensor(0.0)).item():.4f}",
                 "LR": f"{self.optimizer.param_groups[0]['lr']:.2e}"
             })
             
         progress_bar.close()
-        avg_loss = total_loss / len(self.train_dataloader)
-        return {'loss': avg_loss, 'learning_rate': self.optimizer.param_groups[0]['lr']}
+        avg_losses = {k: v / len(self.train_dataloader) for k, v in epoch_losses.items()}
+        avg_losses['learning_rate'] = self.optimizer.param_groups[0]['lr']
+        return avg_losses
     
     def validate_epoch(self, epoch: int) -> Dict[str, Any]:
         self.model.eval()
@@ -133,17 +136,15 @@ class MLMTrainer:
                 dynamic_ncols=True,
                 leave=False
             )
-            for vectors, attention_mask in progress_bar:
-                vectors, attention_mask = vectors.to(self.device), attention_mask.to(self.device)
-                
+            for vectors, attention_mask, difficulty_labels in progress_bar:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                     predictions, targets, mask = self.model(vectors, attention_mask)
-                    loss = self.loss_fn(predictions, targets, mask)
+                    loss_dict = self.loss_fn(predictions, targets, mask, difficulty_labels, self.config)
                 
-                total_loss += loss.item()
+                total_loss += loss_dict['total_loss'].item()
                 num_batches += 1
 
-                self.val_metrics.update(predictions, targets, mask)
+                self.val_metrics.update(predictions, targets, mask, difficulty_labels)
         
         results = self.val_metrics.compute()
         results['loss'] = total_loss / max(num_batches, 1)
@@ -191,7 +192,7 @@ def setup_training(
     config: Dict[str, Any],
     device: torch.device,
     normalizer: BeatmapNormalizer
-) -> Tuple[MLMTrainer, CheckpointManager]:
+) -> Tuple[PreTrainer, CheckpointManager]:
     grad_accum_steps = config['pretraining'].get('gradient_accumulation_steps', 1)
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / grad_accum_steps)
     total_steps = num_update_steps_per_epoch * config['pretraining']['num_epochs']
@@ -203,7 +204,7 @@ def setup_training(
     model_name = config['model'].get('type', 'model')
     checkpoint_manager = CheckpointManager(checkpoint_dir, model_name)
     
-    trainer = MLMTrainer(
+    trainer = PreTrainer(
         model, train_dataloader, val_dataloader,
         optimizer, scheduler, config, device, checkpoint_manager,
         normalizer=normalizer

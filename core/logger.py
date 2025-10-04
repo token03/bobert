@@ -3,22 +3,26 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple, Any
-from core.model.bert import BertEncoder, BertForMaskedModeling
+from core.model.bert import BertEncoder, BertForPretraining
 
 def log_model_summary(model: nn.Module):
-    is_mlm_model = False
+    is_pretrain_model = False
 
     actual_model = model
     if hasattr(model, '_orig_mod'):
         actual_model = model._orig_mod
 
-    if isinstance(actual_model, BertForMaskedModeling):
+    if isinstance(actual_model, BertForPretraining):
         core_model = actual_model.bert
-        is_mlm_model = True
+        is_pretrain_model = True
     elif isinstance(actual_model, BertEncoder):
         core_model = actual_model
     else:
-        raise ValueError(f"Unsupported model type: {type(actual_model)}. Expected BertForMaskedModeling or BertEncoder.")
+        try:
+            core_model = actual_model.bert if hasattr(actual_model, 'bert') else actual_model
+        except:
+             raise ValueError(f"Unsupported model type: {type(actual_model)}.")
+
 
     summary = core_model.get_summary()
     
@@ -30,9 +34,9 @@ def log_model_summary(model: nn.Module):
     print(f"Flash Attention: {core_model.use_flash_attention}")
     print("-" * 30)
 
-    if is_mlm_model and isinstance(actual_model, BertForMaskedModeling):
-        print(f"\n--- MLM Head Information ---")
-        print(f"Task: Masked Modeling")
+    if is_pretrain_model and isinstance(actual_model, BertForPretraining):
+        print(f"\n--- Pre-training Head Information ---")
+        print(f"Tasks: Masked Modeling, Difficulty Attribute Prediction")
         print(f"Masking Ratio: {actual_model.masking_ratio}")
         print(f"Model Compiled: {actual_model.is_compiled}")
         print("-" * 30)
@@ -65,10 +69,13 @@ class TrainingLogger:
         checkpoint_path: str
     ):
         """Logs all information at the end of an epoch."""
+        train_loss = train_metrics.get('total_loss', train_metrics.get('loss', 0.0))
+        val_loss = val_metrics.get('total_loss', val_metrics.get('loss', 0.0))
+
         print(
             f"Epoch {epoch+1}/{num_epochs} | "
-            f"Train Loss: {train_metrics['loss']:.4f} | "
-            f"Val Loss: {val_metrics['loss']:.4f} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val Loss: {val_loss:.4f} | "
             f"LR: {train_metrics['learning_rate']:.2e} | "
             f"Time: {duration:.2f}s"
         )
@@ -84,9 +91,20 @@ class TrainingLogger:
         print("=" * 70)
         print(f"{' ' * 21} DETAILED VALIDATION REPORT {' ' * 22}")
 
+        if 'difficulty_metrics' in val_metrics:
+            print("-" * 70)
+            print(" DIFFICULTY ATTRIBUTE PREDICTIONS (MAE):")
+            header = f"  {'Attribute':<22} | {'MAE / Error':<15}"
+            print(header)
+            print(f"  {'-'*22}-+-{'-'*15}")
+            for name, mae in val_metrics['difficulty_metrics'].items():
+                attr_name = name.replace('_mae', '')
+                row = f"  {attr_name:<22} | {mae:<15.4f}"
+                print(row)
+
         if 'continuous_metrics' in val_metrics:
             print("-" * 70)
-            print(" CONTINUOUS FEATURES:")
+            print(" MASKED CONTINUOUS FEATURES (MAE):")
             header = f"  {'Feature':<22} | {'MAE / Error':<15} | {'Mean (True)':<12} | {'Std (True)':<12}"
             print(header)
             print(f"  {'-'*22}-+-{'-'*15}-+-{'-'*12}-+-{'-'*12}")
@@ -98,7 +116,7 @@ class TrainingLogger:
 
         if 'categorical_metrics' in val_metrics:
             print("-" * 70)
-            print(" CATEGORICAL FEATURES:")
+            print(" MASKED CATEGORICAL FEATURES:")
             header = f"  {'Feature':<22} | {'Accuracy':<10} | {'Precision':<12} | {'Recall':<12}"
             print(header)
             print(f"  {'-'*22}-+-{'-'*10}-+-{'-'*12}-+-{'-'*12}")

@@ -15,23 +15,41 @@ import rosu_pp_py as rosu
 
 from .types import HitObjectVector, DURATION_BINS, quantize_to_bins
 
-def _recalculate_difficulty_worker(
+def _calculate_difficulty_attributes_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
-) -> Optional[float]:
+) -> Optional[Dict[str, float]]:
     osu_file_path = os.path.join(raw_beatmap_path, f"{beatmap_id}.osu")
     if not os.path.exists(osu_file_path):
         return None
     try:
         with open(osu_file_path, 'r', encoding='utf-8') as f:
-            beatmap = rosu.Beatmap(content=f.read())
+            beatmap_content = f.read()
         
-        diff_attrs = rosu.Difficulty()
+        beatmap = rosu.Beatmap(content=beatmap_content)
+
+        if beatmap.mode != 0 or beatmap.n_objects < 2:
+            return None
+
+        objects_to_process = min(seq_len, beatmap.n_objects) if seq_len else beatmap.n_objects
+
+        diff_attrs_calculator = rosu.Difficulty(
+            ar=10.0,
+            cs=4.0,
+        )
+
+        gradual_result_iterator = diff_attrs_calculator.gradual_difficulty(beatmap)
         
-        gradual_result = diff_attrs.gradual_difficulty(beatmap)
-        target_attrs = next(itertools.islice(gradual_result, seq_len - 1, None), None)
+        target_index = objects_to_process - 2
+        target_attrs = next(itertools.islice(gradual_result_iterator, target_index, None), None)
 
         if target_attrs:
-            return target_attrs.stars
+            return {
+                'stars': target_attrs.stars,
+                'aim': target_attrs.aim,
+                'speed': target_attrs.speed,
+                'slider_factor': target_attrs.slider_factor
+            }
+        
         return None
     except Exception as e:
         return None
@@ -56,7 +74,7 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
 def _engineer_features_vectorized(
     beatmaps_df: pd.DataFrame,
     hitobjects_df: pd.DataFrame
-) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
+) -> Tuple[List[torch.Tensor], np.ndarray]:
     invalid_starts_mask = (
         (hitobjects_df['x'] < 0) | (hitobjects_df['x'] > 512) |
         (hitobjects_df['y'] < 0) | (hitobjects_df['y'] > 384)
@@ -76,7 +94,7 @@ def _engineer_features_vectorized(
         hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(bad_maps)].copy()
 
     if beatmaps_df.empty or hitobjects_df.empty:
-        return [], np.array([]), np.array([])
+        return [], np.array([])
 
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
     df.sort_values(['beatmap_id', 'time'], inplace=True)
@@ -117,7 +135,6 @@ def _engineer_features_vectorized(
 
     vector_field_names = HitObjectVector.get_field_names()
     vector_df = df[['beatmap_id'] + vector_field_names]
-    difficulty_df = df[['beatmap_id', 'difficulty_rating']].drop_duplicates(subset='beatmap_id').set_index('beatmap_id')
 
     all_vectors_np = vector_df[vector_field_names].to_numpy(dtype=np.float32)
     ids = vector_df['beatmap_id'].to_numpy()
@@ -126,19 +143,19 @@ def _engineer_features_vectorized(
     vector_arrays = np.split(all_vectors_np, split_indices)
 
     unique_ids = ids[np.concatenate(([0], split_indices))]
-    all_difficulty_ratings = difficulty_df.loc[unique_ids]['difficulty_rating'].to_numpy(dtype=np.float32)
     
     final_data = [torch.from_numpy(vectors) for vectors in vector_arrays]
 
-    return final_data, all_difficulty_ratings, unique_ids
+    return final_data, unique_ids
 
 def load_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
     raw_beatmap_path: str = "./data/raw",
-    chunk_size: int = 2000 
-) -> Tuple[List[torch.Tensor], np.ndarray, np.ndarray]:
+    cache_path: str = "./data/difficulty_attributes_cache.json",
+    chunk_size: int = 2000
+) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], np.ndarray]:
     
     print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, 'beatmaps')
@@ -160,114 +177,153 @@ def load_dataset(
     print(f"Found metadata for {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}...")
 
     processed_data_chunks = []
-    difficulty_ratings_chunks = []
     loaded_ids_chunks = []
 
     for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
         chunk_ids = all_beatmap_ids[i:i + chunk_size]
-        
         beatmaps_df_chunk = all_beatmaps_df[all_beatmaps_df['beatmap_id'].isin(chunk_ids)]
-        
         hitobjects_df_chunk = pd.read_parquet(hitobjects_path, filters=[('beatmap_id', 'in', chunk_ids)])
         
         if hitobjects_df_chunk.empty:
             continue
 
-        data, ratings, ids = _engineer_features_vectorized(beatmaps_df_chunk, hitobjects_df_chunk)
-        
+        data, ids = _engineer_features_vectorized(beatmaps_df_chunk, hitobjects_df_chunk)
         processed_data_chunks.extend(data)
-        difficulty_ratings_chunks.append(ratings)
         loaded_ids_chunks.append(ids)
 
     print("Consolidating processed chunks...")
     processed_data = processed_data_chunks
-    difficulty_ratings = np.concatenate(difficulty_ratings_chunks)
     loaded_ids = np.concatenate(loaded_ids_chunks)
+    print(f"Loaded raw feature vectors for {len(processed_data)} beatmaps.")
+    print("Calculating difficulty attributes (will use cache if available)...")
+
+    # 1. Determine target sequence length for each map
+    id_to_vectors = {bid: vec for bid, vec in zip(loaded_ids, processed_data)}
+    id_to_seq_len = {}
+    for bid, vectors in id_to_vectors.items():
+        target_len = vectors.shape[0]
+        if max_seq_len is not None:
+            target_len = min(target_len, max_seq_len)
+        id_to_seq_len[int(bid)] = target_len
+
+    # 2. Load cache and identify what needs to be calculated
+    cache_dir = os.path.dirname(cache_path)
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        
+    try:
+        with open(cache_path, 'r') as f:
+            difficulty_cache = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        difficulty_cache = {}
+
+    tasks_to_run = []
+    for bid, seq_len in id_to_seq_len.items():
+        str_bid, str_seq_len = str(bid), str(seq_len)
+        if str_bid not in difficulty_cache or str_seq_len not in difficulty_cache.get(str_bid, {}):
+            tasks_to_run.append((bid, seq_len))
     
-    print(f"Loaded and processed {len(processed_data)} total beatmaps.")
-
-    if max_seq_len is not None:
-        print(f"Recalculating difficulty ratings for sequences truncated to {max_seq_len}...")
-        cache_path = os.path.join(dataset_path, f"difficulty_cache_seq_{max_seq_len}.json")
-        try:
-            with open(cache_path, 'r') as f: difficulty_cache = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            difficulty_cache = {}
-
-        ids_needing_recalc = set()
-        for i, vectors in enumerate(processed_data):
-            if vectors.shape[0] > max_seq_len:
-                beatmap_id = str(loaded_ids[i])
-                if beatmap_id not in difficulty_cache:
-                    ids_needing_recalc.add(loaded_ids[i])
+    # 3. Run calculations in parallel for uncached attributes
+    if tasks_to_run:
+        if not os.path.isdir(raw_beatmap_path):
+            raise FileNotFoundError(f"Raw beatmap path '{raw_beatmap_path}' not found. "
+                                    "It's required to calculate difficulty attributes.")
         
-        if ids_needing_recalc:
-            if not os.path.isdir(raw_beatmap_path):
-                print(f"WARNING: Raw beatmap path '{raw_beatmap_path}' not found.")
-                print("Difficulty recalculation for truncated maps will fail, and these maps will be skipped.")
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future_to_id = {
-                    executor.submit(_recalculate_difficulty_worker, bid, max_seq_len, raw_beatmap_path): bid
-                    for bid in ids_needing_recalc
-                }
-                for future in tqdm(concurrent.futures.as_completed(future_to_id), total=len(future_to_id), desc="Recalculating Stars"):
-                    beatmap_id = future_to_id[future]
-                    new_rating = future.result()
-                    if new_rating is not None:
-                        difficulty_cache[str(beatmap_id)] = new_rating
-            with open(cache_path, 'w') as f:
-                json.dump(difficulty_cache, f)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future_to_task = {
+                executor.submit(_calculate_difficulty_attributes_worker, bid, seq_len, raw_beatmap_path): (bid, seq_len)
+                for bid, seq_len in tasks_to_run
+            }
+            for future in tqdm(concurrent.futures.as_completed(future_to_task), total=len(future_to_task), desc="Calculating Attributes"):
+                bid, seq_len = future_to_task[future]
+                new_attrs = future.result()
+                if new_attrs is not None:
+                    str_bid, str_seq_len = str(bid), str(seq_len)
+                    if str_bid not in difficulty_cache:
+                        difficulty_cache[str_bid] = {}
+                    difficulty_cache[str_bid][str_seq_len] = new_attrs
 
-        updated_data, updated_ratings, updated_ids = [], [], []
-        for vectors, rating, bid in zip(processed_data, difficulty_ratings, loaded_ids):
-            if vectors.shape[0] > max_seq_len:
-                new_rating = difficulty_cache.get(str(bid))
-                if new_rating is not None:
-                    updated_data.append(vectors[:max_seq_len])
-                    updated_ratings.append(new_rating)
-                    updated_ids.append(bid)
-            else:
-                updated_data.append(vectors)
-                updated_ratings.append(rating)
-                updated_ids.append(bid)
+        with open(cache_path, 'w') as f:
+            json.dump(difficulty_cache, f)
+
+    # 4. Assemble final dataset using the cache, filtering out failures
+    final_data_filtered = []
+    final_ids_filtered = []
+    final_attributes = defaultdict(list)
+
+    for bid in loaded_ids:
+        seq_len = id_to_seq_len[int(bid)]
+        vectors = id_to_vectors[bid]
         
-        processed_data = updated_data
-        difficulty_ratings = np.array(updated_ratings)
-        loaded_ids = np.array(updated_ids)
+        str_bid, str_seq_len = str(bid), str(seq_len)
+        attrs = difficulty_cache.get(str_bid, {}).get(str_seq_len)
 
+        if attrs:
+            final_data_filtered.append(vectors[:seq_len])
+            final_ids_filtered.append(bid)
+            for key, value in attrs.items():
+                final_attributes[key].append(value)
+    
+    if len(final_data_filtered) < len(loaded_ids):
+        print(f"WARNING: Dropped {len(loaded_ids) - len(final_data_filtered)} beatmaps that failed difficulty calculation.")
 
+    if not final_data_filtered:
+         print("WARNING: No beatmaps remained after difficulty calculation. Returning empty dataset.")
+         return [], {}, np.array([])
+
+    processed_data = final_data_filtered
+    loaded_ids = np.array(final_ids_filtered)
+    final_attributes = {k: np.array(v) for k, v in final_attributes.items()}
+
+    # 5. Run final data integrity check for NaNs/Infs
     print("Running final data integrity check...")
-    final_data_validated = []
-    validated_ids = []
-    validated_difficulty_ratings = []
+    final_data_validated, validated_ids = [], []
+    validated_attributes = defaultdict(list)
+    
     for i, vectors in enumerate(tqdm(processed_data, desc="Validating Tensors")):
-        beatmap_id = loaded_ids[i]
-        has_nan = torch.isnan(vectors).any()
-        has_inf = torch.isinf(vectors).any()
-        
-        if has_nan or has_inf:
-            print(f"WARNING: Skipping beatmap ID {beatmap_id} due to NaN/Inf values found after processing.")
+        if torch.isnan(vectors).any() or torch.isinf(vectors).any():
+            print(f"WARNING: Skipping beatmap ID {loaded_ids[i]} due to NaN/Inf values in features.")
             continue
-
-        if np.isnan(difficulty_ratings[i]) or np.isinf(difficulty_ratings[i]):
-            print(f"WARNING: Skipping beatmap ID {beatmap_id} due to invalid difficulty rating: {difficulty_ratings[i]}")
+        
+        is_attr_valid = True
+        for key, arr in final_attributes.items():
+            attr_val = arr[i]
+            is_problematic = False
+            try:
+                # This check will raise TypeError on non-numeric types like None or strings
+                if np.isnan(attr_val) or np.isinf(attr_val):
+                    is_problematic = True
+            except TypeError:
+                # If it's not a numeric type that can be checked, it's problematic
+                is_problematic = True
+            
+            if is_problematic:
+                print(f"WARNING: Skipping beatmap ID {loaded_ids[i]} due to invalid attribute '{key}': {attr_val}")
+                is_attr_valid = False
+                break
+        
+        if not is_attr_valid:
             continue
             
         final_data_validated.append(vectors)
-        validated_ids.append(beatmap_id)
-        validated_difficulty_ratings.append(difficulty_ratings[i])
+        validated_ids.append(loaded_ids[i])
+        for key, arr in final_attributes.items():
+            validated_attributes[key].append(arr[i])
 
     if len(final_data_validated) < len(processed_data):
         print(f"WARNING: Dropped {len(processed_data) - len(final_data_validated)} beatmaps due to data integrity issues.")
 
+    validated_attributes = {k: np.array(v) for k, v in validated_attributes.items()}
     print("Finished loading and processing all data.")
-    return final_data_validated, np.array(validated_difficulty_ratings), np.array(validated_ids)
+    return final_data_validated, validated_attributes, np.array(validated_ids)
 
 def load_finetuning_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     labels_path: str = "./data/labels.json",
     tags_path: str = "./data/tags.json",
+    raw_beatmap_path: str = "./data/raw",
+    cache_path: str = "./data/difficulty_attributes_cache.json",
     max_samples_per_class: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[torch.Tensor], np.ndarray, List[List[str]], List[List[str]]]:
     print("Loading fine-tuning dataset with labels and tags...")
@@ -319,11 +375,14 @@ def load_finetuning_dataset(
         
     print(f"Found {len(ids_to_load)} unique beatmaps for fine-tuning. Loading only this subset...")
 
-    processed_data, difficulty_ratings, loaded_ids = load_dataset(
+    processed_data, difficulty_attributes, loaded_ids = load_dataset(
         dataset_path, 
         max_seq_len, 
-        ids_to_load=ids_to_load
+        ids_to_load=ids_to_load,
+        raw_beatmap_path=raw_beatmap_path,
+        cache_path=cache_path
     )
+    difficulty_ratings = difficulty_attributes['stars']
 
     print("Assembling final labels and tags...")
     all_labels = []

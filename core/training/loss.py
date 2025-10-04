@@ -60,6 +60,49 @@ def mlm_loss_fn(
     num_masked = torch.sum(mask)
     return total_loss / (num_masked + 1e-9)
 
+def pretrain_loss_fn(
+    predictions: Dict[str, Any],
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+    difficulty_labels: Dict[str, torch.Tensor],
+    config: Dict[str, Any]
+) -> Dict[str, torch.Tensor]:
+    losses = {}
+    pretrain_config = config.get('pretraining', {})
+    mlm_weight = pretrain_config.get('mlm_loss_weight', 1.0)
+    
+    mlm_loss = mlm_loss_fn(predictions['mlm'], targets, mask)
+    losses['mlm_loss'] = mlm_loss
+    
+    total_loss = mlm_loss * mlm_weight
+
+    diff_preds = predictions['difficulty']
+    overall_difficulty_weight = pretrain_config.get('difficulty_loss_weight', 1.0)
+    
+    diff_loss_weights = {
+        'stars': pretrain_config.get('stars_loss_weight', 1.0),
+        'aim': pretrain_config.get('aim_loss_weight', 1.0),
+        'speed': pretrain_config.get('speed_loss_weight', 1.0),
+        'slider_factor': pretrain_config.get('slider_factor_loss_weight', 0.5),
+    }
+
+    difficulty_loss_sum = torch.zeros_like(mlm_loss)
+
+    for key, weight in diff_loss_weights.items():
+        if key in diff_preds and key in difficulty_labels:
+            loss = F.mse_loss(diff_preds[key], difficulty_labels[key])
+            losses[f'{key}_loss'] = loss
+            difficulty_loss_sum += weight * loss 
+            
+    weighted_difficulty_loss = difficulty_loss_sum * overall_difficulty_weight
+    total_loss += weighted_difficulty_loss
+    
+    losses['difficulty_loss'] = weighted_difficulty_loss
+    losses['difficulty_loss_unscaled'] = difficulty_loss_sum
+    losses['total_loss'] = total_loss
+    return losses
+
+
 def _supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch.Tensor, temperature: float) -> torch.Tensor:
     if positive_mask.sum() == 0:
         warnings.warn("No positive pairs found in batch, contrastive loss will be 0. "

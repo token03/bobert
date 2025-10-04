@@ -165,7 +165,7 @@ class BertEncoder(nn.Module):
         output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         return output
 
-class BertForMaskedModeling(nn.Module):
+class BertForPretraining(nn.Module):
     def __init__(
         self, 
         bert_model: BertEncoder, 
@@ -181,16 +181,22 @@ class BertForMaskedModeling(nn.Module):
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
         self.feature_info = HitObjectVector.get_feature_info()
 
+        # MLM Heads
         num_continuous = len(self.feature_info['continuous'])
         self.continuous_head = nn.Linear(bert_model.d_model, num_continuous)
-
         self.categorical_heads = nn.ModuleDict({
             name: nn.Linear(bert_model.d_model, info['cardinality'])
             for name, info in self.feature_info['categorical'].items()
         })
+
+        self.difficulty_attribute_head = nn.Sequential(
+            nn.Linear(bert_model.d_model, bert_model.d_model // 2),
+            nn.GELU(),
+            nn.Linear(bert_model.d_model // 2, 4) # stars, aim, speed, slider_factor
+        )
         
     @classmethod
-    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForMaskedModeling':
+    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForPretraining':
         base_model = BertEncoder.from_config(config)
         pretraining_config = config['pretraining']
         model = cls(
@@ -201,7 +207,7 @@ class BertForMaskedModeling(nn.Module):
         model = model.to(device)
         
         if config.get('components', {}).get('compile_model', False):
-            print("Compiling BERT model with torch.compile...")
+            print("Compiling BERT pre-training model with torch.compile...")
             model = torch.compile(model, mode=config.get('components', {}).get('compile_mode', 'default'))
             model.is_compiled = True
         
@@ -293,19 +299,32 @@ class BertForMaskedModeling(nn.Module):
 
         max_seqlen = full_encoder_input.shape[1]
         encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
-
-        sequence_output = encoded_output[:, 1:, :].contiguous()
-
-        continuous_preds = self.continuous_head(sequence_output)
         
+        # MLM Predictions
+        sequence_output = encoded_output[:, 1:, :].contiguous()
+        continuous_preds = self.continuous_head(sequence_output)
         categorical_preds = {
             name: head(sequence_output)
             for name, head in self.categorical_heads.items()
         }
-
-        predictions = {
+        mlm_predictions = {
             'continuous': continuous_preds,
             'categorical': categorical_preds
+        }
+        
+        # Difficulty Attribute Predictions
+        cls_output = encoded_output[:, 0]
+        difficulty_preds_raw = self.difficulty_attribute_head(cls_output)
+        difficulty_predictions = {
+            'stars': difficulty_preds_raw[:, 0],
+            'aim': difficulty_preds_raw[:, 1],
+            'speed': difficulty_preds_raw[:, 2],
+            'slider_factor': difficulty_preds_raw[:, 3],
+        }
+
+        predictions = {
+            'mlm': mlm_predictions,
+            'difficulty': difficulty_predictions
         }
 
         return predictions, x, is_masked
@@ -361,15 +380,15 @@ class BertForContrastiveFineTuning(nn.Module):
         max_seqlen = full_embeddings.shape[1]
         encoded_output = self.bert.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
         
-        final_representation = encoded_output[:, 0]
+        cls_representation = encoded_output[:, 0]
+        sequence_output = encoded_output[:, 1:]
         
-        # sequence_output = encoded_output[:, 1:] 
-        
-        # mask_expanded = attention_mask.unsqueeze(-1).expand(sequence_output.size()).float()
-        
-        # sum_embeddings = torch.sum(sequence_output * mask_expanded, 1)
-        # sum_mask = torch.clamp(mask_expanded.sum(1), min=1e-9)
-        # final_representation = sum_embeddings / sum_mask
+        mask_expanded = attention_mask.unsqueeze(-1).expand_as(sequence_output)
+        sum_embeddings = torch.sum(sequence_output * mask_expanded, dim=1)
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+        mean_pooled_representation = sum_embeddings / sum_mask
+
+        final_representation = torch.cat([cls_representation, mean_pooled_representation], dim=1)
 
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),

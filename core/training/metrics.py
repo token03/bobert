@@ -24,9 +24,7 @@ class PretrainEpochMetrics(nn.Module):
         self.standard_cont_metrics = MetricCollection({
             name: MeanMetric() for name in self.standard_cont_names
         }).to(device)
-
         self.cont_target_aggregator = CatMetric().to(device)
-
         self.cat_metrics = nn.ModuleDict()
         for name, info in self.feature_info['categorical'].items():
             num_classes = info['cardinality']
@@ -36,36 +34,43 @@ class PretrainEpochMetrics(nn.Module):
                 'recall': Recall(task="multiclass", num_classes=num_classes, average='macro', zero_division=0),
                 'target_aggregator': CatMetric(),
             }).to(device)
-
-    def update(self, predictions: Dict[str, torch.Tensor], targets: torch.Tensor, mask: torch.Tensor):
-        if not torch.any(mask):
-            return
-
-        cont_preds_masked = predictions['continuous'][mask]
-        cont_names_ordered = sorted(self.feature_info['continuous'].keys(), key=lambda k: self.feature_info['continuous'][k])
         
-        # --- Standard Continuous Metrics ---
-        std_cont_target_indices = [self.feature_info['continuous'][name] for name in self.standard_cont_names]
-        std_cont_targets = targets[mask][:, std_cont_target_indices]
-        
-        std_cont_pred_indices = [cont_names_ordered.index(name) for name in self.standard_cont_names]
-        std_cont_preds = cont_preds_masked[:, std_cont_pred_indices]
+        self.difficulty_metrics = MetricCollection({
+            'stars_mae': MeanMetric(),
+            'aim_mae': MeanMetric(),
+            'speed_mae': MeanMetric(),
+            'slider_factor_mae': MeanMetric()
+        }).to(device)
 
-        abs_errors = torch.abs(std_cont_preds - std_cont_targets)
-        for i, name in enumerate(self.standard_cont_names):
-            self.standard_cont_metrics[name].update(abs_errors[:, i])
-        
-        self.cont_target_aggregator.update(std_cont_targets)
+    def update(self, predictions: Dict[str, torch.Tensor], targets: torch.Tensor, mask: torch.Tensor, difficulty_labels: Dict[str, torch.Tensor]):
+        if torch.any(mask):
+            cont_preds_masked = predictions['mlm']['continuous'][mask]
+            cont_names_ordered = sorted(self.feature_info['continuous'].keys(), key=lambda k: self.feature_info['continuous'][k])
+            
+            std_cont_target_indices = [self.feature_info['continuous'][name] for name in self.standard_cont_names]
+            std_cont_targets = targets[mask][:, std_cont_target_indices]
+            
+            std_cont_pred_indices = [cont_names_ordered.index(name) for name in self.standard_cont_names]
+            std_cont_preds = cont_preds_masked[:, std_cont_pred_indices]
 
-        # --- Categorical Metrics ---
-        for name, info in self.feature_info['categorical'].items():
-            pred_logits = predictions['categorical'][name][mask]
-            pred_classes = torch.argmax(pred_logits, dim=-1)
-            target_classes = targets[mask][:, info['index']].long()
-            self.cat_metrics[name]['accuracy'].update(pred_classes, target_classes)
-            self.cat_metrics[name]['precision'].update(pred_classes, target_classes)
-            self.cat_metrics[name]['recall'].update(pred_classes, target_classes)
-            self.cat_metrics[name]['target_aggregator'].update(target_classes)
+            abs_errors = torch.abs(std_cont_preds - std_cont_targets)
+            for i, name in enumerate(self.standard_cont_names):
+                self.standard_cont_metrics[name].update(abs_errors[:, i])
+            self.cont_target_aggregator.update(std_cont_targets)
+
+            for name, info in self.feature_info['categorical'].items():
+                pred_logits = predictions['mlm']['categorical'][name][mask]
+                pred_classes = torch.argmax(pred_logits, dim=-1)
+                target_classes = targets[mask][:, info['index']].long()
+                self.cat_metrics[name]['accuracy'].update(pred_classes, target_classes)
+                self.cat_metrics[name]['precision'].update(pred_classes, target_classes)
+                self.cat_metrics[name]['recall'].update(pred_classes, target_classes)
+                self.cat_metrics[name]['target_aggregator'].update(target_classes)
+
+        for key, preds in predictions['difficulty'].items():
+            if key in difficulty_labels:
+                mae = torch.abs(preds - difficulty_labels[key])
+                self.difficulty_metrics[f'{key}_mae'].update(mae)
 
     def compute(self) -> Dict[str, Any]:
         results = {}
@@ -82,7 +87,6 @@ class PretrainEpochMetrics(nn.Module):
                     'mean': mean_per_cont[i],
                     'std': std_per_cont[i]
                 }
-        
         if cont_metrics:
             results['continuous_metrics'] = cont_metrics
 
@@ -90,13 +94,16 @@ class PretrainEpochMetrics(nn.Module):
         for name, collection in self.cat_metrics.items():
             cat_results = collection.compute()
             targets_for_dist = cat_results.pop('target_aggregator')
-            
             if targets_for_dist.numel() > 0:
                 cat_metrics[name] = {k: v.item() for k, v in cat_results.items()}
                 cat_metrics[name]['distribution'] = Counter(targets_for_dist.cpu().numpy())
-        
         if cat_metrics:
             results['categorical_metrics'] = cat_metrics
+            
+        diff_results = self.difficulty_metrics.compute()
+        difficulty_metrics = {k: v.item() for k, v in diff_results.items() if v.numel() > 0}
+        if difficulty_metrics:
+            results['difficulty_metrics'] = difficulty_metrics
             
         return results
     
@@ -105,6 +112,7 @@ class PretrainEpochMetrics(nn.Module):
         self.cont_target_aggregator.reset()
         for collection in self.cat_metrics.values():
             collection.reset()
+        self.difficulty_metrics.reset()
 
 
 class FineTuneEpochMetrics(nn.Module):

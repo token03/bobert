@@ -21,8 +21,8 @@ components:
   compile_mode: "default" 
     
 pretraining:
-  # db_path: './data/beatmap_dataset_test/'
-  db_path: './data/beatmap_dataset/'
+  db_path: './data/beatmap_dataset_test/'
+  # db_path: './data/beatmap_dataset/'
   batch_size: 8
   num_epochs: 8
 
@@ -37,6 +37,9 @@ pretraining:
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 8
+
+  difficulty_loss_weight: 1.0
+  mlm_loss_weight: 1.0
 
   masking_ratio: 0.3
   mean_span_length: 4
