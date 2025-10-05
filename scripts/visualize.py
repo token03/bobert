@@ -190,7 +190,7 @@ def main():
     sampled_ids_df = all_ids_df.sample(n=sample_size, random_state=42).reset_index(drop=True)
     ids_to_load = sampled_ids_df['beatmap_id'].tolist()
 
-    sampled_data, sampled_ratings, loaded_ids = load_dataset(
+    sampled_data, difficulty_attrs, loaded_ids = load_dataset(
         dataset_path, 
         config['data']['max_seq_len'],
         ids_to_load=ids_to_load
@@ -200,13 +200,28 @@ def main():
         print(f"Warning: Requested {len(ids_to_load)} maps, but loaded {len(loaded_ids)}. "
               "This may be due to filtering or missing data for some IDs.")
 
+    sampled_ratings = difficulty_attrs.get('stars') if isinstance(difficulty_attrs, dict) else None
+    if sampled_ratings is None:
+        sampled_ratings = np.zeros(len(loaded_ids), dtype=np.float32)
+    else:
+        sampled_ratings = np.asarray(sampled_ratings, dtype=np.float32)
+        if sampled_ratings.shape[0] != len(loaded_ids):
+            print(f"Warning: Expected {len(loaded_ids)} difficulty ratings but received "
+                  f"{sampled_ratings.shape[0]}. Truncating to match embeddings.", file=sys.stderr)
+            sampled_ratings = sampled_ratings[:len(loaded_ids)]
+
     model, normalizer = load_model_and_normalizer(config, device)
  
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
         embeddings = generate_embeddings(model, normalizer, sampled_data, config, device)
 
     print("Performing dimensionality reduction with UMAP...")
-    reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
+    reducer = umap.UMAP(
+        n_components=2, 
+        random_state=42, 
+        n_neighbors=5, 
+        min_dist=0.1
+        )
     embeddings_2d = reducer.fit_transform(embeddings)
 
     print("Creating interactive visualization with Plotly...")
@@ -275,7 +290,7 @@ def main():
     });
     """
 
-    output_file = 'embeddings_visualization.html'
+    output_file = './html/embeddings_visualization.html'
     
     fig.write_html(output_file, post_script=js_script, include_plotlyjs='cdn')
     

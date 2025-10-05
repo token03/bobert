@@ -45,9 +45,10 @@ class FineTuningTrainer:
         self.user_tag_encoder = user_tag_encoder
         self.collection_label_encoder = collection_label_encoder
         
-        self.use_amp = config['pretraining'].get('use_amp', False) and device.type == 'cuda'
-        self.grad_clip_norm = config['pretraining'].get('grad_clip_norm', 1.0)
-        self.grad_accum_steps = config['pretraining'].get('gradient_accumulation_steps', 1)
+        finetune_cfg = config.get('finetuning', {})
+        self.use_amp = finetune_cfg.get('use_amp', False) and device.type == 'cuda'
+        self.grad_clip_norm = finetune_cfg.get('grad_clip_norm', 1.0)
+        self.grad_accum_steps = finetune_cfg.get('gradient_accumulation_steps', 1)
         
         self.scaler = torch.amp.GradScaler(device=device.type, enabled=self.use_amp)
         self.metrics_tracker = MetricsTracker()

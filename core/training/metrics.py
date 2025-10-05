@@ -210,7 +210,8 @@ class FineTuneEpochMetrics(nn.Module):
 
     def _compute_spearman_rho(self, metrics: Dict, sim_matrix: torch.Tensor, all_ratings: torch.Tensor):
         num_samples = len(all_ratings)
-        num_pairs = min(num_samples * 10, 100000)
+        # Reduce the number of pairs for faster computation (was num_samples * 10)
+        num_pairs = min(num_samples * 5, 50000)  # Reduced from 100000
         idx1 = torch.randint(0, num_samples, (num_pairs,), device=sim_matrix.device)
         idx2 = torch.randint(0, num_samples, (num_pairs,), device=sim_matrix.device)
         
@@ -225,7 +226,8 @@ class FineTuneEpochMetrics(nn.Module):
 
     def _compute_ndcg_at_k(self, metrics: Dict, sim_matrix: torch.Tensor, continuous_relevance: torch.Tensor):
         num_queries = sim_matrix.shape[0]
-        num_queries_to_eval = min(5000, num_queries)
+        # Reduce the number of queries for nDCG computation (was 5000)
+        num_queries_to_eval = min(2000, num_queries)  # Reduced from 5000
         
         if num_queries_to_eval == 0:
             for k in self.k_values: metrics[f'nDCG@{k}'] = 0.0

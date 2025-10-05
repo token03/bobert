@@ -349,7 +349,8 @@ class BertForContrastiveFineTuning(nn.Module):
             nn.ReLU(),
             nn.Linear(self.d_model, 128) 
         )
-        
+        self.representation_proj = nn.Linear(2 * self.d_model, self.d_model)
+
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
         base_model = BertEncoder.from_config(config)
@@ -389,6 +390,7 @@ class BertForContrastiveFineTuning(nn.Module):
         mean_pooled_representation = sum_embeddings / sum_mask
 
         final_representation = torch.cat([cls_representation, mean_pooled_representation], dim=1)
+        final_representation = self.representation_proj(final_representation)
 
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),

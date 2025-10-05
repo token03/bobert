@@ -2,8 +2,8 @@ data:
   max_seq_len: 1023
   val_split: 0.1
   max_samples_per_class:
-    aim: 1500
-    tech: 1500
+    aim: 2500
+    tech: 2500
 
 model:
   d_model: 512
@@ -65,7 +65,7 @@ finetuning:
 
   use_amp: true
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
 
   user_tag_classes: 42
   collection_label_classes: 5
@@ -76,8 +76,8 @@ finetuning:
   difficulty_rating_weight: 1.0
   contrastive_weight: 2.0
 
-  positive_difficulty_threshold: 0.25
-  hard_negative_difficulty_threshold: 0.5
+  positive_difficulty_threshold: 0.20
+  hard_negative_difficulty_threshold: 1.0
   sampler:
     max_ease_factor: 1.0
     kde_bandwidth: 0.5
