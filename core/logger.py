@@ -57,7 +57,7 @@ class TrainingLogger:
         print(f"Epochs: {start_epoch + 1} to {num_epochs}")
         print(f"Batch Size: {config['pretraining']['batch_size']}")
         print(f"Learning Rate: {config['pretraining']['learning_rate']}")
-        print("-" * 60)
+        print("-" * 30)
 
     def log_epoch_end(
         self,
@@ -82,60 +82,32 @@ class TrainingLogger:
         
         self._log_validation_details(val_metrics)
 
-        print("-" * 70)
+        print("-" * 30)
         print(f"Checkpoint saved to {checkpoint_path}")
-        print("=" * 70)
+        print("-" * 30)
 
     def _log_validation_details(self, val_metrics: Dict[str, Any]):
         """Prints the detailed validation report tables."""
-        print("=" * 70)
-        print(f"{' ' * 21} DETAILED VALIDATION REPORT {' ' * 22}")
+        print("-" * 30)
+        print(f"Validation Metrics")
 
         if 'difficulty_metrics' in val_metrics:
-            print("-" * 70)
-            print(" DIFFICULTY ATTRIBUTE PREDICTIONS (MAE):")
-            header = f"  {'Attribute':<22} | {'MAE / Error':<15}"
-            print(header)
-            print(f"  {'-'*22}-+-{'-'*15}")
+            print("Difficulty MAE:")
             for name, mae in val_metrics['difficulty_metrics'].items():
                 attr_name = name.replace('_mae', '')
-                row = f"  {attr_name:<22} | {mae:<15.4f}"
-                print(row)
+                print(f"  {attr_name}: {mae:.4f}")
 
         if 'continuous_metrics' in val_metrics:
-            print("-" * 70)
-            print(" MASKED CONTINUOUS FEATURES (MAE):")
-            header = f"  {'Feature':<22} | {'MAE / Error':<15} | {'Mean (True)':<12} | {'Std (True)':<12}"
-            print(header)
-            print(f"  {'-'*22}-+-{'-'*15}-+-{'-'*12}-+-{'-'*12}")
+            print("Continuous Features:")
             for name in self.standard_cont_names:
                  if name in val_metrics['continuous_metrics']:
                     metrics = val_metrics['continuous_metrics'][name]
-                    row = f"  {name:<22} | {metrics['mae']:<15.4f} | {metrics['mean']:<12.4f} | {metrics['std']:<12.4f}"
-                    print(row)
+                    print(f"  {name}: MAE {metrics['mae']:.4f}, Median {metrics['median']:.3f}, IQR {metrics['iqr']:.3f}, MAPE {metrics['mape']:.1f}%")
 
         if 'categorical_metrics' in val_metrics:
-            print("-" * 70)
-            print(" MASKED CATEGORICAL FEATURES:")
-            header = f"  {'Feature':<22} | {'Accuracy':<10} | {'Precision':<12} | {'Recall':<12}"
-            print(header)
-            print(f"  {'-'*22}-+-{'-'*10}-+-{'-'*12}-+-{'-'*12}")
+            print("Categorical Features:")
             for name, metrics in val_metrics['categorical_metrics'].items():
-                row = f"  {name:<22} | {metrics['accuracy']:<10.2%} | {metrics['precision']:<12.4f} | {metrics['recall']:<12.4f}"
-                print(row)
-                dist_data = metrics['distribution']
-                total_count = sum(dist_data.values())
-                if total_count == 0: continue
-                sorted_dist = sorted(dist_data.items(), key=lambda item: item[1], reverse=True)
-                dist_str_parts, limit = [], 5
-                if len(sorted_dist) > limit:
-                    top_items = sorted_dist[:limit]
-                    other_count = sum(count for _, count in sorted_dist[limit:])
-                    for class_idx, count in top_items: dist_str_parts.append(f"{class_idx}:{count/total_count:.1%}")
-                    if other_count > 0: dist_str_parts.append(f"Other:{other_count/total_count:.1%}")
-                else:
-                    for class_idx, count in sorted_dist: dist_str_parts.append(f"{class_idx}:{count/total_count:.1%}")
-                print(f"    └─ True Dist: {', '.join(dist_str_parts)}")
+                print(f"  {name}: Acc {metrics['accuracy']:.2%}, Prec {metrics['precision']:.4f}, Rec {metrics['recall']:.4f}, Classes {metrics['num_active_classes']}, Entropy {metrics['class_balance_entropy']:.3f}")
     
     def log_training_end(self):
         print("\n--- Training Finished ---")

@@ -384,10 +384,9 @@ class BertForContrastiveFineTuning(nn.Module):
         cls_representation = encoded_output[:, 0]
         sequence_output = encoded_output[:, 1:]
         
-        mask_expanded = attention_mask.unsqueeze(-1).expand_as(sequence_output)
-        sum_embeddings = torch.sum(sequence_output * mask_expanded, dim=1)
-        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
-        mean_pooled_representation = sum_embeddings / sum_mask
+        sum_embeddings = torch.sum(sequence_output * attention_mask.unsqueeze(-1), dim=1)
+        num_tokens = attention_mask.sum(dim=1, keepdim=True)
+        mean_pooled_representation = sum_embeddings / torch.clamp(num_tokens.to(sum_embeddings.dtype), min=1e-9)
 
         final_representation = torch.cat([cls_representation, mean_pooled_representation], dim=1)
         final_representation = self.representation_proj(final_representation)

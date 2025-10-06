@@ -79,13 +79,25 @@ class PretrainEpochMetrics(nn.Module):
         all_cont_targets = self.cont_target_aggregator.compute()
         if all_cont_targets.numel() > 0:
             mae_results = self.standard_cont_metrics.compute()
-            mean_per_cont = all_cont_targets.mean(dim=0).cpu().tolist()
-            std_per_cont = all_cont_targets.std(dim=0).cpu().tolist()
+            targets_np = all_cont_targets.cpu().numpy()
+
             for i, name in enumerate(self.standard_cont_names):
+                target_values = targets_np[:, i]
+                mae = mae_results[name].item()
+
+                # Calculate more informative metrics
+                median = np.median(target_values)
+                q25, q75 = np.percentile(target_values, [25, 75])
+                iqr = q75 - q25
+                mape = np.mean(np.abs((target_values - median) / (median + 1e-8))) * 100
+
                 cont_metrics[name] = {
-                    'mae': mae_results[name].item(),
-                    'mean': mean_per_cont[i],
-                    'std': std_per_cont[i]
+                    'mae': mae,
+                    'median': median,
+                    'iqr': iqr,
+                    'mape': mape,
+                    'range_min': np.min(target_values),
+                    'range_max': np.max(target_values)
                 }
         if cont_metrics:
             results['continuous_metrics'] = cont_metrics
@@ -96,7 +108,12 @@ class PretrainEpochMetrics(nn.Module):
             targets_for_dist = cat_results.pop('target_aggregator')
             if targets_for_dist.numel() > 0:
                 cat_metrics[name] = {k: v.item() for k, v in cat_results.items()}
-                cat_metrics[name]['distribution'] = Counter(targets_for_dist.cpu().numpy())
+                # Calculate class balance metrics
+                targets_np = targets_for_dist.cpu().numpy()
+                unique_classes, class_counts = np.unique(targets_np, return_counts=True)
+                class_balance = class_counts / len(targets_np)
+                cat_metrics[name]['class_balance_entropy'] = -np.sum(class_balance * np.log(class_balance + 1e-8))
+                cat_metrics[name]['num_active_classes'] = len(unique_classes)
         if cat_metrics:
             results['categorical_metrics'] = cat_metrics
             
