@@ -1,6 +1,5 @@
 # loss.py
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any
 import warnings
@@ -102,31 +101,32 @@ def pretrain_loss_fn(
     losses['total_loss'] = total_loss
     return losses
 
-
-def _supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch.Tensor, temperature: float) -> torch.Tensor:
-    if positive_mask.sum() == 0:
-        warnings.warn("No positive pairs found in batch, contrastive loss will be 0. "
-                      "Check sampler logic and `positive_difficulty_threshold`.", UserWarning)
+def _weighted_contrastive_loss(projections: torch.Tensor, similarity_matrix: torch.Tensor, temperature: float) -> torch.Tensor:
+    """
+    Computes the weighted supervised contrastive loss.
+    The similarity_matrix contains continuous values from 0 to 1.
+    """
+    if similarity_matrix.sum() == 0:
+        warnings.warn("The entire similarity matrix is zero. Contrastive loss will be 0.", UserWarning)
         return torch.tensor(0.0, device=projections.device)
 
     epsilon = 1e-8
     projections = F.normalize(projections + epsilon, p=2, dim=1)
     
-    sim_matrix = torch.matmul(projections, projections.T) / temperature
+    cos_sim_matrix = torch.matmul(projections, projections.T) / temperature
     
-    diag_mask = torch.eye(sim_matrix.shape[0], dtype=torch.bool, device=sim_matrix.device)
-    sim_matrix_masked = sim_matrix.clone()
-    sim_matrix_masked.masked_fill_(diag_mask, -torch.inf)
+    diag_mask = torch.eye(cos_sim_matrix.shape[0], dtype=torch.bool, device=cos_sim_matrix.device)
+    cos_sim_matrix.masked_fill_(diag_mask, -torch.inf)
     
-    log_prob = F.log_softmax(sim_matrix_masked, dim=1)
+    log_prob = F.log_softmax(cos_sim_matrix, dim=1)
     
-    log_prob_pos = (positive_mask.float() * log_prob).sum(dim=1)
+    weighted_log_prob = (similarity_matrix * log_prob).sum(dim=1)
     
-    n_positives_per_anchor = positive_mask.sum(dim=1)
+    sum_similarities_per_anchor = similarity_matrix.sum(dim=1)
     
-    loss_per_anchor = -log_prob_pos / n_positives_per_anchor.clamp(min=1.0)
+    loss_per_anchor = -weighted_log_prob / sum_similarities_per_anchor.clamp(min=1e-8)
     
-    valid_anchors_mask = n_positives_per_anchor > 0
+    valid_anchors_mask = sum_similarities_per_anchor > 0
     final_loss = loss_per_anchor[valid_anchors_mask].mean()
     
     return torch.nan_to_num(final_loss, nan=0.0)
@@ -134,7 +134,7 @@ def _supervised_contrastive_loss(projections: torch.Tensor, positive_mask: torch
 
 def contrastive_loss_fn(
     predictions: Dict[str, torch.Tensor],
-    labels: Dict[str, torch.Tensor],
+    labels: Dict[str, Any], 
     config: Dict[str, Any]
 ) -> Dict[str, torch.Tensor]:
     losses = {}
@@ -145,9 +145,7 @@ def contrastive_loss_fn(
 
     user_tag_weight = finetuning_config.get('user_tag_weight', 1.0)
     collection_label_weight = finetuning_config.get('collection_label_weight', 1.0)
-    difficulty_rating_weight = finetuning_config.get('difficulty_rating_weight', 1.0)
     contrastive_weight = finetuning_config.get('contrastive_weight', 1.0)
-
 
     if 'user_tags' in labels:
         user_tag_loss = F.binary_cross_entropy_with_logits(
@@ -163,22 +161,57 @@ def contrastive_loss_fn(
         losses['collection_label_loss'] = collection_label_loss
         total_loss += collection_label_weight * collection_label_loss
 
-    if 'difficulty_ratings' in labels:
-        difficulty_rating_loss = F.mse_loss(
-            predictions['difficulty_rating_preds'], labels['difficulty_ratings']
-        )
-        losses['difficulty_rating_loss'] = difficulty_rating_loss
-        total_loss += difficulty_rating_weight * difficulty_rating_loss
+    if 'difficulty' in predictions and 'difficulty_labels' in labels:
+        difficulty_weight = finetuning_config.get('difficulty_loss_weight', 1.0)
 
-    if 'positive_mask' in labels and 'contrastive_projection' in predictions:
-        positive_mask = labels['positive_mask']
+        diff_loss_weights = {
+            'stars': finetuning_config.get('stars_loss_weight', 1.0),
+            'aim': finetuning_config.get('aim_loss_weight', 1.0),
+            'speed': finetuning_config.get('speed_loss_weight', 1.0),
+            'slider_factor': finetuning_config.get('slider_factor_loss_weight', 0.5),
+        }
+
+        difficulty_loss_sum = torch.zeros_like(total_loss)
+
+        for key, weight in diff_loss_weights.items():
+            if key in predictions['difficulty'] and key in labels['difficulty_labels']:
+                loss = F.mse_loss(predictions['difficulty'][key], labels['difficulty_labels'][key])
+                losses[f'{key}_loss'] = loss
+                difficulty_loss_sum += weight * loss
+
+        weighted_difficulty_loss = difficulty_loss_sum * difficulty_weight
+        total_loss += weighted_difficulty_loss
+        losses['difficulty_loss'] = weighted_difficulty_loss
+        losses['difficulty_loss_unscaled'] = difficulty_loss_sum
+
+    required_keys = ['raw_difficulty_ratings', 'collection_labels']
+    if 'contrastive_projection' in predictions and all(k in labels for k in required_keys):
+        sampler_config = finetuning_config.get('sampler', {})
+        sigma = sampler_config.get('difficulty_decay_scale', 0.5)
+        beta = sampler_config.get('cross_label_similarity_factor', 0.2)
+        gamma = sampler_config.get('same_label_base_similarity', 0.4)
+
+        ratings = labels['raw_difficulty_ratings']
+        encoded_labels = labels['collection_labels']
+
+        stars_ratings = ratings[:, 0]
+
+        rating_diffs = torch.abs(stars_ratings.unsqueeze(0) - stars_ratings.unsqueeze(1))
+        s_diff = torch.exp(-(rating_diffs.pow(2)) / (2 * sigma**2))
+
+        label_match_mask = (torch.matmul(encoded_labels, encoded_labels.T)) > 0
         
-        contrastive_loss = _supervised_contrastive_loss(
-            predictions['contrastive_projection'], positive_mask, temperature
+        sim_same_label = gamma + (1 - gamma) * s_diff
+        sim_diff_label = beta * s_diff
+        
+        similarity_matrix = torch.where(label_match_mask, sim_same_label, sim_diff_label)
+        similarity_matrix.fill_diagonal_(0) 
+
+        contrastive_loss = _weighted_contrastive_loss(
+            predictions['contrastive_projection'], similarity_matrix, temperature
         )
         losses['contrastive_loss'] = contrastive_loss
         total_loss += contrastive_weight * contrastive_loss
-
 
     losses['total_loss'] = total_loss
     return losses

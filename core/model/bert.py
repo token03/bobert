@@ -181,7 +181,6 @@ class BertForPretraining(nn.Module):
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
         self.feature_info = HitObjectVector.get_feature_info()
 
-        # MLM Heads
         num_continuous = len(self.feature_info['continuous'])
         self.continuous_head = nn.Linear(bert_model.d_model, num_continuous)
         self.categorical_heads = nn.ModuleDict({
@@ -192,7 +191,7 @@ class BertForPretraining(nn.Module):
         self.difficulty_attribute_head = nn.Sequential(
             nn.Linear(bert_model.d_model, bert_model.d_model // 2),
             nn.GELU(),
-            nn.Linear(bert_model.d_model // 2, 4) # stars, aim, speed, slider_factor
+            nn.Linear(bert_model.d_model // 2, 4)
         )
         
     @classmethod
@@ -300,7 +299,6 @@ class BertForPretraining(nn.Module):
         max_seqlen = full_encoder_input.shape[1]
         encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
         
-        # MLM Predictions
         sequence_output = encoded_output[:, 1:, :].contiguous()
         continuous_preds = self.continuous_head(sequence_output)
         categorical_preds = {
@@ -312,7 +310,6 @@ class BertForPretraining(nn.Module):
             'categorical': categorical_preds
         }
         
-        # Difficulty Attribute Predictions
         cls_output = encoded_output[:, 0]
         difficulty_preds_raw = self.difficulty_attribute_head(cls_output)
         difficulty_predictions = {
@@ -342,12 +339,17 @@ class BertForContrastiveFineTuning(nn.Module):
             self.user_tag_projection = nn.Linear(self.d_model, self.d_model)
             
         self.collection_label_head = nn.Linear(self.d_model, collection_label_classes)
-        self.difficulty_rating_head = nn.Linear(self.d_model, 1)  
-        
+
+        self.difficulty_attribute_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model // 2),
+            nn.GELU(),
+            nn.Linear(self.d_model // 2, 4) 
+        )
+
         self.contrastive_projection = nn.Sequential(
             nn.Linear(self.d_model, self.d_model),
             nn.ReLU(),
-            nn.Linear(self.d_model, 128) 
+            nn.Linear(self.d_model, 128)
         )
         self.representation_proj = nn.Linear(2 * self.d_model, self.d_model)
 
@@ -393,12 +395,19 @@ class BertForContrastiveFineTuning(nn.Module):
 
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),
-            'difficulty_rating_preds': self.difficulty_rating_head(final_representation).squeeze(-1),
             'contrastive_projection': self.contrastive_projection(final_representation),
-            'sequence_representation': final_representation 
+            'sequence_representation': final_representation
         }
-        
+
         if self.user_tag_classes > 0:
             predictions['user_tag_logits'] = self.user_tag_head(final_representation)
-            
+
+        difficulty_preds_raw = self.difficulty_attribute_head(cls_representation)
+        predictions['difficulty'] = {
+            'stars': difficulty_preds_raw[:, 0],
+            'aim': difficulty_preds_raw[:, 1],
+            'speed': difficulty_preds_raw[:, 2],
+            'slider_factor': difficulty_preds_raw[:, 3],
+        }
+
         return predictions

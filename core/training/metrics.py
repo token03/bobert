@@ -85,7 +85,6 @@ class PretrainEpochMetrics(nn.Module):
                 target_values = targets_np[:, i]
                 mae = mae_results[name].item()
 
-                # Calculate more informative metrics
                 median = np.median(target_values)
                 q25, q75 = np.percentile(target_values, [25, 75])
                 iqr = q75 - q25
@@ -108,7 +107,6 @@ class PretrainEpochMetrics(nn.Module):
             targets_for_dist = cat_results.pop('target_aggregator')
             if targets_for_dist.numel() > 0:
                 cat_metrics[name] = {k: v.item() for k, v in cat_results.items()}
-                # Calculate class balance metrics
                 targets_np = targets_for_dist.cpu().numpy()
                 unique_classes, class_counts = np.unique(targets_np, return_counts=True)
                 class_balance = class_counts / len(targets_np)
@@ -136,7 +134,7 @@ class FineTuneEpochMetrics(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         self.config = config
-        self.k_values = config['finetuning'].get('validation_k_values', [1, 5, 10])
+        self.k_values = config['finetuning'].get('recall_k_values', [1, 5, 10])
 
         self.batch_metrics = MetricCollection({
             'total_loss': MeanMetric(),
@@ -179,9 +177,14 @@ class FineTuneEpochMetrics(nn.Module):
         all_embeddings = F.normalize(all_embeddings.to(torch.float32), p=2, dim=1)
         sim_matrix = torch.matmul(all_embeddings, all_embeddings.T)
 
-        rating_diffs = torch.abs(all_ratings.unsqueeze(0) - all_ratings.unsqueeze(1))
-        
-        difficulty_mask = rating_diffs <= self.config['finetuning']['positive_difficulty_threshold']
+        if all_ratings.dim() > 1 and all_ratings.shape[1] > 1:
+            stars_ratings = all_ratings[:, 0]
+        else:
+            stars_ratings = all_ratings
+
+        rating_diffs = torch.abs(stars_ratings.unsqueeze(0) - stars_ratings.unsqueeze(1))
+
+        difficulty_mask = rating_diffs <= self.config['finetuning']['recall_difficulty_threshold']
         label_mask = torch.zeros_like(difficulty_mask, dtype=torch.bool, device=device)
         for i in range(len(all_labels)):
             set_i = set(all_labels[i])
@@ -206,8 +209,6 @@ class FineTuneEpochMetrics(nn.Module):
         sim_matrix_for_ranking.fill_diagonal_(-torch.inf)
         self._compute_recall_at_k(metrics, sim_matrix_for_ranking, true_positives_mask)
 
-        self._compute_spearman_rho(metrics, sim_matrix, all_ratings)
-
         self._compute_ndcg_at_k(metrics, sim_matrix, continuous_relevance)
 
         return metrics
@@ -218,52 +219,49 @@ class FineTuneEpochMetrics(nn.Module):
             for k in self.k_values: metrics[f'Recall@{k}'] = 0.0
             return
 
-        _, topk_indices = torch.topk(sim_matrix, max(self.k_values), dim=1)
+        max_k = min(max(self.k_values), sim_matrix.shape[1] - 1)
+        if max_k == 0:
+            for k in self.k_values: metrics[f'Recall@{k}'] = 0.0
+            return
+
+        _, topk_indices = torch.topk(sim_matrix, max_k, dim=1)
         for k in self.k_values:
+            if k > max_k:
+                metrics[f'Recall@{k}'] = 0.0
+                continue
             hits_at_k = torch.gather(true_positives_mask, 1, topk_indices[:, :k]).any(dim=1)
             valid_queries_mask = true_positives_mask.any(dim=1)
             recall_at_k = hits_at_k[valid_queries_mask].sum().item() / num_queries_with_positives
             metrics[f'Recall@{k}'] = recall_at_k
 
-    def _compute_spearman_rho(self, metrics: Dict, sim_matrix: torch.Tensor, all_ratings: torch.Tensor):
-        num_samples = len(all_ratings)
-        # Reduce the number of pairs for faster computation (was num_samples * 10)
-        num_pairs = min(num_samples * 5, 50000)  # Reduced from 100000
-        idx1 = torch.randint(0, num_samples, (num_pairs,), device=sim_matrix.device)
-        idx2 = torch.randint(0, num_samples, (num_pairs,), device=sim_matrix.device)
-        
-        mask = idx1 != idx2
-        idx1, idx2 = idx1[mask], idx2[mask]
-
-        sim_scores = sim_matrix[idx1, idx2] 
-        rating_distances = torch.abs(all_ratings[idx1] - all_ratings[idx2])
-
-        rho, _ = spearmanr(sim_scores.cpu().numpy(), -rating_distances.cpu().numpy()) # Higher sim should correlate with lower distance
-        metrics['SpearmanRho'] = rho if not np.isnan(rho) else 0.0
-
     def _compute_ndcg_at_k(self, metrics: Dict, sim_matrix: torch.Tensor, continuous_relevance: torch.Tensor):
         num_queries = sim_matrix.shape[0]
-        # Reduce the number of queries for nDCG computation (was 5000)
-        num_queries_to_eval = min(2000, num_queries)  # Reduced from 5000
-        
+        num_queries_to_eval = min(2000, num_queries)  
+
         if num_queries_to_eval == 0:
             for k in self.k_values: metrics[f'nDCG@{k}'] = 0.0
             return
-        
+
         query_indices = torch.randperm(num_queries, device=sim_matrix.device)[:num_queries_to_eval]
 
         total_ndcg = {k: 0.0 for k in self.k_values}
         sim_matrix_cpu = sim_matrix.cpu().numpy()
         continuous_relevance_cpu = continuous_relevance.cpu().numpy()
 
+        max_k = min(max(self.k_values), sim_matrix.shape[1] - 1)
+
         for i in query_indices:
             true_relevances_for_query = continuous_relevance_cpu[i].reshape(1, -1)
             pred_scores_for_query = sim_matrix_cpu[i].reshape(1, -1)
             for k in self.k_values:
-                total_ndcg[k] += ndcg_score(true_relevances_for_query, pred_scores_for_query, k=k)
-        
+                if k <= max_k:
+                    total_ndcg[k] += ndcg_score(true_relevances_for_query, pred_scores_for_query, k=k)
+
         for k in self.k_values:
-            metrics[f'nDCG@{k}'] = total_ndcg[k] / num_queries_to_eval
+            if k <= max_k:
+                metrics[f'nDCG@{k}'] = total_ndcg[k] / num_queries_to_eval
+            else:
+                metrics[f'nDCG@{k}'] = 0.0
 
 
 class MetricsTracker:

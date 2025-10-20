@@ -2,10 +2,9 @@
 from collections import defaultdict
 import random
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import WeightedRandomSampler, Sampler
-from typing import Tuple, List, Dict, Any, Optional, Iterator
+from typing import List, Dict, Any, Optional, Iterator
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 import bisect
@@ -66,7 +65,7 @@ def create_contrastive_sampler(
         max_ease_factor=sampler_config.get('max_ease_factor', 5.0),
         kde_bandwidth=sampler_config.get('kde_bandwidth', 0.25),
         kde_bins=sampler_config.get('kde_bins', 100),
-        use_kde_anchor_sampling=sampler_config.get('use_kde_anchor_sampling', False)
+        use_kde_anchor_sampling=sampler_config.get('use_kde_anchor_sampling', True)
     )
 
 class ContrastiveBatchSampler(Sampler[List[int]]):
@@ -82,15 +81,23 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
                  use_kde_anchor_sampling: bool = False):
         super().__init__()
         self.labels = labels
-        self.difficulty_ratings = np.asarray(difficulty_ratings)
+        self.difficulty_ratings = difficulty_ratings
         self.batch_size = batch_size
         self.positive_difficulty_threshold = positive_difficulty_threshold
         self.hard_negative_difficulty_threshold = hard_negative_difficulty_threshold
         self.max_ease_factor = max_ease_factor
         self.num_samples = len(labels)
         self.indices = list(range(self.num_samples))
-        self.max_tries_per_quad = 10 
+        self.max_tries_per_quad = 10
         self.use_kde_anchor_sampling = use_kde_anchor_sampling
+
+        def _get_stars_rating(rating):
+            """Extract stars rating from difficulty rating (handles both single values and 4-element tuples)."""
+            if isinstance(rating, (list, tuple)):
+                return rating[0] 
+            return rating
+
+        self._get_stars_rating = _get_stars_rating
 
         print("Initializing ContrastiveBatchSampler...")
         self.label_to_indices = defaultdict(list)
@@ -101,16 +108,16 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
         self.label_to_sorted_by_diff = {}
         for label, indices in self.label_to_indices.items():
             if len(indices) > 1:
-                sorted_indices = sorted(indices, key=lambda i: self.difficulty_ratings[i])
+                sorted_indices = sorted(indices, key=lambda i: self._get_stars_rating(self.difficulty_ratings[i]))
                 self.label_to_sorted_by_diff[label] = {
                     'indices': sorted_indices,
-                    'ratings': self.difficulty_ratings[sorted_indices]
+                    'ratings': [self._get_stars_rating(self.difficulty_ratings[i]) for i in sorted_indices]
                 }
-        
-        sorted_all_indices = sorted(self.indices, key=lambda i: self.difficulty_ratings[i])
+
+        sorted_all_indices = sorted(self.indices, key=lambda i: self._get_stars_rating(self.difficulty_ratings[i]))
         self.all_indices_sorted_by_diff = {
             'indices': sorted_all_indices,
-            'ratings': self.difficulty_ratings[sorted_all_indices]
+            'ratings': [self._get_stars_rating(self.difficulty_ratings[i]) for i in sorted_all_indices]
         }
         
         self.usable_labels = set(self.label_to_sorted_by_diff.keys())
@@ -126,7 +133,7 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
 
         if self.use_kde_anchor_sampling:
             print("Calculating anchor sampling weights using KDE for difficulty balancing...")
-            anchorable_ratings = self.difficulty_ratings[self.anchorable_indices]
+            anchorable_ratings = np.array([self._get_stars_rating(self.difficulty_ratings[i]) for i in self.anchorable_indices])
 
             min_r, max_r = anchorable_ratings.min(), anchorable_ratings.max()
             bin_edges = np.linspace(min_r - 0.5, max_r + 0.5, kde_bins + 1)
@@ -153,41 +160,41 @@ class ContrastiveBatchSampler(Sampler[List[int]]):
             print("Using uniform anchor sampling for anchors (KDE disabled).")
 
     def _find_positive(self, anchor_idx: int, anchor_labels: List[str], exclude_indices: set) -> Optional[int]:
-        anchor_rating = self.difficulty_ratings[anchor_idx]
+        anchor_rating = self._get_stars_rating(self.difficulty_ratings[anchor_idx])
         potential_labels = list(set(anchor_labels) & self.usable_labels)
         if not potential_labels: return None
         random.shuffle(potential_labels)
-        
+
         for ease_factor in np.linspace(1.0, self.max_ease_factor, 5):
             threshold = self.positive_difficulty_threshold * ease_factor
             min_r, max_r = anchor_rating - threshold, anchor_rating + threshold
-            
+
             for label in potential_labels:
                 sorted_data = self.label_to_sorted_by_diff[label]
                 start_idx = bisect.bisect_left(sorted_data['ratings'], min_r)
                 end_idx = bisect.bisect_right(sorted_data['ratings'], max_r)
-                
+
                 candidates = [i for i in sorted_data['indices'][start_idx:end_idx] if i != anchor_idx and i not in exclude_indices]
                 if candidates:
                     return random.choice(candidates)
         return None
 
     def _find_hard_negative1(self, anchor_idx: int, anchor_labels: List[str], exclude_indices: set) -> Optional[int]:
-        anchor_rating = self.difficulty_ratings[anchor_idx]
+        anchor_rating = self._get_stars_rating(self.difficulty_ratings[anchor_idx])
         potential_labels = list(set(anchor_labels) & self.usable_labels)
         if not potential_labels: return None
         
         label = random.choice(potential_labels)
         sorted_data = self.label_to_sorted_by_diff[label]
 
-        low_candidates = [i for i in sorted_data['indices'] if self.difficulty_ratings[i] < anchor_rating - self.hard_negative_difficulty_threshold]
-        high_candidates = [i for i in sorted_data['indices'] if self.difficulty_ratings[i] > anchor_rating + self.hard_negative_difficulty_threshold]
+        low_candidates = [i for i in sorted_data['indices'] if self._get_stars_rating(self.difficulty_ratings[i]) < anchor_rating - self.hard_negative_difficulty_threshold]
+        high_candidates = [i for i in sorted_data['indices'] if self._get_stars_rating(self.difficulty_ratings[i]) > anchor_rating + self.hard_negative_difficulty_threshold]
         
         all_candidates = [c for c in low_candidates + high_candidates if c not in exclude_indices]
         return random.choice(all_candidates) if all_candidates else None
 
     def _find_hard_negative2(self, anchor_idx: int, exclude_indices: set) -> Optional[int]:
-        anchor_rating = self.difficulty_ratings[anchor_idx]
+        anchor_rating = self._get_stars_rating(self.difficulty_ratings[anchor_idx])
         anchor_labels = set(self.labels[anchor_idx])
 
         for ease_factor in np.linspace(1.0, self.max_ease_factor, 5):

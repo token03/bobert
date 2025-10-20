@@ -382,8 +382,6 @@ def load_finetuning_dataset(
         raw_beatmap_path=raw_beatmap_path,
         cache_path=cache_path
     )
-    difficulty_ratings = difficulty_attributes['stars']
-
     print("Assembling final labels and tags...")
     all_labels = []
     all_tags = []
@@ -401,4 +399,4 @@ def load_finetuning_dataset(
               f"labels file contains IDs not present in the dataset parquet files.")
 
     print("Finished loading fine-tuning dataset.")
-    return processed_data, difficulty_ratings, all_labels, all_tags
+    return processed_data, difficulty_attributes, all_labels, all_tags

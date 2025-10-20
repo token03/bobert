@@ -52,7 +52,7 @@ def create_normalizer_from_data(
     _print_stats_table(
         "ATTRIBUTE STATISTICS",
         list(difficulty_attributes.keys()),
-        {}, # Defaults to standard mean/std normalization
+        {},
         {
             'stars': 'Star difficulty rating',
             'aim': 'Aim skill rating',
@@ -115,7 +115,7 @@ class BeatmapNormalizer:
                 mean, std = self.attribute_stats[key]
                 normalized_attrs[key] = (tensor - mean) / (std + self.epsilon)
             else:
-                normalized_attrs[key] = tensor # Pass through if no stats
+                normalized_attrs[key] = tensor 
         return normalized_attrs
 
     def normalize_difficulty(self, ratings: torch.Tensor) -> torch.Tensor:

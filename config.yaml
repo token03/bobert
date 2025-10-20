@@ -46,7 +46,7 @@ pretraining:
   
   sampling:
     method: "kde"  
-    kde_bandwidth: 0.6
+    kde_bandwidth: 0.2
     num_bins: 200
 
 finetuning:
@@ -74,13 +74,22 @@ finetuning:
   user_tag_weight: 0.0
   collection_label_weight: 1.0
   difficulty_rating_weight: 1.0
-  contrastive_weight: 2.0
+  aim_loss_weight: 1.0
+  speed_loss_weight: 1.0
+  contrastive_weight: 1.0
 
-  positive_difficulty_threshold: 0.3
-  hard_negative_difficulty_threshold: 0.8
+  difficulty_decay_scale: 0.3
+  cross_label_similarity_factor: 0.2
+  same_label_base_similarity: 0.4 
+
+  positive_difficulty_threshold: 0.15
+  hard_negative_difficulty_threshold: 0.50
+
   sampler:
     max_ease_factor: 1.0
-    kde_bandwidth: 0.5
-    kde_bins: 200
+    use_kde_anchor_sampling: true
+    kde_bandwidth: 0.2
+    kde_bins: 100
 
-  validation_k_values: [1, 5, 10]
+  recall_k_values: [1, 3, 5]
+  recall_difficulty_threshold: 0.20

@@ -6,7 +6,6 @@ from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
@@ -72,8 +71,9 @@ class FineTuningTrainer:
                     encoded_tensor[i, encoder[label]] = 1.0
         return encoded_tensor
     
-    def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        vectors, attention_mask, difficulty_ratings, collection_labels, user_tags, positive_mask = batch
+
+    def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
+        vectors, attention_mask, difficulty_ratings, collection_labels, user_tags = batch
 
         vectors = vectors.to(self.device, non_blocking=True)
         attention_mask = attention_mask.to(self.device, non_blocking=True)
@@ -84,8 +84,17 @@ class FineTuningTrainer:
 
         labels_dict = {
             'difficulty_ratings': norm_difficulty_ratings,
-            'positive_mask': positive_mask.to(self.device, non_blocking=True)
+            'raw_difficulty_ratings': difficulty_ratings.to(self.device, non_blocking=True),
+            'raw_collection_labels': collection_labels 
         }
+
+        if norm_difficulty_ratings.shape[-1] >= 4:
+            labels_dict['difficulty_labels'] = {
+                'stars': norm_difficulty_ratings[:, 0],
+                'aim': norm_difficulty_ratings[:, 1],
+                'speed': norm_difficulty_ratings[:, 2],
+                'slider_factor': norm_difficulty_ratings[:, 3],
+            }
         
         if any(collection_labels):
             num_collection_classes = self.model.module.collection_label_head.out_features if isinstance(self.model, nn.DataParallel) else self.model.collection_label_head.out_features
@@ -99,6 +108,7 @@ class FineTuningTrainer:
             labels_dict['user_tags'] = encoded_tags
             
         return vectors, attention_mask, labels_dict
+        
 
     def _run_step(self, batch: Tuple, is_train: bool) -> Dict[str, float]:
         vectors, attention_mask, labels = self._prepare_batch(batch)
@@ -168,21 +178,13 @@ class FineTuningTrainer:
         print("Running validation...")
         with torch.no_grad():
             for batch in tqdm(self.val_dataloader, desc="Validation", leave=False, dynamic_ncols=True):
-                vectors, attention_mask, ratings, labels, _, _ = batch
-
-                vectors_dev = vectors.to(self.device, non_blocking=True)
-                attention_mask_dev = attention_mask.to(self.device, non_blocking=True)
-
-                norm_ratings_dev = self.normalizer.normalize_difficulty(
-                    ratings.to(self.device, non_blocking=True)
-                )
+                vectors, attention_mask, labels_dict = self._prepare_batch(batch)
                 
-                labels_dict = {
-                    'difficulty_ratings': norm_ratings_dev
-                }
+                ratings = labels_dict['raw_difficulty_ratings']
+                raw_labels = labels_dict['raw_collection_labels']
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    predictions = self.model(vectors_dev, attention_mask_dev)
+                    predictions = self.model(vectors, attention_mask)
                     step_losses = self.loss_fn(predictions, labels_dict, self.config)
                     embeddings = predictions.get('collection_label_projection', predictions['sequence_representation'])
 
@@ -190,7 +192,7 @@ class FineTuningTrainer:
 
                 all_embeddings.append(embeddings.cpu())
                 all_ratings.append(ratings.cpu()) 
-                all_labels.extend(labels)
+                all_labels.extend(raw_labels)
 
         batch_metrics = self.val_metrics_computer.compute_batch_metrics()
 
@@ -230,13 +232,12 @@ class FineTuningTrainer:
             r1 = val_metrics.get('Recall@1', 0.0)
             r5 = val_metrics.get('Recall@5', 0.0)
             r10 = val_metrics.get('Recall@10', 0.0)
-            rho = val_metrics.get('SpearmanRho', 0.0)
             ndcg10 = val_metrics.get('nDCG@10', 0.0)
             
             print(f"Epoch {epoch+1}/{num_epochs} | Time: {epoch_duration:.2f}s | "
                   f"Train Loss: {train_metrics['total_loss']:.4f} | "
                   f"Val Loss: {val_metrics.get('total_loss', 0.0):.4f} | "
-                  f"R@1: {r1:.3f} | R@5: {r5:.3f} | R@10: {r10:.3f} | Rho: {rho:.3f} | nDCG@10: {ndcg10:.3f}")
+                  f"R@1: {r1:.3f} | R@5: {r5:.3f} | R@10: {r10:.3f} | nDCG@10: {ndcg10:.3f}")
         
         print("Fine-tuning finished.")
         return self.metrics_tracker

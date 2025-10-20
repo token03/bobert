@@ -146,6 +146,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate and visualize beatmap embeddings.")
     parser.add_argument("--test", action="store_true", help="Use the test dataset.")
     parser.add_argument("--sample_size", type=int, default=DEFAULT_SAMPLE_SIZE, help="Number of beatmaps to sample.")
+    parser.add_argument("--labelled", action="store_true", help="Visualize only labeled beatmaps.")
     args = parser.parse_args()
     
     dataset_name = "beatmap_dataset_test" if args.test else "beatmap_dataset"
@@ -161,32 +162,49 @@ def main():
     
     config = load_config("config", config_dir=".")
 
-    labeled_ids = set()
+    labels_dict = {}
     if os.path.exists(LABELS_PATH):
-        print(f"Loading labels from {LABELS_PATH} to exclude from visualization...")
         with open(LABELS_PATH, 'r') as f:
             labels_dict = json.load(f)
-        labeled_ids = {int(bid) for bid, labels in labels_dict.items() if labels}
-        print(f"Found {len(labeled_ids)} labeled beatmaps to exclude.")
-    else:
-        print(f"Warning: Labels file not found at {LABELS_PATH}. No beatmaps will be excluded.")
 
     all_ids_df = get_beatmap_ids_in_order(dataset_path)
 
-    if labeled_ids:
-        initial_count = len(all_ids_df)
-        all_ids_df = all_ids_df[~all_ids_df['beatmap_id'].isin(labeled_ids)]
-        num_excluded = initial_count - len(all_ids_df)
-        print(f"Excluded {num_excluded} labeled beatmaps from the sampling pool.")
+    if args.labelled:
+        if not labels_dict:
+            print(f"Error: --labelled flag was used, but no labels found in {LABELS_PATH}", file=sys.stderr)
+            sys.exit(1)
+        
+        print("Filtering for labeled beatmaps only...")
+        labeled_ids_with_labels = {int(bid) for bid, labels in labels_dict.items() if labels}
+        if not labeled_ids_with_labels:
+            print(f"Error: Labels file {LABELS_PATH} exists, but contains no beatmaps with labels.", file=sys.stderr)
+            sys.exit(1)
+        
+        all_ids_df = all_ids_df[all_ids_df['beatmap_id'].isin(labeled_ids_with_labels)]
+        print(f"Found {len(all_ids_df)} labeled beatmaps in the dataset to sample from.")
+
+    else:
+        if labels_dict:
+            print("Excluding labeled beatmaps from visualization...")
+            labeled_ids = {int(bid) for bid, labels in labels_dict.items() if labels}
+            initial_count = len(all_ids_df)
+            all_ids_df = all_ids_df[~all_ids_df['beatmap_id'].isin(labeled_ids)]
+            num_excluded = initial_count - len(all_ids_df)
+            print(f"Excluded {num_excluded} labeled beatmaps from the sampling pool.")
+        else:
+            print(f"Warning: No labels file found at {LABELS_PATH}. Visualizing from all available beatmaps.")
     
     num_beatmaps = len(all_ids_df)
 
     if num_beatmaps == 0:
-        print("Error: No valid, unlabeled beatmaps found in the dataset.", file=sys.stderr)
+        if args.labelled:
+            print("Error: No labeled beatmaps that exist in the dataset could be found.", file=sys.stderr)
+        else:
+            print("Error: No valid, unlabeled beatmaps found in the dataset.", file=sys.stderr)
         sys.exit(1)
 
     sample_size = min(args.sample_size, num_beatmaps)
-    print(f"Sampling {sample_size} beatmaps from a total of {num_beatmaps} unlabeled candidates...")
+    print(f"Sampling {sample_size} beatmaps from a total of {num_beatmaps} candidates...")
     sampled_ids_df = all_ids_df.sample(n=sample_size, random_state=42).reset_index(drop=True)
     ids_to_load = sampled_ids_df['beatmap_id'].tolist()
 
@@ -226,19 +244,31 @@ def main():
 
     print("Creating interactive visualization with Plotly...")
     
-    custom_data = loaded_ids
-    
-    if not (len(embeddings_2d) == len(sampled_ratings) == len(custom_data)):
+    if not (len(embeddings_2d) == len(sampled_ratings) == len(loaded_ids)):
         print("ERROR: Mismatch in lengths of data for plotting. Aborting.", file=sys.stderr)
-        print(f"Embeddings: {len(embeddings_2d)}, Ratings: {len(sampled_ratings)}, Custom Data: {len(custom_data)}", file=sys.stderr)
+        print(f"Embeddings: {len(embeddings_2d)}, Ratings: {len(sampled_ratings)}, Loaded IDs: {len(loaded_ids)}", file=sys.stderr)
         sys.exit(1)
 
-    hovertemplate = (
-        "<b>Map ID:</b> %{customdata}<br>"
-        "<b>Difficulty:</b> %{marker.color:.2f}<br>"
-        "<b>Click to open beatmap</b>"
-        "<extra></extra>"
-    )
+    if args.labelled:
+        labels_list = [', '.join(labels_dict.get(str(bid), [])) for bid in loaded_ids]
+        custom_data = list(zip(loaded_ids, labels_list))
+        hovertemplate = (
+            "<b>Map ID:</b> %{customdata[0]}<br>"
+            "<b>Labels:</b> %{customdata[1]}<br>"
+            "<b>Difficulty:</b> %{marker.color:.2f}<br>"
+            "<b>Click to open beatmap</b>"
+            "<extra></extra>"
+        )
+        title_suffix = 'Labeled Beatmap Embeddings'
+    else:
+        custom_data = loaded_ids
+        hovertemplate = (
+            "<b>Map ID:</b> %{customdata}<br>"
+            "<b>Difficulty:</b> %{marker.color:.2f}<br>"
+            "<b>Click to open beatmap</b>"
+            "<extra></extra>"
+        )
+        title_suffix = 'Unlabeled Beatmap Embeddings'
 
     fig = go.Figure(data=go.Scatter(
         x=embeddings_2d[:, 0], y=embeddings_2d[:, 1], mode='markers',
@@ -251,7 +281,7 @@ def main():
     ))
 
     fig.update_layout(
-        title=f'2D UMAP Visualization of {sample_size} Beatmap Embeddings',
+        title=f'2D UMAP Visualization of {sample_size} {title_suffix}',
         xaxis_title='UMAP Dimension 1', yaxis_title='UMAP Dimension 2',
         xaxis=dict(showticklabels=False), yaxis=dict(showticklabels=False),
         hovermode='closest'
@@ -267,16 +297,18 @@ def main():
                     var point = data.points[0];
                     var customData = point.customdata;
                     var url;
+                    var mapId;
 
                     if (Array.isArray(customData) && customData.length > 0) {
-                        var setId = customData[0];
-                        url = 'https://osu.ppy.sh/s/' + setId;
+                        // For labeled case: customData is [mapId, labels]
+                        mapId = customData[0];
                     } else if (customData) {
-                        var mapId = customData;
-                        url = 'https://osu.ppy.sh/b/' + mapId;
+                        // For unlabeled case: customData is just mapId
+                        mapId = customData;
                     }
 
-                    if (url) {
+                    if (mapId) {
+                        url = 'https://osu.ppy.sh/b/' + mapId;
                         console.log('Opening URL: ' + url);
                         window.open(url, '_blank');
                     } else {

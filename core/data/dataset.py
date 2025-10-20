@@ -142,40 +142,21 @@ def collate_fn(
 
     return padded_vectors.to(device), attention_mask.to(device)
     
-def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, positive_difficulty_threshold):
+def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, **kwargs):
     vectors, ratings, labels, tags = zip(*batch)
-    
+
     padded_vectors, attention_mask = collate_fn(
         list(vectors), max_seq_len, vector_dim, torch.device('cpu')
     )
-    
+
     stacked_ratings = torch.tensor(ratings, dtype=torch.float32)
-    
-    batch_size = len(batch)
-    
-    rating_diffs = torch.abs(stacked_ratings.unsqueeze(0) - stacked_ratings.unsqueeze(1))
-    difficulty_mask = rating_diffs <= positive_difficulty_threshold
-    
-    label_mask = torch.zeros(batch_size, batch_size, dtype=torch.bool)
-    for i in range(batch_size):
-        set_i = set(labels[i])
-        if not set_i: continue
-        for j in range(i, batch_size):
-            set_j = set(labels[j])
-            if set_i.intersection(set_j):
-                label_mask[i, j] = True
-                label_mask[j, i] = True
-                
-    positive_mask = (difficulty_mask & label_mask)
-    positive_mask.fill_diagonal_(False)
-    
+
     return (
         padded_vectors.to(device),
         attention_mask.to(device),
         stacked_ratings.to(device),
         labels,
-        tags,
-        positive_mask.to(device)
+        tags
     )
 
 class FinetuningDataset(Dataset):
