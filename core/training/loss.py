@@ -186,10 +186,9 @@ def contrastive_loss_fn(
 
     required_keys = ['raw_difficulty_ratings', 'collection_labels']
     if 'contrastive_projection' in predictions and all(k in labels for k in required_keys):
-        sampler_config = finetuning_config.get('sampler', {})
-        sigma = sampler_config.get('difficulty_decay_scale', 0.5)
-        beta = sampler_config.get('cross_label_similarity_factor', 0.2)
-        gamma = sampler_config.get('same_label_base_similarity', 0.4)
+        sigma = finetuning_config.get('difficulty_decay_scale', 0.5)
+        beta = finetuning_config.get('cross_label_similarity_factor', 0.2)
+        gamma = finetuning_config.get('same_label_base_similarity', 0.4)
 
         ratings = labels['raw_difficulty_ratings']
         encoded_labels = labels['collection_labels']

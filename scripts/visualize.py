@@ -270,7 +270,7 @@ def main():
         )
         title_suffix = 'Unlabeled Beatmap Embeddings'
 
-    fig = go.Figure(data=go.Scatter(
+    fig = go.Figure(data=go.Scattergl(
         x=embeddings_2d[:, 0], y=embeddings_2d[:, 1], mode='markers',
         marker=dict(
             color=sampled_ratings, colorscale='Viridis', showscale=True,

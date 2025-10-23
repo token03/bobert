@@ -4,6 +4,8 @@ data:
   max_samples_per_class:
     aim: 2500
     tech: 2500
+  min_stars: 4.0
+  max_stars: 12.0
 
 model:
   d_model: 512
@@ -72,10 +74,10 @@ finetuning:
   temperature: 0.05
 
   user_tag_weight: 0.0
-  collection_label_weight: 1.0
-  difficulty_rating_weight: 1.0
-  aim_loss_weight: 1.0
-  speed_loss_weight: 1.0
+  collection_label_weight: 0.2
+  difficulty_rating_weight: 0.1
+  aim_loss_weight: 0.1
+  speed_loss_weight: 0.1
   contrastive_weight: 1.0
 
   difficulty_decay_scale: 0.3
