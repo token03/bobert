@@ -325,7 +325,7 @@ def load_finetuning_dataset(
     raw_beatmap_path: str = "./data/raw",
     cache_path: str = "./data/difficulty_attributes_cache.json",
     max_samples_per_class: Optional[Dict[str, int]] = None,
-) -> Tuple[List[torch.Tensor], np.ndarray, List[List[str]], List[List[str]]]:
+) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], List[List[str]], List[List[str]]]:
     print("Loading fine-tuning dataset with labels and tags...")
 
     if not os.path.exists(labels_path):
