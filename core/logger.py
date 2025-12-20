@@ -95,19 +95,19 @@ class TrainingLogger:
             print("Difficulty MAE:")
             for name, mae in val_metrics['difficulty_metrics'].items():
                 attr_name = name.replace('_mae', '')
-                print(f"  {attr_name}: {mae:.4f}")
+                print(f"  {attr_name:<15}: {mae:.4f}")
 
         if 'continuous_metrics' in val_metrics:
             print("Continuous Features:")
             for name in self.standard_cont_names:
                  if name in val_metrics['continuous_metrics']:
                     metrics = val_metrics['continuous_metrics'][name]
-                    print(f"  {name}: MAE {metrics['mae']:.4f}, Median {metrics['median']:.3f}, IQR {metrics['iqr']:.3f}, MAPE {metrics['mape']:.1f}%")
+                    print(f"  {name:<15}: MAE {metrics['mae']:.4f}")
 
         if 'categorical_metrics' in val_metrics:
             print("Categorical Features:")
             for name, metrics in val_metrics['categorical_metrics'].items():
-                print(f"  {name}: Acc {metrics['accuracy']:.2%}, Prec {metrics['precision']:.4f}, Rec {metrics['recall']:.4f}, Classes {metrics['num_active_classes']}, Entropy {metrics['class_balance_entropy']:.3f}")
+                print(f"  {name:<15}: Acc {metrics['accuracy']:.2%}, Prec {metrics['precision']:.4f}, Rec {metrics['recall']:.4f}")
     
     def log_training_end(self):
         print("\n--- Training Finished ---")

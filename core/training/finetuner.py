@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from .checkpoint import CheckpointManager
 from .metrics import MetricsTracker, FineTuneEpochMetrics
 from .optimization import create_optimizer, create_scheduler
+from ..data.types import DIFFICULTY_ATTRIBUTES
 from .loss import contrastive_loss_fn
 from ..data.transforms import BeatmapNormalizer
 
@@ -88,12 +89,10 @@ class FineTuningTrainer:
             'raw_collection_labels': collection_labels 
         }
 
-        if norm_difficulty_ratings.shape[-1] >= 4:
+        if norm_difficulty_ratings.shape[-1] >= len(DIFFICULTY_ATTRIBUTES):
             labels_dict['difficulty_labels'] = {
-                'stars': norm_difficulty_ratings[:, 0],
-                'aim': norm_difficulty_ratings[:, 1],
-                'speed': norm_difficulty_ratings[:, 2],
-                'slider_factor': norm_difficulty_ratings[:, 3],
+                name: norm_difficulty_ratings[:, i]
+                for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
             }
         
         if any(collection_labels):

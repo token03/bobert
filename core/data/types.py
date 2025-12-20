@@ -9,6 +9,11 @@ DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8,
 
 SNAP_BINS = [0, 1/16, 1/12, 1/8, 1/6, 1/4, 1/3, 3/8, 1/2, 5/8, 2/3, 3/4, 5/6, 7/8, 11/12, 15/16]
 
+DIFFICULTY_ATTRIBUTES = [
+    'stars', 'aim', 'speed', 'slider_factor',
+    'hp', 'cs', 'od', 'ar', 'slider_multiplier'
+]
+
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
     STANDARD = "standard"
@@ -33,16 +38,19 @@ class HitObjectVector(NamedTuple):
     delta_y: float
     log_time_diff_ms: float
     bpm: float
+    notes_per_second: float
+    velocity: float
+    relative_angle: float
     
     log_slider_pixel_length: float
     slider_repeats: float
     delta_slider_end_x: float
     delta_slider_end_y: float
+    slider_tortuosity: float
     beat_in_measure: float
     
     object_type: int
     is_new_combo: int
-    kiai_time: int
     time_diff_bin: int
     duration_bin: int
     snap_in_beat: int
@@ -68,11 +76,12 @@ class HitObjectVector(NamedTuple):
 
         slider_feature_names = [
             'log_slider_pixel_length', 'slider_repeats', 
-            'delta_slider_end_x', 'delta_slider_end_y', 'duration_bin'
+            'delta_slider_end_x', 'delta_slider_end_y', 'slider_tortuosity',
+            'duration_bin'
         ]
 
         categorical_features = [
-            'object_type', 'is_new_combo', 'kiai_time', 'beat_in_measure',
+            'object_type', 'is_new_combo', 'beat_in_measure',
             'time_diff_bin', 'duration_bin', 'snap_in_beat', 
         ]
         
@@ -81,7 +90,6 @@ class HitObjectVector(NamedTuple):
         cat_cardinalities = {
             'object_type': 3,
             'is_new_combo': 2,
-            'kiai_time': 2,
             'beat_in_measure': MAX_METER_CARDINALITY,
             'time_diff_bin': len(DURATION_BINS),
             'duration_bin': len(DURATION_BINS),
@@ -114,14 +122,17 @@ class HitObjectVector(NamedTuple):
             'delta_y': NormalizationType.STANDARD,
             'log_time_diff_ms': NormalizationType.STANDARD,
             'bpm': NormalizationType.STANDARD,
+            'notes_per_second': NormalizationType.STANDARD,
+            'velocity': NormalizationType.STANDARD,
+            'relative_angle': NormalizationType.NONE,
             'log_slider_pixel_length': NormalizationType.STANDARD,
             'slider_repeats': NormalizationType.STANDARD,
             'delta_slider_end_x': NormalizationType.STANDARD,
             'delta_slider_end_y': NormalizationType.STANDARD,
+            'slider_tortuosity': NormalizationType.STANDARD,
             
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
-            'kiai_time': NormalizationType.CATEGORICAL,
             'beat_in_measure': NormalizationType.CATEGORICAL,
             'time_diff_bin': NormalizationType.CATEGORICAL,
             'duration_bin': NormalizationType.CATEGORICAL,
@@ -137,14 +148,17 @@ class HitObjectVector(NamedTuple):
             'delta_y': "Change in y from the previous object",
             'log_time_diff_ms': "Log-transformed time difference in milliseconds from previous object",
             'bpm': "Beats Per Minute at the time of the hit object",
+            'notes_per_second': "Number of hit objects in the last 1 second",
+            'velocity': "Euclidean distance between objects divided by time difference",
+            'relative_angle': "Inner angle in radians formed by (n-1, n, n+1)",
             'log_slider_pixel_length': "Log-transformed pixel length of slider's curve path",
             'slider_repeats': "Number of slider repeats (slides - 1)",
             'delta_slider_end_x': "Change in x from start to end of the slider path",
             'delta_slider_end_y': "Change in y from start to end of the slider path",
+            'slider_tortuosity': "Ratio of slider visual pixel length to Euclidean distance between start and end",
             
             'object_type': "Type of hit object (circle, slider, spinner)",
             'is_new_combo': "Whether this hit object starts a new combo",
-            'kiai_time': "Whether the hit object is in kiai time",
             'beat_in_measure': "Which beat of the measure it falls on (categorical, 0-indexed).",
             'time_diff_bin': "Quantized time difference to previous hit object in beats",
             'duration_bin': "Quantized duration of the hit object in beats",

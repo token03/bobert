@@ -3,15 +3,15 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections import Counter
 from typing import Dict, Any, Optional, List
 
 import numpy as np
-from scipy.stats import spearmanr
 from sklearn.metrics import ndcg_score
 from torchmetrics import MetricCollection
-from torchmetrics.aggregation import MeanMetric, CatMetric
+from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import Accuracy, Precision, Recall
+
+from core.data.types import DIFFICULTY_ATTRIBUTES
 
 class PretrainEpochMetrics(nn.Module):
     def __init__(self, feature_info: Dict[str, Any], standard_cont_names: List[str], 
@@ -24,7 +24,6 @@ class PretrainEpochMetrics(nn.Module):
         self.standard_cont_metrics = MetricCollection({
             name: MeanMetric() for name in self.standard_cont_names
         }).to(device)
-        self.cont_target_aggregator = CatMetric().to(device)
         self.cat_metrics = nn.ModuleDict()
         for name, info in self.feature_info['categorical'].items():
             num_classes = info['cardinality']
@@ -32,14 +31,10 @@ class PretrainEpochMetrics(nn.Module):
                 'accuracy': Accuracy(task="multiclass", num_classes=num_classes),
                 'precision': Precision(task="multiclass", num_classes=num_classes, average='macro', zero_division=0),
                 'recall': Recall(task="multiclass", num_classes=num_classes, average='macro', zero_division=0),
-                'target_aggregator': CatMetric(),
             }).to(device)
         
         self.difficulty_metrics = MetricCollection({
-            'stars_mae': MeanMetric(),
-            'aim_mae': MeanMetric(),
-            'speed_mae': MeanMetric(),
-            'slider_factor_mae': MeanMetric()
+            f'{name}_mae': MeanMetric() for name in DIFFICULTY_ATTRIBUTES
         }).to(device)
 
     def update(self, predictions: Dict[str, torch.Tensor], targets: torch.Tensor, mask: torch.Tensor, difficulty_labels: Dict[str, torch.Tensor]):
@@ -56,7 +51,6 @@ class PretrainEpochMetrics(nn.Module):
             abs_errors = torch.abs(std_cont_preds - std_cont_targets)
             for i, name in enumerate(self.standard_cont_names):
                 self.standard_cont_metrics[name].update(abs_errors[:, i])
-            self.cont_target_aggregator.update(std_cont_targets)
 
             for name, info in self.feature_info['categorical'].items():
                 pred_logits = predictions['mlm']['categorical'][name][mask]
@@ -65,7 +59,6 @@ class PretrainEpochMetrics(nn.Module):
                 self.cat_metrics[name]['accuracy'].update(pred_classes, target_classes)
                 self.cat_metrics[name]['precision'].update(pred_classes, target_classes)
                 self.cat_metrics[name]['recall'].update(pred_classes, target_classes)
-                self.cat_metrics[name]['target_aggregator'].update(target_classes)
 
         for key, preds in predictions['difficulty'].items():
             if key in difficulty_labels:
@@ -76,42 +69,18 @@ class PretrainEpochMetrics(nn.Module):
         results = {}
         
         cont_metrics = {}
-        all_cont_targets = self.cont_target_aggregator.compute()
-        if all_cont_targets.numel() > 0:
-            mae_results = self.standard_cont_metrics.compute()
-            targets_np = all_cont_targets.cpu().numpy()
-
-            for i, name in enumerate(self.standard_cont_names):
-                target_values = targets_np[:, i]
-                mae = mae_results[name].item()
-
-                median = np.median(target_values)
-                q25, q75 = np.percentile(target_values, [25, 75])
-                iqr = q75 - q25
-                mape = np.mean(np.abs((target_values - median) / (median + 1e-8))) * 100
-
-                cont_metrics[name] = {
-                    'mae': mae,
-                    'median': median,
-                    'iqr': iqr,
-                    'mape': mape,
-                    'range_min': np.min(target_values),
-                    'range_max': np.max(target_values)
-                }
+        mae_results = self.standard_cont_metrics.compute()
+        for name in self.standard_cont_names:
+            if name in mae_results:
+                cont_metrics[name] = {'mae': mae_results[name].item()}
         if cont_metrics:
             results['continuous_metrics'] = cont_metrics
 
         cat_metrics = {}
         for name, collection in self.cat_metrics.items():
             cat_results = collection.compute()
-            targets_for_dist = cat_results.pop('target_aggregator')
-            if targets_for_dist.numel() > 0:
+            if any(v.numel() > 0 for v in cat_results.values()):
                 cat_metrics[name] = {k: v.item() for k, v in cat_results.items()}
-                targets_np = targets_for_dist.cpu().numpy()
-                unique_classes, class_counts = np.unique(targets_np, return_counts=True)
-                class_balance = class_counts / len(targets_np)
-                cat_metrics[name]['class_balance_entropy'] = -np.sum(class_balance * np.log(class_balance + 1e-8))
-                cat_metrics[name]['num_active_classes'] = len(unique_classes)
         if cat_metrics:
             results['categorical_metrics'] = cat_metrics
             
@@ -124,7 +93,6 @@ class PretrainEpochMetrics(nn.Module):
     
     def reset(self):
         self.standard_cont_metrics.reset()
-        self.cont_target_aggregator.reset()
         for collection in self.cat_metrics.values():
             collection.reset()
         self.difficulty_metrics.reset()
@@ -140,10 +108,9 @@ class FineTuneEpochMetrics(nn.Module):
             'total_loss': MeanMetric(),
             'user_tag_loss': MeanMetric(),
             'collection_label_loss': MeanMetric(),
-            'difficulty_rating_loss': MeanMetric(),
-            'user_tag_contrastive_loss': MeanMetric(),
-            'collection_label_contrastive_loss': MeanMetric(),
-            'difficulty_contrastive_loss': MeanMetric(),
+            'difficulty_loss': MeanMetric(),
+            'contrastive_loss': MeanMetric(),
+            **{f'{name}_loss': MeanMetric() for name in DIFFICULTY_ATTRIBUTES}
         })
 
     def update_batch_metrics(self, losses: Dict[str, float]):

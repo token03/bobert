@@ -13,7 +13,7 @@ import concurrent.futures
 import itertools
 import rosu_pp_py as rosu
 
-from .types import HitObjectVector, DURATION_BINS, quantize_to_bins, DIFFICULTY_ATTRIBUTES
+from .types import HitObjectVector, DURATION_BINS, quantize_to_bins
 
 def _calculate_difficulty_attributes_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
@@ -44,9 +44,10 @@ def _calculate_difficulty_attributes_worker(
 
         if target_attrs:
             return {
-                k: getattr(target_attrs, k) if k in ['stars', 'aim', 'speed', 'slider_factor']
-                else getattr(beatmap, k)
-                for k in DIFFICULTY_ATTRIBUTES
+                'stars': target_attrs.stars,
+                'aim': target_attrs.aim,
+                'speed': target_attrs.speed,
+                'slider_factor': target_attrs.slider_factor
             }
         
         return None
@@ -121,6 +122,8 @@ def _engineer_features_vectorized(
     df['beat_id'] = np.floor(df['cum_beats'] + 1e-4)
     
     # Calculate notes per second: count of objects in the last 1000ms
+    one_second_ago = df['time'] - 1000.0
+    
     def count_notes_in_last_second(group):
         times = group['time'].values
         counts = np.zeros(len(times), dtype=np.float32)
@@ -129,21 +132,7 @@ def _engineer_features_vectorized(
             counts[i] = np.sum(times[:i+1] >= threshold)
         return counts
     
-    df['notes_per_second'] = grouped.apply(count_notes_in_last_second, include_groups=False).explode().astype(np.float32).values
-
-    df['dist'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2)
-    df['velocity'] = df['dist'] / df['time_diff_ms'].replace(0, np.nan)
-    df['velocity'] = df['velocity'].fillna(0)
-
-    next_x = grouped['x'].shift(-1)
-    next_y = grouped['y'].shift(-1)
-    v1_x, v1_y = prev_x - df['x'], prev_y - df['y']
-    v2_x, v2_y = next_x - df['x'], next_y - df['y']
-    norm_v1 = np.sqrt(v1_x**2 + v1_y**2)
-    norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
-    dot = v1_x * v2_x + v1_y * v2_y
-    cos_theta = dot / (norm_v1 * norm_v2).replace(0, np.nan)
-    df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi) # Default to pi (180 deg) for stacks/ends
+    df['notes_per_second'] = grouped.apply(count_notes_in_last_second).explode().astype(np.float32).values
 
     df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
     
@@ -156,13 +145,10 @@ def _engineer_features_vectorized(
     df['delta_slider_end_x'] = raw_slider_end_x - df['x']
     df['delta_slider_end_y'] = raw_slider_end_y - df['y']
     
-    df['slider_dist'] = np.sqrt(df['delta_slider_end_x']**2 + df['delta_slider_end_y']**2)
-    df['slider_tortuosity'] = df['pixel_length'] / df['slider_dist'].replace(0, np.nan)
-    df['slider_tortuosity'] = df['slider_tortuosity'].fillna(1.0)
-    
     df['duration_ms'] = df['end_time'] - df['time']
     df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
     df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
+    if 'kiai_time' not in df.columns: df['kiai_time'] = 0
 
     vector_field_names = HitObjectVector.get_field_names()
     vector_df = df[['beatmap_id'] + vector_field_names]
@@ -228,6 +214,7 @@ def load_dataset(
     print(f"Loaded raw feature vectors for {len(processed_data)} beatmaps.")
     print("Calculating difficulty attributes (will use cache if available)...")
 
+    # 1. Determine target sequence length for each map
     id_to_vectors = {bid: vec for bid, vec in zip(loaded_ids, processed_data)}
     id_to_seq_len = {}
     for bid, vectors in id_to_vectors.items():
@@ -236,6 +223,7 @@ def load_dataset(
             target_len = min(target_len, max_seq_len)
         id_to_seq_len[int(bid)] = target_len
 
+    # 2. Load cache and identify what needs to be calculated
     cache_dir = os.path.dirname(cache_path)
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
@@ -249,10 +237,10 @@ def load_dataset(
     tasks_to_run = []
     for bid, seq_len in id_to_seq_len.items():
         str_bid, str_seq_len = str(bid), str(seq_len)
-        cached_attrs = difficulty_cache.get(str_bid, {}).get(str_seq_len)
-        if not cached_attrs or not all(k in cached_attrs for k in DIFFICULTY_ATTRIBUTES):
+        if str_bid not in difficulty_cache or str_seq_len not in difficulty_cache.get(str_bid, {}):
             tasks_to_run.append((bid, seq_len))
     
+    # 3. Run calculations in parallel for uncached attributes
     if tasks_to_run:
         if not os.path.isdir(raw_beatmap_path):
             raise FileNotFoundError(f"Raw beatmap path '{raw_beatmap_path}' not found. "
@@ -275,11 +263,13 @@ def load_dataset(
         with open(cache_path, 'w') as f:
             json.dump(difficulty_cache, f)
 
+    # 4. Assemble final dataset using the cache, filtering out failures
     final_data_filtered = []
     final_ids_filtered = []
     final_attributes = defaultdict(list)
     
-    expected_attr_keys = DIFFICULTY_ATTRIBUTES
+    # Define the expected keys to ensure consistency across all beatmaps
+    expected_attr_keys = ['stars', 'aim', 'speed', 'slider_factor']
 
     for bid in loaded_ids:
         seq_len = id_to_seq_len[int(bid)]
@@ -305,6 +295,7 @@ def load_dataset(
     loaded_ids = np.array(final_ids_filtered)
     final_attributes = {k: np.array(v) for k, v in final_attributes.items()}
 
+    # 5. Run final data integrity check for NaNs/Infs
     print("Running final data integrity check...")
     final_data_validated, validated_ids = [], []
     validated_attributes = defaultdict(list)
@@ -319,9 +310,11 @@ def load_dataset(
             attr_val = arr[i]
             is_problematic = False
             try:
+                # This check will raise TypeError on non-numeric types like None or strings
                 if np.isnan(attr_val) or np.isinf(attr_val):
                     is_problematic = True
             except TypeError:
+                # If it's not a numeric type that can be checked, it's problematic
                 is_problematic = True
             
             if is_problematic:

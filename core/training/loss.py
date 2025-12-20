@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Any
 import warnings
 
-from core.data.types import SLIDER_TYPE_INDEX, HitObjectVector
+from core.data.types import SLIDER_TYPE_INDEX, HitObjectVector, DIFFICULTY_ATTRIBUTES
 
 def mlm_loss_fn(
     predictions: Dict[str, Any], 
@@ -83,11 +83,17 @@ def pretrain_loss_fn(
         'aim': pretrain_config.get('aim_loss_weight', 1.0),
         'speed': pretrain_config.get('speed_loss_weight', 1.0),
         'slider_factor': pretrain_config.get('slider_factor_loss_weight', 0.5),
+        'hp': pretrain_config.get('hp_loss_weight', 0.2),
+        'cs': pretrain_config.get('cs_loss_weight', 0.2),
+        'od': pretrain_config.get('od_loss_weight', 0.5),
+        'ar': pretrain_config.get('ar_loss_weight', 0.5),
+        'slider_multiplier': pretrain_config.get('slider_multiplier_loss_weight', 0.2),
     }
 
     difficulty_loss_sum = torch.zeros_like(mlm_loss)
 
-    for key, weight in diff_loss_weights.items():
+    for key in DIFFICULTY_ATTRIBUTES:
+        weight = diff_loss_weights.get(key, 1.0)
         if key in diff_preds and key in difficulty_labels:
             loss = F.mse_loss(diff_preds[key], difficulty_labels[key])
             losses[f'{key}_loss'] = loss
@@ -169,11 +175,17 @@ def contrastive_loss_fn(
             'aim': finetuning_config.get('aim_loss_weight', 1.0),
             'speed': finetuning_config.get('speed_loss_weight', 1.0),
             'slider_factor': finetuning_config.get('slider_factor_loss_weight', 0.5),
+            'hp': finetuning_config.get('hp_loss_weight', 0.2),
+            'cs': finetuning_config.get('cs_loss_weight', 0.2),
+            'od': finetuning_config.get('od_loss_weight', 0.5),
+            'ar': finetuning_config.get('ar_loss_weight', 0.5),
+            'slider_multiplier': finetuning_config.get('slider_multiplier_loss_weight', 0.2),
         }
 
         difficulty_loss_sum = torch.zeros_like(total_loss)
 
-        for key, weight in diff_loss_weights.items():
+        for key in DIFFICULTY_ATTRIBUTES:
+            weight = diff_loss_weights.get(key, 1.0)
             if key in predictions['difficulty'] and key in labels['difficulty_labels']:
                 loss = F.mse_loss(predictions['difficulty'][key], labels['difficulty_labels'][key])
                 losses[f'{key}_loss'] = loss

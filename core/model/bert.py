@@ -8,7 +8,7 @@ import math
 from rotary_embedding_torch import RotaryEmbedding
 
 from .components import TransformerEncoderLayer, GatedConv1D, RMSNorm
-from ..data.types import HitObjectVector
+from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES
 
 T = TypeVar('T', bound='BertEncoder')
 
@@ -191,7 +191,7 @@ class BertForPretraining(nn.Module):
         self.difficulty_attribute_head = nn.Sequential(
             nn.Linear(bert_model.d_model, bert_model.d_model // 2),
             nn.GELU(),
-            nn.Linear(bert_model.d_model // 2, 4)
+            nn.Linear(bert_model.d_model // 2, len(DIFFICULTY_ATTRIBUTES))
         )
         
     @classmethod
@@ -313,10 +313,8 @@ class BertForPretraining(nn.Module):
         cls_output = encoded_output[:, 0]
         difficulty_preds_raw = self.difficulty_attribute_head(cls_output)
         difficulty_predictions = {
-            'stars': difficulty_preds_raw[:, 0],
-            'aim': difficulty_preds_raw[:, 1],
-            'speed': difficulty_preds_raw[:, 2],
-            'slider_factor': difficulty_preds_raw[:, 3],
+            name: difficulty_preds_raw[:, i]
+            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
         }
 
         predictions = {
@@ -343,7 +341,7 @@ class BertForContrastiveFineTuning(nn.Module):
         self.difficulty_attribute_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model // 2),
             nn.GELU(),
-            nn.Linear(self.d_model // 2, 4) 
+            nn.Linear(self.d_model // 2, len(DIFFICULTY_ATTRIBUTES)) 
         )
 
         self.contrastive_projection = nn.Sequential(
@@ -404,10 +402,8 @@ class BertForContrastiveFineTuning(nn.Module):
 
         difficulty_preds_raw = self.difficulty_attribute_head(cls_representation)
         predictions['difficulty'] = {
-            'stars': difficulty_preds_raw[:, 0],
-            'aim': difficulty_preds_raw[:, 1],
-            'speed': difficulty_preds_raw[:, 2],
-            'slider_factor': difficulty_preds_raw[:, 3],
+            name: difficulty_preds_raw[:, i]
+            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
         }
 
         return predictions

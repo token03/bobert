@@ -2,7 +2,7 @@
 import torch
 import numpy as np
 from typing import List, Tuple, Optional, Set, Dict, Any
-from .types import HitObjectVector, NormalizationType
+from .types import HitObjectVector, NormalizationType, DIFFICULTY_ATTRIBUTES
 
 def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, descriptions: Dict, stats: Dict):
     print(f"\n--- {title}:")
@@ -53,12 +53,7 @@ def create_normalizer_from_data(
         "ATTRIBUTE STATISTICS",
         list(difficulty_attributes.keys()),
         {},
-        {
-            'stars': 'Star difficulty rating',
-            'aim': 'Aim skill rating',
-            'speed': 'Speed skill rating',
-            'slider_factor': 'Slider difficulty factor'
-        },
+        {name: f"{name} attribute" for name in DIFFICULTY_ATTRIBUTES},
         normalizer.get_attribute_stats()
     )
     print("="*80)
@@ -119,17 +114,29 @@ class BeatmapNormalizer:
         return normalized_attrs
 
     def normalize_difficulty(self, ratings: torch.Tensor) -> torch.Tensor:
-        """Convenience method for fine-tuning, which only uses star rating."""
-        if 'stars' not in self.attribute_stats:
-            raise ValueError("Difficulty normalization requested but 'stars' statistics are not set.")
-        mean, std = self.attribute_stats['stars']
-        return (ratings - mean) / (std + self.epsilon)
+        if ratings.dim() == 1 or ratings.shape[1] == 1:
+            mean, std = self.attribute_stats['stars']
+            return (ratings - mean) / (std + self.epsilon)
+        
+        normalized = torch.zeros_like(ratings)
+        for i, key in enumerate(DIFFICULTY_ATTRIBUTES):
+            if i < ratings.shape[1] and key in self.attribute_stats:
+                mean, std = self.attribute_stats[key]
+                normalized[:, i] = (ratings[:, i] - mean) / (std + self.epsilon)
+        return normalized
 
     def denormalize_difficulty(self, normalized_ratings: torch.Tensor) -> torch.Tensor:
-        if 'stars' not in self.attribute_stats:
-            return normalized_ratings
-        mean, std = self.attribute_stats['stars']
-        return normalized_ratings * (std + self.epsilon) + mean
+        if normalized_ratings.dim() == 1 or normalized_ratings.shape[1] == 1:
+            if 'stars' not in self.attribute_stats: return normalized_ratings
+            mean, std = self.attribute_stats['stars']
+            return normalized_ratings * (std + self.epsilon) + mean
+            
+        denormalized = torch.zeros_like(normalized_ratings)
+        for i, key in enumerate(DIFFICULTY_ATTRIBUTES):
+            if i < normalized_ratings.shape[1] and key in self.attribute_stats:
+                mean, std = self.attribute_stats[key]
+                denormalized[:, i] = normalized_ratings[:, i] * (std + self.epsilon) + mean
+        return denormalized
 
     @classmethod
     def from_data(
@@ -173,6 +180,19 @@ class BeatmapNormalizer:
         """For backward compatibility with checkpointing and fine-tuning setup."""
         return self.attribute_stats.get('stars')
 
+    def update_attribute_stats(self, key: str, values: torch.Tensor):
+        if not torch.is_tensor(values):
+            values = torch.as_tensor(values, dtype=torch.float32)
+        if values.numel() == 0:
+            raise ValueError(f"Cannot compute statistics for '{key}' from an empty tensor.")
+
+        values = values.to(dtype=torch.float32)
+        mean = values.mean()
+        std = torch.clamp(values.std(unbiased=False), min=self.epsilon)
+
+        self.attribute_stats[key] = (mean, std)
+        return self.attribute_stats[key]
+
     def update_difficulty_stats(self, ratings: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """For backward compatibility, updates the 'stars' attribute."""
         if not torch.is_tensor(ratings):
@@ -181,6 +201,13 @@ class BeatmapNormalizer:
             raise ValueError("Cannot compute difficulty statistics from an empty ratings tensor.")
 
         ratings = ratings.to(dtype=torch.float32)
+        
+        if ratings.dim() > 1 and ratings.shape[1] > 1:
+            for i, key in enumerate(DIFFICULTY_ATTRIBUTES):
+                if i < ratings.shape[1]:
+                    self.update_attribute_stats(key, ratings[:, i])
+            return self.attribute_stats['stars']
+
         mean = ratings.mean()
         std = torch.clamp(ratings.std(unbiased=False), min=self.epsilon)
 
