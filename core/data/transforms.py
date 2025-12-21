@@ -4,20 +4,22 @@ import numpy as np
 from typing import List, Tuple, Optional, Set, Dict, Any
 from .types import HitObjectVector, NormalizationType, DIFFICULTY_ATTRIBUTES
 
-def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, descriptions: Dict, stats: Dict):
+def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, stats: Dict):
     print(f"\n--- {title}:")
-    print("-" * 80)
-    print(f"{'Field Name':<22} {'Type':<12} {'Param 1':<12} {'Param 2':<12} {'Description'}")
-    print("-" * 80)
+    print("-" * 60)
+    print(f"{'Field Name':<22} {'Type':<12} {'Param 1':<12} {'Param 2':<12}")
+    print("-" * 60)
+
+    categorical_fields = []
 
     for field_name in field_names:
         norm_type = norm_specs.get(field_name, NormalizationType.STANDARD)
-        description = descriptions.get(field_name, 'Unknown field')
         param1_str, param2_str = "N/A", "N/A"
         type_str = str(norm_type.value)
 
         if norm_type == NormalizationType.CATEGORICAL:
             type_str = "categorical"
+            categorical_fields.append(field_name)
         elif field_name in stats:
             param1, param2 = stats[field_name]
             param1_str = f"{param1:.4f}"
@@ -29,7 +31,31 @@ def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, des
             elif norm_type == NormalizationType.MINMAX:
                 type_str = "min/max"
 
-        print(f"{field_name:<22} {type_str:<12} {param1_str:<12} {param2_str:<12} {description}")
+        print(f"{field_name:<22} {type_str:<12} {param1_str:<12} {param2_str:<12}")
+    
+    return categorical_fields
+
+def _print_categorical_table(all_vectors_tensor: torch.Tensor, field_names: List[str], categorical_fields: List[str]):
+    if not categorical_fields:
+        return
+    
+    print(f"\n--- CATEGORICAL DISTRIBUTIONS (Top 5):")
+    print("-" * 60)
+    print(f"{'Field Name':<22} {'Top Values (Percentage Value)'}")
+    print("-" * 60)
+
+    for field_name in categorical_fields:
+        idx = field_names.index(field_name)
+        data = all_vectors_tensor[:, idx].numpy()
+        values, counts = np.unique(data, return_counts=True)
+        total = len(data)
+        
+        # Sort by counts descending
+        sorted_indices = np.argsort(-counts)
+        top_indices = sorted_indices[:5]
+        
+        dist_str = " ".join([f"{counts[i]/total:.0%} {values[i]:.0f}" for i in top_indices])
+        print(f"{field_name:<22} {dist_str}")
 
 def create_normalizer_from_data(
     train_data: List[torch.Tensor],
@@ -41,19 +67,21 @@ def create_normalizer_from_data(
     print("                    NORMALIZATION STATISTICS")
     print("="*80)
 
-    _print_stats_table(
+    vector_field_names = HitObjectVector.get_field_names()
+    categorical_fields = _print_stats_table(
         "VECTOR STATISTICS",
-        HitObjectVector.get_field_names(),
+        vector_field_names,
         HitObjectVector.get_normalization_specs(),
-        HitObjectVector.get_field_descriptions(),
         normalizer.get_vector_stats()
     )
+    
+    all_vectors_tensor = torch.cat(train_data, dim=0)
+    _print_categorical_table(all_vectors_tensor, vector_field_names, categorical_fields)
     
     _print_stats_table(
         "ATTRIBUTE STATISTICS",
         list(difficulty_attributes.keys()),
         {},
-        {name: f"{name} attribute" for name in DIFFICULTY_ATTRIBUTES},
         normalizer.get_attribute_stats()
     )
     print("="*80)

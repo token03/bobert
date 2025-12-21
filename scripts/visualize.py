@@ -60,8 +60,8 @@ def get_beatmap_ids_in_order(dataset_path: str) -> pd.DataFrame:
         
     return final_beatmaps_df[columns_to_select].reset_index(drop=True)
 
-def load_model_and_normalizer(config: dict, device: torch.device) -> tuple:
-    print("Loading model and normalization stats...")
+def load_model_and_normalizer(config: dict, device: torch.device, model_type: str = "finetune") -> tuple:
+    print(f"Loading {model_type} model and normalization stats...")
     model = BertForContrastiveFineTuning.from_config(config, device)
     model.eval()
     pretrain_manager = CheckpointManager(CHECKPOINT_DIR, model_name=PRETRAIN_MODEL_NAME)
@@ -79,10 +79,11 @@ def load_model_and_normalizer(config: dict, device: torch.device) -> tuple:
     normalizer = BeatmapNormalizer(vector_stats=vector_stats)
     print("Successfully created normalizer from pre-trained stats.")
 
-    finetune_manager = CheckpointManager(CHECKPOINT_DIR, model_name=FINETUNED_MODEL_NAME)
-    ckpt_path = finetune_manager.get_checkpoint_path('latest')
+    model_name = FINETUNED_MODEL_NAME if model_type == "finetune" else PRETRAIN_MODEL_NAME
+    manager = CheckpointManager(CHECKPOINT_DIR, model_name=model_name)
+    ckpt_path = manager.get_checkpoint_path('latest')
     if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Fine-tuned checkpoint not found at {ckpt_path}")
+        raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = checkpoint['model_state_dict']
     compiled_prefix = '_orig_mod.'
@@ -109,7 +110,7 @@ def load_model_and_normalizer(config: dict, device: torch.device) -> tuple:
             print(f"Info: Ignored missing optional keys in checkpoint: {missing_keys}")
     if unexpected_keys:
         print(f"Warning: Unexpected keys in checkpoint were ignored: {unexpected_keys}")
-    print(f"Loaded fine-tuned model weights from {ckpt_path}")
+    print(f"Loaded {model_type} model weights from {ckpt_path}")
     return model, normalizer
 
 class InferenceDataset(Dataset):
@@ -147,7 +148,14 @@ def main():
     parser.add_argument("--test", action="store_true", help="Use the test dataset.")
     parser.add_argument("--sample_size", type=int, default=DEFAULT_SAMPLE_SIZE, help="Number of beatmaps to sample.")
     parser.add_argument("--labelled", action="store_true", help="Visualize only labeled beatmaps.")
+    
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--pretrain", action="store_true", help="Use the pre-trained model.")
+    group.add_argument("--finetune", action="store_true", help="Use the fine-tuned model (default).")
+    
     args = parser.parse_args()
+    
+    model_type = "pretrain" if args.pretrain else "finetune"
     
     dataset_name = "beatmap_dataset_test" if args.test else "beatmap_dataset"
     dataset_path = os.path.join("data", dataset_name)
@@ -228,7 +236,7 @@ def main():
                   f"{sampled_ratings.shape[0]}. Truncating to match embeddings.", file=sys.stderr)
             sampled_ratings = sampled_ratings[:len(loaded_ids)]
 
-    model, normalizer = load_model_and_normalizer(config, device)
+    model, normalizer = load_model_and_normalizer(config, device, model_type=model_type)
  
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
         embeddings = generate_embeddings(model, normalizer, sampled_data, config, device)
@@ -259,7 +267,7 @@ def main():
             "<b>Click to open beatmap</b>"
             "<extra></extra>"
         )
-        title_suffix = 'Labeled Beatmap Embeddings'
+        title_suffix = f'{model_type.capitalize()} Labeled Beatmap Embeddings'
     else:
         custom_data = loaded_ids
         hovertemplate = (
@@ -268,7 +276,7 @@ def main():
             "<b>Click to open beatmap</b>"
             "<extra></extra>"
         )
-        title_suffix = 'Unlabeled Beatmap Embeddings'
+        title_suffix = f'{model_type.capitalize()} Unlabeled Beatmap Embeddings'
 
     fig = go.Figure(data=go.Scattergl(
         x=embeddings_2d[:, 0], y=embeddings_2d[:, 1], mode='markers',

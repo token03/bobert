@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.parser import parse_osu_file, _preprocess_timing_points
-from core.data.types import SNAP_BINS, MAX_METER_CARDINALITY
+from core.data.types import MAX_METER_CARDINALITY
 
 BEATMAPS_SCHEMA = pa.schema([
     ('beatmap_id', pa.int64()), ('category', pa.string()), ('hp_drain', pa.float32()),
@@ -34,12 +34,43 @@ HITOBJECTS_SCHEMA = pa.schema([
     ('bpm', pa.float32()), ('curve_type_char', pa.string()), ('num_anchors', pa.int32()),
     ('kiai_time', pa.int8()), ('slider_repeats', pa.int32()), ('hard_anchor_ratio', pa.float32()),
     ('slider_end_x', pa.int32()), ('slider_end_y', pa.int32()),
-    ('beat_in_measure', pa.int32()), ('snap_in_beat', pa.int32()), 
+    ('beat_in_measure', pa.int32()), ('rhythmic_snap', pa.int32()), 
 ])
 CURVEPOINTS_SCHEMA = pa.schema([
     ('beatmap_id', pa.int64()), ('hitobject_time', pa.int32()), ('point_index', pa.int32()),
     ('x', pa.int32()), ('y', pa.int32()), ('is_hard', pa.int8())
 ])
+
+def get_rhythmic_snap(beat_fraction: float) -> int:
+    """
+    Categorizes the rhythmic snap of a hit object within a beat.
+    0 (White): The Downbeat (Start of beat). High Emphasis.
+    1 (Red): The 1/2 beat. Medium Emphasis.
+    2 (Blue): The 1/4 beats. Standard Stream/Burst.
+    3 (Purple): The 1/3 and 1/6 beats. Swing/Triplet feel.
+    4 (Yellow/Other): 1/8, 1/12, 1/16. Grace notes / Tech / Errors.
+    5 (Unsnapped): Floating values.
+    """
+    f = beat_fraction % 1.0
+    if f < 1e-4 or f > 1.0 - 1e-4:
+        return 0 # White
+    
+    if abs(f - 0.5) < 1e-4:
+        return 1 # Red
+    
+    if any(abs(f - target) < 1e-4 for target in [0.25, 0.75]):
+        return 2 # Blue
+    
+    if any(abs(f - target) < 1e-4 for target in [1/3, 2/3, 1/6, 5/6]):
+        return 3 # Purple
+    
+    targets_1_8 = [1/8, 3/8, 5/8, 7/8]
+    targets_1_12 = [1/12, 5/12, 7/12, 11/12]
+    targets_1_16 = [1/16, 3/16, 5/16, 7/16, 9/16, 11/16, 13/16, 15/16]
+    if any(abs(f - target) < 1e-4 for target in targets_1_8 + targets_1_12 + targets_1_16):
+        return 4 # Yellow/Other
+    
+    return 5 # Unsnapped
 
 def worker(tasks_queue: mp.Queue, temp_dir: str):
     pid = os.getpid()
@@ -48,8 +79,6 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
     hitobjects_buffer = []
     curvepoints_buffer = []
     file_counter = 0
-
-    SNAP_BINS_NP = np.array(SNAP_BINS)
 
     while True:
         file_path = tasks_queue.get()
@@ -86,7 +115,7 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
                     kiai = 0
                     idx = bisect.bisect_right(section_start_times, ho.time) - 1
 
-                    beat_in_measure, snap_in_beat = 0, 0
+                    beat_in_measure, rhythmic_snap = 0, 0
                     if idx >= 0:
                         section = timing_sections[idx]
                         beat_length = section.uninherited.beat_length
@@ -108,7 +137,7 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
 
                             beat_fraction = beats_in_section - np.floor(beats_in_section)
                             if beat_fraction > 1.0 - 1e-4: beat_fraction = 0.0
-                            snap_in_beat = int(np.argmin(np.abs(SNAP_BINS_NP - beat_fraction)))
+                            rhythmic_snap = get_rhythmic_snap(beat_fraction)
 
                     num_anchors = 0
                     num_hard_anchors = 0
@@ -130,7 +159,7 @@ def worker(tasks_queue: mp.Queue, temp_dir: str):
                         'bpm': bpm, 'curve_type_char': ho.curve_type or '', 'num_anchors': num_anchors,
                         'kiai_time': kiai, 'slider_repeats': slider_repeats, 'hard_anchor_ratio': hard_anchor_ratio,
                         'slider_end_x': slider_end_x, 'slider_end_y': slider_end_y,
-                        'beat_in_measure': beat_in_measure, 'snap_in_beat': snap_in_beat, 
+                        'beat_in_measure': beat_in_measure, 'rhythmic_snap': rhythmic_snap, 
                     })
 
                     if ho.curve_points:

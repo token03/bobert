@@ -7,8 +7,6 @@ MAX_METER_CARDINALITY = 8
 
 DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
 
-SNAP_BINS = [0, 1/16, 1/12, 1/8, 1/6, 1/4, 1/3, 3/8, 1/2, 5/8, 2/3, 3/4, 5/6, 7/8, 11/12, 15/16]
-
 DIFFICULTY_ATTRIBUTES = [
     'stars', 'aim', 'speed', 'slider_factor',
     'hp', 'cs', 'od', 'ar', 'slider_multiplier'
@@ -41,6 +39,7 @@ class HitObjectVector(NamedTuple):
     notes_per_second: float
     velocity: float
     relative_angle: float
+    rhythm_change: float
     
     log_slider_pixel_length: float
     slider_repeats: float
@@ -53,7 +52,7 @@ class HitObjectVector(NamedTuple):
     is_new_combo: int
     time_diff_bin: int
     duration_bin: int
-    snap_in_beat: int
+    rhythmic_snap: int
     
     @classmethod
     def get_field_names(cls):
@@ -82,7 +81,7 @@ class HitObjectVector(NamedTuple):
 
         categorical_features = [
             'object_type', 'is_new_combo', 'beat_in_measure',
-            'time_diff_bin', 'duration_bin', 'snap_in_beat', 
+            'time_diff_bin', 'duration_bin', 'rhythmic_snap', 
         ]
         
         continuous_features = [f for f in field_names if f not in categorical_features]
@@ -93,7 +92,7 @@ class HitObjectVector(NamedTuple):
             'beat_in_measure': MAX_METER_CARDINALITY,
             'time_diff_bin': len(DURATION_BINS),
             'duration_bin': len(DURATION_BINS),
-            'snap_in_beat': len(SNAP_BINS),
+            'rhythmic_snap': 6,
         }
 
         info = {
@@ -125,6 +124,7 @@ class HitObjectVector(NamedTuple):
             'notes_per_second': NormalizationType.STANDARD,
             'velocity': NormalizationType.STANDARD,
             'relative_angle': NormalizationType.NONE,
+            'rhythm_change': NormalizationType.STANDARD,
             'log_slider_pixel_length': NormalizationType.STANDARD,
             'slider_repeats': NormalizationType.STANDARD,
             'delta_slider_end_x': NormalizationType.STANDARD,
@@ -136,7 +136,7 @@ class HitObjectVector(NamedTuple):
             'beat_in_measure': NormalizationType.CATEGORICAL,
             'time_diff_bin': NormalizationType.CATEGORICAL,
             'duration_bin': NormalizationType.CATEGORICAL,
-            'snap_in_beat': NormalizationType.CATEGORICAL,
+            'rhythmic_snap': NormalizationType.CATEGORICAL,
         }
     
     @classmethod
@@ -151,6 +151,7 @@ class HitObjectVector(NamedTuple):
             'notes_per_second': "Number of hit objects in the last 1 second",
             'velocity': "Euclidean distance between objects divided by time difference",
             'relative_angle': "Inner angle in radians formed by (n-1, n, n+1)",
+            'rhythm_change': "Ratio of current time difference to previous time difference",
             'log_slider_pixel_length': "Log-transformed pixel length of slider's curve path",
             'slider_repeats': "Number of slider repeats (slides - 1)",
             'delta_slider_end_x': "Change in x from start to end of the slider path",
@@ -162,7 +163,7 @@ class HitObjectVector(NamedTuple):
             'beat_in_measure': "Which beat of the measure it falls on (categorical, 0-indexed).",
             'time_diff_bin': "Quantized time difference to previous hit object in beats",
             'duration_bin': "Quantized duration of the hit object in beats",
-            'snap_in_beat': "Categorical index of the object's rhythmic snap within a beat.",
+            'rhythmic_snap': "Categorical index of the object's rhythmic snap within a beat.",
         }
 
 VECTOR_DIM = HitObjectVector.get_vector_dim()

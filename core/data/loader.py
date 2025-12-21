@@ -145,6 +145,9 @@ def _engineer_features_vectorized(
     cos_theta = dot / (norm_v1 * norm_v2).replace(0, np.nan)
     df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi) # Default to pi (180 deg) for stacks/ends
 
+    df['rhythm_change'] = df['time_diff_ms'] / grouped['time_diff_ms'].shift(1).replace(0, np.nan)
+    df['rhythm_change'] = df['rhythm_change'].fillna(1.0)
+
     df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
     
     df['slider_repeats'] = df['slider_repeats'].fillna(0)
