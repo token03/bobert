@@ -36,14 +36,21 @@ def main():
 
     counts = np.array(counts)
     p50 = np.percentile(counts, 50)
+    p75 = np.percentile(counts, 75)
     p90 = np.percentile(counts, 90)
     p99 = np.percentile(counts, 99)
 
     print("\nHitobject Count Percentiles:")
     print(f"50th percentile (Median): {p50:.1f}")
+    print(f"75th percentile:          {p75:.1f}")
     print(f"90th percentile:          {p90:.1f}")
     print(f"99th percentile:          {p99:.1f}")
     print(f"Min: {counts.min()}, Max: {counts.max()}, Mean: {counts.mean():.1f}")
+
+    print("\nInverse Percentiles (Percent of maps with <= N objects):")
+    for val in [512, 1024, 2048]:
+        percentile = (counts <= val).mean() * 100
+        print(f"{val} objects: {percentile:.2f}th percentile")
 
 if __name__ == "__main__":
     main()
