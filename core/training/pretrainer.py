@@ -86,10 +86,10 @@ class PreTrainer:
         
         data_iter = iter(self.train_dataloader)
         for i in range(len(self.train_dataloader)):
-            vectors, attention_mask, difficulty_labels = next(data_iter)
+            vectors, attention_mask, difficulty_labels, cu_seqlens = next(data_iter)
             
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                predictions, targets, mask = self.model(vectors, attention_mask)
+                predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
                 loss_dict = self.loss_fn(predictions, targets, mask, difficulty_labels, self.config)
                 scaled_loss = loss_dict['total_loss'] / self.grad_accum_steps
             
@@ -136,9 +136,9 @@ class PreTrainer:
                 dynamic_ncols=True,
                 leave=False
             )
-            for vectors, attention_mask, difficulty_labels in progress_bar:
+            for vectors, attention_mask, difficulty_labels, cu_seqlens in progress_bar:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    predictions, targets, mask = self.model(vectors, attention_mask)
+                    predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
                     loss_dict = self.loss_fn(predictions, targets, mask, difficulty_labels, self.config)
                 
                 total_loss += loss_dict['total_loss'].item()

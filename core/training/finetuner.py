@@ -73,11 +73,12 @@ class FineTuningTrainer:
         return encoded_tensor
     
 
-    def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
-        vectors, attention_mask, difficulty_ratings, collection_labels, user_tags = batch
+    def _prepare_batch(self, batch: Tuple) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any], Optional[torch.Tensor]]:
+        vectors, attention_mask, difficulty_ratings, collection_labels, user_tags, cu_seqlens = batch
 
         vectors = vectors.to(self.device, non_blocking=True)
         attention_mask = attention_mask.to(self.device, non_blocking=True)
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
         
         norm_difficulty_ratings = self.normalizer.normalize_difficulty(
             difficulty_ratings.to(self.device, non_blocking=True)
@@ -106,15 +107,15 @@ class FineTuningTrainer:
             encoded_tags = self._encode_labels(user_tags, self.user_tag_encoder, num_user_tag_classes)
             labels_dict['user_tags'] = encoded_tags
             
-        return vectors, attention_mask, labels_dict
+        return vectors, attention_mask, labels_dict, cu_seqlens
         
 
     def _run_step(self, batch: Tuple, is_train: bool) -> Dict[str, float]:
-        vectors, attention_mask, labels = self._prepare_batch(batch)
+        vectors, attention_mask, labels, cu_seqlens = self._prepare_batch(batch)
         
         with torch.set_grad_enabled(is_train):
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                predictions = self.model(vectors, attention_mask)
+                predictions = self.model(vectors, attention_mask, cu_seqlens)
                 losses = self.loss_fn(predictions, labels, self.config)
         
         if is_train:
@@ -177,13 +178,13 @@ class FineTuningTrainer:
         print("Running validation...")
         with torch.no_grad():
             for batch in tqdm(self.val_dataloader, desc="Validation", leave=False, dynamic_ncols=True):
-                vectors, attention_mask, labels_dict = self._prepare_batch(batch)
+                vectors, attention_mask, labels_dict, cu_seqlens = self._prepare_batch(batch)
                 
                 ratings = labels_dict['raw_difficulty_ratings']
                 raw_labels = labels_dict['raw_collection_labels']
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
-                    predictions = self.model(vectors, attention_mask)
+                    predictions = self.model(vectors, attention_mask, cu_seqlens)
                     step_losses = self.loss_fn(predictions, labels_dict, self.config)
                     embeddings = predictions.get('collection_label_projection', predictions['sequence_representation'])
 

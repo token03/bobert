@@ -7,7 +7,7 @@ import math
 
 from rotary_embedding_torch import RotaryEmbedding
 
-from .components import TransformerEncoderLayer, GatedConv1D, RMSNorm
+from .components import TransformerEncoderLayer, PackedGatedConv1D, RMSNorm
 from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES
 
 T = TypeVar('T', bound='BertEncoder')
@@ -49,11 +49,10 @@ class BertEncoder(nn.Module):
         combined_dim = cont_proj_dim + total_cat_embed_dim
         self.embedding_proj = nn.Linear(combined_dim, d_model)
 
-        self.gated_cnn = GatedConv1D(d_model, self.cnn_kernel_size)
+        self.packed_gated_cnn = PackedGatedConv1D(d_model, self.cnn_kernel_size)
         self.cnn_norm = RMSNorm(d_model)
         self.cnn_dropout = nn.Dropout(dropout)
 
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
 
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
@@ -116,29 +115,30 @@ class BertEncoder(nn.Module):
     def _embed(
         self,
         x: torch.Tensor,
-        attention_mask: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x_embed = self.embed_sequences(x)
-
-        cnn_input = self.cnn_norm(x_embed)
-        cnn_output = self.gated_cnn(cnn_input, attention_mask)
-        x_embed = x_embed + self.cnn_dropout(cnn_output)
-
-        batch_size = x.shape[0]
-
-        cls_tokens = self.cls_token.to(x_embed.dtype).expand(batch_size, -1, -1)
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_embed = self.embed_sequences(x) 
         
-        full_embeddings = torch.cat([cls_tokens, x_embed], dim=1)
+        if cu_seqlens is None:
+            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
+            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+        
+        packed_embed = x_embed[attention_mask]  
+        
+        packed_normed = self.cnn_norm(packed_embed)
+        packed_cnn_output = self.packed_gated_cnn(packed_normed, cu_seqlens)
+        packed_embed = packed_embed + self.cnn_dropout(packed_cnn_output)
+        
+        return packed_embed, attention_mask, cu_seqlens
 
-        cls_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
-        full_attention_mask = torch.cat([cls_mask, attention_mask], dim=1)
-
-        return full_embeddings, full_attention_mask
-
-    def encode(self, embeddings: torch.Tensor, attention_mask: torch.Tensor, max_seqlen: int) -> torch.Tensor:
-        seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-        cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-        packed_output = embeddings[attention_mask]
+    def encode(self, packed_embeddings: torch.Tensor, attention_mask: torch.Tensor, 
+               max_seqlen: int, cu_seqlens: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if cu_seqlens is None:
+            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
+            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+        
+        packed_output = packed_embeddings
 
         for layer in self.layers:
             packed_output = layer(
@@ -148,22 +148,25 @@ class BertEncoder(nn.Module):
                 max_seqlen=max_seqlen
             )
 
-        output = torch.zeros_like(embeddings)
-        output[attention_mask] = packed_output
+        packed_output = self.final_norm(packed_output)
 
-        output = self.final_norm(output)
-
-        return output
+        return packed_output
 
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        full_embeddings, full_attention_mask = self._embed(x, attention_mask)
-        max_seqlen = full_embeddings.shape[1]
-        output = self.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
-        return output
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        packed_embeddings, attention_mask, cu_seqlens = self._embed(
+            x, attention_mask, cu_seqlens
+        )
+        max_seqlen = x.shape[1]
+        packed_output = self.encode(
+            packed_embeddings, attention_mask, 
+            max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        )
+        return packed_output, attention_mask
 
 class BertForPretraining(nn.Module):
     def __init__(
@@ -266,7 +269,8 @@ class BertForPretraining(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: torch.Tensor
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
         is_masked = self._generate_span_mask(attention_mask)
 
@@ -289,29 +293,59 @@ class BertForPretraining(nn.Module):
             encoder_x_input
         )
         
-        batch_size = x.shape[0]
-        cls_tokens = self.bert.cls_token.to(encoder_x_input.dtype).expand(batch_size, -1, -1)
-        full_encoder_input = torch.cat([cls_tokens, encoder_x_input], dim=1)
-
-        cls_attn_mask = torch.ones((x.shape[0], 1), dtype=torch.bool, device=x.device)
-        full_attention_mask = torch.cat([cls_attn_mask, attention_mask], dim=1)
-
-        max_seqlen = full_encoder_input.shape[1]
-        encoded_output = self.bert.encode(full_encoder_input, full_attention_mask, max_seqlen=max_seqlen)
+        if cu_seqlens is None:
+            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
+            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
         
-        sequence_output = encoded_output[:, 1:, :].contiguous()
-        continuous_preds = self.continuous_head(sequence_output)
-        categorical_preds = {
-            name: head(sequence_output)
+        packed_input = encoder_x_input[attention_mask]
+        
+        max_seqlen = x.shape[1]
+        packed_output = self.bert.encode(
+            packed_input, attention_mask, 
+            max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        )
+        
+        batch_size = cu_seqlens.shape[0] - 1
+        pooled_representations = []
+        
+        for i in range(batch_size):
+            start = cu_seqlens[i]
+            end = cu_seqlens[i + 1]
+            
+            if end - start > 0:
+                seq_tokens = packed_output[start:end]
+                mean_pooled = seq_tokens.mean(dim=0)
+            else:
+                mean_pooled = torch.zeros(self.bert.d_model, device=packed_output.device)
+            pooled_representations.append(mean_pooled)
+        
+        pooled_output = torch.stack(pooled_representations)
+        
+        continuous_preds_packed = self.continuous_head(packed_output)
+        categorical_preds_packed = {
+            name: head(packed_output)
             for name, head in self.categorical_heads.items()
         }
+        
+        seq_len = attention_mask.shape[1]
+        continuous_preds = torch.zeros(batch_size, seq_len, continuous_preds_packed.shape[-1], 
+                                      device=x.device, dtype=continuous_preds_packed.dtype)
+        categorical_preds = {
+            name: torch.zeros(batch_size, seq_len, preds.shape[-1], 
+                            device=x.device, dtype=preds.dtype)
+            for name, preds in categorical_preds_packed.items()
+        }
+        
+        continuous_preds[attention_mask] = continuous_preds_packed
+        for name in categorical_preds:
+            categorical_preds[name][attention_mask] = categorical_preds_packed[name]
+        
         mlm_predictions = {
             'continuous': continuous_preds,
             'categorical': categorical_preds
         }
         
-        cls_output = encoded_output[:, 0]
-        difficulty_preds_raw = self.difficulty_attribute_head(cls_output)
+        difficulty_preds_raw = self.difficulty_attribute_head(pooled_output)
         difficulty_predictions = {
             name: difficulty_preds_raw[:, i]
             for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
@@ -376,20 +410,32 @@ class BertForContrastiveFineTuning(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        full_embeddings, full_attention_mask = self.bert._embed(x, attention_mask)
-        max_seqlen = full_embeddings.shape[1]
-        encoded_output = self.bert.encode(full_embeddings, full_attention_mask, max_seqlen=max_seqlen)
+        packed_embeddings, attention_mask, cu_seqlens = self.bert._embed(
+            x, attention_mask, cu_seqlens
+        )
+        max_seqlen = x.shape[1]
+        packed_output = self.bert.encode(
+            packed_embeddings, attention_mask, 
+            max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        )
         
-        cls_representation = encoded_output[:, 0]
-        sequence_output = encoded_output[:, 1:]
+        batch_size = cu_seqlens.shape[0] - 1
+        pooled_representations = []
         
-        sum_embeddings = torch.sum(sequence_output * attention_mask.unsqueeze(-1), dim=1)
-        num_tokens = attention_mask.sum(dim=1, keepdim=True)
-        mean_pooled_representation = sum_embeddings / torch.clamp(num_tokens.to(sum_embeddings.dtype), min=1e-9)
-
-        final_representation = torch.cat([cls_representation, mean_pooled_representation], dim=1)
-        final_representation = self.representation_proj(final_representation)
+        for i in range(batch_size):
+            start = cu_seqlens[i]
+            end = cu_seqlens[i + 1]
+            
+            if end - start > 0:
+                seq_tokens = packed_output[start:end]
+                mean_pooled = seq_tokens.mean(dim=0)
+            else:
+                mean_pooled = torch.zeros(self.bert.d_model, device=packed_output.device)
+            pooled_representations.append(mean_pooled)
+        
+        final_representation = torch.stack(pooled_representations)
 
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),
@@ -400,7 +446,7 @@ class BertForContrastiveFineTuning(nn.Module):
         if self.user_tag_classes > 0:
             predictions['user_tag_logits'] = self.user_tag_head(final_representation)
 
-        difficulty_preds_raw = self.difficulty_attribute_head(cls_representation)
+        difficulty_preds_raw = self.difficulty_attribute_head(final_representation)
         predictions['difficulty'] = {
             name: difficulty_preds_raw[:, i]
             for i, name in enumerate(DIFFICULTY_ATTRIBUTES)

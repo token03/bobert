@@ -9,7 +9,7 @@ def pretrain_collate_fn(
     max_seq_len: int,
     vector_dim: int,
     device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
     vectors, attributes_list = zip(*batch)
     
     lengths = [min(v.shape[0], max_seq_len) for v in vectors]
@@ -29,10 +29,14 @@ def pretrain_collate_fn(
         for key in attributes_list[0]
     } if attributes_list else {}
 
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    cu_seqlens = torch.nn.functional.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+
     return (
         padded_vectors.to(device),
         attention_mask.to(device),
-        {k: v.to(device) for k, v in stacked_attributes.items()}
+        {k: v.to(device) for k, v in stacked_attributes.items()},
+        cu_seqlens.to(device)
     )
 
 
@@ -127,7 +131,7 @@ def collate_fn(
     max_seq_len: int,
     vector_dim: int,
     device: torch.device
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     lengths = [min(v.shape[0], max_seq_len) for v in batch]
     max_len_batch = max(lengths) if lengths else 0
 
@@ -140,12 +144,16 @@ def collate_fn(
             padded_vectors[i, :length, :actual_dim] = v[:length, :actual_dim]
             attention_mask[i, :length] = True
 
-    return padded_vectors.to(device), attention_mask.to(device)
+    # Pre-compute cu_seqlens with explicit int32 dtype
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    cu_seqlens = torch.nn.functional.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+
+    return padded_vectors.to(device), attention_mask.to(device), cu_seqlens.to(device)
     
 def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, **kwargs):
     vectors, ratings, labels, tags = zip(*batch)
 
-    padded_vectors, attention_mask = collate_fn(
+    padded_vectors, attention_mask, cu_seqlens = collate_fn(
         list(vectors), max_seq_len, vector_dim, torch.device('cpu')
     )
 
@@ -156,7 +164,8 @@ def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, **kwargs):
         attention_mask.to(device),
         stacked_ratings.to(device),
         labels,
-        tags
+        tags,
+        cu_seqlens.to(device)
     )
 
 class FinetuningDataset(Dataset):

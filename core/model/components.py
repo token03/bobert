@@ -80,6 +80,46 @@ class RMSNorm(nn.Module):
         hidden_states = x * torch.rsqrt(variance + self.eps)
         return (self.weight * hidden_states).to(input_dtype)
 
+class PackedGatedConv1D(nn.Module):
+    def __init__(self, d_model: int, kernel_size: int):
+        super().__init__()
+        self.d_model = d_model
+        self.kernel_size = kernel_size
+        self.padding = kernel_size // 2
+        
+        self.conv = nn.Conv1d(
+            in_channels=d_model,
+            out_channels=2 * d_model,
+            kernel_size=kernel_size,
+            padding=0, 
+            bias=False
+        )
+
+    def forward(self, packed_x: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        batch_size = cu_seqlens.shape[0] - 1
+        device = packed_x.device
+        
+        outputs = []
+        for i in range(batch_size):
+            start_idx = cu_seqlens[i]
+            end_idx = cu_seqlens[i + 1]
+            seq_len = end_idx - start_idx
+            
+            if seq_len == 0:
+                continue
+                
+            seq_data = packed_x[start_idx:end_idx]
+            seq_data_t = seq_data.t().unsqueeze(0)
+            padded_seq = F.pad(seq_data_t, (self.padding, self.padding), mode='replicate')
+            convolved = self.conv(padded_seq)
+            
+            output, gate = convolved.chunk(2, dim=1) 
+            gated_output = F.silu(gate) * output 
+            gated_output = gated_output.squeeze(0).t()
+            outputs.append(gated_output)
+        
+        return torch.cat(outputs, dim=0)
+
 class GatedConv1D(nn.Module):
     def __init__(self, d_model: int, kernel_size: int):
         super().__init__()
@@ -112,7 +152,9 @@ class SwiGLU(nn.Module):
         self.w3 = nn.Linear(d_model, dim_feedforward, bias=False)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        gate = self.w1(x)
+        F.silu(gate, inplace=True)
+        return self.w2(gate * self.w3(x))
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(

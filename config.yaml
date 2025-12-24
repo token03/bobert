@@ -1,5 +1,6 @@
 data:
-  max_seq_len: 1023
+  # max_seq_len: 1023
+  max_seq_len: 2048
   val_split: 0.1
   max_samples_per_class:
     aim: 2500
