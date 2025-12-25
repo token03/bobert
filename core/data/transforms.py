@@ -249,19 +249,15 @@ class BeatmapAugmenter:
         self.norm_y_idx = feature_info['continuous']['norm_y']
         self.delta_x_idx = feature_info['continuous']['delta_x']
         self.delta_y_idx = feature_info['continuous']['delta_y']
-        self.delta_slider_end_x_idx = feature_info['continuous']['delta_slider_end_x']
-        self.delta_slider_end_y_idx = feature_info['continuous']['delta_slider_end_y']
 
     def _flip(self, vectors: torch.Tensor, flip_x: bool, flip_y: bool) -> torch.Tensor:
         aug_vectors = vectors.clone()
         if flip_x:
             aug_vectors[:, self.norm_x_idx] *= -1
             aug_vectors[:, self.delta_x_idx] *= -1
-            aug_vectors[:, self.delta_slider_end_x_idx] *= -1
         if flip_y:
             aug_vectors[:, self.norm_y_idx] *= -1
             aug_vectors[:, self.delta_y_idx] *= -1
-            aug_vectors[:, self.delta_slider_end_y_idx] *= -1
 
         return aug_vectors
 

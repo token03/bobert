@@ -27,7 +27,13 @@ def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
     result[values >= bins_arr[-1]] = len(bins) - 1
     return result
 
-SLIDER_TYPE_INDEX = 1
+OBJECT_TYPE_CIRCLE = 0
+OBJECT_TYPE_SLIDER_HEAD = 1
+OBJECT_TYPE_SLIDER_END = 2
+OBJECT_TYPE_SPINNER_START = 3
+OBJECT_TYPE_SPINNER_END = 4
+
+SLIDER_TYPE_INDEX = OBJECT_TYPE_SLIDER_HEAD
 
 class HitObjectVector(NamedTuple):
     norm_x: float
@@ -43,15 +49,12 @@ class HitObjectVector(NamedTuple):
     
     log_slider_pixel_length: float
     slider_repeats: float
-    delta_slider_end_x: float
-    delta_slider_end_y: float
     slider_tortuosity: float
     beat_in_measure: float
     
     object_type: int
     is_new_combo: int
     time_diff_bin: int
-    duration_bin: int
     rhythmic_snap: int
     
     @classmethod
@@ -74,24 +77,21 @@ class HitObjectVector(NamedTuple):
         field_names = cls.get_field_names()
 
         slider_feature_names = [
-            'log_slider_pixel_length', 'slider_repeats', 
-            'delta_slider_end_x', 'delta_slider_end_y', 'slider_tortuosity',
-            'duration_bin'
+            'log_slider_pixel_length', 'slider_repeats', 'slider_tortuosity'
         ]
 
         categorical_features = [
             'object_type', 'is_new_combo', 'beat_in_measure',
-            'time_diff_bin', 'duration_bin', 'rhythmic_snap', 
+            'time_diff_bin', 'rhythmic_snap', 
         ]
         
         continuous_features = [f for f in field_names if f not in categorical_features]
         
         cat_cardinalities = {
-            'object_type': 3,
+            'object_type': 5, 
             'is_new_combo': 2,
             'beat_in_measure': MAX_METER_CARDINALITY,
             'time_diff_bin': len(DURATION_BINS),
-            'duration_bin': len(DURATION_BINS),
             'rhythmic_snap': 6,
         }
 
@@ -127,15 +127,12 @@ class HitObjectVector(NamedTuple):
             'rhythm_change': NormalizationType.STANDARD,
             'log_slider_pixel_length': NormalizationType.STANDARD,
             'slider_repeats': NormalizationType.STANDARD,
-            'delta_slider_end_x': NormalizationType.STANDARD,
-            'delta_slider_end_y': NormalizationType.STANDARD,
             'slider_tortuosity': NormalizationType.STANDARD,
             
             'object_type': NormalizationType.CATEGORICAL,
             'is_new_combo': NormalizationType.CATEGORICAL,
             'beat_in_measure': NormalizationType.CATEGORICAL,
             'time_diff_bin': NormalizationType.CATEGORICAL,
-            'duration_bin': NormalizationType.CATEGORICAL,
             'rhythmic_snap': NormalizationType.CATEGORICAL,
         }
     
@@ -154,15 +151,12 @@ class HitObjectVector(NamedTuple):
             'rhythm_change': "Ratio of current time difference to previous time difference",
             'log_slider_pixel_length': "Log-transformed pixel length of slider's curve path",
             'slider_repeats': "Number of slider repeats (slides - 1)",
-            'delta_slider_end_x': "Change in x from start to end of the slider path",
-            'delta_slider_end_y': "Change in y from start to end of the slider path",
             'slider_tortuosity': "Ratio of slider visual pixel length to Euclidean distance between start and end",
             
-            'object_type': "Type of hit object (circle, slider, spinner)",
+            'object_type': "Type of hit object (circle, slider_head, slider_end, spinner_start, spinner_end)",
             'is_new_combo': "Whether this hit object starts a new combo",
             'beat_in_measure': "Which beat of the measure it falls on (categorical, 0-indexed).",
             'time_diff_bin': "Quantized time difference to previous hit object in beats",
-            'duration_bin': "Quantized duration of the hit object in beats",
             'rhythmic_snap': "Categorical index of the object's rhythmic snap within a beat.",
         }
 

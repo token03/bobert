@@ -4,7 +4,11 @@ import torch.nn.functional as F
 from typing import Dict, Any
 import warnings
 
-from core.data.types import SLIDER_TYPE_INDEX, HitObjectVector, DIFFICULTY_ATTRIBUTES
+from core.data.types import (
+    OBJECT_TYPE_SLIDER_HEAD, OBJECT_TYPE_SLIDER_END,
+    OBJECT_TYPE_SPINNER_START, OBJECT_TYPE_SPINNER_END,
+    HitObjectVector, DIFFICULTY_ATTRIBUTES
+)
 
 def mlm_loss_fn(
     predictions: Dict[str, Any], 
@@ -18,7 +22,9 @@ def mlm_loss_fn(
     total_loss = torch.zeros((), device=targets.device)
     
     actual_object_type = targets[..., feature_info['categorical']['object_type']['index']].long()
-    is_slider_mask = (actual_object_type == SLIDER_TYPE_INDEX)
+
+    is_slider_head_mask = (actual_object_type == OBJECT_TYPE_SLIDER_HEAD)
+    is_spinner_start_mask = (actual_object_type == OBJECT_TYPE_SPINNER_START)
     
     slider_feature_names = set(feature_info['slider'].keys())
     
@@ -31,7 +37,7 @@ def mlm_loss_fn(
 
         if name in slider_feature_names:
             zero_target = torch.zeros_like(target_slice)
-            final_target = torch.where(is_slider_mask, target_slice, zero_target)
+            final_target = torch.where(is_slider_head_mask, target_slice, zero_target)
         else:
             final_target = target_slice
 
@@ -44,7 +50,7 @@ def mlm_loss_fn(
 
         if name in slider_feature_names:
             zero_target = torch.zeros_like(cat_targets)
-            final_target = torch.where(is_slider_mask, cat_targets, zero_target)
+            final_target = torch.where(is_slider_head_mask, cat_targets, zero_target)
         else:
             final_target = cat_targets
             

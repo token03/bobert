@@ -12,8 +12,13 @@ from collections import defaultdict
 import concurrent.futures
 import itertools
 import rosu_pp_py as rosu
+from .parser import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
-from .types import HitObjectVector, DURATION_BINS, quantize_to_bins, DIFFICULTY_ATTRIBUTES
+from .types import (
+    HitObjectVector, DURATION_BINS, quantize_to_bins, DIFFICULTY_ATTRIBUTES,
+    OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER_HEAD, OBJECT_TYPE_SLIDER_END,
+    OBJECT_TYPE_SPINNER_START, OBJECT_TYPE_SPINNER_END
+)
 
 def _calculate_difficulty_attributes_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
@@ -70,10 +75,48 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     except ImportError:
         return dataset_path
 
+def _split_sliders_and_spinners(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[int, int]]:
+    
+    original_counts = df.groupby('beatmap_id', observed=False).size().to_dict()
+    
+    slider_mask = df['object_type'] == OBJECT_TYPE_SLIDER
+    spinner_mask = df['object_type'] == OBJECT_TYPE_SPINNER
+    
+    slider_ends = df[slider_mask].copy()
+    slider_ends['object_type'] = OBJECT_TYPE_SLIDER_END
+    slider_ends['time'] = slider_ends['end_time']
+    slider_ends['x'] = slider_ends['slider_end_x'].fillna(slider_ends['x']).astype(int)
+    slider_ends['y'] = slider_ends['slider_end_y'].fillna(slider_ends['y']).astype(int)
+    
+    slider_ends['is_new_combo'] = 0
+    slider_ends['slider_repeats'] = 0
+    slider_ends['log_slider_pixel_length'] = 0
+    slider_ends['slider_tortuosity'] = 0
+    slider_ends['pixel_length'] = 0
+    
+    spinner_ends = df[spinner_mask].copy()
+    spinner_ends['object_type'] = OBJECT_TYPE_SPINNER_END
+    spinner_ends['time'] = spinner_ends['end_time']
+    
+    spinner_ends['is_new_combo'] = 0
+    spinner_ends['slider_repeats'] = 0
+    spinner_ends['log_slider_pixel_length'] = 0
+    spinner_ends['slider_tortuosity'] = 0
+    spinner_ends['pixel_length'] = 0
+    
+    df.loc[slider_mask, 'object_type'] = OBJECT_TYPE_SLIDER_HEAD
+    df.loc[spinner_mask, 'object_type'] = OBJECT_TYPE_SPINNER_START
+    
+    df_combined = pd.concat([df, slider_ends, spinner_ends], ignore_index=True)
+    df_combined.sort_values(['beatmap_id', 'time'], inplace=True)
+    df_combined.reset_index(drop=True, inplace=True)
+    
+    return df_combined, original_counts
+
 def _engineer_features_vectorized(
     beatmaps_df: pd.DataFrame,
     hitobjects_df: pd.DataFrame
-) -> Tuple[List[torch.Tensor], np.ndarray]:
+) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]]:
     invalid_starts_mask = (
         (hitobjects_df['x'] < 0) | (hitobjects_df['x'] > 512) |
         (hitobjects_df['y'] < 0) | (hitobjects_df['y'] > 384)
@@ -93,7 +136,7 @@ def _engineer_features_vectorized(
         hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(bad_maps)].copy()
 
     if beatmaps_df.empty or hitobjects_df.empty:
-        return [], np.array([])
+        return [], np.array([]), {}
 
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
     df.sort_values(['beatmap_id', 'time'], inplace=True)
@@ -120,7 +163,6 @@ def _engineer_features_vectorized(
     df['cum_beats'] = grouped['time_diff_beats'].cumsum()
     df['beat_id'] = np.floor(df['cum_beats'] + 1e-4)
     
-    # Calculate notes per second: count of objects in the last 1000ms
     def count_notes_in_last_second(group):
         times = group['time'].values
         counts = np.zeros(len(times), dtype=np.float32)
@@ -143,7 +185,7 @@ def _engineer_features_vectorized(
     norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
     dot = v1_x * v2_x + v1_y * v2_y
     cos_theta = dot / (norm_v1 * norm_v2).replace(0, np.nan)
-    df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi) # Default to pi (180 deg) for stacks/ends
+    df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi) 
 
     df['rhythm_change'] = df['time_diff_ms'] / grouped['time_diff_ms'].shift(1).replace(0, np.nan)
     df['rhythm_change'] = df['rhythm_change'].fillna(1.0)
@@ -153,19 +195,64 @@ def _engineer_features_vectorized(
     df['slider_repeats'] = df['slider_repeats'].fillna(0)
     df['log_slider_pixel_length'] = np.log1p(df['pixel_length'].fillna(0.0))
 
+    # Calculate slider tortuosity
     raw_slider_end_x = df['slider_end_x'].fillna(df['x'])
     raw_slider_end_y = df['slider_end_y'].fillna(df['y'])
-    
-    df['delta_slider_end_x'] = raw_slider_end_x - df['x']
-    df['delta_slider_end_y'] = raw_slider_end_y - df['y']
-    
-    df['slider_dist'] = np.sqrt(df['delta_slider_end_x']**2 + df['delta_slider_end_y']**2)
-    df['slider_tortuosity'] = df['pixel_length'] / df['slider_dist'].replace(0, np.nan)
+    slider_dist = np.sqrt((raw_slider_end_x - df['x'])**2 + (raw_slider_end_y - df['y'])**2)
+    df['slider_tortuosity'] = df['pixel_length'] / slider_dist.replace(0, np.nan)
     df['slider_tortuosity'] = df['slider_tortuosity'].fillna(1.0)
+
+    # ===== SPLIT SLIDERS AND SPINNERS INTO HEAD/END TOKENS =====
+    print("Splitting sliders and spinners into head/end tokens...")
+    df, original_counts = _split_sliders_and_spinners(df)
     
-    df['duration_ms'] = df['end_time'] - df['time']
-    df['duration_beats'] = df['duration_ms'] / df['beat_length_ms']
-    df['duration_bin'] = quantize_to_bins(df['duration_beats'].fillna(0).to_numpy(), DURATION_BINS)
+    grouped = df.groupby('beatmap_id', observed=False, sort=False)
+    
+    prev_x = grouped['x'].shift(1)
+    prev_y = grouped['y'].shift(1)
+    prev_time = grouped['time'].shift(1)
+    first_in_group = ~df.duplicated('beatmap_id', keep='first')
+    prev_x.loc[first_in_group] = 256
+    prev_y.loc[first_in_group] = 192
+    prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
+    
+    df['norm_x'] = np.clip((df['x'] - 256.0) / 256.0, -1.0, 1.0)
+    df['norm_y'] = np.clip((df['y'] - 192.0) / 192.0, -1.0, 1.0)
+    
+    df['delta_x'] = np.clip(df['x'] - prev_x, -512.0, 512.0)
+    df['delta_y'] = np.clip(df['y'] - prev_y, -384.0, 384.0)
+    
+    df['time_diff_ms'] = df['time'] - prev_time
+    df['log_time_diff_ms'] = np.log1p(df['time_diff_ms'])
+    df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
+    df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
+    
+    df['dist'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2)
+    df['velocity'] = df['dist'] / df['time_diff_ms'].replace(0, np.nan)
+    df['velocity'] = df['velocity'].fillna(0)
+    
+    next_x = grouped['x'].shift(-1)
+    next_y = grouped['y'].shift(-1)
+    v1_x, v1_y = prev_x - df['x'], prev_y - df['y']
+    v2_x, v2_y = next_x - df['x'], next_y - df['y']
+    norm_v1 = np.sqrt(v1_x**2 + v1_y**2)
+    norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
+    dot = v1_x * v2_x + v1_y * v2_y
+    cos_theta = dot / (norm_v1 * norm_v2).replace(0, np.nan)
+    df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi)
+    
+    df['rhythm_change'] = df['time_diff_ms'] / grouped['time_diff_ms'].shift(1).replace(0, np.nan)
+    df['rhythm_change'] = df['rhythm_change'].fillna(1.0)
+    
+    def count_notes_in_last_second(group):
+        times = group['time'].values
+        counts = np.zeros(len(times), dtype=np.float32)
+        for i, current_time in enumerate(times):
+            threshold = current_time - 1000.0
+            counts[i] = np.sum(times[:i+1] >= threshold)
+        return counts
+    
+    df['notes_per_second'] = grouped.apply(count_notes_in_last_second, include_groups=False).explode().astype(np.float32).values
 
     vector_field_names = HitObjectVector.get_field_names()
     vector_df = df[['beatmap_id'] + vector_field_names]
@@ -180,7 +267,7 @@ def _engineer_features_vectorized(
     
     final_data = [torch.from_numpy(vectors) for vectors in vector_arrays]
 
-    return final_data, unique_ids
+    return final_data, unique_ids, original_counts
 
 def load_dataset(
     dataset_path: str,
@@ -212,6 +299,7 @@ def load_dataset(
 
     processed_data_chunks = []
     loaded_ids_chunks = []
+    original_counts_dict = {}
 
     for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
         chunk_ids = all_beatmap_ids[i:i + chunk_size]
@@ -221,9 +309,10 @@ def load_dataset(
         if hitobjects_df_chunk.empty:
             continue
 
-        data, ids = _engineer_features_vectorized(beatmaps_df_chunk, hitobjects_df_chunk)
+        data, ids, chunk_original_counts = _engineer_features_vectorized(beatmaps_df_chunk, hitobjects_df_chunk)
         processed_data_chunks.extend(data)
         loaded_ids_chunks.append(ids)
+        original_counts_dict.update(chunk_original_counts)
 
     print("Consolidating processed chunks...")
     processed_data = processed_data_chunks
@@ -234,7 +323,8 @@ def load_dataset(
     id_to_vectors = {bid: vec for bid, vec in zip(loaded_ids, processed_data)}
     id_to_seq_len = {}
     for bid, vectors in id_to_vectors.items():
-        target_len = vectors.shape[0]
+        original_count = original_counts_dict.get(int(bid), vectors.shape[0])
+        target_len = original_count
         if max_seq_len is not None:
             target_len = min(target_len, max_seq_len)
         id_to_seq_len[int(bid)] = target_len
