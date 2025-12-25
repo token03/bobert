@@ -71,11 +71,16 @@ class TrainingLogger:
         """Logs all information at the end of an epoch."""
         train_loss = train_metrics.get('total_loss', train_metrics.get('loss', 0.0))
         val_loss = val_metrics.get('total_loss', val_metrics.get('loss', 0.0))
+        
+        train_mlm = train_metrics.get('mlm_loss', 0.0)
+        val_mlm = val_metrics.get('mlm_loss', 0.0)
+        train_diff = train_metrics.get('difficulty_loss', 0.0)
+        val_diff = val_metrics.get('difficulty_loss', 0.0)
 
         print(
             f"Epoch {epoch+1}/{num_epochs} | "
-            f"Train Loss: {train_loss:.4f} | "
-            f"Val Loss: {val_loss:.4f} | "
+            f"Train Loss: {train_loss:.4f} (MLM: {train_mlm:.4f}, Diff: {train_diff:.4f}) | "
+            f"Val Loss: {val_loss:.4f} (MLM: {val_mlm:.4f}, Diff: {val_diff:.4f}) | "
             f"LR: {train_metrics['learning_rate']:.2e} | "
             f"Time: {duration:.2f}s"
         )

@@ -9,8 +9,27 @@ DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8,
 
 DIFFICULTY_ATTRIBUTES = [
     'stars', 'aim', 'speed', 'slider_factor',
-    'hp', 'cs', 'od', 'ar', 'slider_multiplier'
+    'cs', 'ar', 'slider_multiplier'
 ]
+
+FEATURE_GROUPS = {
+    'spatial': {
+        'features': ['norm_x', 'norm_y', 'delta_x', 'delta_y', 'relative_angle'],
+        'output_dim': 160
+    },
+    'rhythm': {
+        'features': ['log_time_diff_ms', 'bpm', 'notes_per_second', 'velocity', 'rhythm_change'],
+        'output_dim': 192
+    },
+    'slider': {
+        'features': ['log_slider_pixel_length', 'slider_repeats', 'slider_tortuosity'],
+        'output_dim': 64
+    },
+    'categorical': {
+        'features': ['object_type', 'is_new_combo', 'beat_in_measure', 'time_diff_bin', 'rhythmic_snap'],
+        'output_dim': 96
+    }
+}
 
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"

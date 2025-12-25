@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
 
@@ -201,3 +201,40 @@ class TransformerEncoderLayer(nn.Module):
         src = src + self.dropout2(src2)
 
         return src
+
+class NumericalGroupEmbedder(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(input_dim, output_dim)
+        self.act = nn.GELU()
+        # self.norm = RMSNorm(output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # return self.norm(self.act(self.proj(x)))
+        return self.act(self.proj(x))
+
+class CategoricalGroupEmbedder(nn.Module):
+    def __init__(self, cat_info: Dict[str, Dict[str, int]], total_output_dim: int):
+        super().__init__()
+        self.embeds = nn.ModuleDict()
+        
+        self.dim_per_feat = total_output_dim // len(cat_info)
+        
+        for name, info in cat_info.items():
+            self.embeds[name] = nn.Embedding(info['cardinality'], self.dim_per_feat)
+            
+        self.remainder = total_output_dim % len(cat_info)
+        if self.remainder > 0:
+            last_feat = list(cat_info.keys())[-1]
+            self.embeds[last_feat] = nn.Embedding(
+                cat_info[last_feat]['cardinality'], 
+                self.dim_per_feat + self.remainder
+            )
+
+    def forward(self, x: torch.Tensor, feature_indices: Dict[str, int]) -> torch.Tensor:
+        outputs = []
+        for name, embed in self.embeds.items():
+            idx = feature_indices[name]
+            feat_x = x[:, :, idx].long()
+            outputs.append(embed(feat_x))
+        return torch.cat(outputs, dim=-1)

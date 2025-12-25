@@ -195,15 +195,12 @@ def _engineer_features_vectorized(
     df['slider_repeats'] = df['slider_repeats'].fillna(0)
     df['log_slider_pixel_length'] = np.log1p(df['pixel_length'].fillna(0.0))
 
-    # Calculate slider tortuosity
     raw_slider_end_x = df['slider_end_x'].fillna(df['x'])
     raw_slider_end_y = df['slider_end_y'].fillna(df['y'])
     slider_dist = np.sqrt((raw_slider_end_x - df['x'])**2 + (raw_slider_end_y - df['y'])**2)
     df['slider_tortuosity'] = df['pixel_length'] / slider_dist.replace(0, np.nan)
     df['slider_tortuosity'] = df['slider_tortuosity'].fillna(1.0)
 
-    # ===== SPLIT SLIDERS AND SPINNERS INTO HEAD/END TOKENS =====
-    print("Splitting sliders and spinners into head/end tokens...")
     df, original_counts = _split_sliders_and_spinners(df)
     
     grouped = df.groupby('beatmap_id', observed=False, sort=False)

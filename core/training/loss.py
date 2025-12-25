@@ -89,10 +89,8 @@ def pretrain_loss_fn(
         'aim': pretrain_config.get('aim_loss_weight', 1.0),
         'speed': pretrain_config.get('speed_loss_weight', 1.0),
         'slider_factor': pretrain_config.get('slider_factor_loss_weight', 0.5),
-        'hp': pretrain_config.get('hp_loss_weight', 0.2),
+        'ar': pretrain_config.get('ar_loss_weight', 0.3),
         'cs': pretrain_config.get('cs_loss_weight', 0.2),
-        'od': pretrain_config.get('od_loss_weight', 0.5),
-        'ar': pretrain_config.get('ar_loss_weight', 0.5),
         'slider_multiplier': pretrain_config.get('slider_multiplier_loss_weight', 0.2),
     }
 
@@ -114,10 +112,6 @@ def pretrain_loss_fn(
     return losses
 
 def _weighted_contrastive_loss(projections: torch.Tensor, similarity_matrix: torch.Tensor, temperature: float) -> torch.Tensor:
-    """
-    Computes the weighted supervised contrastive loss.
-    The similarity_matrix contains continuous values from 0 to 1.
-    """
     if similarity_matrix.sum() == 0:
         warnings.warn("The entire similarity matrix is zero. Contrastive loss will be 0.", UserWarning)
         return torch.tensor(0.0, device=projections.device)
@@ -181,9 +175,7 @@ def contrastive_loss_fn(
             'aim': finetuning_config.get('aim_loss_weight', 1.0),
             'speed': finetuning_config.get('speed_loss_weight', 1.0),
             'slider_factor': finetuning_config.get('slider_factor_loss_weight', 0.5),
-            'hp': finetuning_config.get('hp_loss_weight', 0.2),
             'cs': finetuning_config.get('cs_loss_weight', 0.2),
-            'od': finetuning_config.get('od_loss_weight', 0.5),
             'ar': finetuning_config.get('ar_loss_weight', 0.5),
             'slider_multiplier': finetuning_config.get('slider_multiplier_loss_weight', 0.2),
         }

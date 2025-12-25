@@ -144,7 +144,11 @@ class PreTrainer:
                 total_loss += loss_dict['total_loss'].item()
                 num_batches += 1
 
-                self.val_metrics.update(predictions, targets, mask, difficulty_labels)
+                self.val_metrics.update(
+                    predictions, targets, mask, difficulty_labels,
+                    mlm_loss=loss_dict['mlm_loss'].item(),
+                    difficulty_loss=loss_dict.get('difficulty_loss', torch.tensor(0.0)).item()
+                )
         
         results = self.val_metrics.compute()
         results['loss'] = total_loss / max(num_batches, 1)

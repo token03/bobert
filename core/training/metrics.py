@@ -29,15 +29,18 @@ class PretrainEpochMetrics(nn.Module):
             num_classes = info['cardinality']
             self.cat_metrics[name] = MetricCollection({
                 'accuracy': Accuracy(task="multiclass", num_classes=num_classes),
-                'precision': Precision(task="multiclass", num_classes=num_classes, average='macro', zero_division=0),
-                'recall': Recall(task="multiclass", num_classes=num_classes, average='macro', zero_division=0),
+                'precision': Precision(task="multiclass", num_classes=num_classes, average='weighted', zero_division=0),
+                'recall': Recall(task="multiclass", num_classes=num_classes, average='weighted', zero_division=0),
             }).to(device)
         
         self.difficulty_metrics = MetricCollection({
             f'{name}_mae': MeanMetric() for name in DIFFICULTY_ATTRIBUTES
         }).to(device)
+        
+        self.mlm_loss_metric = MeanMetric().to(device)
+        self.difficulty_loss_metric = MeanMetric().to(device)
 
-    def update(self, predictions: Dict[str, torch.Tensor], targets: torch.Tensor, mask: torch.Tensor, difficulty_labels: Dict[str, torch.Tensor]):
+    def update(self, predictions: Dict[str, torch.Tensor], targets: torch.Tensor, mask: torch.Tensor, difficulty_labels: Dict[str, torch.Tensor], mlm_loss: float = None, difficulty_loss: float = None):
         if torch.any(mask):
             cont_preds_masked = predictions['mlm']['continuous'][mask]
             cont_names_ordered = sorted(self.feature_info['continuous'].keys(), key=lambda k: self.feature_info['continuous'][k])
@@ -64,6 +67,11 @@ class PretrainEpochMetrics(nn.Module):
             if key in difficulty_labels:
                 mae = torch.abs(preds - difficulty_labels[key])
                 self.difficulty_metrics[f'{key}_mae'].update(mae)
+        
+        if mlm_loss is not None:
+            self.mlm_loss_metric.update(mlm_loss)
+        if difficulty_loss is not None:
+            self.difficulty_loss_metric.update(difficulty_loss)
 
     def compute(self) -> Dict[str, Any]:
         results = {}
@@ -88,6 +96,11 @@ class PretrainEpochMetrics(nn.Module):
         difficulty_metrics = {k: v.item() for k, v in diff_results.items() if v.numel() > 0}
         if difficulty_metrics:
             results['difficulty_metrics'] = difficulty_metrics
+        
+        if self.mlm_loss_metric.update_count > 0:
+            results['mlm_loss'] = self.mlm_loss_metric.compute().item()
+        if self.difficulty_loss_metric.update_count > 0:
+            results['difficulty_loss'] = self.difficulty_loss_metric.compute().item()
             
         return results
     
@@ -96,6 +109,8 @@ class PretrainEpochMetrics(nn.Module):
         for collection in self.cat_metrics.values():
             collection.reset()
         self.difficulty_metrics.reset()
+        self.mlm_loss_metric.reset()
+        self.difficulty_loss_metric.reset()
 
 
 class FineTuneEpochMetrics(nn.Module):

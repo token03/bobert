@@ -7,8 +7,8 @@ import math
 
 from rotary_embedding_torch import RotaryEmbedding
 
-from .components import TransformerEncoderLayer, PackedGatedConv1D, RMSNorm
-from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES
+from .components import TransformerEncoderLayer, PackedGatedConv1D, RMSNorm, NumericalGroupEmbedder, CategoricalGroupEmbedder
+from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
 
 T = TypeVar('T', bound='BertEncoder')
 
@@ -33,21 +33,31 @@ class BertEncoder(nn.Module):
 
         self.feature_info = HitObjectVector.get_feature_info()
 
-        self.cont_indices = list(self.feature_info['continuous'].values())
-        num_continuous = len(self.cont_indices)
-        cont_proj_dim = d_model // 4
-        self.continuous_proj = nn.Linear(num_continuous, cont_proj_dim)
+        self.spatial_indices = [self.feature_info['continuous'][name] for name in FEATURE_GROUPS['spatial']['features']]
+        self.rhythm_indices = [self.feature_info['continuous'][name] for name in FEATURE_GROUPS['rhythm']['features']]
+        self.slider_indices = [self.feature_info['continuous'][name] for name in FEATURE_GROUPS['slider']['features']]
 
-        self.cat_embeds = nn.ModuleDict()
-        total_cat_embed_dim = 0
-        cat_embed_dim = d_model // 8
-        for name, info in self.feature_info['categorical'].items():
-            embedding = nn.Embedding(info['cardinality'], cat_embed_dim)
-            self.cat_embeds[name] = embedding
-            total_cat_embed_dim += cat_embed_dim
+        self.spatial_embedder = NumericalGroupEmbedder(
+            input_dim=len(self.spatial_indices),
+            output_dim=FEATURE_GROUPS['spatial']['output_dim']
+        )
+        self.rhythm_embedder = NumericalGroupEmbedder(
+            input_dim=len(self.rhythm_indices),
+            output_dim=FEATURE_GROUPS['rhythm']['output_dim']
+        )
+        self.slider_embedder = NumericalGroupEmbedder(
+            input_dim=len(self.slider_indices),
+            output_dim=FEATURE_GROUPS['slider']['output_dim']
+        )
 
-        combined_dim = cont_proj_dim + total_cat_embed_dim
-        self.embedding_proj = nn.Linear(combined_dim, d_model)
+        cat_info_subset = {name: self.feature_info['categorical'][name] for name in FEATURE_GROUPS['categorical']['features']}
+        self.categorical_embedder = CategoricalGroupEmbedder(
+            cat_info=cat_info_subset,
+            total_output_dim=FEATURE_GROUPS['categorical']['output_dim']
+        )
+
+        self.embedding_mix = nn.Linear(d_model, d_model)
+        self.embedding_norm = RMSNorm(d_model)
 
         self.packed_gated_cnn = PackedGatedConv1D(d_model, self.cnn_kernel_size)
         self.cnn_norm = RMSNorm(d_model)
@@ -97,19 +107,22 @@ class BertEncoder(nn.Module):
         }
 
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
-        cont_features = x[:, :, self.cont_indices]
-        projected_cont = self.continuous_proj(cont_features)
+        spatial_features = x[:, :, self.spatial_indices]
+        spatial_embed = self.spatial_embedder(spatial_features)
 
-        cat_feature_embeds = []
-        for name, info in self.feature_info['categorical'].items():
-            cat_indices = x[:, :, info['index']].long()
-            embed_layer = self.cat_embeds[name]
-            cat_feature_embeds.append(embed_layer(cat_indices))
+        rhythm_features = x[:, :, self.rhythm_indices]
+        rhythm_embed = self.rhythm_embedder(rhythm_features)
 
-        all_features = [projected_cont] + cat_feature_embeds
-        combined_features = torch.cat(all_features, dim=-1)
+        slider_features = x[:, :, self.slider_indices]
+        slider_embed = self.slider_embedder(slider_features)
 
-        x_embed = self.embedding_proj(combined_features)
+        cat_feature_indices = {name: self.feature_info['categorical'][name]['index'] for name in FEATURE_GROUPS['categorical']['features']}
+        cat_embed = self.categorical_embedder(x, cat_feature_indices)
+
+        combined_features = torch.cat([spatial_embed, rhythm_embed, slider_embed, cat_embed], dim=-1)
+
+        x_embed = self.embedding_mix(combined_features)
+        x_embed = self.embedding_norm(x_embed)
         return x_embed
 
     def _embed(
@@ -192,7 +205,7 @@ class BertForPretraining(nn.Module):
         })
 
         self.difficulty_attribute_head = nn.Sequential(
-            nn.Linear(bert_model.d_model, bert_model.d_model // 2),
+            nn.Linear(2 * bert_model.d_model, bert_model.d_model // 2),
             nn.GELU(),
             nn.Linear(bert_model.d_model // 2, len(DIFFICULTY_ATTRIBUTES))
         )
@@ -210,7 +223,8 @@ class BertForPretraining(nn.Module):
         
         if config.get('components', {}).get('compile_model', False):
             print("Compiling BERT pre-training model with torch.compile...")
-            model = torch.compile(model, mode=config.get('components', {}).get('compile_mode', 'default'))
+            compile_mode = config.get('components', {}).get('compile_mode', 'default')
+            model = torch.compile(model, mode=compile_mode, fullgraph=False)
             model.is_compiled = True
         
         return model
@@ -315,9 +329,11 @@ class BertForPretraining(nn.Module):
             if end - start > 0:
                 seq_tokens = packed_output[start:end]
                 mean_pooled = seq_tokens.mean(dim=0)
+                max_pooled = seq_tokens.max(dim=0)[0]
+                combined_pooled = torch.cat([mean_pooled, max_pooled], dim=-1)
             else:
-                mean_pooled = torch.zeros(self.bert.d_model, device=packed_output.device)
-            pooled_representations.append(mean_pooled)
+                combined_pooled = torch.zeros(2 * self.bert.d_model, device=packed_output.device)
+            pooled_representations.append(combined_pooled)
         
         pooled_output = torch.stack(pooled_representations)
         
@@ -367,19 +383,19 @@ class BertForContrastiveFineTuning(nn.Module):
         
         self.user_tag_classes = user_tag_classes
         if self.user_tag_classes > 0:
-            self.user_tag_head = nn.Linear(self.d_model, user_tag_classes)
-            self.user_tag_projection = nn.Linear(self.d_model, self.d_model)
+            self.user_tag_head = nn.Linear(2 * self.d_model, user_tag_classes)
+            self.user_tag_projection = nn.Linear(2 * self.d_model, self.d_model)
             
-        self.collection_label_head = nn.Linear(self.d_model, collection_label_classes)
+        self.collection_label_head = nn.Linear(2 * self.d_model, collection_label_classes)
 
         self.difficulty_attribute_head = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model // 2),
+            nn.Linear(2 * self.d_model, self.d_model // 2),
             nn.GELU(),
             nn.Linear(self.d_model // 2, len(DIFFICULTY_ATTRIBUTES)) 
         )
 
         self.contrastive_projection = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
+            nn.Linear(2 * self.d_model, self.d_model),
             nn.ReLU(),
             nn.Linear(self.d_model, 128)
         )
@@ -398,7 +414,8 @@ class BertForContrastiveFineTuning(nn.Module):
         
         if config.get('components', {}).get('compile_model', False):
             print("Compiling Contrastive BERT model with torch.compile...")
-            model = torch.compile(model, mode=config.get('components', {}).get('compile_mode', 'default'))
+            compile_mode = config.get('components', {}).get('compile_mode', 'default')
+            model = torch.compile(model, mode=compile_mode, fullgraph=False)
             model.is_compiled = True
         
         return model
@@ -431,9 +448,11 @@ class BertForContrastiveFineTuning(nn.Module):
             if end - start > 0:
                 seq_tokens = packed_output[start:end]
                 mean_pooled = seq_tokens.mean(dim=0)
+                max_pooled = seq_tokens.max(dim=0)[0]
+                combined_pooled = torch.cat([mean_pooled, max_pooled], dim=-1)
             else:
-                mean_pooled = torch.zeros(self.bert.d_model, device=packed_output.device)
-            pooled_representations.append(mean_pooled)
+                combined_pooled = torch.zeros(2 * self.bert.d_model, device=packed_output.device)
+            pooled_representations.append(combined_pooled)
         
         final_representation = torch.stack(pooled_representations)
 
