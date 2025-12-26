@@ -10,9 +10,9 @@ from torch.nn import RMSNorm
 from .components import TransformerEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
 from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
 
-T = TypeVar('T', bound='BertEncoder')
+T = TypeVar('T', bound='Bobert')
 
-class BertEncoder(nn.Module):
+class Bobert(nn.Module):
     def __init__(
         self,
         d_model: int,
@@ -159,10 +159,10 @@ class BertEncoder(nn.Module):
         )
         return packed_output, attention_mask
 
-class BertForPretraining(nn.Module):
+class BobertForPretraining(nn.Module):
     def __init__(
         self, 
-        bert_model: BertEncoder, 
+        bert_model: Bobert, 
         masking_ratio: float = 0.15,
         mean_span_length: float = 3.0
     ):
@@ -185,8 +185,8 @@ class BertForPretraining(nn.Module):
         self.difficulty_attribute_head = nn.Linear(bert_model.d_model, len(DIFFICULTY_ATTRIBUTES))
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForPretraining':
-        base_model = BertEncoder.from_config(config)
+    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BobertForPretraining':
+        base_model = Bobert.from_config(config)
         pretraining_config = config['pretraining']
         model = cls(
             base_model, 

@@ -20,7 +20,7 @@ from core.config import load_config
 from core.data.loader import load_dataset 
 from core.data.transforms import BeatmapNormalizer, BeatmapTransform
 from core.data.dataset import collate_fn
-from core.model.bert import BertForContrastiveFineTuning
+from core.model.bobert import BertForContrastiveFineTuning
 from core.training.checkpoint import CheckpointManager
 
 import umap

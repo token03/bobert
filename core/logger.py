@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple, Any
-from core.model.bert import BertEncoder, BertForPretraining
+from core.model.bobert import Bobert, BobertForPretraining
 
 def log_model_summary(model: nn.Module):
     is_pretrain_model = False
@@ -12,10 +12,10 @@ def log_model_summary(model: nn.Module):
     if hasattr(model, '_orig_mod'):
         actual_model = model._orig_mod
 
-    if isinstance(actual_model, BertForPretraining):
+    if isinstance(actual_model, BobertForPretraining):
         core_model = actual_model.bert
         is_pretrain_model = True
-    elif isinstance(actual_model, BertEncoder):
+    elif isinstance(actual_model, Bobert):
         core_model = actual_model
     else:
         try:
@@ -34,7 +34,7 @@ def log_model_summary(model: nn.Module):
     print(f"Flash Attention: {core_model.use_flash_attention}")
     print("-" * 30)
 
-    if is_pretrain_model and isinstance(actual_model, BertForPretraining):
+    if is_pretrain_model and isinstance(actual_model, BobertForPretraining):
         print(f"\n--- Pre-training Head Information ---")
         print(f"Tasks: Masked Modeling, Difficulty Attribute Prediction")
         print(f"Masking Ratio: {actual_model.masking_ratio}")

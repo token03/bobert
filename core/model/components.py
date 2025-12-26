@@ -2,8 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
 from torch.nn import RMSNorm
@@ -55,16 +54,15 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         return self.wo(out.view(total_tokens, self.d_model))
 
 class SwiGLU(nn.Module):
-    def __init__(self, d_model: int, dim_feedforward: int):
+    def __init__(self, d_model, dim_feedforward):
         super().__init__()
-        self.w1 = nn.Linear(d_model, dim_feedforward, bias=False)
+        self.w13 = nn.Linear(d_model, dim_feedforward * 2, bias=False)
         self.w2 = nn.Linear(dim_feedforward, d_model, bias=False)
-        self.w3 = nn.Linear(d_model, dim_feedforward, bias=False)
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.w1(x)
-        F.silu(gate, inplace=True)
-        return self.w2(gate * self.w3(x))
+
+    def forward(self, x):
+        x13 = self.w13(x)
+        x1, x3 = torch.chunk(x13, 2, dim=-1)
+        return self.w2(F.silu(x1) * x3)
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(

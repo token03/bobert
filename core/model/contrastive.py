@@ -2,14 +2,14 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, TypeVar, TypeVar, Optional
 
-from core.model.bert import BertEncoder
+from core.model.bobert import Bobert
 
 from ..data.types import DIFFICULTY_ATTRIBUTES
 
-T = TypeVar('T', bound='BertEncoder')
+T = TypeVar('T', bound='Bobert')
 
 class BertForContrastiveFineTuning(nn.Module):
-    def __init__(self, bert_model: BertEncoder, user_tag_classes: int = 1000, collection_label_classes: int = 100):
+    def __init__(self, bert_model: Bobert, user_tag_classes: int = 1000, collection_label_classes: int = 100):
         super().__init__()
         self.bert = bert_model
         self.d_model = bert_model.d_model
