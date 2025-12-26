@@ -55,8 +55,6 @@ class BertEncoder(nn.Module):
             total_output_dim=FEATURE_GROUPS['categorical']['output_dim']
         )
 
-        self.embedding_mix = nn.Linear(d_model, d_model)
-
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
                 d_model, n_heads, dim_feedforward, dropout,
