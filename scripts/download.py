@@ -320,7 +320,7 @@ def main():
     start_time = time.time()
 
     DEFAULT_CACHE_DIR = PROJECT_ROOT / 'cache'
-    DEFAULT_OUTPUT_DIR = PROJECT_ROOT / 'data' / 'raw'
+    DEFAULT_OUTPUT_DIR = PROJECT_ROOT / 'data' / 'osu'
     DEFAULT_LABEL_DIR = PROJECT_ROOT / 'data' / 'labels'
 
     parser = argparse.ArgumentParser(
@@ -330,7 +330,7 @@ def main():
     group.add_argument("input_file", nargs="?", help="Path to the input .txt file.")
     group.add_argument("--label", action="store_true", help="Download beatmaps from label files.")
 
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory to save downloaded .osu files. Default: ./data/raw")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory to save downloaded .osu files. Default: ./data/osu")
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="Directory to store cache files. Default: ./cache")
     parser.add_argument("--label-dir", default=str(DEFAULT_LABEL_DIR), help="Directory containing label .txt files. Default: ./data/labels")
 

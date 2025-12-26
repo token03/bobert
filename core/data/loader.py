@@ -334,7 +334,7 @@ def load_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
-    raw_beatmap_path: str = "./data/raw",
+    raw_beatmap_path: str = "./data/osu",
     cache_path: str = "./data/difficulty_attributes_cache.json",
     chunk_size: int = 5000
 ) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], np.ndarray]:
@@ -431,7 +431,7 @@ def load_finetuning_dataset(
     max_seq_len: Optional[int] = None,
     labels_path: str = "./data/labels.json",
     tags_path: str = "./data/tags.json",
-    raw_beatmap_path: str = "./data/raw",
+    raw_beatmap_path: str = "./data/osu",
     cache_path: str = "./data/difficulty_attributes_cache.json",
     max_samples_per_class: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], List[List[str]], List[List[str]]]:
