@@ -16,9 +16,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         
-        self.wq = nn.Linear(d_model, d_model, bias=False)
-        self.wk = nn.Linear(d_model, d_model, bias=False)
-        self.wv = nn.Linear(d_model, d_model, bias=False)
+        self.wqkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
         self.dropout = dropout
@@ -32,7 +30,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         
         total_tokens, _ = x.shape
 
-        q, k, v = self.wq(x), self.wk(x), self.wv(x)
+        qkv = self.wqkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
         
         q = q.view(total_tokens, self.n_heads, self.d_head)
         k = k.view(total_tokens, self.n_heads, self.d_head)
