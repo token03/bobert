@@ -19,30 +19,28 @@ def mlm_loss_fn(
         return torch.tensor(0.0, device=targets.device)
 
     feature_info = HitObjectVector.get_feature_info()
-    total_loss = torch.zeros((), device=targets.device)
     
-    actual_object_type = targets[..., feature_info['categorical']['object_type']['index']].long()
+    cont_names = sorted(feature_info['continuous'].keys(), key=lambda k: feature_info['continuous'][k])
+    cont_indices = [feature_info['continuous'][name] for name in cont_names]
+    
+    cont_preds = predictions['continuous'] 
+    cont_targets = targets[..., cont_indices]
 
+    actual_object_type = targets[..., feature_info['categorical']['object_type']['index']].long()
     is_slider_head_mask = (actual_object_type == OBJECT_TYPE_SLIDER_HEAD)
-    is_spinner_start_mask = (actual_object_type == OBJECT_TYPE_SPINNER_START)
     
     slider_feature_names = set(feature_info['slider'].keys())
+    is_slider_feature = torch.tensor(
+        [name in slider_feature_names for name in cont_names], 
+        device=targets.device
+    ).view(1, 1, -1)
     
-    cont_preds = predictions['continuous']
-    cont_names = sorted(feature_info['continuous'].keys(), key=lambda k: feature_info['continuous'][k])
+    should_zero = is_slider_feature & (~is_slider_head_mask.unsqueeze(-1))
+    final_cont_targets = torch.where(should_zero, torch.zeros_like(cont_targets), cont_targets)
 
-    for i, name in enumerate(cont_names):
-        pred_slice = cont_preds[..., i]
-        target_slice = targets[..., feature_info['continuous'][name]]
-
-        if name in slider_feature_names:
-            zero_target = torch.zeros_like(target_slice)
-            final_target = torch.where(is_slider_head_mask, target_slice, zero_target)
-        else:
-            final_target = target_slice
-
-        loss = F.smooth_l1_loss(pred_slice, final_target, reduction='none', beta=0.5)
-        total_loss += loss[mask].sum()
+    cont_loss = F.smooth_l1_loss(cont_preds, final_cont_targets, reduction='none', beta=0.5)
+    
+    total_loss = cont_loss[mask].sum()
 
     for name, info in feature_info['categorical'].items():
         cat_logits = predictions['categorical'][name]

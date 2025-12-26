@@ -6,8 +6,9 @@ from typing import Tuple, Dict, Any, Type, TypeVar, Optional
 import math
 
 from rotary_embedding_torch import RotaryEmbedding
+from torch.nn import RMSNorm
 
-from .components import TransformerEncoderLayer, PackedGatedConv1D, RMSNorm, NumericalGroupEmbedder, CategoricalGroupEmbedder
+from .components import TransformerEncoderLayer, PackedGatedConv1D, NumericalGroupEmbedder, CategoricalGroupEmbedder
 from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
 
 T = TypeVar('T', bound='BertEncoder')
@@ -205,7 +206,7 @@ class BertForPretraining(nn.Module):
         })
 
         self.difficulty_attribute_head = nn.Sequential(
-            nn.Linear(2 * bert_model.d_model, bert_model.d_model // 2),
+            nn.Linear(bert_model.d_model, bert_model.d_model // 2),
             nn.GELU(),
             nn.Linear(bert_model.d_model // 2, len(DIFFICULTY_ATTRIBUTES))
         )
@@ -320,22 +321,19 @@ class BertForPretraining(nn.Module):
         )
         
         batch_size = cu_seqlens.shape[0] - 1
-        pooled_representations = []
         
+        batch_indices = torch.zeros(packed_output.shape[0], dtype=torch.long, device=packed_output.device)
         for i in range(batch_size):
-            start = cu_seqlens[i]
-            end = cu_seqlens[i + 1]
-            
-            if end - start > 0:
-                seq_tokens = packed_output[start:end]
-                mean_pooled = seq_tokens.mean(dim=0)
-                max_pooled = seq_tokens.max(dim=0)[0]
-                combined_pooled = torch.cat([mean_pooled, max_pooled], dim=-1)
-            else:
-                combined_pooled = torch.zeros(2 * self.bert.d_model, device=packed_output.device)
-            pooled_representations.append(combined_pooled)
+            batch_indices[cu_seqlens[i]:cu_seqlens[i + 1]] = i
         
-        pooled_output = torch.stack(pooled_representations)
+        pooled_output = torch.zeros(batch_size, self.bert.d_model, device=packed_output.device, dtype=packed_output.dtype)
+        pooled_output.scatter_reduce_(
+            0,
+            batch_indices.unsqueeze(1).expand(-1, self.bert.d_model),
+            packed_output,
+            reduce='mean',
+            include_self=False
+        )
         
         continuous_preds_packed = self.continuous_head(packed_output)
         categorical_preds_packed = {
@@ -383,23 +381,23 @@ class BertForContrastiveFineTuning(nn.Module):
         
         self.user_tag_classes = user_tag_classes
         if self.user_tag_classes > 0:
-            self.user_tag_head = nn.Linear(2 * self.d_model, user_tag_classes)
-            self.user_tag_projection = nn.Linear(2 * self.d_model, self.d_model)
+            self.user_tag_head = nn.Linear(self.d_model, user_tag_classes)
+            self.user_tag_projection = nn.Linear(self.d_model, self.d_model)
             
-        self.collection_label_head = nn.Linear(2 * self.d_model, collection_label_classes)
+        self.collection_label_head = nn.Linear(self.d_model, collection_label_classes)
 
         self.difficulty_attribute_head = nn.Sequential(
-            nn.Linear(2 * self.d_model, self.d_model // 2),
+            nn.Linear(self.d_model, self.d_model // 2),
             nn.GELU(),
             nn.Linear(self.d_model // 2, len(DIFFICULTY_ATTRIBUTES)) 
         )
 
         self.contrastive_projection = nn.Sequential(
-            nn.Linear(2 * self.d_model, self.d_model),
+            nn.Linear(self.d_model, self.d_model),
             nn.ReLU(),
             nn.Linear(self.d_model, 128)
         )
-        self.representation_proj = nn.Linear(2 * self.d_model, self.d_model)
+        self.representation_proj = nn.Linear(self.d_model, self.d_model)
 
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
@@ -439,22 +437,21 @@ class BertForContrastiveFineTuning(nn.Module):
         )
         
         batch_size = cu_seqlens.shape[0] - 1
-        pooled_representations = []
         
+        # Create batch indices for each token in packed_output
+        batch_indices = torch.zeros(packed_output.shape[0], dtype=torch.long, device=packed_output.device)
         for i in range(batch_size):
-            start = cu_seqlens[i]
-            end = cu_seqlens[i + 1]
-            
-            if end - start > 0:
-                seq_tokens = packed_output[start:end]
-                mean_pooled = seq_tokens.mean(dim=0)
-                max_pooled = seq_tokens.max(dim=0)[0]
-                combined_pooled = torch.cat([mean_pooled, max_pooled], dim=-1)
-            else:
-                combined_pooled = torch.zeros(2 * self.bert.d_model, device=packed_output.device)
-            pooled_representations.append(combined_pooled)
+            batch_indices[cu_seqlens[i]:cu_seqlens[i + 1]] = i
         
-        final_representation = torch.stack(pooled_representations)
+        # Use scatter_reduce to compute mean pooling
+        final_representation = torch.zeros(batch_size, self.bert.d_model, device=packed_output.device, dtype=packed_output.dtype)
+        final_representation.scatter_reduce_(
+            0,
+            batch_indices.unsqueeze(1).expand(-1, self.bert.d_model),
+            packed_output,
+            reduce='mean',
+            include_self=False
+        )
 
         predictions = {
             'collection_label_logits': self.collection_label_head(final_representation),

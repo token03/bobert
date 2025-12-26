@@ -20,6 +20,26 @@ from .types import (
     OBJECT_TYPE_SPINNER_START, OBJECT_TYPE_SPINNER_END
 )
 
+def _calculate_nps_vectorized(times: np.ndarray, split_indices: np.ndarray) -> np.ndarray:
+    nps_array = np.zeros(len(times), dtype=np.float32)
+    
+    boundaries = np.concatenate(([0], split_indices, [len(times)]))
+    
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i+1]
+        map_times = times[start:end]
+        if len(map_times) == 0:
+            continue
+            
+        thresholds = map_times - 1000.0
+        
+        start_indices = np.searchsorted(map_times, thresholds, side='left')
+        
+        current_indices = np.arange(len(map_times))
+        nps_array[start:end] = (current_indices - start_indices + 1).astype(np.float32)
+        
+    return nps_array
+
 def _calculate_difficulty_attributes_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
 ) -> Optional[Dict[str, float]]:
@@ -75,41 +95,35 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     except ImportError:
         return dataset_path
 
-def _split_sliders_and_spinners(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[int, int]]:
-    
-    original_counts = df.groupby('beatmap_id', observed=False).size().to_dict()
+def _expand_sliders_and_spinners(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[int, int]]:
+    original_counts = df['beatmap_id'].value_counts(sort=False).to_dict()
     
     slider_mask = df['object_type'] == OBJECT_TYPE_SLIDER
     spinner_mask = df['object_type'] == OBJECT_TYPE_SPINNER
     
-    slider_ends = df[slider_mask].copy()
+    slider_ends = df.loc[slider_mask].copy()
     slider_ends['object_type'] = OBJECT_TYPE_SLIDER_END
     slider_ends['time'] = slider_ends['end_time']
-    slider_ends['x'] = slider_ends['slider_end_x'].fillna(slider_ends['x']).astype(int)
-    slider_ends['y'] = slider_ends['slider_end_y'].fillna(slider_ends['y']).astype(int)
+    slider_ends['x'] = slider_ends['slider_end_x'].fillna(slider_ends['x']).astype(np.int32)
+    slider_ends['y'] = slider_ends['slider_end_y'].fillna(slider_ends['y']).astype(np.int32)
     
-    slider_ends['is_new_combo'] = 0
-    slider_ends['slider_repeats'] = 0
-    slider_ends['log_slider_pixel_length'] = 0
-    slider_ends['slider_tortuosity'] = 0
-    slider_ends['pixel_length'] = 0
-    
-    spinner_ends = df[spinner_mask].copy()
+    cols_to_zero = ['is_new_combo', 'slider_repeats', 'pixel_length']
+    for col in cols_to_zero:
+        if col in slider_ends.columns:
+            slider_ends[col] = 0
+            
+    spinner_ends = df.loc[spinner_mask].copy()
     spinner_ends['object_type'] = OBJECT_TYPE_SPINNER_END
     spinner_ends['time'] = spinner_ends['end_time']
-    
-    spinner_ends['is_new_combo'] = 0
-    spinner_ends['slider_repeats'] = 0
-    spinner_ends['log_slider_pixel_length'] = 0
-    spinner_ends['slider_tortuosity'] = 0
-    spinner_ends['pixel_length'] = 0
-    
+    for col in cols_to_zero:
+        if col in spinner_ends.columns:
+            spinner_ends[col] = 0
+
     df.loc[slider_mask, 'object_type'] = OBJECT_TYPE_SLIDER_HEAD
     df.loc[spinner_mask, 'object_type'] = OBJECT_TYPE_SPINNER_START
     
     df_combined = pd.concat([df, slider_ends, spinner_ends], ignore_index=True)
-    df_combined.sort_values(['beatmap_id', 'time'], inplace=True)
-    df_combined.reset_index(drop=True, inplace=True)
+    df_combined.sort_values(by=['beatmap_id', 'time'], inplace=True, kind='mergesort')
     
     return df_combined, original_counts
 
@@ -117,6 +131,7 @@ def _engineer_features_vectorized(
     beatmaps_df: pd.DataFrame,
     hitobjects_df: pd.DataFrame
 ) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]]:
+    
     invalid_starts_mask = (
         (hitobjects_df['x'] < 0) | (hitobjects_df['x'] > 512) |
         (hitobjects_df['y'] < 0) | (hitobjects_df['y'] > 384)
@@ -126,140 +141,126 @@ def _engineer_features_vectorized(
 
     high_bpm_maps = hitobjects_df.loc[hitobjects_df['bpm'] > 1000, 'beatmap_id'].unique()
     if len(high_bpm_maps) > 0:
-        beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(high_bpm_maps)].copy()
-        hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(high_bpm_maps)].copy()
+        beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(high_bpm_maps)]
+        hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(high_bpm_maps)]
 
-    counts_after = hitobjects_df['beatmap_id'].value_counts()
-    bad_maps = counts_after[counts_after < 10].index
+    counts = hitobjects_df['beatmap_id'].value_counts()
+    bad_maps = counts[counts < 10].index
     if len(bad_maps) > 0:
-        beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(bad_maps)].copy()
-        hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(bad_maps)].copy()
+        beatmaps_df = beatmaps_df[~beatmaps_df['beatmap_id'].isin(bad_maps)]
+        hitobjects_df = hitobjects_df[~hitobjects_df['beatmap_id'].isin(bad_maps)]
 
     if beatmaps_df.empty or hitobjects_df.empty:
         return [], np.array([]), {}
 
     df = pd.merge(hitobjects_df, beatmaps_df, on='beatmap_id', how='inner')
-    df.sort_values(['beatmap_id', 'time'], inplace=True)
-    grouped = df.groupby('beatmap_id', observed=False, sort=False)
 
-    prev_x = grouped['x'].shift(1)
-    prev_y = grouped['y'].shift(1)
-    prev_time = grouped['time'].shift(1)
-    first_in_group = ~df.duplicated('beatmap_id', keep='first')
-    prev_x.loc[first_in_group] = 256
-    prev_y.loc[first_in_group] = 192
-    prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
-    df['norm_x'] = np.clip((df['x'] - 256.0) / 256.0, -1.0, 1.0)
-    df['norm_y'] = np.clip((df['y'] - 192.0) / 192.0, -1.0, 1.0)
+    df, original_counts = _expand_sliders_and_spinners(df)
+    
+    ids = df['beatmap_id'].values
+    x = df['x'].values.astype(np.float32)
+    y = df['y'].values.astype(np.float32)
+    time = df['time'].values.astype(np.float32)
+    
+    id_diff = ids[:-1] != ids[1:]
+    split_indices = np.where(id_diff)[0] + 1
+    
+    is_new_map = np.zeros(len(df), dtype=bool)
+    is_new_map[0] = True
+    is_new_map[split_indices] = True
 
-    df['delta_x'] = np.clip(df['x'] - prev_x, -512.0, 512.0)
-    df['delta_y'] = np.clip(df['y'] - prev_y, -384.0, 384.0)
-    
-    df['time_diff_ms'] = df['time'] - prev_time
-    df['log_time_diff_ms'] = np.log1p(df['time_diff_ms'])
-    df['beat_length_ms'] = 60000.0 / df['bpm'].replace(0, np.nan)
-    df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
-    
-    df['cum_beats'] = grouped['time_diff_beats'].cumsum()
-    df['beat_id'] = np.floor(df['cum_beats'] + 1e-4)
-    
-    def count_notes_in_last_second(group):
-        times = group['time'].values
-        counts = np.zeros(len(times), dtype=np.float32)
-        for i, current_time in enumerate(times):
-            threshold = current_time - 1000.0
-            counts[i] = np.sum(times[:i+1] >= threshold)
-        return counts
-    
-    df['notes_per_second'] = grouped.apply(count_notes_in_last_second, include_groups=False).explode().astype(np.float32).values
+    df['norm_x'] = np.clip((x - 256.0) / 256.0, -1.0, 1.0)
+    df['norm_y'] = np.clip((y - 192.0) / 192.0, -1.0, 1.0)
 
-    df['dist'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2)
-    df['velocity'] = df['dist'] / df['time_diff_ms'].replace(0, np.nan)
-    df['velocity'] = df['velocity'].fillna(0)
+    prev_x = np.roll(x, 1)
+    prev_y = np.roll(y, 1)
+    prev_time = np.roll(time, 1)
 
-    next_x = grouped['x'].shift(-1)
-    next_y = grouped['y'].shift(-1)
-    v1_x, v1_y = prev_x - df['x'], prev_y - df['y']
-    v2_x, v2_y = next_x - df['x'], next_y - df['y']
-    norm_v1 = np.sqrt(v1_x**2 + v1_y**2)
+    prev_x[is_new_map] = 256.0
+    prev_y[is_new_map] = 192.0
+    prev_time[is_new_map] = time[is_new_map] - 200.0
+
+    delta_x = np.clip(x - prev_x, -512.0, 512.0)
+    delta_y = np.clip(y - prev_y, -384.0, 384.0)
+    
+    df['delta_x'] = delta_x
+    df['delta_y'] = delta_y
+    
+    time_diff_ms = time - prev_time
+    time_diff_ms = np.maximum(time_diff_ms, 0)
+    
+    df['time_diff_ms'] = time_diff_ms
+    df['log_time_diff_ms'] = np.log1p(time_diff_ms)
+    
+    beat_length_ms = (60000.0 / df['bpm'].replace(0, np.nan)).astype(np.float32)
+    time_diff_beats = time_diff_ms / beat_length_ms
+    df['time_diff_beats'] = time_diff_beats
+    
+    df['time_diff_bin'] = quantize_to_bins(time_diff_beats.fillna(0).to_numpy(), DURATION_BINS)
+
+    cum_beats_arr = np.zeros(len(df), dtype=np.float32)
+    boundaries = np.concatenate(([0], split_indices, [len(df)]))
+    tdb_values = time_diff_beats.fillna(0).values
+    
+    for i in range(len(boundaries)-1):
+        s, e = boundaries[i], boundaries[i+1]
+        cum_beats_arr[s:e] = np.cumsum(tdb_values[s:e])
+        
+    df['cum_beats'] = cum_beats_arr
+    df['beat_id'] = np.floor(cum_beats_arr + 1e-4)
+
+    dist = np.sqrt(delta_x**2 + delta_y**2)
+    df['dist'] = dist
+    velocity = np.divide(dist, time_diff_ms, out=np.zeros_like(dist), where=time_diff_ms!=0)
+    df['velocity'] = velocity
+
+    next_x = np.roll(x, -1)
+    next_y = np.roll(y, -1)
+    
+    is_map_end = np.roll(is_new_map, -1)
+    is_map_end[-1] = True
+    
+    v1_x, v1_y = delta_x, delta_y
+    v2_x, v2_y = next_x - x, next_y - y
+    
+    norm_v1 = dist
     norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
-    dot = v1_x * v2_x + v1_y * v2_y
-    cos_theta = dot / (norm_v1 * norm_v2).replace(0, np.nan)
-    df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi) 
-
-    df['rhythm_change'] = df['time_diff_ms'] / grouped['time_diff_ms'].shift(1).replace(0, np.nan)
-    df['rhythm_change'] = df['rhythm_change'].fillna(1.0)
-
-    df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
     
+    dot = v1_x * v2_x + v1_y * v2_y
+    denom = norm_v1 * norm_v2
+    cos_theta = np.divide(dot, denom, out=np.zeros_like(dot), where=denom!=0)
+    
+    angle = np.arccos(np.clip(cos_theta, -1.0, 1.0))
+    angle = np.nan_to_num(angle, nan=np.pi)
+    df['relative_angle'] = angle
+
+    prev_time_diff = np.roll(time_diff_ms, 1)
+    prev_time_diff[is_new_map] = 0
+    
+    rhythm = np.divide(time_diff_ms, prev_time_diff, out=np.ones_like(time_diff_ms), where=prev_time_diff!=0)
+    df['rhythm_change'] = rhythm
+
     df['slider_repeats'] = df['slider_repeats'].fillna(0)
-    df['log_slider_pixel_length'] = np.log1p(df['pixel_length'].fillna(0.0))
+    df['pixel_length'] = df['pixel_length'].fillna(0.0)
+    df['log_slider_pixel_length'] = np.log1p(df['pixel_length'])
+    
+    raw_end_x = df['slider_end_x'].fillna(df['x']).values
+    raw_end_y = df['slider_end_y'].fillna(df['y']).values
+    slider_euc_dist = np.sqrt((raw_end_x - x)**2 + (raw_end_y - y)**2)
+    
+    tortuosity = np.divide(df['pixel_length'].values, slider_euc_dist, 
+                           out=np.ones_like(slider_euc_dist), where=slider_euc_dist!=0)
+    df['slider_tortuosity'] = tortuosity
 
-    raw_slider_end_x = df['slider_end_x'].fillna(df['x'])
-    raw_slider_end_y = df['slider_end_y'].fillna(df['y'])
-    slider_dist = np.sqrt((raw_slider_end_x - df['x'])**2 + (raw_slider_end_y - df['y'])**2)
-    df['slider_tortuosity'] = df['pixel_length'] / slider_dist.replace(0, np.nan)
-    df['slider_tortuosity'] = df['slider_tortuosity'].fillna(1.0)
-
-    df, original_counts = _split_sliders_and_spinners(df)
-    
-    grouped = df.groupby('beatmap_id', observed=False, sort=False)
-    
-    prev_x = grouped['x'].shift(1)
-    prev_y = grouped['y'].shift(1)
-    prev_time = grouped['time'].shift(1)
-    first_in_group = ~df.duplicated('beatmap_id', keep='first')
-    prev_x.loc[first_in_group] = 256
-    prev_y.loc[first_in_group] = 192
-    prev_time.loc[first_in_group] = df.loc[first_in_group, 'time'] - 200
-    
-    df['norm_x'] = np.clip((df['x'] - 256.0) / 256.0, -1.0, 1.0)
-    df['norm_y'] = np.clip((df['y'] - 192.0) / 192.0, -1.0, 1.0)
-    
-    df['delta_x'] = np.clip(df['x'] - prev_x, -512.0, 512.0)
-    df['delta_y'] = np.clip(df['y'] - prev_y, -384.0, 384.0)
-    
-    df['time_diff_ms'] = df['time'] - prev_time
-    df['log_time_diff_ms'] = np.log1p(df['time_diff_ms'])
-    df['time_diff_beats'] = df['time_diff_ms'] / df['beat_length_ms']
-    df['time_diff_bin'] = quantize_to_bins(df['time_diff_beats'].fillna(0).to_numpy(), DURATION_BINS)
-    
-    df['dist'] = np.sqrt(df['delta_x']**2 + df['delta_y']**2)
-    df['velocity'] = df['dist'] / df['time_diff_ms'].replace(0, np.nan)
-    df['velocity'] = df['velocity'].fillna(0)
-    
-    next_x = grouped['x'].shift(-1)
-    next_y = grouped['y'].shift(-1)
-    v1_x, v1_y = prev_x - df['x'], prev_y - df['y']
-    v2_x, v2_y = next_x - df['x'], next_y - df['y']
-    norm_v1 = np.sqrt(v1_x**2 + v1_y**2)
-    norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
-    dot = v1_x * v2_x + v1_y * v2_y
-    cos_theta = dot / (norm_v1 * norm_v2).replace(0, np.nan)
-    df['relative_angle'] = np.arccos(cos_theta.clip(-1.0, 1.0)).fillna(np.pi)
-    
-    df['rhythm_change'] = df['time_diff_ms'] / grouped['time_diff_ms'].shift(1).replace(0, np.nan)
-    df['rhythm_change'] = df['rhythm_change'].fillna(1.0)
-    
-    def count_notes_in_last_second(group):
-        times = group['time'].values
-        counts = np.zeros(len(times), dtype=np.float32)
-        for i, current_time in enumerate(times):
-            threshold = current_time - 1000.0
-            counts[i] = np.sum(times[:i+1] >= threshold)
-        return counts
-    
-    df['notes_per_second'] = grouped.apply(count_notes_in_last_second, include_groups=False).explode().astype(np.float32).values
+    df['notes_per_second'] = _calculate_nps_vectorized(time, split_indices)
 
     vector_field_names = HitObjectVector.get_field_names()
-    vector_df = df[['beatmap_id'] + vector_field_names]
-
-    all_vectors_np = vector_df[vector_field_names].to_numpy(dtype=np.float32)
-    ids = vector_df['beatmap_id'].to_numpy()
+    df[vector_field_names] = df[vector_field_names].astype(np.float32)
     
-    split_indices = np.where(ids[:-1] != ids[1:])[0] + 1
+    all_vectors_np = df[vector_field_names].to_numpy()
+    
     vector_arrays = np.split(all_vectors_np, split_indices)
-
+    
     unique_ids = ids[np.concatenate(([0], split_indices))]
     
     final_data = [torch.from_numpy(vectors) for vectors in vector_arrays]
@@ -272,7 +273,7 @@ def load_dataset(
     ids_to_load: Optional[List[int]] = None,
     raw_beatmap_path: str = "./data/raw",
     cache_path: str = "./data/difficulty_attributes_cache.json",
-    chunk_size: int = 2000
+    chunk_size: int = 5000
 ) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], np.ndarray]:
     
     print("Loading raw data from Parquet dataset...")
@@ -286,12 +287,12 @@ def load_dataset(
     if ids_to_load:
         print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
         all_beatmaps_df = pd.read_parquet(beatmaps_path, filters=[('beatmap_id', 'in', ids_to_load)])
-        id_cat = pd.Categorical(all_beatmaps_df['beatmap_id'], categories=ids_to_load, ordered=True)
-        all_beatmaps_df = all_beatmaps_df.assign(beatmap_id=id_cat).sort_values('beatmap_id')
     else:
         all_beatmaps_df = pd.read_parquet(beatmaps_path)
 
-    all_beatmap_ids = all_beatmaps_df['beatmap_id'].unique().tolist()
+    all_beatmap_ids = all_beatmaps_df['beatmap_id'].unique()
+    all_beatmap_ids.sort()
+    
     print(f"Found metadata for {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}...")
 
     processed_data_chunks = []
@@ -300,7 +301,8 @@ def load_dataset(
 
     for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
         chunk_ids = all_beatmap_ids[i:i + chunk_size]
-        beatmaps_df_chunk = all_beatmaps_df[all_beatmaps_df['beatmap_id'].isin(chunk_ids)]
+        
+        beatmaps_df_chunk = all_beatmaps_df[all_beatmaps_df['beatmap_id'].isin(chunk_ids)].copy()
         hitobjects_df_chunk = pd.read_parquet(hitobjects_path, filters=[('beatmap_id', 'in', chunk_ids)])
         
         if hitobjects_df_chunk.empty:
@@ -312,6 +314,9 @@ def load_dataset(
         original_counts_dict.update(chunk_original_counts)
 
     print("Consolidating processed chunks...")
+    if not processed_data_chunks:
+         return [], {}, np.array([])
+         
     processed_data = processed_data_chunks
     loaded_ids = np.concatenate(loaded_ids_chunks)
     print(f"Loaded raw feature vectors for {len(processed_data)} beatmaps.")
@@ -385,54 +390,16 @@ def load_dataset(
                 final_attributes[key].append(attrs[key])
     
     if len(final_data_filtered) < len(loaded_ids):
-        print(f"WARNING: Dropped {len(loaded_ids) - len(final_data_filtered)} beatmaps that failed difficulty calculation or had incomplete attributes.")
+        print(f"WARNING: Dropped {len(loaded_ids) - len(final_data_filtered)} beatmaps that failed difficulty calculation.")
 
     if not final_data_filtered:
-         print("WARNING: No beatmaps remained after difficulty calculation. Returning empty dataset.")
          return [], {}, np.array([])
 
     processed_data = final_data_filtered
     loaded_ids = np.array(final_ids_filtered)
     final_attributes = {k: np.array(v) for k, v in final_attributes.items()}
 
-    print("Running final data integrity check...")
-    final_data_validated, validated_ids = [], []
-    validated_attributes = defaultdict(list)
-    
-    for i, vectors in enumerate(tqdm(processed_data, desc="Validating Tensors")):
-        if torch.isnan(vectors).any() or torch.isinf(vectors).any():
-            print(f"WARNING: Skipping beatmap ID {loaded_ids[i]} due to NaN/Inf values in features.")
-            continue
-        
-        is_attr_valid = True
-        for key, arr in final_attributes.items():
-            attr_val = arr[i]
-            is_problematic = False
-            try:
-                if np.isnan(attr_val) or np.isinf(attr_val):
-                    is_problematic = True
-            except TypeError:
-                is_problematic = True
-            
-            if is_problematic:
-                print(f"WARNING: Skipping beatmap ID {loaded_ids[i]} due to invalid attribute '{key}': {attr_val}")
-                is_attr_valid = False
-                break
-        
-        if not is_attr_valid:
-            continue
-            
-        final_data_validated.append(vectors)
-        validated_ids.append(loaded_ids[i])
-        for key, arr in final_attributes.items():
-            validated_attributes[key].append(arr[i])
-
-    if len(final_data_validated) < len(processed_data):
-        print(f"WARNING: Dropped {len(processed_data) - len(final_data_validated)} beatmaps due to data integrity issues.")
-
-    validated_attributes = {k: np.array(v) for k, v in validated_attributes.items()}
-    print("Finished loading and processing all data.")
-    return final_data_validated, validated_attributes, np.array(validated_ids)
+    return processed_data, final_attributes, loaded_ids
 
 def load_finetuning_dataset(
     dataset_path: str,
@@ -443,11 +410,11 @@ def load_finetuning_dataset(
     cache_path: str = "./data/difficulty_attributes_cache.json",
     max_samples_per_class: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], List[List[str]], List[List[str]]]:
+    
     print("Loading fine-tuning dataset with labels and tags...")
 
     if not os.path.exists(labels_path):
-        raise FileNotFoundError(f"Labels file not found at {labels_path}. "
-                                "This is required for fine-tuning.")
+        raise FileNotFoundError(f"Labels file not found at {labels_path}.")
     
     print(f"Loading labels from {labels_path}...")
     with open(labels_path, 'r') as f:
@@ -480,17 +447,14 @@ def load_finetuning_dataset(
                 sampled_ids_for_class = random.sample(class_ids, limit)
                 final_ids.update(sampled_ids_for_class)
             else:
-                if limit is not None:
-                    print(f"Class '{class_name}' has {original_count} samples, which is within the limit of {limit}. Keeping all.")
                 final_ids.update(class_ids)
         
         ids_to_load = sorted(list(final_ids))
 
     if not ids_to_load:
-        raise ValueError("No beatmaps with labels found or remaining after sampling. "
-                         "Cannot proceed with fine-tuning.")
+        raise ValueError("No beatmaps with labels found.")
         
-    print(f"Found {len(ids_to_load)} unique beatmaps for fine-tuning. Loading only this subset...")
+    print(f"Found {len(ids_to_load)} unique beatmaps for fine-tuning.")
 
     processed_data, difficulty_attributes, loaded_ids = load_dataset(
         dataset_path, 
@@ -499,21 +463,13 @@ def load_finetuning_dataset(
         raw_beatmap_path=raw_beatmap_path,
         cache_path=cache_path
     )
-    print("Assembling final labels and tags...")
+    
     all_labels = []
     all_tags = []
     for beatmap_id in loaded_ids:
         str_beatmap_id = str(beatmap_id)
-        all_labels.append(labels_dict[str_beatmap_id])
+        all_labels.append(labels_dict.get(str_beatmap_id, []))
         all_tags.append(tags_dict.get(str_beatmap_id, []))
         
-    final_count = len(processed_data)
-    print(f"Final fine-tuning dataset size: {final_count} beatmaps.")
-    
-    if final_count != len(loaded_ids):
-        print(f"Warning: Mismatch between number of loaded IDs ({len(loaded_ids)}) and "
-              f"final processed beatmaps ({final_count}). This can happen if the "
-              f"labels file contains IDs not present in the dataset parquet files.")
-
-    print("Finished loading fine-tuning dataset.")
+    print(f"Final fine-tuning dataset size: {len(processed_data)} beatmaps.")
     return processed_data, difficulty_attributes, all_labels, all_tags

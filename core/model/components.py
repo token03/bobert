@@ -6,6 +6,7 @@ import math
 from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
+from torch.nn import RMSNorm
 
 class MultiHeadAttentionWithRoPE(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1, local_window_size: int = 128, is_global: bool = True):
@@ -68,18 +69,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         
         return self.wo(output)
 
-class RMSNorm(nn.Module):
-    def __init__(self, d_model: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(d_model))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = x * torch.rsqrt(variance + self.eps)
-        return (self.weight * hidden_states).to(input_dtype)
-
 class PackedGatedConv1D(nn.Module):
     def __init__(self, d_model: int, kernel_size: int):
         super().__init__()
@@ -91,34 +80,34 @@ class PackedGatedConv1D(nn.Module):
             in_channels=d_model,
             out_channels=2 * d_model,
             kernel_size=kernel_size,
-            padding=0, 
+            padding=self.padding, 
             bias=False
         )
 
     def forward(self, packed_x: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
         batch_size = cu_seqlens.shape[0] - 1
-        device = packed_x.device
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+        max_seqlen = seqlens.max().item()
+        total_tokens = packed_x.shape[0]
         
-        outputs = []
-        for i in range(batch_size):
-            start_idx = cu_seqlens[i]
-            end_idx = cu_seqlens[i + 1]
-            seq_len = end_idx - start_idx
-            
-            if seq_len == 0:
-                continue
-                
-            seq_data = packed_x[start_idx:end_idx]
-            seq_data_t = seq_data.t().unsqueeze(0)
-            padded_seq = F.pad(seq_data_t, (self.padding, self.padding), mode='replicate')
-            convolved = self.conv(padded_seq)
-            
-            output, gate = convolved.chunk(2, dim=1) 
-            gated_output = F.silu(gate) * output 
-            gated_output = gated_output.squeeze(0).t()
-            outputs.append(gated_output)
+        token_indices = torch.arange(total_tokens, device=packed_x.device)
+        batch_ids = torch.bucketize(token_indices, cu_seqlens[1:], right=True)
+        positions = token_indices - cu_seqlens[batch_ids]
         
-        return torch.cat(outputs, dim=0)
+        padded = torch.zeros(
+            batch_size, max_seqlen, self.d_model,
+            device=packed_x.device, dtype=packed_x.dtype
+        )
+        padded[batch_ids, positions] = packed_x
+        
+        x_conv = padded.transpose(1, 2)
+        convolved = self.conv(x_conv)
+        
+        output, gate = convolved.chunk(2, dim=1)
+        gated_output = F.silu(gate) * output
+        gated_output = gated_output.transpose(1, 2)
+        
+        return gated_output[batch_ids, positions]
 
 class GatedConv1D(nn.Module):
     def __init__(self, d_model: int, kernel_size: int):
