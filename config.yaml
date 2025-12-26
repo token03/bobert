@@ -15,7 +15,6 @@ model:
   dim_feedforward_mult: 4
   dropout: 0.1
   local_attention_window: 256
-  cnn_kernel_size: 15
 
   
 components:

@@ -76,20 +76,21 @@ class PreTrainer:
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
-        epoch_losses = {}
+        
+        epoch_loss_accum = {} 
+        num_batches = 0
+        
         self.optimizer.zero_grad(set_to_none=True)
         
         num_update_steps = math.ceil(len(self.train_dataloader) / self.grad_accum_steps)
-        progress_bar = tqdm(
-            total=num_update_steps,
-            desc=f"Epoch {epoch+1} [Train]",
-            dynamic_ncols=True
-        )
+        progress_bar = tqdm(total=num_update_steps, desc=f"Epoch {epoch+1} [Train]", dynamic_ncols=True)
         
-        data_iter = iter(self.train_dataloader)
-        for i in range(len(self.train_dataloader)):
-            vectors, attention_mask, difficulty_labels, cu_seqlens = next(data_iter)
-            
+        for vectors, attention_mask, difficulty_labels, cu_seqlens in self.train_dataloader:
+            vectors = vectors.to(self.device)
+            attention_mask = attention_mask.to(self.device)
+            if cu_seqlens is not None: cu_seqlens = cu_seqlens.to(self.device)
+            difficulty_labels = {k: v.to(self.device) for k, v in difficulty_labels.items()}
+
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
                 predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
                 loss_dict = self.loss_fn(predictions, targets, mask, difficulty_labels, self.config)
@@ -97,10 +98,15 @@ class PreTrainer:
             
             self.scaler.scale(scaled_loss).backward()
             
-            for k, v in loss_dict.items():
-                epoch_losses[k] = epoch_losses.get(k, 0.0) + v.item()
+            with torch.no_grad():
+                for k, v in loss_dict.items():
+                    if k not in epoch_loss_accum:
+                        epoch_loss_accum[k] = torch.tensor(0.0, device=self.device)
+                    epoch_loss_accum[k] += v.detach()
 
-            if (i + 1) % self.grad_accum_steps == 0 or (i + 1) == len(self.train_dataloader):
+            num_batches += 1
+            
+            if num_batches % self.grad_accum_steps == 0 or num_batches == len(self.train_dataloader):
                 if self.grad_clip_norm > 0:
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
@@ -108,20 +114,19 @@ class PreTrainer:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
+                if self.scheduler: self.scheduler.step()
                 
-                if self.scheduler is not None: self.scheduler.step()
-                
+                progress_bar.set_postfix({
+                    "Loss": f"{loss_dict['total_loss'].item():.4f}", 
+                    "MLM": f"{loss_dict['mlm_loss'].item():.4f}",
+                    "LR": f"{self.optimizer.param_groups[0]['lr']:.2e}"
+                })
                 progress_bar.update(1)
             
-            progress_bar.set_postfix({
-                "Loss": f"{loss_dict['total_loss'].item():.4f}",
-                "MLM": f"{loss_dict['mlm_loss'].item():.4f}",
-                "Pred": f"{loss_dict.get('difficulty_loss', torch.tensor(0.0)).item():.4f}",
-                "LR": f"{self.optimizer.param_groups[0]['lr']:.2e}"
-            })
-            
         progress_bar.close()
-        avg_losses = {k: v / len(self.train_dataloader) for k, v in epoch_losses.items()}
+        
+        # 3. Batch convert to float at the END of the epoch
+        avg_losses = {k: v.item() / len(self.train_dataloader) for k, v in epoch_loss_accum.items()}
         avg_losses['learning_rate'] = self.optimizer.param_groups[0]['lr']
         return avg_losses
     

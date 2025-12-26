@@ -8,7 +8,7 @@ import math
 from rotary_embedding_torch import RotaryEmbedding
 from torch.nn import RMSNorm
 
-from .components import TransformerEncoderLayer, PackedGatedConv1D, NumericalGroupEmbedder, CategoricalGroupEmbedder
+from .components import TransformerEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
 from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
 
 T = TypeVar('T', bound='BertEncoder')
@@ -23,14 +23,12 @@ class BertEncoder(nn.Module):
         dropout: float = 0.1,
         local_attention_window: int = 128,
         use_flash_attention: bool = True,
-        cnn_kernel_size: int = 0,
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.use_flash_attention = use_flash_attention
-        self.cnn_kernel_size = cnn_kernel_size
 
         self.feature_info = HitObjectVector.get_feature_info()
 
@@ -58,12 +56,6 @@ class BertEncoder(nn.Module):
         )
 
         self.embedding_mix = nn.Linear(d_model, d_model)
-        self.embedding_norm = RMSNorm(d_model)
-
-        self.packed_gated_cnn = PackedGatedConv1D(d_model, self.cnn_kernel_size)
-        self.cnn_norm = RMSNorm(d_model)
-        self.cnn_dropout = nn.Dropout(dropout)
-
 
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(
@@ -92,8 +84,7 @@ class BertEncoder(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=model_config.get('dropout', 0.1),
             local_attention_window=model_config.get('local_attention_window', 128),
-            use_flash_attention=components_config.get('use_flash_attention', True),
-            cnn_kernel_size=model_config.get('cnn_kernel_size', 0)
+            use_flash_attention=components_config.get('use_flash_attention', True)
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -108,22 +99,15 @@ class BertEncoder(nn.Module):
         }
 
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
-        spatial_features = x[:, :, self.spatial_indices]
-        spatial_embed = self.spatial_embedder(spatial_features)
-
-        rhythm_features = x[:, :, self.rhythm_indices]
-        rhythm_embed = self.rhythm_embedder(rhythm_features)
-
-        slider_features = x[:, :, self.slider_indices]
-        slider_embed = self.slider_embedder(slider_features)
+        spatial_embed = self.spatial_embedder(x[:, :, self.spatial_indices])
+        rhythm_embed = self.rhythm_embedder(x[:, :, self.rhythm_indices])
+        slider_embed = self.slider_embedder(x[:, :, self.slider_indices])
 
         cat_feature_indices = {name: self.feature_info['categorical'][name]['index'] for name in FEATURE_GROUPS['categorical']['features']}
         cat_embed = self.categorical_embedder(x, cat_feature_indices)
 
-        combined_features = torch.cat([spatial_embed, rhythm_embed, slider_embed, cat_embed], dim=-1)
+        x_embed = torch.cat([spatial_embed, rhythm_embed, slider_embed, cat_embed], dim=-1)
 
-        x_embed = self.embedding_mix(combined_features)
-        x_embed = self.embedding_norm(x_embed)
         return x_embed
 
     def _embed(
@@ -139,10 +123,6 @@ class BertEncoder(nn.Module):
             cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
         
         packed_embed = x_embed[attention_mask]  
-        
-        packed_normed = self.cnn_norm(packed_embed)
-        packed_cnn_output = self.packed_gated_cnn(packed_normed, cu_seqlens)
-        packed_embed = packed_embed + self.cnn_dropout(packed_cnn_output)
         
         return packed_embed, attention_mask, cu_seqlens
 
@@ -205,12 +185,8 @@ class BertForPretraining(nn.Module):
             for name, info in self.feature_info['categorical'].items()
         })
 
-        self.difficulty_attribute_head = nn.Sequential(
-            nn.Linear(bert_model.d_model, bert_model.d_model // 2),
-            nn.GELU(),
-            nn.Linear(bert_model.d_model // 2, len(DIFFICULTY_ATTRIBUTES))
-        )
-        
+        self.difficulty_attribute_head = nn.Linear(bert_model.d_model, len(DIFFICULTY_ATTRIBUTES))
+
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForPretraining':
         base_model = BertEncoder.from_config(config)
@@ -425,7 +401,7 @@ class BertForContrastiveFineTuning(nn.Module):
         if config.get('components', {}).get('compile_model', False):
             print("Compiling Contrastive BERT model with torch.compile...")
             compile_mode = config.get('components', {}).get('compile_mode', 'default')
-            model = torch.compile(model, mode=compile_mode, fullgraph=False)
+            model = torch.compile(model, mode=compile_mode, dynamic=True) 
             model.is_compiled = True
         
         return model

@@ -23,27 +23,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.local_window_size = local_window_size
         self.is_global = is_global
 
-        self._rope_cache = None
-        self._rope_cache_max_seqlen = 0
-        self._rope_cache_dtype = None
-        self._rope_cache_device = None
-
-    def _get_rope_cache(self, rotary_emb, max_seqlen, device, dtype):
-        need = (
-            self._rope_cache is None or
-            self._rope_cache_max_seqlen < max_seqlen or
-            self._rope_cache_dtype != dtype or
-            self._rope_cache_device != device
-        )
-        if need:
-            t = torch.arange(max_seqlen, device=device)
-            cache = rotary_emb(t, seq_len=max_seqlen).to(dtype)
-            self._rope_cache = cache
-            self._rope_cache_max_seqlen = max_seqlen
-            self._rope_cache_dtype = dtype
-            self._rope_cache_device = device
-        return self._rope_cache
-
     def forward(self, x, **kwargs):
         rotary_emb = kwargs.get("rotary_emb")
         cu_seqlens = kwargs.get("cu_seqlens")
@@ -58,7 +37,9 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
             pos = token_idx - cu_seqlens[batch_ids] 
 
-            all_freqs = self._get_rope_cache(rotary_emb, max_seqlen, x.device, x.dtype)
+            t = torch.arange(max_seqlen, device=x.device)
+            all_freqs = rotary_emb(t, seq_len=max_seqlen)
+            
             freqs = all_freqs[pos].view(total_tokens, 1, self.d_head)
 
             qkv[:, 0] = apply_rotary_emb(freqs, qkv[:, 0], seq_dim=0)
@@ -72,70 +53,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             window_size=window_size
         )
         return self.wo(out.view(total_tokens, self.d_model))
-
-class PackedGatedConv1D(nn.Module):
-    def __init__(self, d_model: int, kernel_size: int):
-        super().__init__()
-        self.d_model = d_model
-        self.kernel_size = kernel_size
-        self.padding = kernel_size // 2
-        
-        self.conv = nn.Conv1d(
-            in_channels=d_model,
-            out_channels=2 * d_model,
-            kernel_size=kernel_size,
-            padding=self.padding, 
-            bias=False
-        )
-
-    def forward(self, packed_x: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
-        batch_size = cu_seqlens.shape[0] - 1
-        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        max_seqlen = seqlens.max().item()
-        total_tokens = packed_x.shape[0]
-        
-        token_indices = torch.arange(total_tokens, device=packed_x.device)
-        batch_ids = torch.bucketize(token_indices, cu_seqlens[1:], right=True)
-        positions = token_indices - cu_seqlens[batch_ids]
-        
-        padded = torch.zeros(
-            batch_size, max_seqlen, self.d_model,
-            device=packed_x.device, dtype=packed_x.dtype
-        )
-        padded[batch_ids, positions] = packed_x
-        
-        x_conv = padded.transpose(1, 2)
-        convolved = self.conv(x_conv)
-        
-        output, gate = convolved.chunk(2, dim=1)
-        gated_output = F.silu(gate) * output
-        gated_output = gated_output.transpose(1, 2)
-        
-        return gated_output[batch_ids, positions]
-
-class GatedConv1D(nn.Module):
-    def __init__(self, d_model: int, kernel_size: int):
-        super().__init__()
-        self.conv = nn.Conv1d(
-            in_channels=d_model,
-            out_channels=2 * d_model,
-            kernel_size=kernel_size,
-            padding='same' 
-        )
-
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        mask = attention_mask.unsqueeze(-1).to(x.dtype)
-        x = x * mask
-        
-        x_permuted = x.permute(0, 2, 1)
-        convolved = self.conv(x_permuted)
-        output, gate = convolved.chunk(2, dim=1)
-        
-        gated_output = F.silu(gate) * output
-        gated_output_permuted = gated_output.permute(0, 2, 1)
-        gated_output_permuted = gated_output_permuted * mask
-        
-        return gated_output_permuted
 
 class SwiGLU(nn.Module):
     def __init__(self, d_model: int, dim_feedforward: int):
