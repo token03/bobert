@@ -23,50 +23,55 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.local_window_size = local_window_size
         self.is_global = is_global
 
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        rotary_emb: RotaryEmbedding = kwargs.get("rotary_emb")
-        cu_seqlens: torch.Tensor = kwargs.get("cu_seqlens")
-        max_seqlen: int = kwargs.get("max_seqlen")
-        
+        self._rope_cache = None
+        self._rope_cache_max_seqlen = 0
+        self._rope_cache_dtype = None
+        self._rope_cache_device = None
+
+    def _get_rope_cache(self, rotary_emb, max_seqlen, device, dtype):
+        need = (
+            self._rope_cache is None or
+            self._rope_cache_max_seqlen < max_seqlen or
+            self._rope_cache_dtype != dtype or
+            self._rope_cache_device != device
+        )
+        if need:
+            t = torch.arange(max_seqlen, device=device)
+            cache = rotary_emb(t, seq_len=max_seqlen).to(dtype)
+            self._rope_cache = cache
+            self._rope_cache_max_seqlen = max_seqlen
+            self._rope_cache_dtype = dtype
+            self._rope_cache_device = device
+        return self._rope_cache
+
+    def forward(self, x, **kwargs):
+        rotary_emb = kwargs.get("rotary_emb")
+        cu_seqlens = kwargs.get("cu_seqlens")
+        max_seqlen = kwargs.get("max_seqlen")
+
         total_tokens, _ = x.shape
 
-        qkv = self.wqkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
-        
-        q = q.view(total_tokens, self.n_heads, self.d_head)
-        k = k.view(total_tokens, self.n_heads, self.d_head)
-        v = v.view(total_tokens, self.n_heads, self.d_head)
+        qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
 
         if rotary_emb is not None:
-            t_for_cache = torch.arange(max_seqlen, device=x.device)
-            all_freqs = rotary_emb(t_for_cache, seq_len=max_seqlen)
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-            position_ids = torch.cat([torch.arange(s, device=x.device, dtype=torch.long) for s in seqlens])
-            freqs = all_freqs[position_ids]
-            freqs = freqs.view(total_tokens, 1, self.d_head)
+            token_idx = torch.arange(total_tokens, device=x.device)
+            batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
+            pos = token_idx - cu_seqlens[batch_ids] 
 
-            freqs = freqs.to(x.dtype)
-            
-            q = apply_rotary_emb(freqs, q, seq_dim=0)
-            k = apply_rotary_emb(freqs, k, seq_dim=0)
+            all_freqs = self._get_rope_cache(rotary_emb, max_seqlen, x.device, x.dtype)
+            freqs = all_freqs[pos].view(total_tokens, 1, self.d_head)
 
-        qkv = torch.stack([q, k, v], dim=1)
-        qkv = qkv.view(total_tokens, 3, self.n_heads, self.d_head)
+            qkv[:, 0] = apply_rotary_emb(freqs, qkv[:, 0], seq_dim=0)
+            qkv[:, 1] = apply_rotary_emb(freqs, qkv[:, 1], seq_dim=0)
 
         window_size = (-1, -1) if self.is_global else (self.local_window_size, self.local_window_size)
-
-        output = flash_attn_varlen_qkvpacked_func(
-            qkv,
-            cu_seqlens,
-            max_seqlen,
+        out = flash_attn_varlen_qkvpacked_func(
+            qkv, cu_seqlens, max_seqlen,
             dropout_p=self.dropout if self.training else 0.0,
             causal=False,
             window_size=window_size
         )
-        
-        output = output.view(total_tokens, self.d_model)
-        
-        return self.wo(output)
+        return self.wo(out.view(total_tokens, self.d_model))
 
 class PackedGatedConv1D(nn.Module):
     def __init__(self, d_model: int, kernel_size: int):
@@ -195,10 +200,8 @@ class NumericalGroupEmbedder(nn.Module):
         super().__init__()
         self.proj = nn.Linear(input_dim, output_dim)
         self.act = nn.GELU()
-        # self.norm = RMSNorm(output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # return self.norm(self.act(self.proj(x)))
         return self.act(self.proj(x))
 
 class CategoricalGroupEmbedder(nn.Module):

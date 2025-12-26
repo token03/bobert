@@ -39,7 +39,7 @@ pretraining:
   use_amp: true
   checkpoint_dir: "./checkpoints"
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 8
 
   difficulty_loss_weight: 1.0
   mlm_loss_weight: 1.0

@@ -46,7 +46,9 @@ class PreTrainer:
         self.grad_clip_norm = config['pretraining'].get('grad_clip_norm', 1.0)
         self.grad_accum_steps = config['pretraining'].get('gradient_accumulation_steps', 1)
 
-        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.use_amp)
+        # GradScaler is only needed for float16, not bfloat16 (bfloat16 has wider dynamic range)
+        # When using bfloat16 with autocast, disable gradient scaling
+        self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=False)
         self.metrics_tracker = MetricsTracker()
         self.feature_info = HitObjectVector.get_feature_info()
 

@@ -320,39 +320,51 @@ class BertForPretraining(nn.Module):
             max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
         
-        batch_size = cu_seqlens.shape[0] - 1
-        
-        batch_indices = torch.zeros(packed_output.shape[0], dtype=torch.long, device=packed_output.device)
-        for i in range(batch_size):
-            batch_indices[cu_seqlens[i]:cu_seqlens[i + 1]] = i
-        
-        pooled_output = torch.zeros(batch_size, self.bert.d_model, device=packed_output.device, dtype=packed_output.dtype)
-        pooled_output.scatter_reduce_(
-            0,
-            batch_indices.unsqueeze(1).expand(-1, self.bert.d_model),
-            packed_output,
-            reduce='mean',
-            include_self=False
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)  # [B]
+        batch_size = seqlens.numel()
+
+        batch_idx = torch.repeat_interleave(
+            torch.arange(batch_size, device=packed_output.device),
+            seqlens
         )
+
+        pooled_sum = torch.zeros(batch_size, self.bert.d_model, device=packed_output.device, dtype=torch.float32)
+        pooled_sum.index_add_(0, batch_idx, packed_output.float())
+        pooled_output = (pooled_sum / seqlens.unsqueeze(1)).to(packed_output.dtype)
+
+        is_masked_flat = is_masked.flatten() 
+        attention_mask_flat = attention_mask.flatten() 
         
-        continuous_preds_packed = self.continuous_head(packed_output)
-        categorical_preds_packed = {
-            name: head(packed_output)
+        padded_indices = torch.arange(batch_size * x.shape[1], device=x.device)
+        packed_to_padded = padded_indices[attention_mask_flat] 
+        
+        masked_in_packed = is_masked_flat[attention_mask_flat] 
+        masked_packed_indices = torch.nonzero(masked_in_packed, as_tuple=True)[0]
+        masked_output = packed_output[masked_packed_indices]
+        
+        continuous_preds_masked = self.continuous_head(masked_output)
+        categorical_preds_masked = {
+            name: head(masked_output)
             for name, head in self.categorical_heads.items()
         }
         
-        seq_len = attention_mask.shape[1]
-        continuous_preds = torch.zeros(batch_size, seq_len, continuous_preds_packed.shape[-1], 
-                                      device=x.device, dtype=continuous_preds_packed.dtype)
+        seq_len = x.shape[1]
+        continuous_preds = torch.zeros(batch_size, seq_len, continuous_preds_masked.shape[-1], 
+                                      device=x.device, dtype=continuous_preds_masked.dtype)
         categorical_preds = {
             name: torch.zeros(batch_size, seq_len, preds.shape[-1], 
                             device=x.device, dtype=preds.dtype)
-            for name, preds in categorical_preds_packed.items()
+            for name, preds in categorical_preds_masked.items()
         }
         
-        continuous_preds[attention_mask] = continuous_preds_packed
+        masked_padded_indices = packed_to_padded[masked_packed_indices]
+        
+        batch_indices = masked_padded_indices // seq_len
+        seq_indices = masked_padded_indices % seq_len
+        
+        continuous_preds[batch_indices, seq_indices] = continuous_preds_masked
         for name in categorical_preds:
-            categorical_preds[name][attention_mask] = categorical_preds_packed[name]
+            categorical_preds[name][batch_indices, seq_indices] = categorical_preds_masked[name]
         
         mlm_predictions = {
             'continuous': continuous_preds,
