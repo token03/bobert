@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple, Dict, Any, Type, TypeVar, Optional
-import math
 
 from rotary_embedding_torch import RotaryEmbedding
 from torch.nn import RMSNorm
@@ -20,8 +19,8 @@ class BertEncoder(nn.Module):
         n_heads: int,
         n_layers: int,
         dim_feedforward: int,
+        local_attention_window: int,
         dropout: float = 0.1,
-        local_attention_window: int = 128,
         use_flash_attention: bool = True,
     ):
         super().__init__()
@@ -73,16 +72,16 @@ class BertEncoder(nn.Module):
         model_config = config['model']
         components_config = config.get('components', {})
         
-        dim_feedforward = model_config['d_model'] * model_config.get('dim_feedforward_mult', 4)
+        dim_feedforward = model_config['d_model'] * model_config['dim_feedforward_mult']
         
         return cls(
             d_model=model_config['d_model'],
             n_heads=model_config['n_heads'],
             n_layers=model_config['n_layers'],
             dim_feedforward=dim_feedforward,
-            dropout=model_config.get('dropout', 0.1),
-            local_attention_window=model_config.get('local_attention_window', 128),
-            use_flash_attention=components_config.get('use_flash_attention', True)
+            dropout=model_config['dropout'],
+            local_attention_window=model_config['local_attention_window'],
+            use_flash_attention=components_config['use_flash_attention'],
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -357,101 +356,3 @@ class BertForPretraining(nn.Module):
         }
 
         return predictions, x, is_masked
-
-
-class BertForContrastiveFineTuning(nn.Module):
-    def __init__(self, bert_model: BertEncoder, user_tag_classes: int = 1000, collection_label_classes: int = 100):
-        super().__init__()
-        self.bert = bert_model
-        self.d_model = bert_model.d_model
-        
-        self.user_tag_classes = user_tag_classes
-        if self.user_tag_classes > 0:
-            self.user_tag_head = nn.Linear(self.d_model, user_tag_classes)
-            self.user_tag_projection = nn.Linear(self.d_model, self.d_model)
-            
-        self.collection_label_head = nn.Linear(self.d_model, collection_label_classes)
-
-        self.difficulty_attribute_head = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model // 2),
-            nn.GELU(),
-            nn.Linear(self.d_model // 2, len(DIFFICULTY_ATTRIBUTES)) 
-        )
-
-        self.contrastive_projection = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
-            nn.ReLU(),
-            nn.Linear(self.d_model, 128)
-        )
-        self.representation_proj = nn.Linear(self.d_model, self.d_model)
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
-        base_model = BertEncoder.from_config(config)
-        
-        finetuning_config = config.get('finetuning', {})
-        user_tag_classes = finetuning_config.get('user_tag_classes', 0) 
-        collection_label_classes = finetuning_config.get('collection_label_classes', 100)
-
-        model = cls(base_model, user_tag_classes, collection_label_classes)
-        model = model.to(device)
-        
-        if config.get('components', {}).get('compile_model', False):
-            print("Compiling Contrastive BERT model with torch.compile...")
-            compile_mode = config.get('components', {}).get('compile_mode', 'default')
-            model = torch.compile(model, mode=compile_mode, dynamic=True) 
-            model.is_compiled = True
-        
-        return model
-
-    def get_summary(self) -> Dict[str, Any]:
-        return self.bert.get_summary()
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        packed_embeddings, attention_mask, cu_seqlens = self.bert._embed(
-            x, attention_mask, cu_seqlens
-        )
-        max_seqlen = x.shape[1]
-        packed_output = self.bert.encode(
-            packed_embeddings, attention_mask, 
-            max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
-        )
-        
-        batch_size = cu_seqlens.shape[0] - 1
-        
-        # Create batch indices for each token in packed_output
-        batch_indices = torch.zeros(packed_output.shape[0], dtype=torch.long, device=packed_output.device)
-        for i in range(batch_size):
-            batch_indices[cu_seqlens[i]:cu_seqlens[i + 1]] = i
-        
-        # Use scatter_reduce to compute mean pooling
-        final_representation = torch.zeros(batch_size, self.bert.d_model, device=packed_output.device, dtype=packed_output.dtype)
-        final_representation.scatter_reduce_(
-            0,
-            batch_indices.unsqueeze(1).expand(-1, self.bert.d_model),
-            packed_output,
-            reduce='mean',
-            include_self=False
-        )
-
-        predictions = {
-            'collection_label_logits': self.collection_label_head(final_representation),
-            'contrastive_projection': self.contrastive_projection(final_representation),
-            'sequence_representation': final_representation
-        }
-
-        if self.user_tag_classes > 0:
-            predictions['user_tag_logits'] = self.user_tag_head(final_representation)
-
-        difficulty_preds_raw = self.difficulty_attribute_head(final_representation)
-        predictions['difficulty'] = {
-            name: difficulty_preds_raw[:, i]
-            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
-        }
-
-        return predictions

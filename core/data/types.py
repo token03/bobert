@@ -3,6 +3,12 @@ from typing import NamedTuple, List, Dict, Any, Optional, Tuple
 import numpy as np
 from enum import Enum
 
+OSU_STAGE_WIDTH = 512
+OSU_STAGE_HEIGHT = 384
+CENTER_X = OSU_STAGE_WIDTH / 2.0
+CENTER_Y = OSU_STAGE_HEIGHT / 2.0
+DEFAULT_PRE_START_MS = 200.0
+
 MAX_METER_CARDINALITY = 8
 
 DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
