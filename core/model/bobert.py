@@ -7,7 +7,7 @@ from typing import Tuple, Dict, Any, Type, TypeVar, Optional
 from rotary_embedding_torch import RotaryEmbedding
 from torch.nn import RMSNorm
 
-from .components import SpanMasker, TransformerEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
+from .components import SpanMasker, BobertEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
 from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
 
 T = TypeVar('T', bound='BobertModel')
@@ -55,7 +55,7 @@ class BobertModel(nn.Module):
         )
 
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(
+            BobertEncoderLayer(
                 d_model, n_heads, dim_feedforward, dropout,
                 is_global=((i + 1) % 3 == 0),
                 local_window_size=local_attention_window
