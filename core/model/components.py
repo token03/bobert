@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
+from torch.distributions import Geometric
 from torch.nn import RMSNorm
 
 class MultiHeadAttentionWithRoPE(nn.Module):
@@ -153,50 +154,40 @@ class SpanMasker(nn.Module):
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, d_model))
 
     def _generate_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = attention_mask.shape
-        device = attention_mask.device
+            batch_size, seq_len = attention_mask.shape
+            device = attention_mask.device
 
-        num_to_mask = (attention_mask.sum(dim=1) * self.masking_ratio).round().long()
+            k = max(1, int(seq_len * self.masking_ratio / self.mean_span_length * 1.2)) # 1.2 is a safe heuristic
+            
+            max_span_len = max(1, int(self.mean_span_length * 3))
 
-        k = max(1, int(seq_len * self.masking_ratio / self.mean_span_length * 1.5))
-        max_span_len = max(1, int(self.mean_span_length * 3))
+            dist = Geometric(probs=1.0 / self.mean_span_length)
+            span_lengths = dist.sample((batch_size, k)).long() + 1
 
-        geom_p = torch.tensor(1.0 / self.mean_span_length, device=device)
-        u = torch.rand(batch_size, k, device=device)
-        span_lengths = (torch.log(u) / torch.log1p(-geom_p)).floor().long() + 1
-        span_lengths.clamp_(max=max_span_len)
+            span_lengths = span_lengths.to(device)
 
-        scores = torch.rand(batch_size, seq_len, device=device)
-        scores.masked_fill_(~attention_mask, -1.0)
-        _, top_indices = torch.topk(scores, k=k, dim=1)
+            span_lengths.clamp_(max=max_span_len)
 
-        offsets = torch.arange(max_span_len, device=device).view(1, 1, -1)
-        span_active_mask = offsets < span_lengths.unsqueeze(-1)
-        
-        indices_to_mask = top_indices.unsqueeze(-1) + offsets
-        indices_to_mask.clamp_(0, seq_len - 1)
+            scores = torch.rand(batch_size, seq_len, device=device)
+            scores.masked_fill_(~attention_mask, -1.0)
+            _, top_indices = torch.topk(scores, k=k, dim=1)
 
-        batch_idx = torch.arange(batch_size, device=device).view(-1, 1, 1).expand_as(indices_to_mask)
-        flat_batch_idx = batch_idx[span_active_mask]
-        flat_indices_to_mask = indices_to_mask[span_active_mask]
-        
-        prelim_mask = torch.zeros_like(attention_mask)
-        prelim_mask[flat_batch_idx, flat_indices_to_mask] = True
-        prelim_mask &= attention_mask
+            offsets = torch.arange(max_span_len, device=device).view(1, 1, -1)
+            span_active_mask = offsets < span_lengths.unsqueeze(-1)
+            
+            indices_to_mask = top_indices.unsqueeze(-1) + offsets
+            indices_to_mask.clamp_(0, seq_len - 1)
 
-        current_mask_count = prelim_mask.sum(dim=1)
-        excess = (current_mask_count - num_to_mask).clamp(min=0)
-        
-        unmask_scores = torch.rand(batch_size, seq_len, device=device)
-        unmask_scores.masked_fill_(~prelim_mask, 2.0)
+            batch_idx = torch.arange(batch_size, device=device).view(-1, 1, 1).expand_as(indices_to_mask)
+            flat_batch_idx = batch_idx[span_active_mask]
+            flat_indices_to_mask = indices_to_mask[span_active_mask]
+            
+            prelim_mask = torch.zeros_like(attention_mask)
+            prelim_mask[flat_batch_idx, flat_indices_to_mask] = True
+            
+            final_mask = prelim_mask & attention_mask
 
-        sorted_scores, _ = torch.sort(unmask_scores, dim=1)
-        clamped_excess_idx = (excess - 1).clamp(min=0)
-        thresholds = sorted_scores.gather(1, clamped_excess_idx.unsqueeze(1))
-        
-        should_unmask = unmask_scores < thresholds
-        final_mask = prelim_mask & ~should_unmask
-        return final_mask
+            return final_mask
 
     def forward(self, x_embed: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         is_masked = self._generate_mask(attention_mask)
