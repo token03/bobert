@@ -20,10 +20,12 @@ class TabformerModel(nn.Module):
         tag_vocab_size: int,
         max_tags: int = 50,
         dropout: float = 0.1,
+        tag_dropout: float = 0.2,
         num_bins: int = 32
     ):
         super().__init__()
         self.d_model = d_model
+        self.tag_dropout = tag_dropout
         
         self.num_feats = metadata_config.get('numerical_features', [])
         self.cat_feats_config = metadata_config.get('categorical_features', {})
@@ -43,8 +45,10 @@ class TabformerModel(nn.Module):
 
         self.tag_embedding = nn.Embedding(tag_vocab_size, d_model, padding_idx=0)
 
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+
         self.n_metadata = len(self.num_feats) + len(self.cat_feat_names)
-        self.total_feature_types = self.n_metadata + 1 
+        self.total_feature_types = self.n_metadata + 2 
         
         self.feature_type_embedder = FeatureTypeEmbedder(self.total_feature_types, d_model)
         
@@ -81,6 +85,11 @@ class TabformerModel(nn.Module):
         batch_size = x_tags.shape[0]
         device = x_tags.device
         embeddings_list = []
+
+        if self.training and self.token_dropout > 0:
+            non_pad_mask = (x_tags != 0)
+            dropout_mask = torch.bernoulli(torch.full(x_tags.shape, self.token_dropout, device=device)).bool()
+            x_tags = x_tags.masked_fill(non_pad_mask & dropout_mask, 0)
         
         if self.num_feats and x_num is not None:
             for i, _ in enumerate(self.num_feats):
@@ -101,20 +110,21 @@ class TabformerModel(nn.Module):
 
         tag_embeds = self.tag_embedding(x_tags) 
 
-        x_embed = torch.cat([meta_embeds, tag_embeds], dim=1) 
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        x_embed = torch.cat([cls_tokens, meta_embeds, tag_embeds], dim=1) 
         
+        cls_idx = torch.zeros(1, device=device, dtype=torch.long)
+        meta_indices = torch.arange(1, self.n_metadata + 1, device=device)
+        tag_indices = torch.full((x_tags.shape[1],), self.n_metadata + 1, device=device)
         
-        meta_indices = torch.arange(self.n_metadata, device=device)
-        
-        tag_indices = torch.full((x_tags.shape[1],), self.n_metadata, device=device)
-        
-        feature_type_ids = torch.cat([meta_indices, tag_indices], dim=0) 
+        feature_type_ids = torch.cat([cls_idx, meta_indices, tag_indices], dim=0) 
         
         x_embed = x_embed + self.feature_type_embedder(x_embed.shape, feature_type_ids)
         
+        cls_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
         meta_mask = torch.zeros(batch_size, self.n_metadata, dtype=torch.bool, device=device)
         tag_mask = (x_tags == 0)
-        padding_mask = torch.cat([meta_mask, tag_mask], dim=1)
+        padding_mask = torch.cat([cls_mask, meta_mask, tag_mask], dim=1)
 
         return x_embed, padding_mask
 
@@ -134,20 +144,6 @@ class TabformerModel(nn.Module):
         return x, padding_mask
 
 
-class TabformerSequencePooler(nn.Module):
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.d_model = d_model
-
-    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor) -> torch.Tensor:
-        mask = (~padding_mask).float().unsqueeze(-1) 
-        
-        sum_embeds = torch.sum(x * mask, dim=1)
-        count = torch.sum(mask, dim=1).clamp(min=1e-9)
-        
-        return sum_embeds / count
-
-
 class TabformerForContrastiveLearning(nn.Module):
     def __init__(
         self, 
@@ -156,7 +152,6 @@ class TabformerForContrastiveLearning(nn.Module):
     ):
         super().__init__()
         self.tabformer = tabformer
-        self.pooler = TabformerSequencePooler(tabformer.d_model)
         
         self.projection_head = nn.Sequential(
             nn.Linear(tabformer.d_model, tabformer.d_model),
@@ -171,9 +166,9 @@ class TabformerForContrastiveLearning(nn.Module):
         x_tags: torch.Tensor
     ) -> torch.Tensor:
         
-        sequence_output, padding_mask = self.tabformer(x_num, x_cat, x_tags)
-        pooled = self.pooler(sequence_output, padding_mask)
-        projected = self.projection_head(pooled)
+        sequence_output, _ = self.tabformer(x_num, x_cat, x_tags)
+        cls_output = sequence_output[:, 0, :]
+        projected = self.projection_head(cls_output)
         return F.normalize(projected, dim=-1, p=2)
 
     def get_summary(self) -> Dict[str, Any]:

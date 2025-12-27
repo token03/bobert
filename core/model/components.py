@@ -290,4 +290,4 @@ class PiecewiseLinearEncoder(nn.Module):
         
         out = (1 - alpha) * e_lower + alpha * e_upper
         
-        return out 
+        return out
