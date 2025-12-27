@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple, Any
-from core.model.bobert import Bobert, BobertForPretraining
+from core.model.bobert import BobertModel, BobertForPretraining
 
 def log_model_summary(model: nn.Module):
     is_pretrain_model = False
@@ -15,7 +15,7 @@ def log_model_summary(model: nn.Module):
     if isinstance(actual_model, BobertForPretraining):
         core_model = actual_model.bert
         is_pretrain_model = True
-    elif isinstance(actual_model, Bobert):
+    elif isinstance(actual_model, BobertModel):
         core_model = actual_model
     else:
         try:
@@ -37,7 +37,7 @@ def log_model_summary(model: nn.Module):
     if is_pretrain_model and isinstance(actual_model, BobertForPretraining):
         print(f"\n--- Pre-training Head Information ---")
         print(f"Tasks: Masked Modeling, Difficulty Attribute Prediction")
-        print(f"Masking Ratio: {actual_model.masking_ratio}")
+        print(f"Masking Ratio: {actual_model.masker.masking_ratio}")
         print(f"Model Compiled: {actual_model.is_compiled}")
         print("-" * 30)
 

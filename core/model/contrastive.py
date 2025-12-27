@@ -2,14 +2,14 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, TypeVar, TypeVar, Optional
 
-from core.model.bobert import Bobert
+from core.model.bobert import BobertModel
 
 from ..data.types import DIFFICULTY_ATTRIBUTES
 
-T = TypeVar('T', bound='Bobert')
+T = TypeVar('T', bound='BobertModel')
 
 class BertForContrastiveFineTuning(nn.Module):
-    def __init__(self, bert_model: Bobert, user_tag_classes: int = 1000, collection_label_classes: int = 100):
+    def __init__(self, bert_model: BobertModel, user_tag_classes: int = 1000, collection_label_classes: int = 100):
         super().__init__()
         self.bert = bert_model
         self.d_model = bert_model.d_model
@@ -36,7 +36,7 @@ class BertForContrastiveFineTuning(nn.Module):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BertForContrastiveFineTuning':
-        base_model = BertEncoder.from_config(config)
+        base_model = BobertModel.from_config(config)
         
         finetuning_config = config.get('finetuning', {})
         user_tag_classes = finetuning_config.get('user_tag_classes', 0) 

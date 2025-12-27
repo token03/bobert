@@ -1,4 +1,4 @@
-# bert.py
+# bobert.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,12 +7,12 @@ from typing import Tuple, Dict, Any, Type, TypeVar, Optional
 from rotary_embedding_torch import RotaryEmbedding
 from torch.nn import RMSNorm
 
-from .components import TransformerEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
+from .components import SpanMasker, TransformerEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
 from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
 
-T = TypeVar('T', bound='Bobert')
+T = TypeVar('T', bound='BobertModel')
 
-class Bobert(nn.Module):
+class BobertModel(nn.Module):
     def __init__(
         self,
         d_model: int,
@@ -159,40 +159,136 @@ class Bobert(nn.Module):
         )
         return packed_output, attention_mask
 
-class BobertForPretraining(nn.Module):
-    def __init__(
-        self, 
-        bert_model: Bobert, 
-        masking_ratio: float = 0.15,
-        mean_span_length: float = 3.0
-    ):
+
+class BobertSequencePooler(nn.Module):
+    def __init__(self, d_model: int):
         super().__init__()
-        self.bert = bert_model
-        self.masking_ratio = masking_ratio
-        self.mean_span_length = mean_span_length
-        self.is_compiled = False
+        self.d_model = d_model
 
-        self.mask_token_embed = nn.Parameter(torch.randn(1, 1, bert_model.d_model))
+    def forward(self, packed_output: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        batch_size = seqlens.numel()
+
+        batch_idx = torch.repeat_interleave(
+            torch.arange(batch_size, device=packed_output.device),
+            seqlens
+        )
+
+        pooled_sum = torch.zeros(batch_size, self.d_model, device=packed_output.device, dtype=torch.float32)
+        pooled_sum.index_add_(0, batch_idx, packed_output.float())
+        pooled_output = (pooled_sum / seqlens.unsqueeze(1)).to(packed_output.dtype)
+        
+        return pooled_output
+
+
+class BobertMaskedLMHead(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
         self.feature_info = HitObjectVector.get_feature_info()
-
         num_continuous = len(self.feature_info['continuous'])
-        self.continuous_head = nn.Linear(bert_model.d_model, num_continuous)
+        
+        self.continuous_head = nn.Linear(d_model, num_continuous)
         self.categorical_heads = nn.ModuleDict({
-            name: nn.Linear(bert_model.d_model, info['cardinality'])
+            name: nn.Linear(d_model, info['cardinality'])
             for name, info in self.feature_info['categorical'].items()
         })
 
-        self.difficulty_attribute_head = nn.Linear(bert_model.d_model, len(DIFFICULTY_ATTRIBUTES))
+    def forward(
+        self, 
+        packed_output: torch.Tensor, 
+        is_masked: torch.Tensor, 
+        attention_mask: torch.Tensor,
+        batch_seq_shape: Tuple[int, int]
+    ) -> Dict[str, Any]:
+        
+        is_masked_flat = is_masked.flatten() 
+        attention_mask_flat = attention_mask.flatten() 
+        batch_size, seq_len = batch_seq_shape
+        device = packed_output.device
+        
+        padded_indices = torch.arange(batch_size * seq_len, device=device)
+        packed_to_padded = padded_indices[attention_mask_flat] 
+        
+        masked_in_packed = is_masked_flat[attention_mask_flat] 
+        masked_packed_indices = torch.nonzero(masked_in_packed, as_tuple=True)[0]
+        masked_output = packed_output[masked_packed_indices]
+        
+        continuous_preds_masked = self.continuous_head(masked_output)
+        categorical_preds_masked = {
+            name: head(masked_output)
+            for name, head in self.categorical_heads.items()
+        }
+        
+        continuous_preds = torch.zeros(batch_size, seq_len, continuous_preds_masked.shape[-1], 
+                                      device=device, dtype=continuous_preds_masked.dtype)
+        categorical_preds = {
+            name: torch.zeros(batch_size, seq_len, preds.shape[-1], 
+                            device=device, dtype=preds.dtype)
+            for name, preds in categorical_preds_masked.items()
+        }
+        
+        masked_padded_indices = packed_to_padded[masked_packed_indices]
+        batch_indices = masked_padded_indices // seq_len
+        seq_indices = masked_padded_indices % seq_len
+        
+        continuous_preds[batch_indices, seq_indices] = continuous_preds_masked
+        for name in categorical_preds:
+            categorical_preds[name][batch_indices, seq_indices] = categorical_preds_masked[name]
+            
+        return {
+            'continuous': continuous_preds,
+            'categorical': categorical_preds
+        }
+
+
+class BobertDifficultyHead(nn.Module):
+    def __init__(self, d_model: int, pooler: BobertSequencePooler):
+        super().__init__()
+        self.pooler = pooler
+        self.head = nn.Linear(d_model, len(DIFFICULTY_ATTRIBUTES))
+
+    def forward(self, packed_output: torch.Tensor, cu_seqlens: torch.Tensor) -> Dict[str, torch.Tensor]:
+        pooled_output = self.pooler(packed_output, cu_seqlens)
+        difficulty_preds_raw = self.head(pooled_output)
+        
+        return {
+            name: difficulty_preds_raw[:, i]
+            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
+        }
+
+
+class BobertForPretraining(nn.Module):
+    def __init__(
+        self, 
+        bert_model: BobertModel, 
+        masker: SpanMasker,
+        mlm_head: BobertMaskedLMHead,
+        difficulty_head: BobertDifficultyHead
+    ):
+        super().__init__()
+        self.bert = bert_model
+        self.masker = masker
+        self.mlm_head = mlm_head
+        self.difficulty_head = difficulty_head
+        self.is_compiled = False
 
     @classmethod
     def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BobertForPretraining':
-        base_model = Bobert.from_config(config)
+        base_model = BobertModel.from_config(config)
         pretraining_config = config['pretraining']
-        model = cls(
-            base_model, 
-            masking_ratio=pretraining_config.get('masking_ratio', 0.15),
-            mean_span_length=pretraining_config.get('mean_span_length', 3.0)
+        
+        masking_strategy = SpanMasker(
+            d_model=base_model.d_model,
+            masking_ratio=pretraining_config.get('masking_ratio'),
+            mean_span_length=pretraining_config.get('mean_span_length')
         )
+        
+        mlm_head = BobertMaskedLMHead(base_model.d_model)
+        
+        pooler = BobertSequencePooler(base_model.d_model)
+        difficulty_head = BobertDifficultyHead(base_model.d_model, pooler)
+
+        model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
         model = model.to(device)
         
         if config.get('components', {}).get('compile_model', False):
@@ -206,149 +302,34 @@ class BobertForPretraining(nn.Module):
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
 
-    def _generate_span_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len = attention_mask.shape
-        device = attention_mask.device
-
-        num_to_mask = (attention_mask.sum(dim=1) * self.masking_ratio).round().long()
-
-        k = max(1, int(seq_len * self.masking_ratio / self.mean_span_length * 1.5))
-        max_span_len = max(1, int(self.mean_span_length * 3))
-
-        geom_p = torch.tensor(1.0 / self.mean_span_length, device=device)
-        u = torch.rand(batch_size, k, device=device)
-        span_lengths = (torch.log(u) / torch.log1p(-geom_p)).floor().long() + 1
-        span_lengths.clamp_(max=max_span_len)
-
-        scores = torch.rand(batch_size, seq_len, device=device)
-        scores.masked_fill_(~attention_mask, -1.0)  
-        _, top_indices = torch.topk(scores, k=k, dim=1) 
-
-        offsets = torch.arange(max_span_len, device=device).view(1, 1, -1)
-        
-        span_active_mask = offsets < span_lengths.unsqueeze(-1)
-        
-        indices_to_mask = top_indices.unsqueeze(-1) + offsets
-        indices_to_mask.clamp_(0, seq_len - 1)
-
-        batch_idx = torch.arange(batch_size, device=device).view(-1, 1, 1).expand_as(indices_to_mask)
-        flat_batch_idx = batch_idx[span_active_mask]
-        flat_indices_to_mask = indices_to_mask[span_active_mask]
-        
-        prelim_mask = torch.zeros_like(attention_mask)
-        prelim_mask[flat_batch_idx, flat_indices_to_mask] = True
-        prelim_mask &= attention_mask 
-
-        current_mask_count = prelim_mask.sum(dim=1)
-        excess = (current_mask_count - num_to_mask).clamp(min=0)
-        
-        unmask_scores = torch.rand(batch_size, seq_len, device=device)
-        unmask_scores.masked_fill_(~prelim_mask, 2.0)
-
-        sorted_scores, _ = torch.sort(unmask_scores, dim=1)
-        clamped_excess_idx = (excess - 1).clamp(min=0)
-        thresholds = sorted_scores.gather(1, clamped_excess_idx.unsqueeze(1))
-        
-        should_unmask = unmask_scores < thresholds
-        final_mask = prelim_mask & ~should_unmask
-        
-        return final_mask
-
     def forward(
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        is_masked = self._generate_span_mask(attention_mask)
-
-        rand_for_split = torch.rand(x.shape[:2], device=x.device)
-        mask_replace = is_masked & (rand_for_split < 0.8)
-        mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
-
+        
         x_embed = self.bert.embed_sequences(x)
-        encoder_x_input = x_embed.clone()
-        if torch.any(mask_random):
-            with torch.no_grad():
-                valid_embeddings = x_embed[attention_mask]
-                num_to_replace = mask_random.sum()
-                rand_indices = torch.randint(0, valid_embeddings.shape[0], (num_to_replace,), device=x.device)
-                random_embeds = valid_embeddings[rand_indices]
-            encoder_x_input[mask_random] = random_embeds
-        encoder_x_input = torch.where(
-            mask_replace.unsqueeze(-1),
-            self.mask_token_embed.to(x_embed.dtype),
-            encoder_x_input
-        )
+        
+        encoder_x_input, is_masked = self.masker(x_embed, attention_mask)
         
         if cu_seqlens is None:
             seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
             cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
         
         packed_input = encoder_x_input[attention_mask]
-        
         max_seqlen = x.shape[1]
+        
         packed_output = self.bert.encode(
             packed_input, attention_mask, 
             max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
         
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)  # [B]
-        batch_size = seqlens.numel()
-
-        batch_idx = torch.repeat_interleave(
-            torch.arange(batch_size, device=packed_output.device),
-            seqlens
+        mlm_predictions = self.mlm_head(
+            packed_output, is_masked, attention_mask, (x.shape[0], x.shape[1])
         )
-
-        pooled_sum = torch.zeros(batch_size, self.bert.d_model, device=packed_output.device, dtype=torch.float32)
-        pooled_sum.index_add_(0, batch_idx, packed_output.float())
-        pooled_output = (pooled_sum / seqlens.unsqueeze(1)).to(packed_output.dtype)
-
-        is_masked_flat = is_masked.flatten() 
-        attention_mask_flat = attention_mask.flatten() 
         
-        padded_indices = torch.arange(batch_size * x.shape[1], device=x.device)
-        packed_to_padded = padded_indices[attention_mask_flat] 
-        
-        masked_in_packed = is_masked_flat[attention_mask_flat] 
-        masked_packed_indices = torch.nonzero(masked_in_packed, as_tuple=True)[0]
-        masked_output = packed_output[masked_packed_indices]
-        
-        continuous_preds_masked = self.continuous_head(masked_output)
-        categorical_preds_masked = {
-            name: head(masked_output)
-            for name, head in self.categorical_heads.items()
-        }
-        
-        seq_len = x.shape[1]
-        continuous_preds = torch.zeros(batch_size, seq_len, continuous_preds_masked.shape[-1], 
-                                      device=x.device, dtype=continuous_preds_masked.dtype)
-        categorical_preds = {
-            name: torch.zeros(batch_size, seq_len, preds.shape[-1], 
-                            device=x.device, dtype=preds.dtype)
-            for name, preds in categorical_preds_masked.items()
-        }
-        
-        masked_padded_indices = packed_to_padded[masked_packed_indices]
-        
-        batch_indices = masked_padded_indices // seq_len
-        seq_indices = masked_padded_indices % seq_len
-        
-        continuous_preds[batch_indices, seq_indices] = continuous_preds_masked
-        for name in categorical_preds:
-            categorical_preds[name][batch_indices, seq_indices] = categorical_preds_masked[name]
-        
-        mlm_predictions = {
-            'continuous': continuous_preds,
-            'categorical': categorical_preds
-        }
-        
-        difficulty_preds_raw = self.difficulty_attribute_head(pooled_output)
-        difficulty_predictions = {
-            name: difficulty_preds_raw[:, i]
-            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
-        }
+        difficulty_predictions = self.difficulty_head(packed_output, cu_seqlens)
 
         predictions = {
             'mlm': mlm_predictions,
