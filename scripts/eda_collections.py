@@ -64,5 +64,5 @@ def perform_eda(file_path):
     print(df.isnull().sum())
 
 if __name__ == "__main__":
-    parquet_file = "collections_data.parquet"
+    parquet_file = "collections.parquet"
     perform_eda(parquet_file)

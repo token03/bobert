@@ -23,8 +23,7 @@ def initialize_api() -> Ossapi:
 
 api = initialize_api()
 
-test_beatmapset = api.beatmapset(beatmapset_id=2145644)
-print(test_beatmapset.genre, test_beatmapset.language, test_beatmapset.tags)
+query = "5426254 || 5086201 || 5219809"
+test = api.search_beatmapsets(query)
 
-        
-print(test_beatmapset.related_tags)
+print(test[0])
