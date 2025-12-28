@@ -41,7 +41,6 @@ def pretrain_collate_fn(
 
 
 class BeatmapDataset(Dataset):
-
     def __init__(
         self,
         beatmap_data: List[torch.Tensor],
