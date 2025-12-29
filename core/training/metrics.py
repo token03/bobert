@@ -13,7 +13,7 @@ class MLMMetrics(nn.Module):
     def __init__(self, feature_info: Dict[str, Any], device: torch.device):
         super().__init__()
         self.feature_info = feature_info
-        self.device = device
+        self._device = device
 
         self.cont_names = sorted(
             feature_info["continuous"].keys(),
@@ -125,7 +125,7 @@ class MLMMetrics(nn.Module):
 class DifficultyMetrics(nn.Module):
     def __init__(self, device: torch.device):
         super().__init__()
-        self.device = device
+        self._device = device
 
         self.attr_metrics = MetricCollection(
             {f"{name}_mae": MeanMetric() for name in DIFFICULTY_ATTRIBUTES}
@@ -171,7 +171,7 @@ class ContrastiveMetrics(nn.Module):
     def __init__(self, k_values: List[int], device: torch.device):
         super().__init__()
         self.k_values = k_values
-        self.device = device
+        self._device = device
         self.loss_metric = MeanMetric().to(device)
 
     def update(
@@ -191,38 +191,3 @@ class ContrastiveMetrics(nn.Module):
 
     def reset(self):
         self.loss_metric.reset()
-
-
-class MetricsTracker:
-    def __init__(self):
-        self.metrics: Dict[str, Dict[str, List]] = {}
-        self.epoch_metrics: List[Dict[str, Any]] = []
-
-    def update(self, phase: str, **kwargs):
-        if phase not in self.metrics:
-            self.metrics[phase] = {}
-
-        for key, value in kwargs.items():
-            if key not in self.metrics[phase]:
-                self.metrics[phase][key] = []
-            self.metrics[phase][key].append(value)
-
-    def get_latest(self, phase: str, metric: str) -> Optional[float]:
-        if phase in self.metrics and metric in self.metrics[phase]:
-            return self.metrics[phase][metric][-1]
-        return None
-
-    def get_average(self, phase: str, metric: str, last_n: int = 1) -> Optional[float]:
-        if phase in self.metrics and metric in self.metrics[phase]:
-            values = self.metrics[phase][metric][-last_n:]
-            return sum(values) / len(values) if values else None
-        return None
-
-    def log_epoch(
-        self,
-        epoch: int,
-        train_metrics: Dict[str, float],
-        val_metrics: Optional[Dict[str, float]] = None,
-    ):
-        epoch_data = {"epoch": epoch, "train": train_metrics, "val": val_metrics or {}}
-        self.epoch_metrics.append(epoch_data)

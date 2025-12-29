@@ -1,71 +1,76 @@
-import math
 from typing import Dict, Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import pytorch_lightning as pl
 
-from .train import BaseTrainer
+from .train import create_trainer
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
-from .setup import create_optimizer, create_scheduler, calculate_total_steps
-from .checkpoint import CheckpointManager
+from .setup import create_optimizer, create_scheduler
 from ..data.types import HitObjectVector
 from ..data.transforms import BeatmapNormalizer
 
-class PreTrainer(BaseTrainer):
+
+class PretrainingModule(pl.LightningModule):
     def __init__(
         self,
         model: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
         config: Dict[str, Any],
-        device: torch.device,
         normalizer: BeatmapNormalizer,
     ):
-        super().__init__(model, optimizer, scheduler, config, device, "pretraining")
+        super().__init__()
+        self.model = model
+        self.config = config
         self.normalizer = normalizer
-        self.loss_fn = pretrain_loss_fn
+        self.batch_size = config["pretraining"]["batch_size"]
+        self.save_hyperparameters(ignore=["model", "normalizer"])
 
         feature_info = HitObjectVector.get_feature_info()
-        self.mlm_metrics = MLMMetrics(feature_info, device)
-        self.difficulty_metrics = DifficultyMetrics(device)
+        self.mlm_metrics = MLMMetrics(feature_info, torch.device("cpu"))
+        self.difficulty_metrics = DifficultyMetrics(torch.device("cpu"))
 
-    def _train_step(self, batch: Tuple) -> Dict[str, torch.Tensor]:
+    def forward(self, vectors, attention_mask, cu_seqlens=None):
+        return self.model(vectors, attention_mask, cu_seqlens)
+
+    def _shared_step(self, batch: Tuple):
         vectors, attention_mask, difficulty_labels, cu_seqlens = batch
-
-        vectors = vectors.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-        if cu_seqlens is not None:
-            cu_seqlens = cu_seqlens.to(self.device)
         difficulty_labels = {k: v.to(self.device) for k, v in difficulty_labels.items()}
 
-        with torch.amp.autocast(
-            device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp
-        ):
-            predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
-            loss_dict = self.loss_fn(
-                predictions, targets, mask, difficulty_labels, self.config
-            )
+        predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
+        loss_dict = pretrain_loss_fn(
+            predictions, targets, mask, difficulty_labels, self.config
+        )
+        return predictions, targets, mask, difficulty_labels, loss_dict
 
-        return loss_dict
+    def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
+        _, _, _, _, loss_dict = self._shared_step(batch)
 
-    def _validate_step(self, batch: Tuple) -> float:
-        vectors, attention_mask, difficulty_labels, cu_seqlens = batch
+        self.log(
+            "train_loss",
+            loss_dict["total_loss"],
+            prog_bar=True,
+            batch_size=self.batch_size,
+        )
+        self.log("train_mlm_loss", loss_dict["mlm_loss"], batch_size=self.batch_size)
+        self.log(
+            "train_difficulty_loss",
+            loss_dict.get("difficulty_loss", 0.0),
+            batch_size=self.batch_size,
+        )
+        self.log(
+            "lr",
+            self.trainer.optimizers[0].param_groups[0]["lr"],
+            prog_bar=True,
+            batch_size=self.batch_size,
+        )
 
-        vectors = vectors.to(self.device)
-        attention_mask = attention_mask.to(self.device)
-        if cu_seqlens is not None:
-            cu_seqlens = cu_seqlens.to(self.device)
-        difficulty_labels = {k: v.to(self.device) for k, v in difficulty_labels.items()}
+        return loss_dict["total_loss"]
 
-        with torch.amp.autocast(
-            device_type=self.device.type, dtype=torch.bfloat16, enabled=self.use_amp
-        ):
-            predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
-            loss_dict = self.loss_fn(
-                predictions, targets, mask, difficulty_labels, self.config
-            )
+    def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
+        predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(
+            batch
+        )
 
         self.mlm_metrics.update(
             predictions["mlm"], targets, mask, loss=loss_dict["mlm_loss"].item()
@@ -76,57 +81,83 @@ class PreTrainer(BaseTrainer):
             loss=loss_dict.get("difficulty_loss", torch.tensor(0.0)).item(),
         )
 
-        return loss_dict["total_loss"].item()
+        self.log(
+            "val_loss",
+            loss_dict["total_loss"],
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=self.batch_size,
+        )
+        return loss_dict["total_loss"]
 
-    def _compute_epoch_metrics(self) -> Dict[str, Any]:
+    def on_validation_epoch_end(self):
         mlm_results = self.mlm_metrics.compute()
         diff_results = self.difficulty_metrics.compute()
-        return {**mlm_results, **diff_results}
 
-    def _reset_metrics(self):
+        def log_nested(prefix: str, data):
+            """Recursively flatten and log nested dicts."""
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    log_nested(f"{prefix}_{key}", value)
+            else:
+                self.log(prefix, data)
+
+        log_nested("val_mlm", mlm_results)
+        log_nested("val_diff", diff_results)
+
         self.mlm_metrics.reset()
         self.difficulty_metrics.reset()
 
+    def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
+        checkpoint["vector_stats"] = self.normalizer.get_vector_stats()
+        checkpoint["attribute_stats"] = self.normalizer.get_attribute_stats()
 
-def create_pretrainer(
-    model: nn.Module,
-    train_dataloader: DataLoader,
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
+        if "vector_stats" in checkpoint:
+            self.normalizer.vector_stats = checkpoint["vector_stats"]
+        if "attribute_stats" in checkpoint:
+            self.normalizer.attribute_stats = checkpoint["attribute_stats"]
+
+    def configure_optimizers(self):
+        optimizer = create_optimizer(self.model, self.config, "pretraining")
+        total_steps = self.trainer.estimated_stepping_batches
+        scheduler = create_scheduler(optimizer, self.config, total_steps, "pretraining")
+
+        if scheduler is None:
+            return optimizer
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
+
+
+def setup_pretraining(
     config: Dict[str, Any],
-    device: torch.device,
     normalizer: BeatmapNormalizer,
-) -> PreTrainer:
-    total_steps = calculate_total_steps(train_dataloader, config, "pretraining")
-    optimizer = create_optimizer(model, config, "pretraining")
-    scheduler = create_scheduler(optimizer, config, total_steps, "pretraining")
+    model: Optional[nn.Module] = None,
+    checkpoint_dir: Optional[str] = None,
+) -> Tuple[PretrainingModule, pl.Trainer]:
+    from ..model.bobert import BobertForPretraining
 
-    trainer = PreTrainer(model, optimizer, scheduler, config, device, normalizer)
+    if model is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = BobertForPretraining.from_config(config, device)
 
-    batch_size = getattr(train_dataloader, "batch_size", None)
-    if train_dataloader.batch_sampler is not None:
-        batch_size = train_dataloader.batch_sampler.batch_size
-    effective_batch = batch_size * trainer.grad_accum_steps if batch_size else "unknown"
+    module = PretrainingModule(model, config, normalizer)
+    trainer = create_trainer(config, "pretraining", checkpoint_dir)
 
-    print(
-        f"PreTrainer initialized - AMP: {trainer.use_amp}, Device: {device}, "
-        f"Grad Accum: {trainer.grad_accum_steps}, Effective batch: {effective_batch}"
-    )
-
-    return trainer
+    return module, trainer
 
 
-def save_pretrain_checkpoint(
-    trainer: PreTrainer,
-    checkpoint_manager: CheckpointManager,
-    epoch: int,
-    metrics: Dict[str, Any],
-    normalizer: BeatmapNormalizer,
-) -> str:
-    return checkpoint_manager.save_checkpoint(
-        trainer.model,
-        trainer.optimizer,
-        trainer.scheduler,
-        trainer.scaler,
-        epoch,
-        metrics,
-        vector_stats=normalizer.get_vector_stats(),
-    )
+def train(
+    module: PretrainingModule,
+    trainer: pl.Trainer,
+    datamodule: pl.LightningDataModule,
+    ckpt_path: Optional[str] = None,
+):
+    trainer.fit(module, datamodule, ckpt_path=ckpt_path)
