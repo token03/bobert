@@ -1,14 +1,12 @@
-# loss.py
 import torch
 import torch.nn.functional as F
 from typing import Dict, Any
-import warnings
 
 from core.data.types import (
-    OBJECT_TYPE_SLIDER_HEAD, OBJECT_TYPE_SLIDER_END,
-    OBJECT_TYPE_SPINNER_START, OBJECT_TYPE_SPINNER_END,
+    OBJECT_TYPE_SLIDER_HEAD,
     HitObjectVector, DIFFICULTY_ATTRIBUTES
 )
+
 
 def mlm_loss_fn(
     predictions: Dict[str, Any], 
@@ -63,6 +61,42 @@ def mlm_loss_fn(
     num_masked = torch.sum(mask)
     return total_loss / (num_masked + 1e-9)
 
+
+def difficulty_loss_fn(
+    predictions: Dict[str, torch.Tensor],
+    labels: Dict[str, torch.Tensor],
+    config: Dict[str, Any],
+    phase: str = 'pretraining'
+) -> Dict[str, torch.Tensor]:
+    losses = {}
+    phase_config = config.get(phase, {})
+    overall_weight = phase_config.get('difficulty_loss_weight', 1.0)
+    
+    per_attr_weights = {
+        'stars': phase_config.get('stars_loss_weight', 1.0),
+        'aim': phase_config.get('aim_loss_weight', 1.0),
+        'speed': phase_config.get('speed_loss_weight', 1.0),
+        'slider_factor': phase_config.get('slider_factor_loss_weight', 0.5),
+        'ar': phase_config.get('ar_loss_weight', 0.3),
+        'cs': phase_config.get('cs_loss_weight', 0.2),
+        'slider_multiplier': phase_config.get('slider_multiplier_loss_weight', 0.2),
+    }
+
+    device = next(iter(predictions.values())).device
+    unscaled_sum = torch.zeros((), device=device)
+
+    for key in DIFFICULTY_ATTRIBUTES:
+        if key in predictions and key in labels:
+            weight = per_attr_weights.get(key, 1.0)
+            loss = F.mse_loss(predictions[key], labels[key])
+            losses[f'{key}_loss'] = loss
+            unscaled_sum = unscaled_sum + weight * loss
+
+    losses['difficulty_loss_unscaled'] = unscaled_sum
+    losses['difficulty_loss'] = unscaled_sum * overall_weight
+    return losses
+
+
 def pretrain_loss_fn(
     predictions: Dict[str, Any],
     targets: torch.Tensor,
@@ -79,146 +113,22 @@ def pretrain_loss_fn(
     
     total_loss = mlm_loss * mlm_weight
 
-    diff_preds = predictions['difficulty']
-    overall_difficulty_weight = pretrain_config.get('difficulty_loss_weight', 1.0)
+    diff_losses = difficulty_loss_fn(
+        predictions['difficulty'], 
+        difficulty_labels, 
+        config, 
+        phase='pretraining'
+    )
+    losses.update(diff_losses)
+    total_loss = total_loss + diff_losses['difficulty_loss']
     
-    diff_loss_weights = {
-        'stars': pretrain_config.get('stars_loss_weight', 1.0),
-        'aim': pretrain_config.get('aim_loss_weight', 1.0),
-        'speed': pretrain_config.get('speed_loss_weight', 1.0),
-        'slider_factor': pretrain_config.get('slider_factor_loss_weight', 0.5),
-        'ar': pretrain_config.get('ar_loss_weight', 0.3),
-        'cs': pretrain_config.get('cs_loss_weight', 0.2),
-        'slider_multiplier': pretrain_config.get('slider_multiplier_loss_weight', 0.2),
-    }
-
-    difficulty_loss_sum = torch.zeros_like(mlm_loss)
-
-    for key in DIFFICULTY_ATTRIBUTES:
-        weight = diff_loss_weights.get(key, 1.0)
-        if key in diff_preds and key in difficulty_labels:
-            loss = F.mse_loss(diff_preds[key], difficulty_labels[key])
-            losses[f'{key}_loss'] = loss
-            difficulty_loss_sum += weight * loss 
-            
-    weighted_difficulty_loss = difficulty_loss_sum * overall_difficulty_weight
-    total_loss += weighted_difficulty_loss
-    
-    losses['difficulty_loss'] = weighted_difficulty_loss
-    losses['difficulty_loss_unscaled'] = difficulty_loss_sum
     losses['total_loss'] = total_loss
     return losses
-
-def _weighted_contrastive_loss(projections: torch.Tensor, similarity_matrix: torch.Tensor, temperature: float) -> torch.Tensor:
-    if similarity_matrix.sum() == 0:
-        warnings.warn("The entire similarity matrix is zero. Contrastive loss will be 0.", UserWarning)
-        return torch.tensor(0.0, device=projections.device)
-
-    epsilon = 1e-8
-    projections = F.normalize(projections + epsilon, p=2, dim=1)
-    
-    cos_sim_matrix = torch.matmul(projections, projections.T) / temperature
-    
-    diag_mask = torch.eye(cos_sim_matrix.shape[0], dtype=torch.bool, device=cos_sim_matrix.device)
-    cos_sim_matrix.masked_fill_(diag_mask, -torch.inf)
-    
-    log_prob = F.log_softmax(cos_sim_matrix, dim=1)
-    
-    weighted_log_prob = (similarity_matrix * log_prob).sum(dim=1)
-    
-    sum_similarities_per_anchor = similarity_matrix.sum(dim=1)
-    
-    loss_per_anchor = -weighted_log_prob / sum_similarities_per_anchor.clamp(min=1e-8)
-    
-    valid_anchors_mask = sum_similarities_per_anchor > 0
-    final_loss = loss_per_anchor[valid_anchors_mask].mean()
-    
-    return torch.nan_to_num(final_loss, nan=0.0)
 
 
 def contrastive_loss_fn(
     predictions: Dict[str, torch.Tensor],
-    labels: Dict[str, Any], 
+    labels: Dict[str, Any],
     config: Dict[str, Any]
 ) -> Dict[str, torch.Tensor]:
-    losses = {}
-    total_loss = torch.zeros((), device=predictions['sequence_representation'].device)
-
-    finetuning_config = config.get('finetuning', {})
-    temperature = finetuning_config.get('temperature', 0.1)
-
-    user_tag_weight = finetuning_config.get('user_tag_weight', 1.0)
-    collection_label_weight = finetuning_config.get('collection_label_weight', 1.0)
-    contrastive_weight = finetuning_config.get('contrastive_weight', 1.0)
-
-    if 'user_tags' in labels:
-        user_tag_loss = F.binary_cross_entropy_with_logits(
-            predictions['user_tag_logits'], labels['user_tags'].float()
-        )
-        losses['user_tag_loss'] = user_tag_loss
-        total_loss += user_tag_weight * user_tag_loss
-    
-    if 'collection_labels' in labels:
-        collection_label_loss = F.binary_cross_entropy_with_logits(
-            predictions['collection_label_logits'], labels['collection_labels'].float()
-        )
-        losses['collection_label_loss'] = collection_label_loss
-        total_loss += collection_label_weight * collection_label_loss
-
-    if 'difficulty' in predictions and 'difficulty_labels' in labels:
-        difficulty_weight = finetuning_config.get('difficulty_loss_weight', 1.0)
-
-        diff_loss_weights = {
-            'stars': finetuning_config.get('stars_loss_weight', 1.0),
-            'aim': finetuning_config.get('aim_loss_weight', 1.0),
-            'speed': finetuning_config.get('speed_loss_weight', 1.0),
-            'slider_factor': finetuning_config.get('slider_factor_loss_weight', 0.5),
-            'cs': finetuning_config.get('cs_loss_weight', 0.2),
-            'ar': finetuning_config.get('ar_loss_weight', 0.5),
-            'slider_multiplier': finetuning_config.get('slider_multiplier_loss_weight', 0.2),
-        }
-
-        difficulty_loss_sum = torch.zeros_like(total_loss)
-
-        for key in DIFFICULTY_ATTRIBUTES:
-            weight = diff_loss_weights.get(key, 1.0)
-            if key in predictions['difficulty'] and key in labels['difficulty_labels']:
-                loss = F.mse_loss(predictions['difficulty'][key], labels['difficulty_labels'][key])
-                losses[f'{key}_loss'] = loss
-                difficulty_loss_sum += weight * loss
-
-        weighted_difficulty_loss = difficulty_loss_sum * difficulty_weight
-        total_loss += weighted_difficulty_loss
-        losses['difficulty_loss'] = weighted_difficulty_loss
-        losses['difficulty_loss_unscaled'] = difficulty_loss_sum
-
-    required_keys = ['raw_difficulty_ratings', 'collection_labels']
-    if 'contrastive_projection' in predictions and all(k in labels for k in required_keys):
-        sigma = finetuning_config.get('difficulty_decay_scale', 0.5)
-        beta = finetuning_config.get('cross_label_similarity_factor', 0.2)
-        gamma = finetuning_config.get('same_label_base_similarity', 0.4)
-
-        ratings = labels['raw_difficulty_ratings']
-        encoded_labels = labels['collection_labels']
-
-        stars_ratings = ratings[:, 0]
-
-        rating_diffs = torch.abs(stars_ratings.unsqueeze(0) - stars_ratings.unsqueeze(1))
-        s_diff = torch.exp(-(rating_diffs.pow(2)) / (2 * sigma**2))
-
-        label_match_mask = (torch.matmul(encoded_labels, encoded_labels.T)) > 0
-        
-        sim_same_label = gamma + (1 - gamma) * s_diff
-        sim_diff_label = beta * s_diff
-        
-        similarity_matrix = torch.where(label_match_mask, sim_same_label, sim_diff_label)
-        similarity_matrix.fill_diagonal_(0) 
-
-        contrastive_loss = _weighted_contrastive_loss(
-            predictions['contrastive_projection'], similarity_matrix, temperature
-        )
-        losses['contrastive_loss'] = contrastive_loss
-        total_loss += contrastive_weight * contrastive_loss
-
-    losses['total_loss'] = total_loss
-    return losses
+    raise NotImplementedError("Multimodal contrastive loss not yet implemented")
