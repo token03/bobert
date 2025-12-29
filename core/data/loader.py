@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
-import random
 from collections import defaultdict
 
 from .types import DIFFICULTY_ATTRIBUTES
@@ -32,7 +31,7 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
         return dataset_path
 
 
-def load_dataset(
+def load_beatmaps(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
@@ -144,78 +143,27 @@ def load_dataset(
     )
 
 
-def load_finetuning_dataset(
-    dataset_path: str,
-    max_seq_len: Optional[int] = None,
-    labels_path: str = "./data/labels.json",
-    tags_path: str = "./data/tags.json",
-    raw_beatmap_path: str = "./data/osu",
-    cache_path: str = "./data/difficulty_attributes_cache.json",
-    max_samples_per_class: Optional[Dict[str, int]] = None,
-) -> Tuple[List[torch.Tensor], Dict[str, np.ndarray], List[List[str]], List[List[str]]]:
-    print("Loading fine-tuning dataset with labels and tags...")
+def load_metadata(dataset_path: str) -> pd.DataFrame:
+    beatmaps_path = os.path.join(dataset_path, "beatmaps")
 
-    if not os.path.exists(labels_path):
-        raise FileNotFoundError(f"Labels file not found at {labels_path}.")
+    if not os.path.exists(beatmaps_path):
+        raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
 
-    print(f"Loading labels from {labels_path}...")
-    with open(labels_path, "r") as f:
-        labels_dict = json.load(f)
+    print("Loading beatmap metadata...")
+    all_beatmaps_df = pd.read_parquet(beatmaps_path)
 
-    tags_dict = {}
-    if os.path.exists(tags_path):
-        print(f"Loading tags from {tags_path}...")
-        with open(tags_path, "r") as f:
-            tags_dict = json.load(f)
+    return all_beatmaps_df
 
-    all_labeled_ids = {
-        int(id_str): labels for id_str, labels in labels_dict.items() if labels
-    }
+def load_tags(dataset_path: str) -> Dict[int, List[str]]:
+    tags_path = os.path.join(dataset_path, "tags.json")
 
-    if not max_samples_per_class:
-        ids_to_load = sorted(list(all_labeled_ids.keys()))
-    else:
-        print("Applying max samples per class limit...")
-        class_to_ids = defaultdict(list)
-        for bid, labels in all_labeled_ids.items():
-            for label in labels:
-                class_to_ids[label].append(bid)
+    if not os.path.exists(tags_path):
+        raise FileNotFoundError(f"Tags file not found at '{tags_path}'.")
 
-        final_ids = set()
-        for class_name, class_ids in class_to_ids.items():
-            limit = max_samples_per_class.get(class_name)
-            original_count = len(class_ids)
+    print("Loading beatmap tags...")
+    with open(tags_path, "r", encoding="utf-8") as f:
+        tags_data = json.load(f)
 
-            if limit is not None and original_count > limit:
-                print(
-                    f"Downsampling class '{class_name}' from {original_count} to {limit} samples."
-                )
-                sampled_ids_for_class = random.sample(class_ids, limit)
-                final_ids.update(sampled_ids_for_class)
-            else:
-                final_ids.update(class_ids)
+    id_to_tags = {int(k): v for k, v in tags_data.items()}
 
-        ids_to_load = sorted(list(final_ids))
-
-    if not ids_to_load:
-        raise ValueError("No beatmaps with labels found.")
-
-    print(f"Found {len(ids_to_load)} unique beatmaps for fine-tuning.")
-
-    processed_data, difficulty_attributes, loaded_ids = load_dataset(
-        dataset_path,
-        max_seq_len,
-        ids_to_load=ids_to_load,
-        raw_beatmap_path=raw_beatmap_path,
-        cache_path=cache_path,
-    )
-
-    all_labels = []
-    all_tags = []
-    for beatmap_id in loaded_ids:
-        str_beatmap_id = str(beatmap_id)
-        all_labels.append(labels_dict.get(str_beatmap_id, []))
-        all_tags.append(tags_dict.get(str_beatmap_id, []))
-
-    print(f"Final fine-tuning dataset size: {len(processed_data)} beatmaps.")
-    return processed_data, difficulty_attributes, all_labels, all_tags
+    return id_to_tags

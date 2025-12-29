@@ -17,7 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.utils.config import load_config
-from core.data.loader import load_dataset 
+from core.data.loader import load_beatmaps 
 from core.data.transforms import BeatmapNormalizer, BeatmapTransform
 from core.data.dataset import collate_fn
 from core.model.bobert import BertForContrastiveFineTuning
@@ -216,7 +216,7 @@ def main():
     sampled_ids_df = all_ids_df.sample(n=sample_size, random_state=42).reset_index(drop=True)
     ids_to_load = sampled_ids_df['beatmap_id'].tolist()
 
-    sampled_data, difficulty_attrs, loaded_ids = load_dataset(
+    sampled_data, difficulty_attrs, loaded_ids = load_beatmaps(
         dataset_path, 
         config['data']['max_seq_len'],
         ids_to_load=ids_to_load
