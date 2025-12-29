@@ -1,4 +1,4 @@
-# pretrainer.py
+# pretrain.py
 import time
 import math
 from core.data.types import HitObjectVector
@@ -12,9 +12,9 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 from core.training.checkpoint import CheckpointManager
 from core.training.metrics import MetricsTracker, PretrainEpochMetrics 
-from core.training.optimization import create_optimizer, create_scheduler
+from core.training.setup import create_optimizer, create_scheduler
 from .loss import pretrain_loss_fn
-from core.logger import TrainingLogger
+from core.utils.logger import TrainingLogger
 from ..data.transforms import BeatmapNormalizer
 
 class PreTrainer:

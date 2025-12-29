@@ -13,7 +13,6 @@ from .types import DIFFICULTY_ATTRIBUTES
 from .features import engineer_features_vectorized
 from .difficulty import DifficultyManager
 
-
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
         import google.colab  # type: ignore

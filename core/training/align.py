@@ -1,4 +1,4 @@
-# finetuner.py
+# align.py
 import time
 import math
 from typing import Dict, Any, Optional, Tuple, List
@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 
 from .checkpoint import CheckpointManager
 from .metrics import MetricsTracker, FineTuneEpochMetrics
-from .optimization import create_optimizer, create_scheduler
+from .setup import create_optimizer, create_scheduler
 from ..data.types import DIFFICULTY_ATTRIBUTES
 from .loss import contrastive_loss_fn
 from ..data.transforms import BeatmapNormalizer
