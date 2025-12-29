@@ -30,8 +30,6 @@ class PretrainingModule(pl.LightningModule):
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
         feature_info = HitObjectVector.get_feature_info()
-        # Use object.__setattr__ to avoid registering metrics as submodules
-        # This prevents Lightning from moving them to GPU when the module is moved
         object.__setattr__(
             self, "_mlm_metrics", MLMMetrics(feature_info, torch.device("cpu"))
         )
@@ -74,9 +72,6 @@ class PretrainingModule(pl.LightningModule):
             batch_size=self.batch_size,
         )
 
-        # Scale loss for gradient accumulation to match manual training loop behavior.
-        # Lightning accumulates gradients but doesn't scale the loss, so we divide
-        # by accumulate_grad_batches to get the same effective learning rate.
         return loss_dict["total_loss"] / self.accumulate_grad_batches
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
@@ -84,7 +79,6 @@ class PretrainingModule(pl.LightningModule):
             batch
         )
 
-        # Detach and move to CPU to prevent VRAM accumulation in metrics
         mlm_preds_cpu = {
             "continuous": predictions["mlm"]["continuous"].detach().cpu(),
             "categorical": {
