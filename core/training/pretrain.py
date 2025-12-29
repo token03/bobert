@@ -24,6 +24,9 @@ class PretrainingModule(pl.LightningModule):
         self.config = config
         self.normalizer = normalizer
         self.batch_size = config["pretraining"]["batch_size"]
+        self.accumulate_grad_batches = config["pretraining"].get(
+            "gradient_accumulation_steps", 1
+        )
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
         feature_info = HitObjectVector.get_feature_info()
@@ -71,7 +74,10 @@ class PretrainingModule(pl.LightningModule):
             batch_size=self.batch_size,
         )
 
-        return loss_dict["total_loss"]
+        # Scale loss for gradient accumulation to match manual training loop behavior.
+        # Lightning accumulates gradients but doesn't scale the loss, so we divide
+        # by accumulate_grad_batches to get the same effective learning rate.
+        return loss_dict["total_loss"] / self.accumulate_grad_batches
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
         predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(
