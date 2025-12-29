@@ -5,6 +5,7 @@ from .setup import (
     create_checkpoint_manager,
     calculate_total_steps,
     load_checkpoint_if_exists,
+    create_kde_sampler
 )
 from .checkpoint import CheckpointManager
 from .metrics import (

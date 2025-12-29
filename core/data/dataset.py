@@ -143,47 +143,7 @@ def collate_fn(
             padded_vectors[i, :length, :actual_dim] = v[:length, :actual_dim]
             attention_mask[i, :length] = True
 
-    # Pre-compute cu_seqlens with explicit int32 dtype
     seqlens = torch.tensor(lengths, dtype=torch.int32)
     cu_seqlens = torch.nn.functional.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
 
     return padded_vectors.to(device), attention_mask.to(device), cu_seqlens.to(device)
-    
-def finetuning_collate_fn(batch, max_seq_len, vector_dim, device, **kwargs):
-    vectors, ratings, labels, tags = zip(*batch)
-
-    padded_vectors, attention_mask, cu_seqlens = collate_fn(
-        list(vectors), max_seq_len, vector_dim, torch.device('cpu')
-    )
-
-    stacked_ratings = torch.tensor(ratings, dtype=torch.float32)
-
-    return (
-        padded_vectors.to(device),
-        attention_mask.to(device),
-        stacked_ratings.to(device),
-        labels,
-        tags,
-        cu_seqlens.to(device)
-    )
-
-class FinetuningDataset(Dataset):
-    def __init__(self, beatmap_data: List[torch.Tensor], ratings, labels, tags, transform: BeatmapTransform):
-        self.beatmap_data = beatmap_data
-        self.ratings = ratings
-        self.labels = labels
-        self.tags = tags
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.beatmap_data)
-
-    def __getitem__(self, idx):
-        vectors = self.beatmap_data[idx]
-        norm_vectors = self.transform(vectors)
-        return (
-            norm_vectors,
-            self.ratings[idx],
-            self.labels[idx],
-            self.tags[idx]
-        )
