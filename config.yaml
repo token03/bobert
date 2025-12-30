@@ -44,7 +44,7 @@ pretraining:
   difficulty_loss_weight: 1.0
   mlm_loss_weight: 1.0
 
-  masking_ratio: 0.3
+  masking_ratio: 0.25
   mean_span_length: 4
   
   sampling:
