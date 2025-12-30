@@ -1,4 +1,4 @@
-# types.py
+# hitobject.py
 from typing import NamedTuple, List, Dict, Any, Optional, Tuple
 import numpy as np
 from enum import Enum
@@ -12,11 +12,6 @@ DEFAULT_PRE_START_MS = 200.0
 MAX_METER_CARDINALITY = 8
 
 DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8, 16, 32, 64]
-
-DIFFICULTY_ATTRIBUTES = [
-    'stars', 'aim', 'speed', 'slider_factor',
-    'cs', 'ar', 'slider_multiplier'
-]
 
 FEATURE_GROUPS = {
     'spatial': {
@@ -60,7 +55,7 @@ OBJECT_TYPE_SPINNER_END = 4
 
 SLIDER_TYPE_INDEX = OBJECT_TYPE_SLIDER_HEAD
 
-class HitObjectVector(NamedTuple):
+class HitObject(NamedTuple):
     norm_x: float
     norm_y: float
     delta_x: float
@@ -161,61 +156,4 @@ class HitObjectVector(NamedTuple):
             'rhythmic_snap': NormalizationType.CATEGORICAL,
         }
     
-    @classmethod
-    def get_field_descriptions(cls) -> Dict[str, str]:
-        return {
-            'norm_x': "Absolute x-coordinate, normalized to [-1, 1]",
-            'norm_y': "Absolute y-coordinate, normalized to [-1, 1]",
-            'delta_x': "Change in x from the previous object",
-            'delta_y': "Change in y from the previous object",
-            'log_time_diff_ms': "Log-transformed time difference in milliseconds from previous object",
-            'bpm': "Beats Per Minute at the time of the hit object",
-            'notes_per_second': "Number of hit objects in the last 1 second",
-            'velocity': "Euclidean distance between objects divided by time difference",
-            'relative_angle': "Inner angle in radians formed by (n-1, n, n+1)",
-            'rhythm_change': "Ratio of current time difference to previous time difference",
-            'log_slider_pixel_length': "Log-transformed pixel length of slider's curve path",
-            'slider_repeats': "Number of slider repeats (slides - 1)",
-            'slider_tortuosity': "Ratio of slider visual pixel length to Euclidean distance between start and end",
-            
-            'object_type': "Type of hit object (circle, slider_head, slider_end, spinner_start, spinner_end)",
-            'is_new_combo': "Whether this hit object starts a new combo",
-            'beat_in_measure': "Which beat of the measure it falls on (categorical, 0-indexed).",
-            'time_diff_bin': "Quantized time difference to previous hit object in beats",
-            'rhythmic_snap': "Categorical index of the object's rhythmic snap within a beat.",
-        }
-
-VECTOR_DIM = HitObjectVector.get_vector_dim()
-
-class RawTimingPoint(NamedTuple):
-    time: int
-    beat_length: float
-    meter: int
-    uninherited: bool
-    effects: int
-
-class RawHitObject(NamedTuple):
-    x: int
-    y: int
-    time: int
-    object_type: int 
-    is_new_combo: int
-    curve_type: Optional[str]       
-    curve_points: Optional[List[Tuple[int, int, int]]]
-    slides: Optional[int]
-    pixel_length: Optional[float]
-    end_time: int
-    hit_sound: int
-
-class RawBeatmap(NamedTuple):
-    beatmap_id: int
-    category: str
-    hp_drain: float
-    cs: float
-    od: float
-    ar: float
-    slider_multiplier: float
-    slider_tick: float
-    difficulty_rating: float
-    timing_points: List[RawTimingPoint]
-    hit_objects: List[RawHitObject]
+VECTOR_DIM = HitObject.get_vector_dim()

@@ -49,8 +49,9 @@ pretraining:
   
   sampling:
     method: "kde"  
-    kde_bandwidth: 0.2
-    num_bins: 200
+    kde_bandwidth: 0.5
+    num_bins: 100
+    strength: 0.2
 
 finetuning:
   db_path: './data/beatmap_dataset/'

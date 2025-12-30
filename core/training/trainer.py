@@ -1,31 +1,12 @@
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import (
-    ModelCheckpoint,
-    RichProgressBar,
-    TQDMProgressBar,
-)
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger
 from typing import Dict, Any, List, Optional
 
 
 def setup_device() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
-
-
-def _is_notebook() -> bool:
-    """Detect if running inside a Jupyter notebook."""
-    try:
-        from IPython import get_ipython
-
-        shell = get_ipython()
-        if shell is None:
-            return False
-        shell_name = shell.__class__.__name__
-        return shell_name in ("ZMQInteractiveShell", "Shell")
-    except (ImportError, NameError):
-        return False
-
 
 def create_trainer(
     config: Dict[str, Any],
@@ -36,12 +17,7 @@ def create_trainer(
     phase_config = config[phase]
     save_dir = checkpoint_dir or phase_config["checkpoint_dir"]
 
-    # Use TQDMProgressBar in notebooks (better compatibility), RichProgressBar otherwise
-    if _is_notebook():
-        # process_position=0 ensures proper rendering in notebooks
-        progress_bar = TQDMProgressBar(refresh_rate=1, process_position=0)
-    else:
-        progress_bar = RichProgressBar(refresh_rate=1)
+    progress_bar = TQDMProgressBar(refresh_rate=1)
 
     callbacks = [
         ModelCheckpoint(

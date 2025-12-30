@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.parser import parse_osu_file, _preprocess_timing_points
-from core.data.types import MAX_METER_CARDINALITY
+from core.data.hitobject import MAX_METER_CARDINALITY
 
 BEATMAPS_SCHEMA = pa.schema([
     ('beatmap_id', pa.int64()), ('category', pa.string()), ('hp_drain', pa.float32()),

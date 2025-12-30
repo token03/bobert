@@ -4,7 +4,7 @@ from typing import Dict, Any, TypeVar, TypeVar, Optional
 
 from core.model.bobert import BobertModel
 
-from ..data.types import DIFFICULTY_ATTRIBUTES
+from ..data.beatmap import DIFFICULTY_ATTRIBUTES
 
 T = TypeVar('T', bound='BobertModel')
 

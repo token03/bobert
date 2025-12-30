@@ -2,7 +2,9 @@
 import torch
 import numpy as np
 from typing import List, Tuple, Optional, Set, Dict, Any
-from .types import HitObjectVector, NormalizationType, DIFFICULTY_ATTRIBUTES
+
+from .beatmap import DIFFICULTY_ATTRIBUTES
+from .hitobject import HitObject, NormalizationType
 
 def _print_stats_table(title: str, field_names: List[str], norm_specs: Dict, stats: Dict):
     print(f"\n--- {title}:")
@@ -67,11 +69,11 @@ def create_normalizer_from_data(
     print("                    NORMALIZATION STATISTICS")
     print("="*80)
 
-    vector_field_names = HitObjectVector.get_field_names()
+    vector_field_names = HitObject.get_field_names()
     categorical_fields = _print_stats_table(
         "VECTOR STATISTICS",
         vector_field_names,
-        HitObjectVector.get_normalization_specs(),
+        HitObject.get_normalization_specs(),
         normalizer.get_vector_stats()
     )
     
@@ -98,11 +100,11 @@ class BeatmapNormalizer:
         self.vector_stats = vector_stats
         self.attribute_stats = attribute_stats if attribute_stats is not None else {}
         self.epsilon = epsilon
-        self.vector_norm_specs = HitObjectVector.get_normalization_specs()
+        self.vector_norm_specs = HitObject.get_normalization_specs()
 
     def normalize_vectors(self, vectors: torch.Tensor) -> torch.Tensor:
         normalized_vectors = vectors.clone()
-        for i, field_name in enumerate(HitObjectVector.get_field_names()):
+        for i, field_name in enumerate(HitObject.get_field_names()):
             if field_name not in self.vector_stats:
                 continue
             norm_type = self.vector_norm_specs[field_name]
@@ -116,7 +118,7 @@ class BeatmapNormalizer:
 
     def denormalize_vectors(self, normalized_vectors: torch.Tensor) -> torch.Tensor:
         denormalized_vectors = normalized_vectors.clone()
-        for i, field_name in enumerate(HitObjectVector.get_field_names()):
+        for i, field_name in enumerate(HitObject.get_field_names()):
             if field_name not in self.vector_stats:
                 continue
             norm_type = self.vector_norm_specs[field_name]
@@ -174,8 +176,8 @@ class BeatmapNormalizer:
         epsilon: float = 1e-8
     ) -> 'BeatmapNormalizer':
         print("Calculating normalization statistics...")
-        vector_field_names = HitObjectVector.get_field_names()
-        vector_norm_specs = HitObjectVector.get_normalization_specs()
+        vector_field_names = HitObject.get_field_names()
+        vector_norm_specs = HitObject.get_normalization_specs()
         all_vectors_tensor = torch.cat(train_data, dim=0)
 
         vector_stats = {}
@@ -244,7 +246,7 @@ class BeatmapNormalizer:
 
 class BeatmapAugmenter:
     def __init__(self):
-        feature_info = HitObjectVector.get_feature_info()
+        feature_info = HitObject.get_feature_info()
         self.norm_x_idx = feature_info['continuous']['norm_x']
         self.norm_y_idx = feature_info['continuous']['norm_y']
         self.delta_x_idx = feature_info['continuous']['delta_x']

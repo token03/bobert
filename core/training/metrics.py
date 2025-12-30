@@ -6,7 +6,7 @@ from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import Accuracy, Precision, Recall
 
-from core.data.types import DIFFICULTY_ATTRIBUTES
+from core.data.beatmap import DIFFICULTY_ATTRIBUTES
 
 
 class MLMMetrics(nn.Module):

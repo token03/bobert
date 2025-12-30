@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from .train import create_trainer
+from .trainer import create_trainer
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
 from .setup import create_optimizer, create_scheduler
-from ..data.types import HitObjectVector
+from ..data.hitobject import HitObject
 from ..data.transforms import BeatmapNormalizer
 
 
@@ -29,7 +29,7 @@ class PretrainingModule(pl.LightningModule):
         )
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
-        feature_info = HitObjectVector.get_feature_info()
+        feature_info = HitObject.get_feature_info()
         object.__setattr__(
             self, "_mlm_metrics", MLMMetrics(feature_info, torch.device("cpu"))
         )

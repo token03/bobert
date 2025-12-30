@@ -1,13 +1,44 @@
 # parser.py
 import os
 import bisect
-from collections import Counter
-from typing import Optional, List, NamedTuple
-from .types import RawBeatmap, RawHitObject, RawTimingPoint
+from typing import Optional, List, NamedTuple, Tuple
 
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
 OBJECT_TYPE_SPINNER = 2
+
+class RawTimingPoint(NamedTuple):
+    time: int
+    beat_length: float
+    meter: int
+    uninherited: bool
+    effects: int
+
+class RawHitObject(NamedTuple):
+    x: int
+    y: int
+    time: int
+    object_type: int 
+    is_new_combo: int
+    curve_type: Optional[str]       
+    curve_points: Optional[List[Tuple[int, int, int]]]
+    slides: Optional[int]
+    pixel_length: Optional[float]
+    end_time: int
+    hit_sound: int
+
+class RawBeatmap(NamedTuple):
+    beatmap_id: int
+    category: str
+    hp_drain: float
+    cs: float
+    od: float
+    ar: float
+    slider_multiplier: float
+    slider_tick: float
+    difficulty_rating: float
+    timing_points: List[RawTimingPoint]
+    hit_objects: List[RawHitObject]
 
 class TimingSection(NamedTuple):
     start_time: int

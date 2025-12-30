@@ -202,12 +202,18 @@ class SpanMasker(nn.Module):
 
         cumsum_lengths = torch.cumsum(span_lengths, dim=1)
 
-        num_spans = torch.zeros(batch_size, dtype=torch.long, device=device)
-        for b in range(batch_size):
-            idx = torch.searchsorted(
-                cumsum_lengths[b], target_mask_count[b], right=False
-            )
-            num_spans[b] = (idx + 1).clamp(min=1, max=max_k)
+        # Vectorized version: find first index where cumsum_lengths >= target_mask_count
+        # Create mask where cumsum_lengths[b, k] >= target_mask_count[b]
+        mask = cumsum_lengths >= target_mask_count.unsqueeze(1)
+        # Find first True index using argmax (returns 0 if all False)
+        first_indices = mask.long().argmax(dim=1)
+        # Handle case where all values are False (target is very large)
+        # In that case, we should use all spans
+        all_false = ~mask.any(dim=1)
+        first_indices = torch.where(
+            all_false, torch.tensor(max_k - 1, device=device), first_indices
+        )
+        num_spans = (first_indices + 1).clamp(min=1, max=max_k)
 
         scores = torch.rand(batch_size, seq_len, device=device)
         scores.masked_fill_(~attention_mask, -1.0)
@@ -250,9 +256,9 @@ class SpanMasker(nn.Module):
 
         encoder_input = x_embed.clone()
 
-        # Avoid graph breaks: use detach() and torch.where instead of no_grad() and conditionals
+        # Avoid graph breaks: use torch.where instead of no_grad() and conditionals
         # Generate random embeddings for all positions (even if not used)
-        valid_embeddings = x_embed[attention_mask].detach()
+        valid_embeddings = x_embed[attention_mask]
         batch_size, seq_len, _ = x_embed.shape
         # Sample random indices for the entire sequence
         rand_indices = torch.randint(

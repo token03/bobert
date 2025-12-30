@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 from collections import defaultdict
 
-from .types import DIFFICULTY_ATTRIBUTES
+from .beatmap import DIFFICULTY_ATTRIBUTES
 from .features import engineer_features_vectorized
 from .difficulty import DifficultyManager
 

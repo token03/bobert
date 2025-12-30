@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from .train import create_trainer
+from .trainer import create_trainer
 from .metrics import ContrastiveMetrics
 from .setup import create_optimizer, create_scheduler
 from ..data.transforms import BeatmapNormalizer

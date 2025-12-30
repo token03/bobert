@@ -7,8 +7,10 @@ from typing import Tuple, Dict, Any, Type, TypeVar, Optional
 from rotary_embedding_torch import RotaryEmbedding
 from torch.nn import RMSNorm
 
+from ..data.beatmap import DIFFICULTY_ATTRIBUTES
+
 from .components import SpanMasker, BobertEncoderLayer, NumericalGroupEmbedder, CategoricalGroupEmbedder
-from ..data.types import HitObjectVector, DIFFICULTY_ATTRIBUTES, FEATURE_GROUPS
+from ..data.hitobject import HitObject, FEATURE_GROUPS
 
 T = TypeVar('T', bound='BobertModel')
 
@@ -29,7 +31,7 @@ class BobertModel(nn.Module):
         self.n_layers = n_layers
         self.use_flash_attention = use_flash_attention
 
-        self.feature_info = HitObjectVector.get_feature_info()
+        self.feature_info = HitObject.get_feature_info()
 
         self.spatial_indices = [self.feature_info['continuous'][name] for name in FEATURE_GROUPS['spatial']['features']]
         self.rhythm_indices = [self.feature_info['continuous'][name] for name in FEATURE_GROUPS['rhythm']['features']]
@@ -184,7 +186,7 @@ class BobertSequencePooler(nn.Module):
 class BobertMaskedLMHead(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
-        self.feature_info = HitObjectVector.get_feature_info()
+        self.feature_info = HitObject.get_feature_info()
         num_continuous = len(self.feature_info['continuous'])
         
         self.continuous_head = nn.Linear(d_model, num_continuous)

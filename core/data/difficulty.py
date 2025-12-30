@@ -6,7 +6,7 @@ import itertools
 import rosu_pp_py as rosu
 from tqdm import tqdm
 
-from .types import DIFFICULTY_ATTRIBUTES
+from .beatmap import DIFFICULTY_ATTRIBUTES
 
 
 class DifficultyManager:

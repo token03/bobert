@@ -4,8 +4,8 @@ import pandas as pd
 import torch
 
 from .parser import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
-from .types import (
-    HitObjectVector,
+from .hitobject import (
+    HitObject,
     DURATION_BINS,
     quantize_to_bins,
     OBJECT_TYPE_SLIDER_HEAD,
@@ -241,7 +241,7 @@ def _apply_object_specific_features(df: pd.DataFrame) -> pd.DataFrame:
 def _finalize_vectors(
     df: pd.DataFrame, split_indices: np.ndarray
 ) -> List[torch.Tensor]:
-    vector_field_names = HitObjectVector.get_field_names()
+    vector_field_names = HitObject.get_field_names()
     df[vector_field_names] = df[vector_field_names].astype(np.float32)
     all_vectors_np = df[vector_field_names].to_numpy()
     vector_arrays = np.split(all_vectors_np, split_indices)

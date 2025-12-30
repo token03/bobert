@@ -17,9 +17,10 @@ def create_kde_sampler(
     difficulty_ratings: Optional[np.ndarray] = None,
     bandwidth: float = 0.5,
     num_bins: int = 100,
+    strength: float = 0.1,
 ) -> WeightedRandomSampler:
     print(
-        f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}..."
+        f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}, strength={strength}..."
     )
 
     if difficulty_ratings is None:
@@ -44,13 +45,16 @@ def create_kde_sampler(
         smoothed_hist,
         kind="linear",
         bounds_error=False,
-        fill_value=smoothed_hist.min(),
+        fill_value=(smoothed_hist[0], smoothed_hist[-1]),
     )
 
     density_values = interp_func(difficulty_ratings_array)
     density_values = np.maximum(density_values, 1e-8)
 
-    sample_weights = 1.0 / density_values
+    log_w = -strength * np.log(density_values)
+    log_w = log_w - np.max(log_w)
+    sample_weights = np.exp(log_w)
+
     sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
     sample_weights = torch.from_numpy(sample_weights).double()
 
@@ -61,6 +65,7 @@ def create_kde_sampler(
     return WeightedRandomSampler(
         weights=sample_weights, num_samples=len(sample_weights), replacement=True
     )
+
 
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Optimizer:
