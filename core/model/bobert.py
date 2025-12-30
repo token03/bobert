@@ -339,3 +339,84 @@ class BobertForPretraining(nn.Module):
         }
 
         return predictions, x, is_masked
+    
+class BobertForAlignment(nn.Module):
+    def __init__(
+        self, 
+        bert_model: BobertModel, 
+        masker: SpanMasker,
+        mlm_head: BobertMaskedLMHead,
+        difficulty_head: BobertDifficultyHead
+    ):
+        super().__init__()
+        self.bert = bert_model
+        self.masker = masker
+        self.mlm_head = mlm_head
+        self.difficulty_head = difficulty_head
+        self.is_compiled = False
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BobertForPretraining':
+        base_model = BobertModel.from_config(config)
+        pretraining_config = config['pretraining']
+        
+        masking_strategy = SpanMasker(
+            d_model=base_model.d_model,
+            masking_ratio=pretraining_config.get('masking_ratio'),
+            mean_span_length=pretraining_config.get('mean_span_length')
+        )
+        
+        mlm_head = BobertMaskedLMHead(base_model.d_model)
+        
+        pooler = BobertSequencePooler(base_model.d_model)
+        difficulty_head = BobertDifficultyHead(base_model.d_model, pooler)
+
+        model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
+        model = model.to(device)
+        
+        if config.get('components', {}).get('compile_model', False):
+            print("Compiling BERT pre-training model with torch.compile...")
+            compile_mode = config.get('components', {}).get('compile_mode', 'default')
+            model = torch.compile(model, mode=compile_mode, fullgraph=False)
+            model.is_compiled = True
+        
+        return model
+
+    def get_summary(self) -> Dict[str, Any]:
+        return self.bert.get_summary()
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None
+    ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
+        
+        x_embed = self.bert.embed_sequences(x)
+        
+        encoder_x_input, is_masked = self.masker(x_embed, attention_mask)
+        
+        if cu_seqlens is None:
+            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
+            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+        
+        packed_input = encoder_x_input[attention_mask]
+        max_seqlen = x.shape[1]
+        
+        packed_output = self.bert.encode(
+            packed_input, attention_mask, 
+            max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        )
+        
+        mlm_predictions = self.mlm_head(
+            packed_output, is_masked, attention_mask, (x.shape[0], x.shape[1])
+        )
+        
+        difficulty_predictions = self.difficulty_head(packed_output, cu_seqlens)
+
+        predictions = {
+            'mlm': mlm_predictions,
+            'difficulty': difficulty_predictions
+        }
+
+        return predictions, x, is_masked

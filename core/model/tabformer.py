@@ -86,9 +86,9 @@ class TabformerModel(nn.Module):
         device = x_tags.device
         embeddings_list = []
 
-        if self.training and self.token_dropout > 0:
+        if self.training and self.tag_dropout > 0:
             non_pad_mask = (x_tags != 0)
-            dropout_mask = torch.bernoulli(torch.full(x_tags.shape, self.token_dropout, device=device)).bool()
+            dropout_mask = torch.bernoulli(torch.full(x_tags.shape, self.tag_dropout, device=device)).bool()
             x_tags = x_tags.masked_fill(non_pad_mask & dropout_mask, 0)
         
         if self.num_feats and x_num is not None:

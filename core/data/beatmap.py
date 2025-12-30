@@ -7,7 +7,7 @@ DIFFICULTY_ATTRIBUTES = [
 ]
 
 
-class Metadata(NamedTuple):
+class Beatmap(NamedTuple):
     # identifiers
     beatmap_id: int
     beatmapset_id: int
@@ -43,5 +43,4 @@ class Metadata(NamedTuple):
     # tags
     mapper_tags: List[str]
     weighted_user_tags: Dict[str, float]
-    weighted_collection_tags: Dict[str, float]
 

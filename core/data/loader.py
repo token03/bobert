@@ -31,7 +31,7 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
         return dataset_path
 
 
-def load_beatmaps(
+def load_hitobjects(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,

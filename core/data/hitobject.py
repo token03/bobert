@@ -16,11 +16,11 @@ DURATION_BINS = [1/16, 1/12, 1/9, 1/8, 1/7, 1/6, 1/5, 1/4, 1/3, 1/2, 1, 2, 4, 8,
 FEATURE_GROUPS = {
     'spatial': {
         'features': ['norm_x', 'norm_y', 'delta_x', 'delta_y', 'relative_angle'],
-        'output_dim': 160
+        'output_dim': 192
     },
     'rhythm': {
         'features': ['log_time_diff_ms', 'bpm', 'notes_per_second', 'velocity', 'rhythm_change'],
-        'output_dim': 192
+        'output_dim': 160
     },
     'slider': {
         'features': ['log_slider_pixel_length', 'slider_repeats', 'slider_tortuosity'],

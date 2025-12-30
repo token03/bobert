@@ -1,17 +1,80 @@
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
-from typing import Callable, Dict, List, Optional, Any
+from torch.utils.data import DataLoader, Dataset
+from typing import Callable, Dict, List, Optional, Any, Tuple
 
-from .loader import load_beatmaps, setup_dataset
-from .dataset import BeatmapDataset, pretrain_collate_fn
+from .loader import load_hitobjects, setup_dataset
 from .transforms import (
     BeatmapAugmenter,
     BeatmapNormalizer,
     BeatmapTransform,
     create_normalizer_from_data,
 )
+
+def pretrain_collate_fn(
+    batch: List[Tuple[torch.Tensor, Dict[str, float]]],
+    max_seq_len: int,
+    vector_dim: int,
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
+    vectors, attributes_list = zip(*batch)
+
+    lengths = [min(v.shape[0], max_seq_len) for v in vectors]
+    max_len_batch = max(lengths) if lengths else 0
+
+    padded_vectors = torch.zeros(
+        len(batch), max_len_batch, vector_dim, dtype=torch.float32
+    )
+    attention_mask = torch.zeros(len(batch), max_len_batch, dtype=torch.bool)
+
+    for i, (v, length) in enumerate(zip(vectors, lengths)):
+        if length > 0:
+            actual_dim = min(v.shape[1], vector_dim)
+            padded_vectors[i, :length, :actual_dim] = v[:length, :actual_dim]
+            attention_mask[i, :length] = True
+
+    stacked_attributes = (
+        {
+            key: torch.tensor([d[key] for d in attributes_list], dtype=torch.float32)
+            for key in attributes_list[0]
+        }
+        if attributes_list
+        else {}
+    )
+
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    cu_seqlens = torch.nn.functional.pad(
+        torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
+    )
+
+    return padded_vectors, attention_mask, stacked_attributes, cu_seqlens
+
+
+class BeatmapDataset(Dataset):
+    def __init__(
+        self,
+        beatmap_data: List[torch.Tensor],
+        transform: BeatmapTransform,
+        difficulty_attributes: Optional[Dict[str, list]] = None,
+    ):
+        self.beatmap_data = beatmap_data
+        self.transform = transform
+        self.difficulty_attributes = difficulty_attributes
+
+    def __len__(self) -> int:
+        return len(self.beatmap_data)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, float]]:
+        vectors = self.beatmap_data[idx]
+        normalized_vectors = self.transform(vectors)
+
+        attributes = {}
+        if self.difficulty_attributes:
+            attributes = {
+                key: val[idx] for key, val in self.difficulty_attributes.items()
+            }
+
+        return normalized_vectors, attributes
 
 
 class BeatmapDataModule(pl.LightningDataModule):
@@ -41,7 +104,7 @@ class BeatmapDataModule(pl.LightningDataModule):
         if self.all_data:
             return
 
-        self.all_data, self.difficulty_attrs, _ = load_beatmaps(
+        self.all_data, self.difficulty_attrs, _ = load_hitobjects(
             self.db_path,
             max_seq_len=self.config["data"]["max_seq_len"],
             raw_beatmap_path=self.config["pretraining"].get(
