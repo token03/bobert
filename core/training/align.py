@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -8,7 +8,6 @@ from .trainer import create_trainer
 from .metrics import ContrastiveMetrics
 from .setup import create_optimizer, create_scheduler
 from ..data.transforms import BeatmapNormalizer
-
 
 class AlignmentModule(pl.LightningModule):
     def __init__(

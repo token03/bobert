@@ -2,186 +2,259 @@ import numpy as np
 import torch
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader, Dataset
-from typing import Callable, Dict, List, Optional, Any, Tuple
+from typing import Callable, Dict, List, Optional, Any, Tuple, Union
 
-from .loader import load_hitobjects, setup_dataset
+from .loader import load_hitobjects, load_metadata_stub, load_tags_stub, setup_dataset
 from .transforms import (
     BeatmapAugmenter,
     BeatmapNormalizer,
     BeatmapTransform,
     create_normalizer_from_data,
 )
+from .vocab import TagTokenizer
 
-def pretrain_collate_fn(
-    batch: List[Tuple[torch.Tensor, Dict[str, float]]],
-    max_seq_len: int,
-    vector_dim: int,
-) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], torch.Tensor]:
-    vectors, attributes_list = zip(*batch)
-
+def _pad_batch(vectors: List[torch.Tensor], max_seq_len: int, vector_dim: int):
     lengths = [min(v.shape[0], max_seq_len) for v in vectors]
-    max_len_batch = max(lengths) if lengths else 0
+    max_len = max(lengths) if lengths else 0
+    batch_size = len(vectors)
 
-    padded_vectors = torch.zeros(
-        len(batch), max_len_batch, vector_dim, dtype=torch.float32
-    )
-    attention_mask = torch.zeros(len(batch), max_len_batch, dtype=torch.bool)
+    padded = torch.zeros(batch_size, max_len, vector_dim, dtype=torch.float32)
+    mask = torch.zeros(batch_size, max_len, dtype=torch.bool)
 
     for i, (v, length) in enumerate(zip(vectors, lengths)):
         if length > 0:
             actual_dim = min(v.shape[1], vector_dim)
-            padded_vectors[i, :length, :actual_dim] = v[:length, :actual_dim]
-            attention_mask[i, :length] = True
-
-    stacked_attributes = (
-        {
-            key: torch.tensor([d[key] for d in attributes_list], dtype=torch.float32)
-            for key in attributes_list[0]
-        }
-        if attributes_list
-        else {}
-    )
+            padded[i, :length, :actual_dim] = v[:length, :actual_dim]
+            mask[i, :length] = True
 
     seqlens = torch.tensor(lengths, dtype=torch.int32)
     cu_seqlens = torch.nn.functional.pad(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
+    return padded, mask, cu_seqlens
 
-    return padded_vectors, attention_mask, stacked_attributes, cu_seqlens
+def _stack_dicts(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    if not dict_list:
+        return {}
+    return {
+        k: torch.tensor([d[k] for d in dict_list], dtype=torch.float32)
+        for k in dict_list[0]
+    }
 
+def _random_split_aligned(
+    data_sources: Dict[str, Union[List, Dict]], val_split: float
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    primary_key = next(iter(data_sources))
+    total_len = len(data_sources[primary_key])
+    
+    val_size = int(total_len * val_split)
+    train_size = total_len - val_size
+    
+    indices = torch.randperm(total_len).tolist()
+    train_idx = indices[:train_size]
+    val_idx = indices[train_size:]
 
-class PretrainDataset(Dataset):
+    def extract(source, idx_list):
+        if isinstance(source, dict):
+            return {k: [v[i] for i in idx_list] for k, v in source.items()}
+        return [source[i] for i in idx_list]
+
+    train_out = {k: extract(v, train_idx) for k, v in data_sources.items()}
+    val_out = {k: extract(v, val_idx) for k, v in data_sources.items()}
+    return train_out, val_out
+
+def pretrain_collate_fn(
+    batch: List[Tuple[torch.Tensor, Dict[str, float]]],
+    max_seq_len: int,
+    vector_dim: int,
+):
+    vectors, attrs = zip(*batch)
+    padded, mask, cu_seqlens = _pad_batch(vectors, max_seq_len, vector_dim)
+    return padded, mask, _stack_dicts(attrs), cu_seqlens
+
+def align_collate_fn(
+    batch: List[Tuple[torch.Tensor, Dict, torch.Tensor, Dict]],
+    max_seq_len: int,
+    vector_dim: int,
+    max_tags: int = 50,
+):
+    vectors, metadata, tags, attrs = zip(*batch)
+    padded_vec, mask, cu_seqlens = _pad_batch(vectors, max_seq_len, vector_dim)
+
+    tag_lens = [min(t.shape[0], max_tags) for t in tags]
+    padded_tags = torch.zeros(len(batch), max(tag_lens) if tag_lens else 1, dtype=torch.long)
+    for i, (t, l) in enumerate(zip(tags, tag_lens)):
+        if l > 0: padded_tags[i, :l] = t[:l]
+
+    return (
+        padded_vec, mask, cu_seqlens,
+        None, None,  
+        padded_tags, _stack_dicts(attrs),
+    )
+
+class BeatmapDataset(Dataset):
     def __init__(
         self,
         beatmap_data: List[torch.Tensor],
         transform: BeatmapTransform,
         difficulty_attributes: Optional[Dict[str, list]] = None,
+        beatmap_ids: Optional[List[int]] = None,
+        metadata: Optional[Dict[int, Dict]] = None,
+        tags: Optional[Dict[int, torch.Tensor]] = None,
     ):
         self.beatmap_data = beatmap_data
         self.transform = transform
-        self.difficulty_attributes = difficulty_attributes
+        self.diff_attrs = difficulty_attributes
+        self.beatmap_ids = beatmap_ids
+        self.metadata = metadata or {}
+        self.tags = tags or {}
+        self.has_meta = beatmap_ids is not None
 
     def __len__(self) -> int:
         return len(self.beatmap_data)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, Dict[str, float]]:
-        vectors = self.beatmap_data[idx]
-        normalized_vectors = self.transform(vectors)
+    def __getitem__(self, idx: int):
+        vec = self.transform(self.beatmap_data[idx])
+        attrs = {k: v[idx] for k, v in self.diff_attrs.items()} if self.diff_attrs else {}
 
-        attributes = {}
-        if self.difficulty_attributes:
-            attributes = {
-                key: val[idx] for key, val in self.difficulty_attributes.items()
-            }
+        if not self.has_meta:
+            return vec, attrs
 
-        return normalized_vectors, attributes
+        bid = self.beatmap_ids[idx]
+        tags = self.tags.get(bid, torch.tensor([0], dtype=torch.long))
+        return vec, self.metadata.get(bid, {}), tags, attrs
 
-
-class PretrainDataModule(pl.LightningDataModule):
-    def __init__(
-        self,
-        config: Dict[str, Any],
-        db_path: Optional[str] = None,
-        sampler_fn: Optional[Callable] = None,
-    ):
+class BeatmapDataModule(pl.LightningDataModule):
+    def __init__(self, config: Dict[str, Any], section: str, db_path: Optional[str] = None):
         super().__init__()
         self.config = config
-        self.db_path = db_path or config["pretraining"]["db_path"]
-        self.sampler_fn = sampler_fn
-
-        self.all_data: List[torch.Tensor] = []
-        self.difficulty_attrs: Dict[str, np.ndarray] = {}
-        self.normalizer: Optional[BeatmapNormalizer] = None
-        self._sampler = None
+        self.section = section
+        self.db_path = db_path or config[section].get("db_path")
+        self.batch_size = config[section]["batch_size"]
+        self.vector_dim: Optional[int] = None
+        self.train_dataset = None
+        self.val_dataset = None
 
     def prepare_data(self):
-        setup_dataset(
+        setup_dataset(self.db_path, self.config.get(self.section, {}).get("colab_url"))
+
+    def _setup_common(self) -> Tuple[List, Dict, List]:
+        return load_hitobjects(
             self.db_path,
-            self.config.get("pretraining", {}).get("colab_url"),
+            max_seq_len=self.config["data"]["max_seq_len"],
+            raw_beatmap_path=self.config[self.section].get("raw_beatmap_path", "./data/osu"),
         )
+
+    def _create_datasets(self, train_data, val_data) -> Tuple[Dataset, Dataset]:
+        raise NotImplementedError
 
     def setup(self, stage: Optional[str] = None):
-        if self.all_data:
-            return
+        if self.train_dataset: return
 
-        self.all_data, self.difficulty_attrs, _ = load_hitobjects(
-            self.db_path,
-            max_seq_len=self.config["data"]["max_seq_len"],
-            raw_beatmap_path=self.config["pretraining"].get(
-                "raw_beatmap_path", "./data/osu"
-            ),
-        )
+        all_data, diff_attrs, all_ids = self._setup_common()
+        
+        sources = {"data": all_data, "attrs": diff_attrs}
+        if all_ids is not None:
+            sources["ids"] = all_ids.tolist()
 
-        val_size = int(len(self.all_data) * self.config["data"]["val_split"])
-        train_size = len(self.all_data) - val_size
+        train_s, val_s = _random_split_aligned(sources, self.config["data"]["val_split"])
 
-        indices = torch.randperm(len(self.all_data)).tolist()
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
+        train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
+        self.normalizer = create_normalizer_from_data(train_s["data"], train_attrs_np)
+        
+        aug = BeatmapAugmenter()
+        self.t_train = BeatmapTransform(self.normalizer, aug, augment=True)
+        self.t_val = BeatmapTransform(self.normalizer, aug, augment=False)
+        self.vector_dim = train_s["data"][0].shape[1]
 
-        self.train_data = [self.all_data[i] for i in train_indices]
-        self.val_data = [self.all_data[i] for i in val_indices]
+        self.train_dataset, self.val_dataset = self._create_datasets(train_s, val_s)
+        
+        if hasattr(self, "_setup_sampler"):
+            self._setup_sampler(train_s["attrs"])
 
-        self.train_attrs = {
-            k: [v[i] for i in train_indices] for k, v in self.difficulty_attrs.items()
-        }
-        self.val_attrs = {
-            k: [v[i] for i in val_indices] for k, v in self.difficulty_attrs.items()
-        }
+        print(f"Data split: {len(self.train_dataset)} training, {len(self.val_dataset)} validation")
 
-        train_attrs_array = {
-            k: np.array([v[i] for i in train_indices])
-            for k, v in self.difficulty_attrs.items()
-        }
-        self.normalizer = create_normalizer_from_data(
-            self.train_data, train_attrs_array
-        )
-
-        if self.sampler_fn is not None:
-            stars = np.array([self.difficulty_attrs["stars"][i] for i in train_indices])
-            self._sampler = self.sampler_fn(stars)
-
-        augmenter = BeatmapAugmenter()
-        train_transform = BeatmapTransform(self.normalizer, augmenter, augment=True)
-        val_transform = BeatmapTransform(self.normalizer, augmenter, augment=False)
-
-        self.train_dataset = PretrainDataset(
-            self.train_data, train_transform, self.train_attrs
-        )
-        self.val_dataset = PretrainDataset(self.val_data, val_transform, self.val_attrs)
-
-        self._vector_dim = self.train_data[0].shape[1]
-
-        print(
-            f"Data split: {len(self.train_data)} training, {len(self.val_data)} validation"
-        )
-
-    def train_dataloader(self) -> DataLoader:
-        collate = lambda batch: pretrain_collate_fn(
-            batch,
-            max_seq_len=self.config["data"]["max_seq_len"],
-            vector_dim=self._vector_dim,
-        )
+    def _get_dataloader(self, dataset, shuffle, collate_fn, sampler=None):
         return DataLoader(
-            self.train_dataset,
-            batch_size=self.config["pretraining"]["batch_size"],
-            sampler=self._sampler,
-            collate_fn=collate,
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle and not sampler,
+            sampler=sampler,
+            collate_fn=collate_fn,
             num_workers=self.config["data"].get("num_workers", 0),
             pin_memory=True,
         )
 
-    def val_dataloader(self) -> DataLoader:
-        collate = lambda batch: pretrain_collate_fn(
-            batch,
-            max_seq_len=self.config["data"]["max_seq_len"],
-            vector_dim=self._vector_dim,
+class PretrainDataModule(BeatmapDataModule):
+    def __init__(self, config, db_path=None, sampler_fn=None):
+        super().__init__(config, "pretraining", db_path)
+        self.sampler_fn = sampler_fn
+        self._sampler = None
+
+    def _setup_sampler(self, train_attrs):
+        if self.sampler_fn:
+            self._sampler = self.sampler_fn(np.array(train_attrs["stars"]))
+
+    def _create_datasets(self, train_s, val_s):
+        return (
+            BeatmapDataset(train_s["data"], self.t_train, train_s["attrs"]),
+            BeatmapDataset(val_s["data"], self.t_val, val_s["attrs"]),
         )
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.config["pretraining"]["batch_size"],
-            shuffle=False,
-            collate_fn=collate,
-            num_workers=self.config["data"].get("num_workers", 0),
-            pin_memory=True,
+
+    def train_dataloader(self):
+        collate = lambda b: pretrain_collate_fn(b, self.config["data"]["max_seq_len"], self.vector_dim)
+        return self._get_dataloader(self.train_dataset, True, collate, self._sampler)
+
+    def val_dataloader(self):
+        collate = lambda b: pretrain_collate_fn(b, self.config["data"]["max_seq_len"], self.vector_dim)
+        return self._get_dataloader(self.val_dataset, False, collate)
+
+class AlignDataModule(BeatmapDataModule):
+    def __init__(self, config, tag_tokenizer, db_path=None):
+        super().__init__(config, "alignment", db_path)
+        self.tag_tokenizer = tag_tokenizer
+        self.meta_store = {}
+        self.tag_store = {}
+
+    def setup(self, stage=None):
+        if self.train_dataset: return
+        
+        all_data, diff_attrs, ids_array = self._setup_common()
+        all_ids = ids_array.tolist()
+        
+        self.meta_store = load_metadata_stub(all_ids)
+        tags_raw = load_tags_stub(all_ids)
+        self.tag_store = {k: self.tag_tokenizer.encode(v) for k, v in tags_raw.items()}
+
+        sources = {"data": all_data, "attrs": diff_attrs, "ids": all_ids}
+        train_s, val_s = _random_split_aligned(sources, self.config["data"]["val_split"])
+        
+        train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
+        self.normalizer = create_normalizer_from_data(train_s["data"], train_attrs_np)
+        
+        aug = BeatmapAugmenter()
+        self.t_train = BeatmapTransform(self.normalizer, aug, augment=True)
+        self.t_val = BeatmapTransform(self.normalizer, aug, augment=False)
+        self.vector_dim = train_s["data"][0].shape[1]
+
+        self.train_dataset = BeatmapDataset(
+            train_s["data"], self.t_train, train_s["attrs"], 
+            train_s["ids"], self.meta_store, self.tag_store
         )
+        self.val_dataset = BeatmapDataset(
+            val_s["data"], self.t_val, val_s["attrs"], 
+            val_s["ids"], self.meta_store, self.tag_store
+        )
+        print(f"Data split: {len(self.train_dataset)} training, {len(self.val_dataset)} validation")
+
+    def train_dataloader(self):
+        collate = lambda b: align_collate_fn(
+            b, self.config["data"]["max_seq_len"], self.vector_dim, self.config["alignment"].get("max_tags", 50)
+        )
+        return self._get_dataloader(self.train_dataset, True, collate)
+
+    def val_dataloader(self):
+        collate = lambda b: align_collate_fn(
+            b, self.config["data"]["max_seq_len"], self.vector_dim, self.config["alignment"].get("max_tags", 50)
+        )
+        return self._get_dataloader(self.val_dataset, False, collate)

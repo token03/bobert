@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Tuple, List, Optional, Dict
+from typing import Tuple, List, Optional, Dict, Any
 import gdown
 import numpy as np
 import pandas as pd
@@ -12,9 +12,11 @@ from .beatmap import DIFFICULTY_ATTRIBUTES
 from .features import engineer_features_vectorized
 from .difficulty import DifficultyManager
 
+
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
         import google.colab  # type: ignore
+
         colab_path = "/content/beatmap_dataset"
         if not os.path.exists(colab_path) and colab_url:
             print("Downloading dataset for Colab environment...")
@@ -154,6 +156,7 @@ def load_metadata(dataset_path: str) -> pd.DataFrame:
 
     return all_beatmaps_df
 
+
 def load_tags(dataset_path: str) -> Dict[int, List[str]]:
     tags_path = os.path.join(dataset_path, "tags.json")
 
@@ -167,3 +170,11 @@ def load_tags(dataset_path: str) -> Dict[int, List[str]]:
     id_to_tags = {int(k): v for k, v in tags_data.items()}
 
     return id_to_tags
+
+
+def load_metadata_stub(beatmap_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    return {bid: {} for bid in beatmap_ids}
+
+
+def load_tags_stub(beatmap_ids: List[int]) -> Dict[int, List[str]]:
+    return {bid: ["<UNK>"] for bid in beatmap_ids}

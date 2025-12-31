@@ -1,4 +1,4 @@
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -10,7 +10,6 @@ from .metrics import MLMMetrics, DifficultyMetrics
 from .setup import create_optimizer, create_scheduler
 from ..data.hitobject import HitObject
 from ..data.transforms import BeatmapNormalizer
-
 
 class PretrainingModule(pl.LightningModule):
     def __init__(
