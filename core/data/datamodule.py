@@ -50,7 +50,7 @@ def pretrain_collate_fn(
     return padded_vectors, attention_mask, stacked_attributes, cu_seqlens
 
 
-class BeatmapDataset(Dataset):
+class PretrainDataset(Dataset):
     def __init__(
         self,
         beatmap_data: List[torch.Tensor],
@@ -77,7 +77,7 @@ class BeatmapDataset(Dataset):
         return normalized_vectors, attributes
 
 
-class BeatmapDataModule(pl.LightningDataModule):
+class PretrainDataModule(pl.LightningDataModule):
     def __init__(
         self,
         config: Dict[str, Any],
@@ -145,10 +145,10 @@ class BeatmapDataModule(pl.LightningDataModule):
         train_transform = BeatmapTransform(self.normalizer, augmenter, augment=True)
         val_transform = BeatmapTransform(self.normalizer, augmenter, augment=False)
 
-        self.train_dataset = BeatmapDataset(
+        self.train_dataset = PretrainDataset(
             self.train_data, train_transform, self.train_attrs
         )
-        self.val_dataset = BeatmapDataset(self.val_data, val_transform, self.val_attrs)
+        self.val_dataset = PretrainDataset(self.val_data, val_transform, self.val_attrs)
 
         self._vector_dim = self.train_data[0].shape[1]
 

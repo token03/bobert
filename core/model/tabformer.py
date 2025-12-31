@@ -144,7 +144,7 @@ class TabformerModel(nn.Module):
         return x, padding_mask
 
 
-class TabformerForContrastiveLearning(nn.Module):
+class TabformerForAlignment(nn.Module):
     def __init__(
         self, 
         tabformer: TabformerModel, 
