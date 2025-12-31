@@ -11,26 +11,22 @@ from ossapi import Ossapi
 import pandas as pd
 import time
 
-# --- Path Setup ---
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Always use absolute paths based on PROJECT_ROOT
 DATA_DIR = PROJECT_ROOT / "data"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 COLLECTIONS_DIR = DATA_DIR / "collections"   
 BEATMAP_TOPIC_WEIGHTS_PATH = COLLECTIONS_DIR / "beatmap_topic_weights.parquet"
 
-# Progress tracking files (hidden)
 PROGRESS_STATE_PATH = DATA_DIR / ".beatmap_fetch_progress.json"
 FAILED_BEATMAPS_PATH = DATA_DIR / ".failed_beatmaps.json"
 
-# Configuration
 BATCH_SIZE = 50
 SAVE_INTERVAL = 20000 
 MAX_RETRIES = 3
-RETRY_BASE_DELAY = 1 # Slightly lower base for retries
+RETRY_BASE_DELAY = 1 
 API_RATE_LIMIT_DELAY = 0.8
 
 def atomic_save_parquet(df: pd.DataFrame, path: Path):
@@ -38,7 +34,6 @@ def atomic_save_parquet(df: pd.DataFrame, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
     df.to_parquet(temp_path, index=False)
-    # On some systems replacement might fail if destination exists, though .replace() is usually atomic
     if path.exists():
         path.unlink()
     temp_path.rename(path)
@@ -63,12 +58,9 @@ def initialize_api() -> Ossapi:
     return Ossapi(client_id, client_secret)
 
 def beatmap_to_dict(bm) -> dict:
-    """Convert a Beatmap object to a flat dictionary with primitive values."""
-    # Get the nested beatmapset if available
     bs = getattr(bm, '_beatmapset', None) or getattr(bm, 'beatmapset', None)
     
     return {
-        # Beatmap core info
         'id': bm.id,
         'beatmapset_id': bm.beatmapset_id,
         'user_id': bm.user_id,
@@ -78,7 +70,6 @@ def beatmap_to_dict(bm) -> dict:
         'status': str(bm.status.value) if bm.status else None,
         'ranked': str(bm.ranked.value) if bm.ranked else None,
         
-        # Difficulty stats
         'difficulty_rating': bm.difficulty_rating,
         'cs': bm.cs,
         'ar': bm.ar,
@@ -86,7 +77,6 @@ def beatmap_to_dict(bm) -> dict:
         'drain': bm.drain,        # HP
         'bpm': bm.bpm,
         
-        # Length & counts
         'total_length': bm.total_length,
         'hit_length': bm.hit_length,
         'count_circles': bm.count_circles,
@@ -94,22 +84,18 @@ def beatmap_to_dict(bm) -> dict:
         'count_spinners': bm.count_spinners,
         'max_combo': getattr(bm, 'max_combo', None),
         
-        # Play stats
         'playcount': bm.playcount,
         'passcount': bm.passcount,
         
-        # Metadata
         'url': bm.url,
         'checksum': getattr(bm, 'checksum', None),
         'last_updated': str(bm.last_updated) if bm.last_updated else None,
         'is_scoreable': bm.is_scoreable,
         'convert': bm.convert,
         'deleted_at': str(bm.deleted_at) if bm.deleted_at else None,
-        
-        # Owners
+
         'owners': " ".join([str(o.id) for o in bm.owners]) if bm.owners else "",
 
-        # Beatmapset info (flattened)
         'artist': bs.artist if bs else None,
         'artist_unicode': bs.artist_unicode if bs else None,
         'title': bs.title if bs else None,
@@ -127,17 +113,14 @@ def beatmap_to_dict(bm) -> dict:
     }
 
 def main():
-    # 1. Ensure directories exist
     DATA_DIR.mkdir(exist_ok=True)
     
-    # 2. Load Source IDs
     if not BEATMAP_TOPIC_WEIGHTS_PATH.exists():
         print(f"[red]Error: Source file not found at {BEATMAP_TOPIC_WEIGHTS_PATH}[/red]")
         return
     
     all_ids = pd.read_parquet(BEATMAP_TOPIC_WEIGHTS_PATH)['beatmap_id'].unique()
     
-    # 3. Load State
     progress = {"completed_ids": [], "completed_count": 0}
     if PROGRESS_STATE_PATH.exists():
         try:
@@ -152,11 +135,9 @@ def main():
         except Exception:
             pass
 
-    # 4. Load Data & Sync Progress
     if BEATMAPS_PATH.exists():
         try:
             beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
-            # Reconstruct progress set from the actual data to be sure
             existing_ids = set(beatmaps_df['id'].unique()) if 'id' in beatmaps_df.columns else set()
             progress["completed_ids"] = list(existing_ids)
             progress["completed_count"] = len(existing_ids)
@@ -167,7 +148,6 @@ def main():
     else:
         beatmaps_df = pd.DataFrame()
 
-    # 5. Filter remaining
     done_set = set(progress["completed_ids"])
     todo_ids = [bid for bid in all_ids if bid not in done_set]
     
@@ -180,11 +160,9 @@ def main():
     def handle_interrupt(signum, frame):
         nonlocal is_shutting_down
         if is_shutting_down: 
-            # If hit twice, we force exit but don't ignore the signal anymore
             return
         is_shutting_down = True
         print("\n\n[bold yellow]Stopping gracefully... Please wait for saving to finish.[/bold yellow]")
-        # Instruct the OS to ignore further interrupts to protect the write
         signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     signal.signal(signal.SIGINT, handle_interrupt)
@@ -228,7 +206,6 @@ def main():
 
                 bar.update(task, advance=len(batch))
 
-                # Periodic Checkpoint
                 if len(new_data) >= SAVE_INTERVAL:
                     bar.console.print(f"[green]Saving checkpoint ({len(new_data)} items)...[/green]")
                     beatmaps_df = pd.concat([beatmaps_df, pd.DataFrame(new_data)], ignore_index=True)
@@ -240,7 +217,6 @@ def main():
                 time.sleep(API_RATE_LIMIT_DELAY)
 
     finally:
-        # Final cleanup and save
         if new_data:
             print(f"[green]Final Save: Writing {len(new_data)} items to disk...[/green]")
             beatmaps_df = pd.concat([beatmaps_df, pd.DataFrame(new_data)], ignore_index=True)
