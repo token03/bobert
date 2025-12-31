@@ -1,5 +1,7 @@
 from collections import defaultdict
 import math
+from pathlib import Path
+import sys
 import pandas as pd
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -11,6 +13,10 @@ import os
 import json
 import re
 from tqdm import tqdm
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 VERSION = "v5"
 MIN_MAPS_IN_COLLECTION = 10
@@ -24,8 +30,12 @@ ALPHA = 0.00005
 SCALING_FACTOR = 100
 L1_RATIO = 0.5
 
+DATA_DIR = PROJECT_ROOT / "data"
+COLLECTIONS_DIR = DATA_DIR / "collections"
+COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collections_data.parquet"
+
 def get_collection_names(collection_ids):
-    cache_file = "collection_names_cache.json"
+    cache_file = DATA_DIR / "collection_names_cache.json"
     cache = {}
     if os.path.exists(cache_file):
         with open(cache_file, "r") as f:
@@ -138,7 +148,7 @@ def deduplicate_collections(df, threshold=0.90, probe_items=32):
 
 def run_nmf():
     print("--- Loading Data ---")
-    df = pd.read_parquet("collections_data.parquet")
+    df = pd.read_parquet(COLLECTIONS_DATA_PATH)
 
     col_counts = df.groupby('collection_id')['beatmap_id'].count()
     valid_collections = col_counts[
@@ -278,8 +288,8 @@ def run_nmf():
         .merge(summary_df, on='topic_id', how='left')
     
     final_summary.columns = ['topic_id', 'collection_count', 'beatmap_count', 'collection_names', 'beatmap_names']
-    final_summary.to_csv(f"topic_summary_{VERSION}.csv", index=False)
-    print(f"Fused summary saved to topic_summary_{VERSION}.csv")
+    final_summary.to_csv(COLLECTIONS_DIR / f"topic_summary_{VERSION}.csv", index=False)
+    print(f"Fused summary saved to {COLLECTIONS_DIR / f'topic_summary_{VERSION}.csv'}")
     
     print("Done.")
 
