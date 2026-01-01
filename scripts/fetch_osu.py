@@ -17,6 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+DATA_DIR = PROJECT_ROOT / "data"
+BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
+
 SONGS_FOLDER_PATH = r'F:\Songs' 
 
 INDEXER_THREADS = os.cpu_count() * 2 if os.cpu_count() else 4
