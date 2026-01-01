@@ -296,7 +296,7 @@ class BobertForPretraining(nn.Module):
         if config.get('components', {}).get('compile_model', False):
             print("Compiling BERT pre-training model with torch.compile...")
             compile_mode = config.get('components', {}).get('compile_mode', 'default')
-            model = torch.compile(model, mode=compile_mode, fullgraph=False)
+            model = torch.compile(model, mode=compile_mode, dynamic=True)
             model.is_compiled = True
         
         return model
@@ -377,7 +377,7 @@ class BobertForAlignment(nn.Module):
         if config.get('components', {}).get('compile_model', False):
             print("Compiling BERT pre-training model with torch.compile...")
             compile_mode = config.get('components', {}).get('compile_mode', 'default')
-            model = torch.compile(model, mode=compile_mode, fullgraph=False)
+            model = torch.compile(model, mode=compile_mode, dynamic=True)
             model.is_compiled = True
         
         return model

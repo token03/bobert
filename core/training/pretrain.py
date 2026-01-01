@@ -11,6 +11,7 @@ from .setup import create_optimizer, create_scheduler
 from ..data.hitobject import HitObject
 from ..data.transforms import BeatmapNormalizer
 
+
 class PretrainingModule(pl.LightningModule):
     def __init__(
         self,
@@ -58,10 +59,14 @@ class PretrainingModule(pl.LightningModule):
             prog_bar=True,
             batch_size=self.batch_size,
         )
-        self.log("train_mlm_loss", loss_dict["mlm_loss"], batch_size=self.batch_size)
+        self.log(
+            "train_mlm_loss", loss_dict["mlm_loss"].detach(), batch_size=self.batch_size
+        )
         self.log(
             "train_difficulty_loss",
-            loss_dict.get("difficulty_loss", 0.0),
+            loss_dict["difficulty_loss"].detach()
+            if "difficulty_loss" in loss_dict
+            else 0.0,
             batch_size=self.batch_size,
         )
         self.log(
@@ -100,17 +105,21 @@ class PretrainingModule(pl.LightningModule):
         self._difficulty_metrics.update(
             diff_preds_cpu,
             diff_labels_cpu,
-            loss=loss_dict.get("difficulty_loss", torch.tensor(0.0)).item(),
+            loss=loss_dict["difficulty_loss"].item()
+            if "difficulty_loss" in loss_dict
+            else 0.0,
         )
+
+        del predictions, targets, mask, difficulty_labels
 
         self.log(
             "val_loss",
-            loss_dict["total_loss"],
+            loss_dict["total_loss"].detach(),
             prog_bar=True,
             sync_dist=True,
             batch_size=self.batch_size,
         )
-        return loss_dict["total_loss"]
+        return loss_dict["total_loss"].detach()
 
     def on_validation_epoch_end(self):
         mlm_results = self._mlm_metrics.compute()

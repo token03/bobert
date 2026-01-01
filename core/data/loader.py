@@ -152,6 +152,9 @@ def load_beatmap_data(
     diff_manager = DifficultyManager(cache_path, raw_beatmap_path)
     all_beatmap_data = []
 
+    chunk_data_list = []
+    all_tasks_to_run = []
+
     for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
         chunk_ids = all_beatmap_ids[i : i + chunk_size]
 
@@ -192,13 +195,32 @@ def load_beatmap_data(
                 target_len = min(target_len, max_seq_len)
             id_to_seq_len[bid] = target_len
 
-        tasks_to_run = []
         for bid, seq_len in id_to_seq_len.items():
             if not diff_manager.get_attributes(bid, seq_len):
-                tasks_to_run.append((bid, seq_len))
+                all_tasks_to_run.append((bid, seq_len))
 
-        if tasks_to_run:
-            diff_manager.update_missing(tasks_to_run)
+        chunk_data_list.append(
+            {
+                "ids": ids,
+                "id_to_vectors": id_to_vectors,
+                "id_to_seq_len": id_to_seq_len,
+                "chunk_metadata": chunk_metadata,
+                "chunk_user_tags": chunk_user_tags,
+                "chunk_collection_topics": chunk_collection_topics,
+            }
+        )
+
+    if all_tasks_to_run:
+        with tqdm(total=len(all_tasks_to_run), desc="Calculating Attributes") as pbar:
+            diff_manager.update_missing(all_tasks_to_run, pbar)
+
+    for chunk_data in chunk_data_list:
+        ids = chunk_data["ids"]
+        id_to_vectors = chunk_data["id_to_vectors"]
+        id_to_seq_len = chunk_data["id_to_seq_len"]
+        chunk_metadata = chunk_data["chunk_metadata"]
+        chunk_user_tags = chunk_data["chunk_user_tags"]
+        chunk_collection_topics = chunk_data["chunk_collection_topics"]
 
         for bid in ids:
             bid_int = int(bid)

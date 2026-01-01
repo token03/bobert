@@ -227,7 +227,13 @@ def _apply_object_specific_features(df: pd.DataFrame) -> pd.DataFrame:
     x, y = df["x"].values, df["y"].values
     raw_end_x = df["slider_end_x"].fillna(df["x"]).values
     raw_end_y = df["slider_end_y"].fillna(df["y"]).values
-    slider_euc_dist = np.sqrt((raw_end_x - x) ** 2 + (raw_end_y - y) ** 2)
+
+    # Suppress invalid value warning from NaN in sqrt calculation
+    with np.errstate(invalid="ignore"):
+        slider_euc_dist = np.sqrt((raw_end_x - x) ** 2 + (raw_end_y - y) ** 2)
+
+    # Replace any NaN distances with 0
+    slider_euc_dist = np.nan_to_num(slider_euc_dist, nan=0.0)
 
     df["slider_tortuosity"] = np.divide(
         df["pixel_length"].values,

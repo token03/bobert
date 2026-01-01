@@ -36,7 +36,7 @@ class DifficultyManager:
             return attrs
         return None
 
-    def update_missing(self, tasks: List[Tuple[int, int]]):
+    def update_missing(self, tasks: List[Tuple[int, int]], pbar: Optional[tqdm] = None):
         if not tasks:
             return
 
@@ -50,11 +50,7 @@ class DifficultyManager:
                 ): (bid, seq_len)
                 for bid, seq_len in tasks
             }
-            for future in tqdm(
-                concurrent.futures.as_completed(future_to_task),
-                total=len(future_to_task),
-                desc="Calculating Attributes",
-            ):
+            for future in concurrent.futures.as_completed(future_to_task):
                 bid, seq_len = future_to_task[future]
                 new_attrs = future.result()
                 if new_attrs is not None:
@@ -62,6 +58,8 @@ class DifficultyManager:
                     if str_bid not in self.cache:
                         self.cache[str_bid] = {}
                     self.cache[str_bid][str_seq_len] = new_attrs
+                if pbar is not None:
+                    pbar.update(1)
         self.save_cache()
 
 

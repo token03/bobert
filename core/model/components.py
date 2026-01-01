@@ -183,7 +183,6 @@ class SpanMasker(nn.Module):
         self.register_buffer("span_length_probs", probs)
         self.register_buffer("span_lengths_range", lengths.long())
 
-        # Precompute max_span_len to avoid .item() call during forward pass (graph break)
         self.max_span_len = max_len
 
     def _generate_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -196,19 +195,14 @@ class SpanMasker(nn.Module):
 
         max_k = max(1, int(seq_len * self.masking_ratio / self.mean_span_length * 1.5))
 
-        dist = Categorical(self.span_length_probs)
-        span_length_indices = dist.sample((batch_size, max_k))
+        probs = self.span_length_probs.expand(batch_size, -1)
+        span_length_indices = torch.multinomial(probs, num_samples=max_k, replacement=True)
         span_lengths = self.span_lengths_range[span_length_indices]
 
         cumsum_lengths = torch.cumsum(span_lengths, dim=1)
 
-        # Vectorized version: find first index where cumsum_lengths >= target_mask_count
-        # Create mask where cumsum_lengths[b, k] >= target_mask_count[b]
         mask = cumsum_lengths >= target_mask_count.unsqueeze(1)
-        # Find first True index using argmax (returns 0 if all False)
         first_indices = mask.long().argmax(dim=1)
-        # Handle case where all values are False (target is very large)
-        # In that case, we should use all spans
         all_false = ~mask.any(dim=1)
         first_indices = torch.where(
             all_false, torch.tensor(max_k - 1, device=device), first_indices
@@ -256,22 +250,17 @@ class SpanMasker(nn.Module):
 
         encoder_input = x_embed.clone()
 
-        # Avoid graph breaks: use torch.where instead of no_grad() and conditionals
-        # Generate random embeddings for all positions (even if not used)
         valid_embeddings = x_embed[attention_mask]
         batch_size, seq_len, _ = x_embed.shape
-        # Sample random indices for the entire sequence
         rand_indices = torch.randint(
             0,
-            max(1, valid_embeddings.shape[0]),  # Avoid randint(0, 0)
+            max(1, valid_embeddings.shape[0]), 
             (batch_size, seq_len),
             device=x_embed.device,
         )
-        # Clamp to valid range
         rand_indices = rand_indices.clamp(0, max(0, valid_embeddings.shape[0] - 1))
         random_embeds = valid_embeddings[rand_indices]
 
-        # Use torch.where to conditionally replace (no graph break)
         encoder_input = torch.where(
             mask_random.unsqueeze(-1), random_embeds, encoder_input
         )
