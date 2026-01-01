@@ -18,15 +18,21 @@ def get_sharded_path(beatmap_id: str, base_dir: str) -> str:
     return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
 
 
-def shard_beatmaps(input_dir: str, dry_run: bool = False):
+def shard_beatmaps(input_dir: str, dry_run: bool = False, subdir: str | None = None):
     input_path = Path(input_dir).resolve()
 
     if not input_path.exists():
         print(f"Error: Input directory '{input_path}' does not exist.")
         sys.exit(1)
 
-    print(f"Scanning for .osu files in {input_path}...")
-    flat_files = [f for f in input_path.glob("*.osu") if f.is_file()]
+    scan_path = input_path / subdir if subdir else input_path
+
+    if subdir and not scan_path.exists():
+        print(f"Error: Subdirectory '{scan_path}' does not exist.")
+        sys.exit(1)
+
+    print(f"Scanning for .osu files in {scan_path}...")
+    flat_files = [f for f in scan_path.glob("*.osu") if f.is_file()]
 
     if not flat_files:
         print("No .osu files found in the root directory. Already sharded or empty?")
@@ -60,6 +66,7 @@ def shard_beatmaps(input_dir: str, dry_run: bool = False):
 
     # Move files
     moved_count = 0
+    deleted_count = 0
     error_count = 0
 
     for shard, files in tqdm(shard_groups.items(), desc="Sharding", unit="shard"):
@@ -73,15 +80,31 @@ def shard_beatmaps(input_dir: str, dry_run: bool = False):
 
             try:
                 if not dry_run:
-                    source_path.rename(dest_path)
-                moved_count += 1
+                    # Check if file already exists in shard (duplicate)
+                    if dest_path.exists():
+                        # Keep sharded version, delete root file
+                        source_path.unlink()
+                        deleted_count += 1
+                    else:
+                        # New file, move to shard
+                        source_path.rename(dest_path)
+                        moved_count += 1
+                else:
+                    # Dry run - just count
+                    if dest_path.exists():
+                        deleted_count += 1
+                    else:
+                        moved_count += 1
             except Exception as e:
                 error_count += 1
-                print(f"\nError moving {source_path.name}: {e}")
+                print(f"\nError processing {source_path.name}: {e}")
 
     # Summary
     print(
         f"\n{'Would move' if dry_run else 'Moved'} {moved_count} files into {len(shard_groups)} shard directories"
+    )
+    print(
+        f"{'Would delete' if dry_run else 'Deleted'} {deleted_count} duplicate files from root"
     )
     if error_count > 0:
         print(f"Encountered {error_count} errors")
@@ -93,7 +116,7 @@ def shard_beatmaps(input_dir: str, dry_run: bool = False):
 
 
 def main():
-    DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "osu"
+    DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "beatmaps"
 
     parser = argparse.ArgumentParser(
         description="Reorganize beatmap files from flat to sharded structure"
@@ -109,10 +132,17 @@ def main():
         action="store_true",
         help="Show what would be done without actually moving files",
     )
+    parser.add_argument(
+        "-d",
+        "--subdir",
+        type=str,
+        default=None,
+        help="Subdirectory within input-dir to scan for beatmaps (e.g., 'renamed')",
+    )
 
     args = parser.parse_args()
 
-    shard_beatmaps(args.input_dir, args.dry_run)
+    shard_beatmaps(args.input_dir, args.dry_run, args.subdir)
 
 
 if __name__ == "__main__":

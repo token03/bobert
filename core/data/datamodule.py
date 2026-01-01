@@ -171,7 +171,7 @@ class BeatmapDataModule(pl.LightningDataModule):
             self.db_path,
             max_seq_len=self.config["data"]["max_seq_len"],
             raw_beatmap_path=self.config[self.section].get(
-                "raw_beatmap_path", "./data/osu"
+                "raw_beatmap_path", "./data/beatmaps"
             ),
             include_metadata=include_metadata,
             include_user_tags=include_user_tags,

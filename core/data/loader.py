@@ -118,7 +118,7 @@ def load_beatmap_data(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
-    raw_beatmap_path: str = "./data/osu",
+    raw_beatmap_path: str = "./data/beatmaps",
     cache_path: str = "./data/difficulty_attributes_cache.json",
     chunk_size: int = 5000,
     include_metadata: bool = False,

@@ -1,54 +1,49 @@
-import re
 import sys
 import os
+import json
+import argparse
 import requests
-import glob
 import threading
 import queue
 import time
-import shutil
 import tqdm
-import json
-import concurrent.futures
+import pandas as pd
 from pathlib import Path
-import argparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-def get_shard_from_id(beatmap_id: str) -> str:
-    """Get shard directory name from beatmap ID (last 2 digits, zero-padded)."""
-    return str(beatmap_id)[-2:].zfill(2)
-
-
-def get_sharded_path(beatmap_id: str, base_dir: str) -> str:
-    """Get the full sharded path for a beatmap file."""
-    shard = get_shard_from_id(beatmap_id)
-    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
-
-
 DATA_DIR = PROJECT_ROOT / "data"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
-
-SONGS_FOLDER_PATH = r"F:\Songs"
-
-INDEXER_THREADS = (os.cpu_count() or 2) * 2
-
-CACHE_FILE_NAME = "beatmap_index.json"
+BEATMAPS_DIR = DATA_DIR / "beatmaps"
+FAILED_DOWNLOADS_PATH = DATA_DIR / ".failed_downloads.json"
 
 API_CONFIG = {
-    # 'https://osu.ppy.sh/osu/{id}': 0.2,
-    "https://osu.direct/api/osu/{id}": 0.8,
-    "https://catboy.best/osu/{id}": 2.1,
+    "https://osu.ppy.sh/osu/{id}": 0.2,
+    "https://osu.direct/api/osu/{id}": 1.0,
+    "https://catboy.best/osu/{id}": 2.0,
 }
 
-last_request_time = {api: 0.0 for api in API_CONFIG}
+API_TIERS = [
+    {"url": "https://osu.ppy.sh/osu/{id}", "delay": 0.2, "name": "osu.ppy.sh"},
+    {"url": "https://osu.direct/api/osu/{id}", "delay": 1.0, "name": "osu.direct"},
+    {"url": "https://catboy.best/osu/{id}", "delay": 2.0, "name": "catboy.best"},
+]
+
+CHECKPOINT_INTERVAL = 1000
+
+last_request_time = {tier["url"]: 0.0 for tier in API_TIERS}
 last_request_lock = threading.Lock()
 
 processed_ids = set()
 processed_ids_lock = threading.Lock()
+
+failed_downloads = set()
+failed_downloads_lock = threading.Lock()
+
+checkpoint_counter = 0
+checkpoint_lock = threading.Lock()
 
 DOWNLOAD_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -56,202 +51,99 @@ DOWNLOAD_HEADERS = {
 }
 
 
-def process_file_chunk(file_paths):
-    local_index = {}
-    beatmap_id_regex = re.compile(r"^\s*BeatmapID\s*:\s*(\d+)\s*$", re.IGNORECASE)
-    for file_path in file_paths:
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                for i, line in enumerate(f):
-                    if i > 50:
-                        break
-                    match = beatmap_id_regex.match(line)
-                    if match:
-                        beatmap_id = match.group(1)
-                        if beatmap_id not in local_index:
-                            local_index[beatmap_id] = file_path
-                        break
-        except (IOError, UnicodeDecodeError):
-            continue
-    return local_index
-
-
-def build_index_multithreaded():
-    print("Building local beatmap index with multiple threads...")
-
-    all_osu_files = []
-    print("Discovering .osu files...")
-    for root, _, files in os.walk(SONGS_FOLDER_PATH):
-        for file in files:
-            if file.endswith(".osu"):
-                all_osu_files.append(os.path.join(root, file))
-
-    if not all_osu_files:
-        print("No .osu files found in the specified SONGS_FOLDER_PATH.")
-        return {}
-
-    chunk_size = max(1, len(all_osu_files) // INDEXER_THREADS)
-    chunks = [
-        all_osu_files[i : i + chunk_size]
-        for i in range(0, len(all_osu_files), chunk_size)
-    ]
-
-    final_index = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=INDEXER_THREADS) as executor:
-        future_to_chunk = {
-            executor.submit(process_file_chunk, chunk): chunk for chunk in chunks
-        }
-
-        kwargs = {"total": len(chunks), "unit": "chunk", "desc": "Indexing Songs"}
-        for future in tqdm.tqdm(
-            concurrent.futures.as_completed(future_to_chunk), **kwargs
-        ):
-            try:
-                result = future.result()
-                final_index.update(result)
-            except Exception as exc:
-                print(f"A chunk generated an exception: {exc}")
-
-    return final_index
-
-
-def load_or_build_index(cache_dir):
-    if not SONGS_FOLDER_PATH or not os.path.isdir(SONGS_FOLDER_PATH):
-        print(
-            "Warning: SONGS_FOLDER_PATH is not set or invalid. Local search will be disabled."
-        )
-        return {}
-
-    cache_file_path = Path(cache_dir) / CACHE_FILE_NAME
+def is_valid_osu_file(content: bytes) -> bool:
+    if len(content) < 100:
+        return False
 
     try:
-        if cache_file_path.exists():
-            cache_mtime = cache_file_path.stat().st_mtime
-            songs_folder_mtime = Path(SONGS_FOLDER_PATH).stat().st_mtime
-
-            if cache_mtime > songs_folder_mtime:
-                print(f"Loading fresh beatmap index from '{cache_file_path.name}'...")
-                with open(cache_file_path, "r", encoding="utf-8") as f:
-                    beatmap_index = json.load(f)
-                print(f"Loaded {len(beatmap_index)} entries from cache.")
-                return beatmap_index
-            else:
-                print(
-                    "Songs folder has been modified or cache is outdated. Rebuilding index..."
-                )
-        else:
-            print(
-                f"No cache file found at '{cache_file_path.name}'. A one-time scan is required."
-            )
-
-        start_scan = time.time()
-        beatmap_index = build_index_multithreaded()
-        end_scan = time.time()
-        print(
-            f"Index built in {end_scan - start_scan:.2f} seconds. Found {len(beatmap_index)} unique beatmap files."
-        )
-
-        print(f"Saving index to '{cache_file_path.name}' for future runs...")
-        cache_file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_file_path, "w", encoding="utf-8") as f:
-            json.dump(beatmap_index, f)
-        return beatmap_index
-
-    except Exception as e:
-        print(f"An error occurred during index management: {e}")
-        print("Proceeding without local search capabilities.")
-        return {}
+        first_line = content.decode("utf-8", errors="ignore").split("\n")[0]
+        return first_line.strip().startswith("osu file format v")
+    except:
+        return False
 
 
-def extract_beatmap_info(input_file):
+def load_failed_downloads() -> set:
+    if not FAILED_DOWNLOADS_PATH.exists():
+        return set()
+
     try:
-        with open(input_file, "r", encoding="utf-8") as infile:
-            content = infile.read()
-    except FileNotFoundError:
-        print(f"Error: Input file not found at {input_file}")
-        return []
-
-    pattern1 = r"(\d+\.?\d*)★\((\d+)\)"
-    matches1 = re.findall(pattern1, content)
-    if matches1:
-        return [(id_str, round(float(sr_str), 2)) for sr_str, id_str in matches1]
-
-    pattern2 = r"\((\d+)\)"
-    matches2 = re.findall(pattern2, content)
-    if matches2:
-        return [(id_str, None) for id_str in matches2]
-
-    lines = content.strip().split("\n")
-    potential_ids = []
-    for line in lines:
-        line = line.strip()
-        if line.isdigit() and len(line) >= 5:
-            potential_ids.append(line)
-
-    if potential_ids:
-        return [(id_str, None) for id_str in potential_ids]
-
-    return []
+        with open(FAILED_DOWNLOADS_PATH, "r") as f:
+            data = json.load(f)
+            return set(data.get("failed_ids", []))
+    except:
+        return set()
 
 
-def inject_star_rating(file_path, star_rating):
-    if star_rating is None:
-        return
-    try:
-        with open(file_path, "r+", encoding="utf-8") as f:
-            lines = f.readlines()
-            try:
-                difficulty_section_index = next(
-                    i
-                    for i, line in enumerate(lines)
-                    if line.strip().lower() == "[difficulty]"
-                )
-            except StopIteration:
-                return
+def save_failed_downloads():
+    with failed_downloads_lock:
+        failed_list = sorted(list(failed_downloads))
 
-            rating_line_exists = False
-            for i in range(difficulty_section_index + 1, len(lines)):
-                line = lines[i].strip()
-                if not line:
-                    continue
-                if line.startswith("["):
-                    break
-                if line.lower().startswith("difficultyrating:"):
-                    rating_line_exists = True
-                    break
+    data = {
+        "failed_ids": failed_list,
+        "count": len(failed_list),
+        "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
-            if not rating_line_exists:
-                lines.insert(
-                    difficulty_section_index + 1, f"DifficultyRating:{star_rating}\n"
-                )
-                f.seek(0)
-                f.writelines(lines)
-                f.truncate()
-    except Exception as e:
-        print(f"Error injecting SR into {os.path.basename(file_path)}: {e}")
+    with open(FAILED_DOWNLOADS_PATH, "w") as f:
+        json.dump(data, f, indent=2)
 
 
-def download_worker(tasks_queue, api_url_template, min_delay, output_folder):
+def maybe_checkpoint():
+    global checkpoint_counter
+    with checkpoint_lock:
+        checkpoint_counter += 1
+        if checkpoint_counter % CHECKPOINT_INTERVAL == 0:
+            save_failed_downloads()
+
+
+def get_shard_from_id(beatmap_id: str) -> str:
+    return str(beatmap_id)[-2:].zfill(2)
+
+
+def get_sharded_path(beatmap_id: str, base_dir: str) -> str:
+    shard = get_shard_from_id(beatmap_id)
+    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
+
+
+def scan_existing_beatmaps(osu_dir):
+    downloaded_ids = set()
+    for shard_dir in sorted(osu_dir.iterdir()):
+        if shard_dir.is_dir() and shard_dir.name.isdigit():
+            for osu_file in shard_dir.glob("*.osu"):
+                downloaded_ids.add(osu_file.stem)
+    return downloaded_ids
+
+
+def download_worker(
+    current_queue,
+    next_queue,
+    api_url_template,
+    min_delay,
+    output_folder,
+    tier_name,
+    is_last_tier=False,
+):
     global last_request_time
     while True:
         try:
-            beatmap_id, star_rating = tasks_queue.get_nowait()
+            beatmap_id = current_queue.get_nowait()
         except queue.Empty:
-            break
+            time.sleep(0.1)
+            try:
+                beatmap_id = current_queue.get_nowait()
+            except queue.Empty:
+                break
 
         file_path = get_sharded_path(beatmap_id, output_folder)
 
-        # Ensure shard directory exists
+        with processed_ids_lock:
+            if beatmap_id in processed_ids:
+                current_queue.task_done()
+                continue
+
         shard_dir = os.path.dirname(file_path)
         os.makedirs(shard_dir, exist_ok=True)
 
-        with processed_ids_lock:
-            if beatmap_id in processed_ids:
-                tasks_queue.task_done()
-                continue
-            processed_ids.add(beatmap_id)
-
-        # Enforce throttling
         with last_request_lock:
             elapsed = time.time() - last_request_time[api_url_template]
             if elapsed < min_delay:
@@ -259,161 +151,157 @@ def download_worker(tasks_queue, api_url_template, min_delay, output_folder):
             last_request_time[api_url_template] = time.time()
 
         url = api_url_template.format(id=beatmap_id)
+        download_success = False
+
         try:
             response = requests.get(url, headers=DOWNLOAD_HEADERS, timeout=15)
-            if response.status_code == 200 and response.content:
+
+            if response.status_code == 200 and is_valid_osu_file(response.content):
                 with open(file_path, "wb") as outfile:
                     outfile.write(response.content)
-                inject_star_rating(file_path, star_rating)
-            else:
+
                 with processed_ids_lock:
-                    processed_ids.discard(beatmap_id)
+                    processed_ids.add(beatmap_id)
+
+                download_success = True
+
         except requests.exceptions.RequestException:
-            with processed_ids_lock:
-                processed_ids.discard(beatmap_id)
+            pass
 
-        tasks_queue.task_done()
+        if not download_success:
+            if is_last_tier:
+                with failed_downloads_lock:
+                    failed_downloads.add(beatmap_id)
+                maybe_checkpoint()
+            else:
+                next_queue.put(beatmap_id)
+
+        current_queue.task_done()
 
 
-def process_file(input_file_path, beatmap_index, output_folder):
-    print(f"\n--- Processing {os.path.basename(input_file_path)} ---")
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download osu! beatmaps with tiered fallback"
+    )
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry previously failed downloads (ignore .failed_downloads.json)",
+    )
+    args = parser.parse_args()
 
-    os.makedirs(output_folder, exist_ok=True)
+    start_time = time.time()
 
-    beatmap_infos = extract_beatmap_info(input_file_path)
-    if not beatmap_infos:
-        print("No beatmap IDs found in this file.")
-        return
+    BEATMAPS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Check for existing files in sharded structure
-    already_exist_ids = set()
-    for beatmap_id, _ in beatmap_infos:
-        sharded_path = get_sharded_path(beatmap_id, output_folder)
-        if os.path.exists(sharded_path):
-            already_exist_ids.add(beatmap_id)
+    print(f"--- Output directory: {BEATMAPS_DIR} ---")
 
-    found_locally_ids = set()
-    ids_to_check_and_process = [
-        info for info in beatmap_infos if info[0] not in already_exist_ids
+    if not BEATMAPS_PATH.exists():
+        print(f"Error: beatmaps.parquet not found at {BEATMAPS_PATH}")
+        sys.exit(1)
+
+    print("Loading beatmaps from parquet...")
+    df = pd.read_parquet(BEATMAPS_PATH)
+    df_osu_std = df[df["mode_int"] == 0]
+    all_beatmap_ids = df_osu_std["id"].tolist()
+    print(f"Found {len(all_beatmap_ids):,} osu!standard beatmaps")
+
+    print("Scanning existing downloads...")
+    scan_start = time.time()
+    downloaded_ids = scan_existing_beatmaps(BEATMAPS_DIR)
+    scan_end = time.time()
+    print(
+        f"Scan completed in {scan_end - scan_start:.3f}s - Found {len(downloaded_ids):,} already downloaded"
+    )
+
+    previously_failed = set()
+    if not args.retry_failed:
+        previously_failed = load_failed_downloads()
+        if previously_failed:
+            print(
+                f"Skipping {len(previously_failed):,} previously failed downloads (use --retry-failed to retry)"
+            )
+
+    beatmap_ids_to_download = [
+        str(bid)
+        for bid in all_beatmap_ids
+        if str(bid) not in downloaded_ids and str(bid) not in previously_failed
     ]
 
-    if beatmap_index:
-        for beatmap_id, star_rating in tqdm.tqdm(
-            ids_to_check_and_process,
-            desc="Checking local index",
-            unit="maps",
-            leave=False,
-        ):
-            local_path = beatmap_index.get(beatmap_id)
-            if local_path:
-                dest_path = get_sharded_path(beatmap_id, output_folder)
-                # Ensure shard directory exists
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                try:
-                    shutil.copy2(local_path, dest_path)
-                    inject_star_rating(dest_path, star_rating)
-                    found_locally_ids.add(beatmap_id)
-                except Exception as e:
-                    print(f"Error copying {beatmap_id} from {local_path}: {e}")
+    print(f"Beatmaps to download: {len(beatmap_ids_to_download):,}")
 
-    tasks_queue = queue.Queue()
+    if len(beatmap_ids_to_download) == 0:
+        print("No beatmaps left to download.")
+        return
+
+    tier_queues = [queue.Queue() for _ in range(len(API_TIERS))]
 
     with processed_ids_lock:
         processed_ids.clear()
-        processed_ids.update(already_exist_ids)
-        processed_ids.update(found_locally_ids)
+        processed_ids.update(downloaded_ids)
 
-    for beatmap_id, star_rating in beatmap_infos:
-        if beatmap_id not in processed_ids:
-            tasks_queue.put((beatmap_id, star_rating))
+    with failed_downloads_lock:
+        failed_downloads.clear()
 
-    print(f"\n--- Summary for {os.path.basename(input_file_path)} ---")
-    print(f"Total beatmaps requested: {len(beatmap_infos)}")
-    if already_exist_ids:
-        print(f"Already existed in output folder: {len(already_exist_ids)} maps")
-    if found_locally_ids:
-        print(f"Copied from local Songs folder: {len(found_locally_ids)} maps")
-
-    queued_for_download = tasks_queue.qsize()
-    if queued_for_download == 0:
-        print("No beatmaps left to download.")
-        print(f"--- Finished processing {os.path.basename(input_file_path)} ---")
-        return
-
-    print(f"Queued for download: {queued_for_download} maps")
+    for beatmap_id in beatmap_ids_to_download:
+        tier_queues[0].put(beatmap_id)
 
     threads = []
-    for api, min_delay in API_CONFIG.items():
+    for i, tier in enumerate(API_TIERS):
+        is_last = i == len(API_TIERS) - 1
+        next_queue = None if is_last else tier_queues[i + 1]
+
         thread = threading.Thread(
             target=download_worker,
-            args=(tasks_queue, api, min_delay, output_folder),
+            args=(
+                tier_queues[i],
+                next_queue,
+                tier["url"],
+                tier["delay"],
+                str(BEATMAPS_DIR),
+                tier["name"],
+                is_last,
+            ),
             daemon=True,
         )
         threads.append(thread)
         thread.start()
 
-    with tqdm.tqdm(total=queued_for_download, desc="Downloading", unit="maps") as pbar:
-        initial_count = queued_for_download
-        while not tasks_queue.empty():
-            pbar.n = initial_count - tasks_queue.qsize()
+    with tqdm.tqdm(
+        total=len(beatmap_ids_to_download), desc="Downloading", unit="maps"
+    ) as pbar:
+        initial_count = len(beatmap_ids_to_download)
+        while any(not q.empty() for q in tier_queues) or any(
+            t.is_alive() for t in threads
+        ):
+            with processed_ids_lock:
+                successful = len(processed_ids) - len(downloaded_ids)
+            with failed_downloads_lock:
+                failed = len(failed_downloads)
+
+            completed = successful + failed
+            pbar.n = min(completed, initial_count)
             pbar.refresh()
             time.sleep(0.5)
+
         pbar.n = initial_count
         pbar.refresh()
 
-    tasks_queue.join()
-    print(f"\n--- Finished processing {os.path.basename(input_file_path)} ---")
+    for q in tier_queues:
+        q.join()
 
-
-def main():
-    start_time = time.time()
-
-    DEFAULT_CACHE_DIR = PROJECT_ROOT / "cache"
-    DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "osu"
-
-    parser = argparse.ArgumentParser(
-        description="Downloads beatmaps from a .txt file containing beatmap IDs."
-    )
-    parser.add_argument(
-        "input_file", help="Path to the input .txt file containing beatmap IDs."
-    )
-    parser.add_argument(
-        "--cache-dir",
-        default=str(DEFAULT_CACHE_DIR),
-        help="Directory to store cache files. Default: ./cache",
-    )
-
-    args = parser.parse_args()
-
-    DEFAULT_CACHE_DIR = Path(args.cache_dir).resolve()
-    DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_DIR.resolve()
-
-    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    DEFAULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-    print(f"--- Output directory: {DEFAULT_OUTPUT_DIR} ---")
-    print(f"--- Cache directory: {DEFAULT_CACHE_DIR} ---")
-
-    beatmap_index = load_or_build_index(DEFAULT_CACHE_DIR)
-
-    input_file_path = Path(args.input_file)
-    if not input_file_path.exists():
-        print(f"Error: Input file '{input_file_path}' not found.")
-        sys.exit(1)
-
-    if not input_file_path.is_file():
-        print(f"Error: Provided path '{input_file_path}' is not a file.")
-        sys.exit(1)
-
-    if not input_file_path.suffix.lower() == ".txt":
-        print(f"Error: Input file '{input_file_path}' must be a .txt file.")
-        sys.exit(1)
-
-    print(f"--- Processing input file: {input_file_path.resolve()} ---")
-    process_file(str(input_file_path), beatmap_index, str(DEFAULT_OUTPUT_DIR))
+    if failed_downloads:
+        save_failed_downloads()
+        print(
+            f"\n{len(failed_downloads):,} beatmaps failed all download tiers - saved to {FAILED_DOWNLOADS_PATH}"
+        )
 
     end_time = time.time()
-    print(f"\nAll tasks completed in {end_time - start_time:.2f} seconds.")
+    with processed_ids_lock:
+        successful = len(processed_ids) - len(downloaded_ids)
+    print(f"\nCompleted in {end_time - start_time:.2f} seconds.")
+    print(f"Successfully downloaded: {successful:,}")
+    print(f"Failed: {len(failed_downloads):,}")
 
 
 if __name__ == "__main__":

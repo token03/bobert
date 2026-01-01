@@ -264,10 +264,10 @@ def create_dataset(root_dir: str, output_dir: str, sample_size: Optional[int] = 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--directory', type=str, default="./data", help='Directory to search for .osu files.')
+    parser.add_argument('--directory', type=str, default="./data/beatmaps", help='Directory to search for .osu files.')
     parser.add_argument('--output-dir', type=str, default='./data/beatmap_dataset', help='Directory to save the Parquet dataset.')
     parser.add_argument('--test', action='store_true', help='Create a smaller, randomly sampled test dataset.')
-    parser.add_argument('--sample-size', type=int, default=3000, help='Number of beatmaps for the test dataset.')
+    parser.add_argument('--sample-size', type=int, default=20000, help='Number of beatmaps for the test dataset.')
     args = parser.parse_args()
 
     total_start_time = time.time()

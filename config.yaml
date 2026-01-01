@@ -24,8 +24,8 @@ components:
   compile_mode: "default" 
     
 pretraining:
-  db_path: './data/beatmap_dataset_test/'
-  # db_path: './data/beatmap_dataset/'
+  db_path: './data/beatmap_dataset20k/'
+  # db_path: './data/beatmap_dataset50k/'
   batch_size: 8
   num_epochs: 8
 
@@ -54,7 +54,7 @@ pretraining:
     strength: 0.2
 
 align:
-  db_path: './data/beatmap_dataset/'
+  db_path: './data/beatmap_dataset50k/'
   checkpoint_dir: "./checkpoints"
   model_name: "model"
   batch_size: 8
