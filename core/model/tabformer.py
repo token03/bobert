@@ -19,6 +19,8 @@ class TabformerModel(nn.Module):
         metadata_config: Dict[str, Any],
         tag_vocab_size: int,
         max_tags: int = 50,
+        topic_vocab_size: int = 100,
+        max_topics: int = 20,
         dropout: float = 0.1,
         tag_dropout: float = 0.2,
         num_bins: int = 32
@@ -163,10 +165,11 @@ class TabformerForAlignment(nn.Module):
         self,
         x_num: Optional[torch.Tensor],
         x_cat: Optional[Dict[str, torch.Tensor]],
-        x_tags: torch.Tensor
+        x_tags: torch.Tensor,
+        x_topics: torch.Tensor
     ) -> torch.Tensor:
         
-        sequence_output, _ = self.tabformer(x_num, x_cat, x_tags)
+        sequence_output, _ = self.tabformer(x_num, x_cat, x_tags, x_topics)
         cls_output = sequence_output[:, 0, :]
         projected = self.projection_head(cls_output)
         return F.normalize(projected, dim=-1, p=2)

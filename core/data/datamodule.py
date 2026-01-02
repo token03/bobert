@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import pytorch_lightning as pl
@@ -224,7 +225,7 @@ class BeatmapDataModule(pl.LightningDataModule):
             shuffle=shuffle and not sampler,
             sampler=sampler,
             collate_fn=collate_fn,
-            num_workers=self.config["data"].get("num_workers", 0),
+            num_workers=os.cpu_count(),
             pin_memory=True,
         )
 

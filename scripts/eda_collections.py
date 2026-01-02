@@ -1,5 +1,15 @@
+from pathlib import Path
+import sys
 import pandas as pd
 import os
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+DATA_DIR = PROJECT_ROOT / "data"
+COLLECTIONS_DIR = DATA_DIR / "collections"
+COLLECTIONS_PATH = COLLECTIONS_DIR / "collections.parquet"
 
 def perform_eda(file_path):
     if not os.path.exists(file_path):
@@ -64,5 +74,4 @@ def perform_eda(file_path):
     print(df.isnull().sum())
 
 if __name__ == "__main__":
-    parquet_file = "collections.parquet"
-    perform_eda(parquet_file)
+    perform_eda(COLLECTIONS_PATH)

@@ -1,13 +1,8 @@
 data:
-  # max_seq_len: 1023
   max_seq_len: 2048
   val_split: 0.1
-  num_workers: 4
-  max_samples_per_class:
-    aim: 2500
-    tech: 2500
-  min_stars: 4.0
-  max_stars: 12.0
+  min_sr: 4.0
+  max_sr: 12.0
 
 model:
   d_model: 512
@@ -30,6 +25,7 @@ pretraining:
   num_epochs: 8
 
   learning_rate: 2e-4
+  optimizer: "adamw"
   min_lr: 1e-6
   cooldown_type: "cosine"
   weight_decay: 0.05

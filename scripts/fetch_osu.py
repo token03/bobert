@@ -19,19 +19,13 @@ BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPS_DIR = DATA_DIR / "beatmaps"
 FAILED_DOWNLOADS_PATH = DATA_DIR / ".failed_downloads.json"
 
-API_CONFIG = {
-    "https://osu.ppy.sh/osu/{id}": 0.2,
-    "https://osu.direct/api/osu/{id}": 1.0,
-    "https://catboy.best/osu/{id}": 2.0,
-}
-
 API_TIERS = [
     {"url": "https://osu.ppy.sh/osu/{id}", "delay": 0.2, "name": "osu.ppy.sh"},
     {"url": "https://osu.direct/api/osu/{id}", "delay": 1.0, "name": "osu.direct"},
     {"url": "https://catboy.best/osu/{id}", "delay": 2.0, "name": "catboy.best"},
 ]
 
-CHECKPOINT_INTERVAL = 1000
+CHECKPOINT_INTERVAL = 10
 
 last_request_time = {tier["url"]: 0.0 for tier in API_TIERS}
 last_request_lock = threading.Lock()
