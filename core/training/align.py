@@ -4,10 +4,11 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from .trainer import create_trainer
-from .metrics import ContrastiveMetrics
-from .setup import create_optimizer, create_scheduler
+from core.training.metrics import ContrastiveMetrics
+
+from .setup import create_optimizer, create_scheduler, create_trainer
 from ..data.transforms import BeatmapNormalizer
+
 
 class AlignmentModule(pl.LightningModule):
     def __init__(

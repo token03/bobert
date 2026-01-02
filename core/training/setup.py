@@ -1,7 +1,11 @@
 import math
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
+from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -12,6 +16,10 @@ from torch.utils.data import WeightedRandomSampler
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from muon import SingleDeviceMuonWithAuxAdam
+
+
+def setup_device() -> str:
+    return "gpu" if torch.cuda.is_available() else "cpu"
 
 def create_kde_sampler(
     difficulty_ratings: Optional[np.ndarray] = None,
@@ -147,4 +155,54 @@ def create_scheduler(
         min_lr_ratio=min_lr_ratio,
         cooldown_type=cooldown_type,
         num_cycles=num_cycles,
+    )
+
+def create_trainer(
+    config: Dict[str, Any],
+    phase: str,
+    checkpoint_dir: Optional[str] = None,
+    extra_callbacks: Optional[List[pl.Callback]] = None,
+) -> pl.Trainer:
+    phase_config = config[phase]
+    base_dir = checkpoint_dir or phase_config["checkpoint_dir"]
+
+    checkpoint_path = os.path.join(base_dir, "checkpoints")
+    logs_path = base_dir
+
+    progress_bar = TQDMProgressBar(refresh_rate=1)
+
+    callbacks = [
+        ModelCheckpoint(
+            dirpath=checkpoint_path,
+            filename=f"{phase}-{{epoch:02d}}-{{val_loss:.4f}}",
+            save_top_k=1,
+            monitor="val_loss",
+            mode="min",
+            save_last=True,
+        ),
+        progress_bar,
+    ]
+
+    if extra_callbacks:
+        callbacks.extend(extra_callbacks)
+
+    use_amp = phase_config.get("use_amp", False)
+    precision = "bf16-mixed" if use_amp else 32
+
+    loggers = [
+        CSVLogger(save_dir=logs_path, name="logs"),
+        TensorBoardLogger(save_dir=logs_path, name="logs"),
+    ]
+
+    return pl.Trainer(
+        max_epochs=phase_config["num_epochs"],
+        accelerator=setup_device(),
+        devices=1,
+        precision=precision,
+        gradient_clip_val=phase_config.get("grad_clip_norm", 1.0),
+        accumulate_grad_batches=phase_config.get("gradient_accumulation_steps", 1),
+        logger=loggers,
+        callbacks=callbacks,
+        enable_progress_bar=True,
+        log_every_n_steps=10,
     )

@@ -14,7 +14,7 @@ data/**/*.parquet
 data/**/*.csv
 data/*.tar.gz
 
-checkpoints/
+experiments/
 *.pth
 
 # IDE

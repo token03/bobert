@@ -37,9 +37,9 @@ pretraining:
   stable_ratio: 0.1
 
   use_amp: true
-  checkpoint_dir: "./checkpoints"
+  checkpoint_dir: "./experiments"
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 8
 
   difficulty_loss_weight: 1.0
   mlm_loss_weight: 1.0
@@ -55,7 +55,7 @@ pretraining:
 
 align:
   db_path: './data/beatmap_dataset50k/'
-  checkpoint_dir: "./checkpoints"
+  checkpoint_dir: "./experiments"
   model_name: "model"
   batch_size: 8
   num_epochs: 3

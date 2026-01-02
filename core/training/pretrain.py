@@ -4,10 +4,9 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from .trainer import create_trainer
+from .setup import create_trainer, create_optimizer, create_scheduler, setup_device
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
-from .setup import create_optimizer, create_scheduler
 from ..data.hitobject import HitObject
 from ..data.transforms import BeatmapNormalizer
 
@@ -24,120 +23,91 @@ class PretrainingModule(pl.LightningModule):
         self.config = config
         self.normalizer = normalizer
         self.batch_size = config["pretraining"]["batch_size"]
-        self.accumulate_grad_batches = config["pretraining"].get(
-            "gradient_accumulation_steps", 1
-        )
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
         feature_info = HitObject.get_feature_info()
-        object.__setattr__(
-            self, "_mlm_metrics", MLMMetrics(feature_info, torch.device("cpu"))
-        )
-        object.__setattr__(
-            self, "_difficulty_metrics", DifficultyMetrics(torch.device("cpu"))
-        )
+        self.mlm_metrics = MLMMetrics(feature_info, torch.device("cpu"))
+        self.difficulty_metrics = DifficultyMetrics(torch.device("cpu"))
 
     def forward(self, vectors, attention_mask, cu_seqlens=None):
         return self.model(vectors, attention_mask, cu_seqlens)
 
     def _shared_step(self, batch: Tuple):
         vectors, attention_mask, difficulty_labels, cu_seqlens = batch
-        difficulty_labels = {k: v.to(self.device) for k, v in difficulty_labels.items()}
-
-        predictions, targets, mask = self.model(vectors, attention_mask, cu_seqlens)
+        predictions, targets, mask = self(vectors, attention_mask, cu_seqlens)
+        
         loss_dict = pretrain_loss_fn(
             predictions, targets, mask, difficulty_labels, self.config
         )
+        
         return predictions, targets, mask, difficulty_labels, loss_dict
 
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
         _, _, _, _, loss_dict = self._shared_step(batch)
 
-        self.log(
-            "train_loss",
-            loss_dict["total_loss"],
-            prog_bar=True,
-            batch_size=self.batch_size,
-        )
-        self.log(
-            "train_mlm_loss", loss_dict["mlm_loss"].detach(), batch_size=self.batch_size
-        )
-        self.log(
-            "train_difficulty_loss",
-            loss_dict["difficulty_loss"].detach()
-            if "difficulty_loss" in loss_dict
-            else 0.0,
-            batch_size=self.batch_size,
-        )
-        self.log(
-            "lr",
-            self.trainer.optimizers[0].param_groups[0]["lr"],
-            prog_bar=True,
-            batch_size=self.batch_size,
+        metrics_to_log = {
+            "train_loss": loss_dict["total_loss"],
+            "train_mlm_loss": loss_dict["mlm_loss"],
+            "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
+        }
+        
+        if "difficulty_loss" in loss_dict:
+            metrics_to_log["train_difficulty_loss"] = loss_dict["difficulty_loss"]
+
+        self.log_dict(
+            metrics_to_log, 
+            prog_bar=True, 
+            batch_size=self.batch_size
         )
 
-        return loss_dict["total_loss"] / self.accumulate_grad_batches
+        return loss_dict["total_loss"]
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(
-            batch
+        predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(batch)
+
+        self.mlm_metrics.update(
+            predictions["mlm"], 
+            targets, 
+            mask, 
+            loss=loss_dict["mlm_loss"]
         )
 
-        mlm_preds_cpu = {
-            "continuous": predictions["mlm"]["continuous"].detach().cpu(),
-            "categorical": {
-                k: v.detach().cpu()
-                for k, v in predictions["mlm"]["categorical"].items()
-            },
-        }
-        targets_cpu = targets.detach().cpu()
-        mask_cpu = mask.detach().cpu()
-
-        self._mlm_metrics.update(
-            mlm_preds_cpu, targets_cpu, mask_cpu, loss=loss_dict["mlm_loss"].item()
+        self.difficulty_metrics.update(
+            predictions["difficulty"],
+            difficulty_labels,
+            loss=loss_dict.get("difficulty_loss", 0.0)
         )
-
-        diff_preds_cpu = {
-            k: v.detach().cpu() for k, v in predictions["difficulty"].items()
-        }
-        diff_labels_cpu = {k: v.detach().cpu() for k, v in difficulty_labels.items()}
-
-        self._difficulty_metrics.update(
-            diff_preds_cpu,
-            diff_labels_cpu,
-            loss=loss_dict["difficulty_loss"].item()
-            if "difficulty_loss" in loss_dict
-            else 0.0,
-        )
-
-        del predictions, targets, mask, difficulty_labels
 
         self.log(
             "val_loss",
-            loss_dict["total_loss"].detach(),
+            loss_dict["total_loss"],
             prog_bar=True,
             sync_dist=True,
             batch_size=self.batch_size,
         )
-        return loss_dict["total_loss"].detach()
+        
+        return loss_dict["total_loss"]
 
     def on_validation_epoch_end(self):
-        mlm_results = self._mlm_metrics.compute()
-        diff_results = self._difficulty_metrics.compute()
+        mlm_results = self._flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
+        diff_results = self._flatten_metrics(self.difficulty_metrics.compute(), prefix="val_diff")
 
-        def log_nested(prefix: str, data):
-            """Recursively flatten and log nested dicts."""
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    log_nested(f"{prefix}_{key}", value)
+        self.log_dict(mlm_results, sync_dist=True)
+        self.log_dict(diff_results, sync_dist=True)
+
+        self.mlm_metrics.reset()
+        self.difficulty_metrics.reset()
+
+    @staticmethod
+    def _flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
+        flat = {}
+        for key, value in metrics.items():
+            new_key = f"{prefix}_{key}" if prefix else key
+            if isinstance(value, dict):
+                flat.update(PretrainingModule._flatten_metrics(value, new_key))
             else:
-                self.log(prefix, data)
-
-        log_nested("val_mlm", mlm_results)
-        log_nested("val_diff", diff_results)
-
-        self._mlm_metrics.reset()
-        self._difficulty_metrics.reset()
+                flat[new_key] = value
+        return flat
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         checkpoint["vector_stats"] = self.normalizer.get_vector_stats()
@@ -151,6 +121,7 @@ class PretrainingModule(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config, "pretraining")
+        
         total_steps = self.trainer.estimated_stepping_batches
         scheduler = create_scheduler(optimizer, self.config, total_steps, "pretraining")
 
@@ -166,7 +137,6 @@ class PretrainingModule(pl.LightningModule):
             },
         }
 
-
 def setup_pretraining(
     config: Dict[str, Any],
     normalizer: BeatmapNormalizer,
@@ -176,7 +146,7 @@ def setup_pretraining(
     from ..model.bobert import BobertForPretraining
 
     if model is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = setup_device()
         model = BobertForPretraining.from_config(config, device)
 
     module = PretrainingModule(model, config, normalizer)
