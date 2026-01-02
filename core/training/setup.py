@@ -75,19 +75,18 @@ def create_kde_sampler(
     )
 
 
-
 def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Optimizer:
     phase_config = config[phase]
-    
+
     muon_lr = float(phase_config.get("muon_lr", 0.02))
-    muon_wd = float(phase_config.get("muon_wd", 0.01)) 
-    
+    muon_wd = float(phase_config.get("muon_wd", 0.01))
+
     adam_lr = float(phase_config.get("adam_lr", 2e-4))
     adam_betas = tuple(phase_config.get("adam_betas", (0.9, 0.95)))
     adam_wd = float(phase_config.get("adam_wd", 0.01))
 
     muon_params = []
-    if hasattr(model, 'bert') and hasattr(model.bert, 'layers'):
+    if hasattr(model, "bert") and hasattr(model.bert, "layers"):
         for p in model.bert.layers.parameters():
             if p.ndim >= 2:
                 muon_params.append(p)
@@ -102,18 +101,23 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Op
     adam_params = [p for p in model.parameters() if id(p) not in muon_param_ids]
 
     param_groups = [
-        dict(params=muon_params, use_muon=True,
-             lr=muon_lr, weight_decay=muon_wd),
-        dict(params=adam_params, use_muon=False,
-             lr=adam_lr, betas=adam_betas, weight_decay=adam_wd),
+        dict(params=muon_params, use_muon=True, lr=muon_lr, weight_decay=muon_wd),
+        dict(
+            params=adam_params,
+            use_muon=False,
+            lr=adam_lr,
+            betas=adam_betas,
+            weight_decay=adam_wd,
+        ),
     ]
-    
-    print(f"Optimizer initialized: {len(muon_params)} Muon params, {len(adam_params)} AdamW params.")
-    
+
+    print(
+        f"Optimizer initialized: {len(muon_params)} Muon params, {len(adam_params)} AdamW params."
+    )
+
     optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
 
     return optimizer
-
 
 
 def create_scheduler(
@@ -157,6 +161,7 @@ def create_scheduler(
         num_cycles=num_cycles,
     )
 
+
 def create_trainer(
     config: Dict[str, Any],
     phase: str,
@@ -189,9 +194,10 @@ def create_trainer(
     use_amp = phase_config.get("use_amp", False)
     precision = "bf16-mixed" if use_amp else 32
 
+    csv_logger = CSVLogger(save_dir=logs_path, name="logs")
     loggers = [
-        CSVLogger(save_dir=logs_path, name="logs"),
-        TensorBoardLogger(save_dir=logs_path, name="logs"),
+        csv_logger,
+        TensorBoardLogger(save_dir=logs_path, name="logs", version=csv_logger.version),
     ]
 
     return pl.Trainer(
@@ -205,4 +211,5 @@ def create_trainer(
         callbacks=callbacks,
         enable_progress_bar=True,
         log_every_n_steps=10,
+        enable_model_summary=False,
     )

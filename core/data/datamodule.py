@@ -9,8 +9,6 @@ from .loader import load_beatmap_data, setup_dataset
 from .transforms import (
     BeatmapAugmenter,
     BeatmapNormalizer,
-    BeatmapTransform,
-    create_normalizer_from_data,
 )
 from .vocab import (
     TagTokenizer,
@@ -115,28 +113,57 @@ class BeatmapDataset(Dataset):
     def __init__(
         self,
         beatmap_data: List[torch.Tensor],
-        transform: BeatmapTransform,
+        normalizer: BeatmapNormalizer,
         difficulty_attributes: Optional[Dict[str, list]] = None,
+        is_training: bool = False,
         beatmap_ids: Optional[List[int]] = None,
         metadata: Optional[Dict[int, Dict]] = None,
         tags: Optional[Dict[int, torch.Tensor]] = None,
     ):
         self.beatmap_data = beatmap_data
-        self.transform = transform
+        self.normalizer = normalizer
         self.diff_attrs = difficulty_attributes
+        self.is_training = is_training
         self.beatmap_ids = beatmap_ids
         self.metadata = metadata or {}
         self.tags = tags or {}
         self.has_meta = beatmap_ids is not None
 
+        self.augmenter = BeatmapAugmenter() if is_training else None
+
     def __len__(self) -> int:
         return len(self.beatmap_data)
 
     def __getitem__(self, idx: int):
-        vec = self.transform(self.beatmap_data[idx])
-        attrs = (
-            {k: v[idx] for k, v in self.diff_attrs.items()} if self.diff_attrs else {}
-        )
+        vec = self.beatmap_data[idx].clone()
+
+        if self.augmenter is not None:
+            vec = self.augmenter(vec)
+
+        vec = self.normalizer.normalize_vectors(vec)
+
+        if self.diff_attrs:
+            attrs_dict = {k: v[idx] for k, v in self.diff_attrs.items()}
+
+            # from .beatmap import DIFFICULTY_ATTRIBUTES
+
+            # attrs_tensor = torch.tensor(
+            #     [attrs_dict[k] for k in DIFFICULTY_ATTRIBUTES], dtype=torch.float32
+            # )
+
+            # normalized_tensor = self.normalizer.normalize_difficulty(
+            #     attrs_tensor.unsqueeze(0)
+            # ).squeeze(0)
+
+            # attrs = {
+            #     k: normalized_tensor[i].item()
+            #     for i, k in enumerate(DIFFICULTY_ATTRIBUTES)
+            # }
+
+            # Use raw difficulty attributes without normalization
+            attrs = attrs_dict
+        else:
+            attrs = {}
 
         if not self.has_meta:
             return vec, attrs
@@ -202,11 +229,8 @@ class BeatmapDataModule(pl.LightningDataModule):
         )
 
         train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
-        self.normalizer = create_normalizer_from_data(train_s["data"], train_attrs_np)
+        self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
 
-        aug = BeatmapAugmenter()
-        self.t_train = BeatmapTransform(self.normalizer, aug, augment=True)
-        self.t_val = BeatmapTransform(self.normalizer, aug, augment=False)
         self.vector_dim = train_s["data"][0].shape[1]
 
         self.train_dataset, self.val_dataset = self._create_datasets(train_s, val_s)
@@ -242,8 +266,12 @@ class PretrainDataModule(BeatmapDataModule):
 
     def _create_datasets(self, train_s, val_s):
         return (
-            BeatmapDataset(train_s["data"], self.t_train, train_s["attrs"]),
-            BeatmapDataset(val_s["data"], self.t_val, val_s["attrs"]),
+            BeatmapDataset(
+                train_s["data"], self.normalizer, train_s["attrs"], is_training=True
+            ),
+            BeatmapDataset(
+                val_s["data"], self.normalizer, val_s["attrs"], is_training=False
+            ),
         )
 
     def train_dataloader(self):
@@ -318,11 +346,8 @@ class AlignDataModule(BeatmapDataModule):
         )
 
         train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
-        self.normalizer = create_normalizer_from_data(train_s["data"], train_attrs_np)
+        self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
 
-        aug = BeatmapAugmenter()
-        self.t_train = BeatmapTransform(self.normalizer, aug, augment=True)
-        self.t_val = BeatmapTransform(self.normalizer, aug, augment=False)
         self.vector_dim = train_s["data"][0].shape[1]
 
         tag_store_combined = {
@@ -332,19 +357,21 @@ class AlignDataModule(BeatmapDataModule):
 
         self.train_dataset = BeatmapDataset(
             train_s["data"],
-            self.t_train,
+            self.normalizer,
             train_s["attrs"],
-            train_s["ids"],
-            meta_store,
-            tag_store_combined,
+            is_training=True,
+            beatmap_ids=train_s["ids"],
+            metadata=meta_store,
+            tags=tag_store_combined,
         )
         self.val_dataset = BeatmapDataset(
             val_s["data"],
-            self.t_val,
+            self.normalizer,
             val_s["attrs"],
-            val_s["ids"],
-            meta_store,
-            tag_store_combined,
+            is_training=False,
+            beatmap_ids=val_s["ids"],
+            metadata=meta_store,
+            tags=tag_store_combined,
         )
         print(
             f"Data split: {len(self.train_dataset)} training, {len(self.val_dataset)} validation"

@@ -26,8 +26,8 @@ class PretrainingModule(pl.LightningModule):
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
         feature_info = HitObject.get_feature_info()
-        self.mlm_metrics = MLMMetrics(feature_info, torch.device("cpu"))
-        self.difficulty_metrics = DifficultyMetrics(torch.device("cpu"))
+        self.mlm_metrics = MLMMetrics(feature_info, self.device)
+        self.difficulty_metrics = DifficultyMetrics(self.device)
 
     def forward(self, vectors, attention_mask, cu_seqlens=None):
         return self.model(vectors, attention_mask, cu_seqlens)

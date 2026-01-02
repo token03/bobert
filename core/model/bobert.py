@@ -24,6 +24,7 @@ class BobertModel(nn.Module):
         local_attention_window: int,
         dropout: float = 0.1,
         use_flash_attention: bool = True,
+        max_seq_len: int = 2048
     ):
         super().__init__()
         self.d_model = d_model
@@ -67,11 +68,12 @@ class BobertModel(nn.Module):
 
         self.final_norm = RMSNorm(d_model)
 
-        self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads)
+        self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads, cache_max_seq_len=max_seq_len)
 
     @classmethod
     def from_config(cls: Type[T], config: Dict[str, Any]) -> T:
         model_config = config['model']
+        data_config = config['data']
         components_config = config.get('components', {})
         
         dim_feedforward = model_config['d_model'] * model_config['dim_feedforward_mult']
@@ -84,6 +86,7 @@ class BobertModel(nn.Module):
             dropout=model_config['dropout'],
             local_attention_window=model_config['local_attention_window'],
             use_flash_attention=components_config['use_flash_attention'],
+            max_seq_len=data_config['max_seq_len']
         )
 
     def get_summary(self) -> Dict[str, Any]:
