@@ -365,7 +365,7 @@ def create_dataset(
     beatmap_count = consolidate_dataset(temp_dir, output_base)
 
     formatted_count = format_count(beatmap_count)
-    final_dir = f"{output_base.rsplit('_', 1)[0] if output_base.endswith('_temp') else output_base.rstrip('_temp_processing')}{formatted_count}"
+    final_dir = f"{output_base}{formatted_count}"
 
     if os.path.exists(final_dir):
         shutil.rmtree(final_dir)

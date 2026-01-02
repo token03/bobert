@@ -11,7 +11,7 @@ from pytorch_optimizer import get_wsd_schedule, AdamW
 from torch.utils.data import WeightedRandomSampler
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
-
+from muon import SingleDeviceMuonWithAuxAdam
 
 def create_kde_sampler(
     difficulty_ratings: Optional[np.ndarray] = None,
@@ -70,22 +70,42 @@ def create_kde_sampler(
 
 def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Optimizer:
     phase_config = config[phase]
+    
+    muon_lr = float(phase_config.get("muon_lr", 0.02))
+    muon_wd = float(phase_config.get("muon_wd", 0.01)) 
+    
+    adam_lr = float(phase_config.get("adam_lr", 2e-4))
+    adam_betas = tuple(phase_config.get("adam_betas", (0.9, 0.95)))
+    adam_wd = float(phase_config.get("adam_wd", 0.01))
 
-    optimizer_type = phase_config.get("optimizer", "adamw")
-    weight_decay = float(phase_config.get("weight_decay", 0.0))
-    lr = float(phase_config["learning_rate"])
-
-    if optimizer_type.lower() == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    elif optimizer_type.lower() == "adam":
-        return AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    elif optimizer_type.lower() == "sgd":
-        momentum = float(phase_config.get("momentum", 0.9))
-        return torch.optim.SGD(
-            model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum
-        )
+    muon_params = []
+    if hasattr(model, 'bert') and hasattr(model.bert, 'layers'):
+        for p in model.bert.layers.parameters():
+            if p.ndim >= 2:
+                muon_params.append(p)
     else:
-        raise ValueError(f"Unknown optimizer type: {optimizer_type}")
+        print("Warning: accessing model.bert.layers failed, attempting generic search")
+        for name, p in model.named_parameters():
+            if "layers" in name and p.ndim >= 2:
+                muon_params.append(p)
+
+    muon_param_ids = {id(p) for p in muon_params}
+
+    adam_params = [p for p in model.parameters() if id(p) not in muon_param_ids]
+
+    param_groups = [
+        dict(params=muon_params, use_muon=True,
+             lr=muon_lr, weight_decay=muon_wd),
+        dict(params=adam_params, use_muon=False,
+             lr=adam_lr, betas=adam_betas, weight_decay=adam_wd),
+    ]
+    
+    print(f"Optimizer initialized: {len(muon_params)} Muon params, {len(adam_params)} AdamW params.")
+    
+    optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
+
+    return optimizer
+
 
 
 def create_scheduler(
@@ -93,7 +113,7 @@ def create_scheduler(
 ) -> Optional[LRScheduler]:
     phase_config = config[phase]
 
-    base_lr = float(phase_config["learning_rate"])
+    base_lr = float(phase_config["adam_lr"])
     min_lr = float(phase_config.get("min_lr", 1e-6))
 
     warmup_ratio = float(phase_config.get("warmup_ratio", 0.05))
