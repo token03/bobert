@@ -180,8 +180,8 @@ class BeatmapDataModule(pl.LightningDataModule):
         self.db_path = db_path or config[section].get("db_path")
         self.batch_size = config[section]["batch_size"]
         self.vector_dim: Optional[int] = None
-        self.train_dataset: BeatmapDataset
-        self.val_dataset: BeatmapDataset 
+        self.train_dataset: Optional[BeatmapDataset] = None
+        self.val_dataset: Optional[BeatmapDataset] = None
 
     def prepare_data(self):
         setup_dataset(self.db_path, self.config.get(self.section, {}).get("colab_url"))
@@ -210,6 +210,9 @@ class BeatmapDataModule(pl.LightningDataModule):
         raise NotImplementedError
 
     def setup(self, stage: Optional[str] = None):
+        if self.train_dataset:
+            return
+
         all_beatmap_data = self._setup_common()
 
         all_data = [b["hitobjects"] for b in all_beatmap_data]

@@ -1,6 +1,5 @@
-import math
 import os
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import numpy as np
 from omegaconf import DictConfig
@@ -10,9 +9,9 @@ from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
-from pytorch_optimizer import get_wsd_schedule, AdamW
+from pytorch_optimizer import get_wsd_schedule
 from torch.utils.data import WeightedRandomSampler
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
@@ -23,18 +22,11 @@ def setup_device() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
 
 def create_kde_sampler(
-    difficulty_ratings: Optional[np.ndarray] = None,
+    difficulty_ratings: np.ndarray,
     bandwidth: float = 0.5,
     num_bins: int = 100,
     strength: float = 0.1,
 ) -> WeightedRandomSampler:
-    print(
-        f"Creating optimized KDE sampler with bandwidth={bandwidth}, bins={num_bins}, strength={strength}..."
-    )
-
-    if difficulty_ratings is None:
-        raise ValueError("difficulty_ratings must be provided as a separate array")
-
     difficulty_ratings_array = np.asarray(difficulty_ratings)
 
     min_rating, max_rating = (
@@ -87,15 +79,10 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
     adam_wd = float(phase_config.get("adam_wd", 0.01))
 
     muon_params = []
-    if hasattr(model, "bert") and hasattr(model.bert, "layers"):
-        for p in model.bert.layers.parameters():
-            if p.ndim >= 2:
-                muon_params.append(p)
-    else:
-        print("Warning: accessing model.bert.layers failed, attempting generic search")
-        for name, p in model.named_parameters():
-            if "layers" in name and p.ndim >= 2:
-                muon_params.append(p)
+
+    for p in model.bert.layers.parameters():
+        if p.ndim >= 2:
+            muon_params.append(p)
 
     muon_param_ids = {id(p) for p in muon_params}
 
@@ -122,8 +109,8 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
 
 
 def create_scheduler(
-    optimizer: Optimizer, config: DictConfig, total_steps: int | float, phase: str
-) -> Optional[LRScheduler]:
+    optimizer: Optimizer, config: DictConfig, total_steps: int, phase: str
+) -> LRScheduler:
     phase_config = config[phase]
 
     base_lr = float(phase_config["adam_lr"])
