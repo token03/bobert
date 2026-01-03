@@ -9,6 +9,7 @@ from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
 from ..data.hitobject import HitObject
 from ..data.transforms import BeatmapNormalizer
+from ..model.bobert import BobertForPretraining
 
 
 class PretrainingModule(pl.LightningModule):
@@ -143,8 +144,6 @@ def setup_pretraining(
     model: Optional[nn.Module] = None,
     checkpoint_dir: Optional[str] = None,
 ) -> Tuple[PretrainingModule, pl.Trainer]:
-    from ..model.bobert import BobertForPretraining
-
     if model is None:
         device = setup_device()
         model = BobertForPretraining.from_config(config, device)

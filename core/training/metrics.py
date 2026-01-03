@@ -20,13 +20,10 @@ class MLMMetrics(nn.Module):
             key=lambda k: feature_info["continuous"][k],
         )
 
-        slider_features = set(feature_info.get("slider", {}).keys())
-        self.standard_cont_names = [
-            n for n in self.cont_names if n not in slider_features
-        ]
+        self.slider_feature_names = set(feature_info.get("slider", {}).keys())
 
         self.cont_metrics = MetricCollection(
-            {name: MeanMetric() for name in self.standard_cont_names}
+            {name: MeanMetric() for name in self.cont_names}
         ).to(device)
 
         self.cat_metrics = nn.ModuleDict()
@@ -59,27 +56,33 @@ class MLMMetrics(nn.Module):
         mask: torch.Tensor,
         loss: Optional[float] = None,
     ):
+        from core.data.hitobject import OBJECT_TYPE_SLIDER_HEAD
+
         if loss is not None:
             self.loss_metric.update(loss)
 
         if not torch.any(mask):
             return
 
-        cont_preds_masked = predictions["continuous"][mask]
+        object_type_idx = self.feature_info["categorical"]["object_type"]["index"]
+        object_types = targets[..., object_type_idx].long()
 
-        std_cont_target_indices = [
-            self.feature_info["continuous"][name] for name in self.standard_cont_names
-        ]
-        std_cont_targets = targets[mask][:, std_cont_target_indices]
+        for i, name in enumerate(self.cont_names):
+            target_idx = self.feature_info["continuous"][name]
+            pred_idx = i
 
-        std_cont_pred_indices = [
-            self.cont_names.index(name) for name in self.standard_cont_names
-        ]
-        std_cont_preds = cont_preds_masked[:, std_cont_pred_indices]
+            if name in self.slider_feature_names:
+                slider_mask = mask & (object_types == OBJECT_TYPE_SLIDER_HEAD)
+                if not torch.any(slider_mask):
+                    continue
+                preds = predictions["continuous"][slider_mask][:, pred_idx]
+                targs = targets[slider_mask][:, target_idx]
+            else:
+                preds = predictions["continuous"][mask][:, pred_idx]
+                targs = targets[mask][:, target_idx]
 
-        abs_errors = torch.abs(std_cont_preds - std_cont_targets)
-        for i, name in enumerate(self.standard_cont_names):
-            self.cont_metrics[name].update(abs_errors[:, i])
+            abs_error = torch.abs(preds - targs)
+            self.cont_metrics[name].update(abs_error)
 
         for name, info in self.feature_info["categorical"].items():
             pred_logits = predictions["categorical"][name][mask]
@@ -94,7 +97,7 @@ class MLMMetrics(nn.Module):
 
         cont_results = self.cont_metrics.compute()
         continuous_metrics = {}
-        for name in self.standard_cont_names:
+        for name in self.cont_names:
             if name in cont_results:
                 continuous_metrics[name] = {"mae": cont_results[name].item()}
         if continuous_metrics:

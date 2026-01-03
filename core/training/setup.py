@@ -121,7 +121,7 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Op
 
 
 def create_scheduler(
-    optimizer: Optimizer, config: Dict[str, Any], total_steps: int, phase: str
+    optimizer: Optimizer, config: Dict[str, Any], total_steps: int | float, phase: str
 ) -> Optional[LRScheduler]:
     phase_config = config[phase]
 

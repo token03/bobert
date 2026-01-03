@@ -4,7 +4,7 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict
 
 from .beatmap import DIFFICULTY_ATTRIBUTES
-from .hitobject import HitObject, NormalizationType
+from .hitobject import HitObject, NormalizationType, OBJECT_TYPE_SLIDER_HEAD
 
 
 class BeatmapNormalizer:
@@ -25,7 +25,7 @@ class BeatmapNormalizer:
             if field_name not in self.vector_stats:
                 continue
             norm_type = self.vector_norm_specs[field_name]
-            if norm_type in [NormalizationType.STANDARD, NormalizationType.LOG]:
+            if norm_type == NormalizationType.STANDARD:
                 mean, std = self.vector_stats[field_name]
                 normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
             elif norm_type == NormalizationType.MINMAX:
@@ -74,13 +74,23 @@ class BeatmapNormalizer:
         print("Calculating normalization statistics...")
         vector_field_names = HitObject.get_field_names()
         vector_norm_specs = HitObject.get_normalization_specs()
+        slider_only_features = set(HitObject.get_slider_only_features())
         all_vectors_tensor = torch.cat(train_data, dim=0)
+
+        feature_info = HitObject.get_feature_info()
+        object_type_idx = feature_info["categorical"]["object_type"]["index"]
+        slider_mask = all_vectors_tensor[:, object_type_idx] == OBJECT_TYPE_SLIDER_HEAD
 
         vector_stats = {}
         for i, field_name in enumerate(vector_field_names):
             norm_type = vector_norm_specs[field_name]
-            field_data = all_vectors_tensor[:, i]
-            if norm_type in [NormalizationType.STANDARD, NormalizationType.LOG]:
+
+            if field_name in slider_only_features:
+                field_data = all_vectors_tensor[slider_mask, i]
+            else:
+                field_data = all_vectors_tensor[:, i]
+
+            if norm_type == NormalizationType.STANDARD:
                 mean, std = (
                     field_data.mean(),
                     torch.clamp(field_data.std(), min=epsilon),

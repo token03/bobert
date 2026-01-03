@@ -26,6 +26,7 @@ API_TIERS = [
 ]
 
 CHECKPOINT_INTERVAL = 10
+WORKERS_PER_TIER = 5  # Number of concurrent workers per API tier
 
 last_request_time = {tier["url"]: 0.0 for tier in API_TIERS}
 last_request_lock = threading.Lock()
@@ -120,11 +121,11 @@ def download_worker(
     global last_request_time
     while True:
         try:
-            beatmap_id = current_queue.get_nowait()
+            beatmap_id = current_queue.get(timeout=2.0)
         except queue.Empty:
-            time.sleep(0.1)
+            time.sleep(0.5)
             try:
-                beatmap_id = current_queue.get_nowait()
+                beatmap_id = current_queue.get(timeout=0.5)
             except queue.Empty:
                 break
 
@@ -245,21 +246,23 @@ def main():
         is_last = i == len(API_TIERS) - 1
         next_queue = None if is_last else tier_queues[i + 1]
 
-        thread = threading.Thread(
-            target=download_worker,
-            args=(
-                tier_queues[i],
-                next_queue,
-                tier["url"],
-                tier["delay"],
-                str(BEATMAPS_DIR),
-                tier["name"],
-                is_last,
-            ),
-            daemon=True,
-        )
-        threads.append(thread)
-        thread.start()
+        for worker_id in range(WORKERS_PER_TIER):
+            thread = threading.Thread(
+                target=download_worker,
+                args=(
+                    tier_queues[i],
+                    next_queue,
+                    tier["url"],
+                    tier["delay"],
+                    str(BEATMAPS_DIR),
+                    tier["name"],
+                    is_last,
+                ),
+                daemon=True,
+                name=f"{tier['name']}-worker-{worker_id}",
+            )
+            threads.append(thread)
+            thread.start()
 
     with tqdm.tqdm(
         total=len(beatmap_ids_to_download), desc="Downloading", unit="maps"

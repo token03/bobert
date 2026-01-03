@@ -1,4 +1,5 @@
 # bobert.py
+from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -71,7 +72,7 @@ class BobertModel(nn.Module):
         self.rotary_emb = RotaryEmbedding(dim = d_model // n_heads, cache_max_seq_len=max_seq_len)
 
     @classmethod
-    def from_config(cls: Type[T], config: Dict[str, Any]) -> T:
+    def from_config(cls: Type[T], config: DictConfig) -> T:
         model_config = config['model']
         data_config = config['data']
         components_config = config.get('components', {})
@@ -278,7 +279,7 @@ class BobertForPretraining(nn.Module):
         self.is_compiled = False
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BobertForPretraining':
+    def from_config(cls, config: DictConfig, device: torch.device) -> 'BobertForPretraining':
         base_model = BobertModel.from_config(config)
         pretraining_config = config['pretraining']
         
