@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
-from torch.distributions import Categorical
 from torch.nn import RMSNorm
 
 
@@ -24,7 +23,9 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
 
-        self.wqkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.wq = nn.Linear(d_model, d_model, bias=False)
+        self.wk = nn.Linear(d_model, d_model, bias=False)
+        self.wv = nn.Linear(d_model, d_model, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
         self.dropout = dropout
@@ -38,7 +39,9 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
         total_tokens, _ = x.shape
 
-        qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
+        q = self.wq(x).view(total_tokens, self.n_heads, self.d_head)
+        k = self.wk(x).view(total_tokens, self.n_heads, self.d_head)
+        v = self.wv(x).view(total_tokens, self.n_heads, self.d_head)
 
         if rotary_emb is not None:
             token_idx = torch.arange(total_tokens, device=x.device)
@@ -50,8 +53,10 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
             freqs = all_freqs[pos].view(total_tokens, 1, self.d_head)
 
-            qkv[:, 0] = apply_rotary_emb(freqs, qkv[:, 0], seq_dim=0)
-            qkv[:, 1] = apply_rotary_emb(freqs, qkv[:, 1], seq_dim=0)
+            q = apply_rotary_emb(freqs, q, seq_dim=0)
+            k = apply_rotary_emb(freqs, k, seq_dim=0)
+        
+        qkv = torch.stack([q, k, v], dim=1)
 
         window_size = (
             (-1, -1)

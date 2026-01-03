@@ -1,22 +1,22 @@
 from typing import Dict, Any, Optional, Tuple, List
 
+from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from .setup import create_trainer, create_optimizer, create_scheduler, setup_device
+from .setup import create_trainer, create_optimizer, create_scheduler
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
 from ..data.hitobject import HitObject
 from ..data.transforms import BeatmapNormalizer
-from ..model.bobert import BobertForPretraining
 
 
 class PretrainingModule(pl.LightningModule):
     def __init__(
         self,
         model: nn.Module,
-        config: Dict[str, Any],
+        config: DictConfig,
         normalizer: BeatmapNormalizer,
     ):
         super().__init__()
@@ -70,13 +70,13 @@ class PretrainingModule(pl.LightningModule):
             predictions["mlm"], 
             targets, 
             mask, 
-            loss=loss_dict["mlm_loss"]
+            loss=loss_dict["mlm_loss"].item()
         )
 
         self.difficulty_metrics.update(
             predictions["difficulty"],
             difficulty_labels,
-            loss=loss_dict.get("difficulty_loss", 0.0)
+            loss=loss_dict["difficulty_loss"].item() 
         )
 
         self.log(
@@ -139,25 +139,11 @@ class PretrainingModule(pl.LightningModule):
         }
 
 def setup_pretraining(
-    config: Dict[str, Any],
+    config: DictConfig,
     normalizer: BeatmapNormalizer,
-    model: Optional[nn.Module] = None,
-    checkpoint_dir: Optional[str] = None,
+    model: nn.Module,
 ) -> Tuple[PretrainingModule, pl.Trainer]:
-    if model is None:
-        device = setup_device()
-        model = BobertForPretraining.from_config(config, device)
-
     module = PretrainingModule(model, config, normalizer)
-    trainer = create_trainer(config, "pretraining", checkpoint_dir)
+    trainer = create_trainer(config, "pretraining")
 
     return module, trainer
-
-
-def train(
-    module: PretrainingModule,
-    trainer: pl.Trainer,
-    datamodule: pl.LightningDataModule,
-    ckpt_path: Optional[str] = None,
-):
-    trainer.fit(module, datamodule, ckpt_path=ckpt_path)

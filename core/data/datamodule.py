@@ -145,8 +145,6 @@ class BeatmapDataset(Dataset):
         if self.diff_attrs:
             attrs_dict = {k: v[idx] for k, v in self.diff_attrs.items()}
 
-            # from .beatmap import DIFFICULTY_ATTRIBUTES
-
             # attrs_tensor = torch.tensor(
             #     [attrs_dict[k] for k in DIFFICULTY_ATTRIBUTES], dtype=torch.float32
             # )
@@ -160,7 +158,6 @@ class BeatmapDataset(Dataset):
             #     for i, k in enumerate(DIFFICULTY_ATTRIBUTES)
             # }
 
-            # Use raw difficulty attributes without normalization
             attrs = attrs_dict
         else:
             attrs = {}
@@ -183,8 +180,8 @@ class BeatmapDataModule(pl.LightningDataModule):
         self.db_path = db_path or config[section].get("db_path")
         self.batch_size = config[section]["batch_size"]
         self.vector_dim: Optional[int] = None
-        self.train_dataset = None
-        self.val_dataset = None
+        self.train_dataset: BeatmapDataset
+        self.val_dataset: BeatmapDataset 
 
     def prepare_data(self):
         setup_dataset(self.db_path, self.config.get(self.section, {}).get("colab_url"))
@@ -206,13 +203,13 @@ class BeatmapDataModule(pl.LightningDataModule):
             include_collection_topics=include_collection_topics,
         )
 
-    def _create_datasets(self, train_data, val_data) -> Tuple[Dataset, Dataset]:
+    def _create_datasets(self, train_s, val_s) -> Tuple[BeatmapDataset, BeatmapDataset]:
+        raise NotImplementedError
+
+    def _setup_sampler(self, train_attrs):
         raise NotImplementedError
 
     def setup(self, stage: Optional[str] = None):
-        if self.train_dataset:
-            return
-
         all_beatmap_data = self._setup_common()
 
         all_data = [b["hitobjects"] for b in all_beatmap_data]
@@ -249,7 +246,7 @@ class BeatmapDataModule(pl.LightningDataModule):
             shuffle=shuffle and not sampler,
             sampler=sampler,
             collate_fn=collate_fn,
-            num_workers=os.cpu_count(),
+            num_workers=os.cpu_count() or 1,
             pin_memory=True,
         )
 

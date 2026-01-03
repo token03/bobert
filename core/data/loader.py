@@ -127,14 +127,12 @@ def load_beatmap_data(
     metadata_parquet_path: str = "./data/beatmaps.parquet",
     collection_topics_path: str = "./data/collections/beatmap_topic_weights.parquet",
 ) -> List[Dict[str, Any]]:
-    print("Loading raw data from Parquet dataset...")
     beatmaps_path = os.path.join(dataset_path, "beatmaps")
     hitobjects_path = os.path.join(dataset_path, "hitobjects")
 
     if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
         raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
 
-    print("Loading beatmap metadata...")
     if ids_to_load:
         print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
         all_beatmaps_df = pd.read_parquet(

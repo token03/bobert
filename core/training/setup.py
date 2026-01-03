@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
@@ -75,7 +76,7 @@ def create_kde_sampler(
     )
 
 
-def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Optimizer:
+def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimizer:
     phase_config = config[phase]
 
     muon_lr = float(phase_config.get("muon_lr", 0.02))
@@ -121,7 +122,7 @@ def create_optimizer(model: nn.Module, config: Dict[str, Any], phase: str) -> Op
 
 
 def create_scheduler(
-    optimizer: Optimizer, config: Dict[str, Any], total_steps: int | float, phase: str
+    optimizer: Optimizer, config: DictConfig, total_steps: int | float, phase: str
 ) -> Optional[LRScheduler]:
     phase_config = config[phase]
 
@@ -163,13 +164,12 @@ def create_scheduler(
 
 
 def create_trainer(
-    config: Dict[str, Any],
+    config: DictConfig,
     phase: str,
-    checkpoint_dir: Optional[str] = None,
     extra_callbacks: Optional[List[pl.Callback]] = None,
 ) -> pl.Trainer:
     phase_config = config[phase]
-    base_dir = checkpoint_dir or phase_config["checkpoint_dir"]
+    base_dir = phase_config["checkpoint_dir"]
 
     checkpoint_path = os.path.join(base_dir, "checkpoints")
     logs_path = base_dir

@@ -3,7 +3,7 @@ from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Dict, Any, Type, TypeVar, Optional
+from typing import Tuple, Dict, Any, Type, TypeVar, Optional, cast
 
 from rotary_embedding_torch import RotaryEmbedding
 from torch.nn import RMSNorm
@@ -73,21 +73,21 @@ class BobertModel(nn.Module):
 
     @classmethod
     def from_config(cls: Type[T], config: DictConfig) -> T:
-        model_config = config['model']
-        data_config = config['data']
-        components_config = config.get('components', {})
+        model_config = config.model
+        data_config = config.data
+        components_config = config.components
         
-        dim_feedforward = model_config['d_model'] * model_config['dim_feedforward_mult']
+        dim_feedforward = model_config.d_model * model_config.dim_feedforward_mult
         
         return cls(
-            d_model=model_config['d_model'],
-            n_heads=model_config['n_heads'],
-            n_layers=model_config['n_layers'],
+            d_model=model_config.d_model,
+            n_heads=model_config.n_heads,
+            n_layers=model_config.n_layers,
             dim_feedforward=dim_feedforward,
-            dropout=model_config['dropout'],
-            local_attention_window=model_config['local_attention_window'],
-            use_flash_attention=components_config['use_flash_attention'],
-            max_seq_len=data_config['max_seq_len']
+            dropout=model_config.dropout,
+            local_attention_window=model_config.local_attention_window,
+            use_flash_attention=components_config.use_flash_attention,
+            max_seq_len=data_config.max_seq_len
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -281,12 +281,12 @@ class BobertForPretraining(nn.Module):
     @classmethod
     def from_config(cls, config: DictConfig, device: torch.device) -> 'BobertForPretraining':
         base_model = BobertModel.from_config(config)
-        pretraining_config = config['pretraining']
+        pretraining_config = config.pretraining
         
         masking_strategy = SpanMasker(
             d_model=base_model.d_model,
-            masking_ratio=pretraining_config.get('masking_ratio'),
-            mean_span_length=pretraining_config.get('mean_span_length')
+            masking_ratio=pretraining_config.masking_ratio,
+            mean_span_length=pretraining_config.mean_span_length
         )
         
         mlm_head = BobertMaskedLMHead(base_model.d_model)
@@ -297,11 +297,12 @@ class BobertForPretraining(nn.Module):
         model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
         model = model.to(device)
         
-        if config.get('components', {}).get('compile_model', False):
+        if config.components.get('compile_model', False):
             print("Compiling BERT pre-training model with torch.compile...")
-            compile_mode = config.get('components', {}).get('compile_mode', 'default')
-            model = torch.compile(model, mode=compile_mode, dynamic=True)
+            compile_mode = config.components.get('compile_mode', 'default')
             model.is_compiled = True
+            model = torch.compile(model, mode=compile_mode, dynamic=True)
+            model = cast(BobertForPretraining, model)
         
         return model
 
@@ -360,14 +361,14 @@ class BobertForAlignment(nn.Module):
         self.is_compiled = False
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any], device: torch.device) -> 'BobertForPretraining':
+    def from_config(cls, config: DictConfig, device: torch.device) -> 'BobertForAlignment':
         base_model = BobertModel.from_config(config)
-        pretraining_config = config['pretraining']
+        pretraining_config = config.pretraining
         
         masking_strategy = SpanMasker(
             d_model=base_model.d_model,
-            masking_ratio=pretraining_config.get('masking_ratio'),
-            mean_span_length=pretraining_config.get('mean_span_length')
+            masking_ratio=pretraining_config.masking_ratio,
+            mean_span_length=pretraining_config.mean_span_length,
         )
         
         mlm_head = BobertMaskedLMHead(base_model.d_model)
@@ -378,11 +379,12 @@ class BobertForAlignment(nn.Module):
         model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
         model = model.to(device)
         
-        if config.get('components', {}).get('compile_model', False):
+        if config.components.get('compile_model', False):
             print("Compiling BERT pre-training model with torch.compile...")
-            compile_mode = config.get('components', {}).get('compile_mode', 'default')
-            model = torch.compile(model, mode=compile_mode, dynamic=True)
+            compile_mode = config.components.get('compile_mode', 'default')
             model.is_compiled = True
+            model = torch.compile(model, mode=compile_mode, dynamic=True)
+            model = cast(BobertForAlignment, model)
         
         return model
 

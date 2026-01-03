@@ -1,3 +1,4 @@
+from omegaconf import DictConfig
 import torch
 import torch.nn.functional as F
 from typing import Dict, Any
@@ -71,7 +72,7 @@ def mlm_loss_fn(
 def difficulty_loss_fn(
     predictions: Dict[str, torch.Tensor],
     labels: Dict[str, torch.Tensor],
-    config: Dict[str, Any],
+    config: DictConfig,
     phase: str = "pretraining",
 ) -> Dict[str, torch.Tensor]:
     losses = {}
@@ -108,7 +109,7 @@ def pretrain_loss_fn(
     targets: torch.Tensor,
     mask: torch.Tensor,
     difficulty_labels: Dict[str, torch.Tensor],
-    config: Dict[str, Any],
+    config: DictConfig,
 ) -> Dict[str, torch.Tensor]:
     losses = {}
     pretrain_config = config.get("pretraining", {})

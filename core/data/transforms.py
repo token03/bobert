@@ -71,7 +71,6 @@ class BeatmapNormalizer:
         difficulty_attributes: Dict[str, np.ndarray],
         epsilon: float = 1e-8,
     ) -> "BeatmapNormalizer":
-        print("Calculating normalization statistics...")
         vector_field_names = HitObject.get_field_names()
         vector_norm_specs = HitObject.get_normalization_specs()
         slider_only_features = set(HitObject.get_slider_only_features())
