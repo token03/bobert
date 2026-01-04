@@ -1,8 +1,8 @@
 data:
   max_seq_len: 2048
   val_split: 0.1
-  min_sr: 4.0
-  max_sr: 12.0
+  min_sr: 2.0
+  max_sr: 14.0
 
 model:
   d_model: 512
@@ -19,7 +19,7 @@ components:
   compile_mode: "default" 
     
 pretraining:
-  db_path: './data/beatmap_dataset20k/'
+  db_path: './data/beatmap_dataset100k/'
   # db_path: './data/beatmap_dataset50k/'
   batch_size: 8
   num_epochs: 8
@@ -52,10 +52,10 @@ pretraining:
     method: "kde"  
     kde_bandwidth: 0.5
     num_bins: 100
-    strength: 0.2
+    strength: 0.3
 
 align:
-  db_path: './data/beatmap_dataset50k/'
+  db_path: './data/beatmap_dataset175k/'
   checkpoint_dir: "./experiments"
   model_name: "model"
   batch_size: 8

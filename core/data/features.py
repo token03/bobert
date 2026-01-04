@@ -179,7 +179,7 @@ def _apply_temporal_features(
 
     time_diff_ms = np.maximum(time - prev_time, 0)
     df["time_diff_ms"] = time_diff_ms
-    df["log_time_diff_ms"] = np.log1p(time_diff_ms)
+    df["log_time_diff_ms"] = np.log1p(np.maximum(time_diff_ms, 0))
 
     beat_length_ms = (60000.0 / df["bpm"].replace(0, np.nan)).astype(np.float32)
     time_diff_beats = time_diff_ms / beat_length_ms
@@ -222,8 +222,8 @@ def _apply_temporal_features(
 def _apply_object_specific_features(df: pd.DataFrame) -> pd.DataFrame:
     df["slider_repeats"] = df["slider_repeats"].fillna(0)
     df["pixel_length"] = df["pixel_length"].fillna(0.0)
-    df["log_slider_pixel_length"] = np.log1p(df["pixel_length"])
-    df["log_slider_repeats"] = np.log1p(df["slider_repeats"])
+    df["log_slider_pixel_length"] = np.log1p(np.maximum(df["pixel_length"], 0))
+    df["log_slider_repeats"] = np.log1p(np.maximum(df["slider_repeats"], 0))
 
     x, y = df["x"].values, df["y"].values
     raw_end_x = df["slider_end_x"].fillna(df["x"]).values

@@ -9,6 +9,15 @@ from tqdm import tqdm
 from .beatmap import DIFFICULTY_ATTRIBUTES
 
 
+def get_shard_from_id(beatmap_id: int) -> str:
+    return str(beatmap_id)[-2:].zfill(2)
+
+
+def get_sharded_path(beatmap_id: int, base_dir: str) -> str:
+    shard = get_shard_from_id(beatmap_id)
+    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
+
+
 class DifficultyManager:
     def __init__(self, cache_path: str, raw_path: str):
         self.cache_path = cache_path
@@ -66,7 +75,7 @@ class DifficultyManager:
 def _calculate_difficulty_attributes_worker(
     beatmap_id: int, seq_len: int, raw_beatmap_path: str
 ) -> Optional[Dict[str, float]]:
-    osu_file_path = os.path.join(raw_beatmap_path, f"{beatmap_id}.osu")
+    osu_file_path = get_sharded_path(beatmap_id, raw_beatmap_path)
     if not os.path.exists(osu_file_path):
         return None
     try:
