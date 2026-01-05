@@ -49,10 +49,9 @@ pretraining:
   mean_span_length: 4
   
   sampling:
-    method: "kde"  
-    kde_bandwidth: 0.5
+    kde_bandwidth: 0.2
     num_bins: 100
-    strength: 0.3
+    strength: 0.5
 
 align:
   db_path: './data/beatmap_dataset175k/'

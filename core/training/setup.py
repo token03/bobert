@@ -50,11 +50,21 @@ def create_kde_sampler(
     )
 
     density_values = interp_func(difficulty_ratings_array)
-    density_values = np.maximum(density_values, 1e-8)
+
+    clip_threshold = np.percentile(density_values, 5)
+
+    density_values = np.maximum(density_values, clip_threshold)
 
     log_w = -strength * np.log(density_values)
     log_w = log_w - np.max(log_w)
     sample_weights = np.exp(log_w)
+
+    split_point = np.median(difficulty_ratings_array)
+    
+    floor_weight = sample_weights.min()
+    
+    left_mask = difficulty_ratings_array < split_point
+    sample_weights[left_mask] = floor_weight
 
     sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
     sample_weights = torch.from_numpy(sample_weights).double()

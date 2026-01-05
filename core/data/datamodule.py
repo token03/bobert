@@ -195,12 +195,11 @@ class BeatmapDataModule(pl.LightningDataModule):
         return load_beatmap_data(
             self.db_path,
             max_seq_len=self.config["data"]["max_seq_len"],
-            raw_beatmap_path=self.config[self.section].get(
-                "raw_beatmap_path", "./data/beatmaps"
-            ),
             include_metadata=include_metadata,
             include_user_tags=include_user_tags,
             include_collection_topics=include_collection_topics,
+            min_sr=self.config["data"].get("min_sr"),
+            max_sr=self.config["data"].get("max_sr"),
         )
 
     def _create_datasets(self, train_s, val_s) -> Tuple[BeatmapDataset, BeatmapDataset]:

@@ -10,7 +10,6 @@ from collections import defaultdict
 
 from .beatmap import DIFFICULTY_ATTRIBUTES
 from .features import engineer_features_vectorized
-from .difficulty import DifficultyManager
 
 
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
@@ -118,14 +117,15 @@ def load_beatmap_data(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
-    raw_beatmap_path: str = "./data/beatmaps",
-    cache_path: str = "./data/difficulty_attributes_cache.json",
+    ratings_path: str = "./data/ratings.parquet",
     chunk_size: int = 5000,
     include_metadata: bool = False,
     include_user_tags: bool = False,
     include_collection_topics: bool = False,
     metadata_parquet_path: str = "./data/beatmaps.parquet",
     collection_topics_path: str = "./data/collections/beatmap_topic_weights.parquet",
+    min_sr: Optional[float] = None,
+    max_sr: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     beatmaps_path = os.path.join(dataset_path, "beatmaps")
     hitobjects_path = os.path.join(dataset_path, "hitobjects")
@@ -147,11 +147,32 @@ def load_beatmap_data(
         f"Found metadata for {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}..."
     )
 
-    diff_manager = DifficultyManager(cache_path, raw_beatmap_path)
-    all_beatmap_data = []
+    print("Loading difficulty ratings...")
+    if not os.path.exists(ratings_path):
+        raise FileNotFoundError(f"Ratings file not found at '{ratings_path}'. ")
 
+    if ids_to_load:
+        ratings_df = pd.read_parquet(
+            ratings_path, filters=[("beatmap_id", "in", ids_to_load)]
+        )
+    else:
+        ratings_df = pd.read_parquet(ratings_path)
+
+    ratings_lookup = {}
+    for _, row in ratings_df.iterrows():
+        key = (int(row["beatmap_id"]), int(row["seq_len"]))
+        ratings_lookup[key] = {
+            "stars": row["stars"],
+            "aim": row["aim"],
+            "speed": row["speed"],
+            "slider_factor": row["slider_factor"],
+        }
+
+    print(f"Loaded {len(ratings_lookup)} difficulty ratings")
+
+    all_beatmap_data = []
     chunk_data_list = []
-    all_tasks_to_run = []
+    missing_ratings_count = 0
 
     for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
         chunk_ids = all_beatmap_ids[i : i + chunk_size]
@@ -188,14 +209,9 @@ def load_beatmap_data(
         id_to_seq_len = {}
         for bid, vectors in id_to_vectors.items():
             original_count = chunk_original_counts.get(bid, vectors.shape[0])
-            target_len = original_count
-            if max_seq_len is not None:
-                target_len = min(target_len, max_seq_len)
-            id_to_seq_len[bid] = target_len
-
-        for bid, seq_len in id_to_seq_len.items():
-            if not diff_manager.get_attributes(bid, seq_len):
-                all_tasks_to_run.append((bid, seq_len))
+            lookup_len = max_seq_len if max_seq_len is not None else original_count
+            truncate_len = min(original_count, lookup_len)
+            id_to_seq_len[bid] = (lookup_len, truncate_len)
 
         chunk_data_list.append(
             {
@@ -205,12 +221,9 @@ def load_beatmap_data(
                 "chunk_metadata": chunk_metadata,
                 "chunk_user_tags": chunk_user_tags,
                 "chunk_collection_topics": chunk_collection_topics,
+                "beatmaps_df_chunk": beatmaps_df_chunk,
             }
         )
-
-    if all_tasks_to_run:
-        with tqdm(total=len(all_tasks_to_run), desc="Calculating Attributes") as pbar:
-            diff_manager.update_missing(all_tasks_to_run, pbar)
 
     for chunk_data in chunk_data_list:
         ids = chunk_data["ids"]
@@ -219,19 +232,39 @@ def load_beatmap_data(
         chunk_metadata = chunk_data["chunk_metadata"]
         chunk_user_tags = chunk_data["chunk_user_tags"]
         chunk_collection_topics = chunk_data["chunk_collection_topics"]
+        beatmaps_df_chunk = chunk_data["beatmaps_df_chunk"]
 
         for bid in ids:
             bid_int = int(bid)
-            seq_len = id_to_seq_len[bid_int]
+            lookup_len, truncate_len = id_to_seq_len[bid_int]
             vectors = id_to_vectors[bid_int]
-            attrs = diff_manager.get_attributes(bid_int, seq_len)
 
-            if not attrs:
+            ratings = ratings_lookup.get((bid_int, lookup_len))
+            if not ratings:
+                missing_ratings_count += 1
+                continue
+
+            beatmap_row = beatmaps_df_chunk[beatmaps_df_chunk["beatmap_id"] == bid_int]
+            if beatmap_row.empty:
+                continue
+
+            beatmap_attrs = {
+                "cs": beatmap_row.iloc[0].get("cs", 4.0),
+                "ar": beatmap_row.iloc[0].get("ar", 10.0),
+                "slider_multiplier": beatmap_row.iloc[0].get("slider_multiplier", 1.4),
+            }
+
+            attrs = {**ratings, **beatmap_attrs}
+
+            sr = attrs.get("stars", 0.0)
+            if min_sr is not None and sr < min_sr:
+                continue
+            if max_sr is not None and sr > max_sr:
                 continue
 
             beatmap_entry = {
                 "beatmap_id": bid_int,
-                "hitobjects": vectors[:seq_len],
+                "hitobjects": vectors[:truncate_len],
                 "difficulty": {k: attrs[k] for k in DIFFICULTY_ATTRIBUTES},
             }
 
@@ -247,6 +280,11 @@ def load_beatmap_data(
                 )
 
             all_beatmap_data.append(beatmap_entry)
+
+    if missing_ratings_count > 0:
+        print(
+            f"Warning: {missing_ratings_count} beatmaps skipped (not found in ratings.parquet)"
+        )
 
     print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")
     return all_beatmap_data
