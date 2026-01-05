@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
-from torch.nn import RMSNorm
+from flash_attn.ops.triton.layer_norm import RMSNorm
 
 
 class MultiHeadAttentionWithRoPE(nn.Module):
