@@ -19,16 +19,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-VERSION = "v2"
+VERSION = "v3"
 MIN_MAPS_IN_COLLECTION = 10
 MAX_MAPS_IN_COLLECTION = 3000
 MAX_FREQUENCY_PER_MAP = 0.05
 MIN_COLLECTIONS_PER_MAP = 2
 JACCARD_THRESHOLD = 0.90
-SONG_DAMPENING_POWER = 0.9
+SONG_DAMPENING_POWER = 0.95
 N_TOPICS = 128
-ALPHA = 0.00005
-L1_RATIO = 0.5
+ALPHA = 1e-6
+L1_RATIO = 0.3
 
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
@@ -163,9 +163,9 @@ class OsuCudaNMF:
                 
                 self.W[:, k] = torch.nn.functional.relu(numerator / denom)
 
-            w_norm = torch.norm(self.W, p=2, dim=0) + eps
-            self.W /= w_norm
-            self.H *= w_norm.unsqueeze(1)
+            h_norm = torch.norm(self.H, p=2, dim=1) + eps
+            self.H /= h_norm.unsqueeze(1)
+            self.W *= h_norm
 
             if i % self.loss_check_interval == 0:
                 pass

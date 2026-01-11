@@ -1,22 +1,24 @@
 from pathlib import Path
 import sys
 import pandas as pd
+import argparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-VERSION = ""
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
-BEATMAP_TOPIC_WEIGHTS_PATH = (
-    COLLECTIONS_DIR / f"beatmap_topic_weights{VERSION}.parquet"
-)
 
 
-def query_topics(beatmap_id):
-    print(f"Loading beatmap topic weights from {BEATMAP_TOPIC_WEIGHTS_PATH}...")
-    df = pd.read_parquet(BEATMAP_TOPIC_WEIGHTS_PATH)
+def query_topics(beatmap_id, version=None):
+    version_suffix = f"_{version}" if version else ""
+    beatmap_topic_weights_path = (
+        COLLECTIONS_DIR / f"beatmap_topic_weights{version_suffix}.parquet"
+    )
+
+    print(f"Loading beatmap topic weights from {beatmap_topic_weights_path}...")
+    df = pd.read_parquet(beatmap_topic_weights_path)
 
     beatmap_topics = df[df["beatmap_id"] == beatmap_id].copy()
 
@@ -35,14 +37,15 @@ def query_topics(beatmap_id):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python query_topics.py <beatmap_id>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Query topic weights for a beatmap")
+    parser.add_argument("beatmap_id", type=int, help="Beatmap ID to query")
+    parser.add_argument(
+        "-v",
+        "--version",
+        type=str,
+        default=None,
+        help="Version suffix (e.g., v3). If not specified, no version suffix is used.",
+    )
 
-    try:
-        beatmap_id = int(sys.argv[1])
-    except ValueError:
-        print("Error: beatmap_id must be an integer")
-        sys.exit(1)
-
-    query_topics(beatmap_id)
+    args = parser.parse_args()
+    query_topics(args.beatmap_id, args.version)
