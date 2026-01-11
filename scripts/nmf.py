@@ -4,9 +4,10 @@ from pathlib import Path
 import sys
 import pandas as pd
 import numpy as np
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, coo_matrix
+from scipy.sparse.linalg import svds
 from sklearn.feature_extraction.text import TfidfTransformer
-from sklearn.decomposition import NMF
+import torch
 import time
 import requests
 import os
@@ -34,6 +35,155 @@ DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
 COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collections.parquet"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
+
+
+class OsuCudaNMF:
+    def __init__(
+        self,
+        n_components: int = 128,
+        max_iter: int = 500,
+        tol: float = 1e-4,
+        alpha: float = 0.0,
+        l1_ratio: float = 0.5,
+        init: str = "nndsvda",
+        random_state: int | None = None,
+        verbose: int = 1,
+        loss_check_interval: int = 20,
+    ):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required.")
+
+        self.k = n_components
+        self.max_iter = max_iter
+        self.tol = tol
+        self.alpha = alpha
+        self.l1_ratio = l1_ratio
+        self.init = init
+        self.random_state = random_state
+        self.verbose = verbose
+        self.loss_check_interval = loss_check_interval
+        self.device = torch.device("cuda")
+        
+        self.dtype = torch.float32 
+
+        self.W = None
+        self.H = None
+
+        if random_state is not None:
+            torch.manual_seed(random_state)
+            np.random.seed(random_state)
+
+    def _nndsvd_init(self, X_sparse):
+        from scipy.sparse.linalg import svds
+        
+        n_samples, n_features = X_sparse.shape
+        k = min(self.k, min(n_samples, n_features) - 1)
+        
+        if self.verbose:
+            print("Running NNDSVD initialization (CPU)...")
+            
+        U, S, Vt = svds(X_sparse.astype(np.float64), k=k)
+        
+        U, S, Vt = U[:, ::-1], S[::-1], Vt[::-1, :]
+        
+        W = np.zeros((n_samples, self.k), dtype=np.float32)
+        H = np.zeros((self.k, n_features), dtype=np.float32)
+        
+        W[:, 0] = np.sqrt(S[0]) * np.abs(U[:, 0])
+        H[0, :] = np.sqrt(S[0]) * np.abs(Vt[0, :])
+        
+        for j in range(1, k):
+            u, v = U[:, j], Vt[j, :]
+            u_pos, u_neg = np.maximum(u, 0), np.abs(np.minimum(u, 0))
+            v_pos, v_neg = np.maximum(v, 0), np.abs(np.minimum(v, 0))
+            
+            m_pos = np.linalg.norm(u_pos) * np.linalg.norm(v_pos)
+            m_neg = np.linalg.norm(u_neg) * np.linalg.norm(v_neg)
+            
+            if m_pos >= m_neg:
+                W[:, j] = np.sqrt(S[j] * m_pos) * (u_pos / (np.linalg.norm(u_pos) + 1e-10))
+                H[j, :] = np.sqrt(S[j] * m_pos) * (v_pos / (np.linalg.norm(v_pos) + 1e-10))
+            else:
+                W[:, j] = np.sqrt(S[j] * m_neg) * (u_neg / (np.linalg.norm(u_neg) + 1e-10))
+                H[j, :] = np.sqrt(S[j] * m_neg) * (v_neg / (np.linalg.norm(v_neg) + 1e-10))
+
+        avg = X_sparse.mean()
+        W[W < 1e-10] = avg
+        H[H < 1e-10] = avg
+        
+        return W, H
+
+    def fit_transform(self, X_sparse):
+            print(f"--- Initializing CUDA NMF (Device: {self.device}) ---")
+            n_users, n_items = X_sparse.shape
+            coo = X_sparse.tocoo()
+
+            indices = torch.stack([
+                torch.from_numpy(coo.row), 
+                torch.from_numpy(coo.col)
+            ]).to(self.device, dtype=torch.long)
+            
+            values = torch.from_numpy(coo.data).to(self.device, dtype=self.dtype)
+
+            if self.init == "nndsvda":
+                W_np, H_np = self._nndsvd_init(X_sparse)
+                self.W = torch.tensor(W_np, device=self.device, dtype=self.dtype)
+                self.H = torch.tensor(H_np, device=self.device, dtype=self.dtype)
+            else:
+                self.W = torch.rand(n_users, self.k, device=self.device, dtype=self.dtype)
+                self.H = torch.rand(self.k, n_items, device=self.device, dtype=self.dtype)
+
+            eps = 1e-9
+            
+            l1_reg = self.alpha * self.l1_ratio
+            l2_reg = self.alpha * (1 - self.l1_ratio)
+
+            if self.verbose:
+                pbar = tqdm(range(self.max_iter), desc="NMF Training")
+            else:
+                pbar = range(self.max_iter)
+
+            for i in pbar:
+                w_idx = self.W[indices[0]]
+                h_idx = self.H[:, indices[1]].T
+                
+                wh_vals = (w_idx * h_idx).sum(dim=1).clamp(min=eps)
+                
+                ratio_vals = values / wh_vals
+                
+                R_sparse = torch.sparse_coo_tensor(indices, ratio_vals, (n_users, n_items))
+
+                numerator_H = torch.sparse.mm(R_sparse.t(), self.W).T
+                
+                W_sum = self.W.sum(dim=0, keepdim=True).T 
+                denominator_H = W_sum + l1_reg + (l2_reg * self.H) + eps
+                
+                self.H *= (numerator_H / denominator_H)
+                
+                numerator_W = torch.sparse.mm(R_sparse, self.H.T)
+                
+                H_sum = self.H.sum(dim=1, keepdim=True).T 
+                
+                denominator_W = H_sum + l1_reg + (l2_reg * self.W) + eps
+                
+                self.W *= (numerator_W / denominator_W)
+
+                if i % self.loss_check_interval == 0 and i > 0:
+                    loss = torch.mean(torch.abs(1.0 - ratio_vals)).item()
+                    
+                    if self.verbose:
+                        pbar.set_postfix({"AvgResid": f"{loss:.4f}"})
+                    
+                    if loss < self.tol:
+                        print(f"Converged at iter {i}")
+                        break
+
+            print("Done. Copying to CPU...")
+            return self.W.cpu().numpy()
+
+    @property
+    def components_(self):
+        return self.H.cpu().numpy()
 
 
 def get_collection_names(collection_ids):
@@ -185,6 +335,11 @@ def run_nmf():
     ].index
     df = df[df["beatmap_id"].isin(valid_maps)].copy()
 
+    missing_metadata = df["beatmapset_id"].isna().sum()
+    if missing_metadata > 0:
+        print(f"Dropping {missing_metadata} rows with missing beatmap metadata...")
+        df = df.dropna(subset=["beatmapset_id"]).copy()
+
     print("--- Applying Set/Song Dampening ---")
     df["song_occurrence"] = df.groupby(["collection_id", "beatmapset_id"])[
         "beatmap_id"
@@ -225,25 +380,22 @@ def run_nmf():
     )
     X_tfidf = tfidf.fit_transform(X) * SCALING_FACTOR
 
-    print(f"Running NMF ({N_TOPICS} topics)...")
-    nmf = NMF(
+    print(f"Running CUDA NMF ({N_TOPICS} topics)...")
+    nmf = OsuCudaNMF(
         n_components=N_TOPICS,
-        init="nndsvd",
-        beta_loss="frobenius",
-        solver="cd",
+        max_iter=1000,
         tol=1e-5,
-        max_iter=500,
-        random_state=42,
-        alpha_W=ALPHA,
-        alpha_H=ALPHA,
+        alpha=ALPHA,
         l1_ratio=L1_RATIO,
+        init="nndsvda",
+        random_state=42,
         verbose=1,
     )
 
     start = time.time()
     W = nmf.fit_transform(X_tfidf)
     H = nmf.components_
-    print(f"Converged in {(time.time() - start) / 60:.2f} minutes")
+    print(f"Completed in {(time.time() - start) / 60:.2f} minutes")
 
     print("Calculating topic statistics...")
     col_counts = pd.Series(W.argmax(axis=1)).value_counts()
@@ -275,7 +427,7 @@ def run_nmf():
                     "weight": float(H[t_idx, b_idx]),
                 }
             )
-    pd.DataFrame(h_records).to_parquet(f"beatmap_topic_weights_{VERSION}.parquet")
+    pd.DataFrame(h_records).to_parquet(COLLECTIONS_DIR / f"beatmap_topic_weights_{VERSION}.parquet")
 
     w_records = []
     for c_idx in range(len(unique_collections)):
@@ -288,7 +440,7 @@ def run_nmf():
                     "weight": float(W[c_idx, t_idx]),
                 }
             )
-    pd.DataFrame(w_records).to_parquet(f"collection_topic_weights_{VERSION}.parquet")
+    pd.DataFrame(w_records).to_parquet(COLLECTIONS_DIR / f"collection_topic_weights_{VERSION}.parquet")
 
     print("Generating summaries...")
 
