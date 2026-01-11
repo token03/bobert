@@ -28,7 +28,6 @@ JACCARD_THRESHOLD = 0.90
 SONG_DAMPENING_POWER = 0.9
 N_TOPICS = 128
 ALPHA = 0.00005
-SCALING_FACTOR = 100
 L1_RATIO = 0.5
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -63,8 +62,7 @@ class OsuCudaNMF:
         self.verbose = verbose
         self.loss_check_interval = loss_check_interval
         self.device = torch.device("cuda")
-        
-        self.dtype = torch.float32 
+        self.dtype = torch.float32
 
         self.W = None
         self.H = None
@@ -74,8 +72,6 @@ class OsuCudaNMF:
             np.random.seed(random_state)
 
     def _nndsvd_init(self, X_sparse):
-        from scipy.sparse.linalg import svds
-        
         n_samples, n_features = X_sparse.shape
         k = min(self.k, min(n_samples, n_features) - 1)
         
@@ -114,72 +110,68 @@ class OsuCudaNMF:
         return W, H
 
     def fit_transform(self, X_sparse):
-            print(f"--- Initializing CUDA NMF (Device: {self.device}) ---")
-            n_users, n_items = X_sparse.shape
-            coo = X_sparse.tocoo()
+        print(f"--- Initializing CUDA HALS NMF (Device: {self.device}) ---")
+        n_samples, n_features = X_sparse.shape
+        
+        # 1. Prepare Data on GPU
+        coo = X_sparse.tocoo()
+        indices = torch.stack([
+            torch.from_numpy(coo.row), 
+            torch.from_numpy(coo.col)
+        ]).to(self.device, dtype=torch.long)
+        values = torch.from_numpy(coo.data).to(self.device, dtype=self.dtype)
+        X_gpu = torch.sparse_coo_tensor(indices, values, (n_samples, n_features))
 
-            indices = torch.stack([
-                torch.from_numpy(coo.row), 
-                torch.from_numpy(coo.col)
-            ]).to(self.device, dtype=torch.long)
-            
-            values = torch.from_numpy(coo.data).to(self.device, dtype=self.dtype)
+        # 2. Initialization
+        if self.init == "nndsvda":
+            W_np, H_np = self._nndsvd_init(X_sparse)
+            self.W = torch.tensor(W_np, device=self.device, dtype=self.dtype)
+            self.H = torch.tensor(H_np, device=self.device, dtype=self.dtype)
+        else:
+            self.W = torch.rand(n_samples, self.k, device=self.device, dtype=self.dtype)
+            self.H = torch.rand(self.k, n_features, device=self.device, dtype=self.dtype)
 
-            if self.init == "nndsvda":
-                W_np, H_np = self._nndsvd_init(X_sparse)
-                self.W = torch.tensor(W_np, device=self.device, dtype=self.dtype)
-                self.H = torch.tensor(H_np, device=self.device, dtype=self.dtype)
-            else:
-                self.W = torch.rand(n_users, self.k, device=self.device, dtype=self.dtype)
-                self.H = torch.rand(self.k, n_items, device=self.device, dtype=self.dtype)
+        eps = 1e-16
+        l1_reg = self.alpha * self.l1_ratio
+        l2_reg = self.alpha * (1 - self.l1_ratio)
 
-            eps = 1e-9
-            
-            l1_reg = self.alpha * self.l1_ratio
-            l2_reg = self.alpha * (1 - self.l1_ratio)
+        if self.verbose:
+            pbar = tqdm(range(self.max_iter), desc="HALS Training")
+        else:
+            pbar = range(self.max_iter)
 
-            if self.verbose:
-                pbar = tqdm(range(self.max_iter), desc="NMF Training")
-            else:
-                pbar = range(self.max_iter)
+        for i in pbar:
+            WtW = torch.mm(self.W.t(), self.W)       
+            WtX = torch.sparse.mm(X_gpu.t(), self.W).t() 
 
-            for i in pbar:
-                w_idx = self.W[indices[0]]
-                h_idx = self.H[:, indices[1]].T
+            for k in range(self.k):
+                denom = WtW[k, k] + l2_reg + eps
                 
-                wh_vals = (w_idx * h_idx).sum(dim=1).clamp(min=eps)
+                current_projection = torch.mv(self.H.t(), WtW[k]) 
+                numerator = WtX[k] - current_projection + (WtW[k, k] * self.H[k]) - l1_reg
                 
-                ratio_vals = values / wh_vals
-                
-                R_sparse = torch.sparse_coo_tensor(indices, ratio_vals, (n_users, n_items))
+                self.H[k] = torch.nn.functional.relu(numerator / denom)
 
-                numerator_H = torch.sparse.mm(R_sparse.t(), self.W).T
-                
-                W_sum = self.W.sum(dim=0, keepdim=True).T 
-                denominator_H = W_sum + l1_reg + (l2_reg * self.H) + eps
-                
-                self.H *= (numerator_H / denominator_H)
-                
-                numerator_W = torch.sparse.mm(R_sparse, self.H.T)
-                
-                H_sum = self.H.sum(dim=1, keepdim=True).T 
-                
-                denominator_W = H_sum + l1_reg + (l2_reg * self.W) + eps
-                
-                self.W *= (numerator_W / denominator_W)
+            HHt = torch.mm(self.H, self.H.t())      
+            XHt = torch.sparse.mm(X_gpu, self.H.t())
 
-                if i % self.loss_check_interval == 0 and i > 0:
-                    loss = torch.mean(torch.abs(1.0 - ratio_vals)).item()
-                    
-                    if self.verbose:
-                        pbar.set_postfix({"AvgResid": f"{loss:.4f}"})
-                    
-                    if loss < self.tol:
-                        print(f"Converged at iter {i}")
-                        break
+            for k in range(self.k):
+                denom = HHt[k, k] + l2_reg + eps
+                
+                current_projection = torch.mv(self.W, HHt[k])
+                numerator = XHt[:, k] - current_projection + (HHt[k, k] * self.W[:, k]) - l1_reg
+                
+                self.W[:, k] = torch.nn.functional.relu(numerator / denom)
 
-            print("Done. Copying to CPU...")
-            return self.W.cpu().numpy()
+            w_norm = torch.norm(self.W, p=2, dim=0) + eps
+            self.W /= w_norm
+            self.H *= w_norm.unsqueeze(1)
+
+            if i % self.loss_check_interval == 0:
+                pass
+
+        print("Done. Copying to CPU...")
+        return self.W.cpu().numpy()
 
     @property
     def components_(self):
@@ -378,9 +370,9 @@ def run_nmf():
     tfidf = TfidfTransformer(
         norm="l2", use_idf=True, smooth_idf=True, sublinear_tf=False
     )
-    X_tfidf = tfidf.fit_transform(X) * SCALING_FACTOR
+    X_tfidf = tfidf.fit_transform(X)
 
-    print(f"Running CUDA NMF ({N_TOPICS} topics)...")
+    print(f"Running CUDA HALS NMF ({N_TOPICS} topics)...")
     nmf = OsuCudaNMF(
         n_components=N_TOPICS,
         max_iter=1000,
