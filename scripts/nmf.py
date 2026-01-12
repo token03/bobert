@@ -30,6 +30,7 @@ L1_RATIO = 0.3
 
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
+COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
 COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collections.parquet"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
@@ -177,21 +178,33 @@ class OsuNMF:
             dead_indices = torch.nonzero(h_norm < 1e-10).flatten()
 
             if len(dead_indices) > 0:
-                w_avg = self.W.mean().item() + 1e-6
-
-                self.W[:, dead_indices] = (
-                    torch.rand(
-                        (n_samples, len(dead_indices)),
-                        device=self.device,
-                        dtype=self.dtype,
-                    )
-                    * w_avg
+                n_dead = len(dead_indices)
+                
+                random_row_indices = torch.randint(
+                    0, n_samples, (n_dead,), device=self.device
                 )
+                
+                target_X = X_gpu.index_select(0, random_row_indices).to_dense()
+                
+                current_prediction = torch.mm(self.W[random_row_indices], self.H)
+                
+                residual = torch.nn.functional.relu(target_X - current_prediction)
+                
+                mask_empty = (residual.sum(dim=1) < 1e-10).unsqueeze(1)
+                final_revival = torch.where(mask_empty, target_X, residual)
 
-                self.H[dead_indices, :] = torch.rand(
-                    (len(dead_indices), n_features),
-                    device=self.device,
-                    dtype=self.dtype,
+                self.H[dead_indices, :] = final_revival
+                
+                self.H[dead_indices, :] += torch.rand(
+                    (n_dead, n_features), device=self.device, dtype=self.dtype
+                ) * 1e-6
+
+                w_avg = self.W.mean().item()
+                self.W[:, dead_indices] = torch.full(
+                    (n_samples, n_dead), 
+                    w_avg, 
+                    device=self.device, 
+                    dtype=self.dtype
                 )
 
                 h_norm = torch.norm(self.H, p=2, dim=1)
@@ -338,6 +351,13 @@ def run_nmf():
     print("--- Loading Data ---")
     df = pd.read_parquet(COLLECTIONS_DATA_PATH)
 
+    if os.path.exists(COLLECTION_FILTER_PATH):
+        print("--- Applying Collection Filter ---")
+        with open(COLLECTION_FILTER_PATH, "r") as f:
+            filter_ids = set(json.load(f))
+        df = df[~df["collection_id"].isin(filter_ids)].copy()
+        print(f"Removed {len(filter_ids)} collections")
+
     print("--- Loading Beatmap Metadata ---")
     beatmaps_df = pd.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title", "mode"]
@@ -347,7 +367,8 @@ def run_nmf():
 
     print("--- Filtering by Game Mode ---")
     collection_mode_stats = df.groupby("collection_id").apply(
-        lambda x: (x["mode"] != "osu").sum() / len(x) if len(x) > 0 else 0
+        lambda x: (x["mode"] != "osu").sum() / len(x) if len(x) > 0 else 0,
+        include_groups=False,
     )
     collections_to_keep = collection_mode_stats[collection_mode_stats <= 0.5].index
     df = df[df["collection_id"].isin(collections_to_keep)].copy()

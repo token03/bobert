@@ -1,1 +1,8 @@
-# BoBERT + CM2TA (Bidirectional osu! Beatmap Encoder Representations from Transformers + Contrastive Map-Metadata-Tag Alignment)
+# BoBERT + CM2T2A (Bidirectional osu! Beatmap Encoder Representations from Transformers + Contrastive Map-Metadata-Tag-Topic Alignment)
+
+## BoBERT
+- Based on ModernBERT
+- Tokens are formed by stacking features of hit objects that were passed through FT-Transformer-esque feature embedding layers
+
+## CM2TA
+- Utilizes a lightweight tabular transformer that encodes beatmap metadata, user tags and collection topics
