@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import signal
+import numpy as np
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,13 +19,11 @@ if str(PROJECT_ROOT) not in sys.path:
 DATA_DIR = PROJECT_ROOT / "data"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 COLLECTIONS_DIR = DATA_DIR / "collections"   
-BEATMAP_TOPIC_WEIGHTS_PATH = COLLECTIONS_DIR / "beatmap_topic_weights.parquet"
-
-PROGRESS_STATE_PATH = DATA_DIR / ".beatmap_fetch_progress.json"
+COLLECTIONS_PATH = COLLECTIONS_DIR / "collections.parquet"
 FAILED_BEATMAPS_PATH = DATA_DIR / ".failed_beatmaps.json"
 
 BATCH_SIZE = 50
-SAVE_INTERVAL = 20000 
+SAVE_INTERVAL = 5000 
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1 
 API_RATE_LIMIT_DELAY = 0.8
@@ -42,11 +41,34 @@ def atomic_save_json(data: dict, path: Path):
     """Saves to a temp file then renames to prevent corruption."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
-    with open(temp_path, 'w') as f:
-        json.dump(data, f)
-    if path.exists():
-        path.unlink()
-    temp_path.rename(path)
+    
+    def convert_to_serializable(obj):
+        if isinstance(obj, dict):
+            return {k: convert_to_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_serializable(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            return obj
+        else:
+            return str(obj)
+    
+    try:
+        cleaned_data = convert_to_serializable(data)
+        with open(temp_path, 'w') as f:
+            json.dump(cleaned_data, f)
+        if path.exists():
+            path.unlink()
+        temp_path.rename(path)
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise e
 
 def initialize_api() -> Ossapi:
     load_dotenv()
@@ -115,43 +137,39 @@ def beatmap_to_dict(bm) -> dict:
 def main():
     DATA_DIR.mkdir(exist_ok=True)
     
-    if not BEATMAP_TOPIC_WEIGHTS_PATH.exists():
-        print(f"[red]Error: Source file not found at {BEATMAP_TOPIC_WEIGHTS_PATH}[/red]")
+    if not COLLECTIONS_PATH.exists():
+        print(f"[red]Error: Source file not found at {COLLECTIONS_PATH}[/red]")
         return
     
-    all_ids = pd.read_parquet(BEATMAP_TOPIC_WEIGHTS_PATH)['beatmap_id'].unique()
+    all_ids = pd.read_parquet(COLLECTIONS_PATH)['beatmap_id'].unique()
     
-    progress = {"completed_ids": [], "completed_count": 0}
-    if PROGRESS_STATE_PATH.exists():
+    existing_ids = set()
+    if BEATMAPS_PATH.exists():
         try:
-            with open(PROGRESS_STATE_PATH) as f: progress = json.load(f)
-        except Exception:
-            print("[yellow]Warning: Progress state corrupt, rebuilding from data file...[/yellow]")
-    
-    failed_state = {"failed_ids": {}, "permanently_failed": []}
+            beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
+            if 'id' in beatmaps_df.columns:
+                existing_ids = set(beatmaps_df['id'].unique())
+            print(f"[yellow]Resuming: Found {len(existing_ids)} beatmaps already on disk.[/yellow]")
+        except Exception as e:
+            print(f"[red]Error loading Parquet: {e}. Starting fresh.[/red]")
+            beatmaps_df = pd.DataFrame()
+    else:
+        beatmaps_df = pd.DataFrame()
+
+    failed_state = {"failed_ids": {}}
     if FAILED_BEATMAPS_PATH.exists():
         try:
             with open(FAILED_BEATMAPS_PATH) as f: failed_state = json.load(f)
         except Exception:
             pass
-
-    if BEATMAPS_PATH.exists():
-        try:
-            beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
-            existing_ids = set(beatmaps_df['id'].unique()) if 'id' in beatmaps_df.columns else set()
-            progress["completed_ids"] = list(existing_ids)
-            progress["completed_count"] = len(existing_ids)
-            print(f"[yellow]Synced: found {len(existing_ids)} entries in existing Parquet.[/yellow]")
-        except Exception as e:
-            print(f"[red]Error loading Parquet: {e}[/red]")
-            beatmaps_df = pd.DataFrame()
-    else:
-        beatmaps_df = pd.DataFrame()
-
-    done_set = set(progress["completed_ids"])
-    todo_ids = [bid for bid in all_ids if bid not in done_set]
     
-    print(f"[cyan]Total to fetch: {len(todo_ids)}[/cyan]")
+    todo_ids = [bid for bid in all_ids if bid not in existing_ids]
+    
+    if len(todo_ids) == 0:
+        print("[bold green]All beatmaps have been fetched![/bold green]")
+        return
+
+    print(f"[cyan]Total left to fetch: {len(todo_ids)}[/cyan]")
     
     api = initialize_api()
     new_data = []
@@ -191,14 +209,11 @@ def main():
                         break
                     except Exception as e:
                         if attempt == MAX_RETRIES - 1:
-                            bar.console.print(f"[red]Batch failed after {MAX_RETRIES} attempts[/red]")
+                            bar.console.print(f"[red]Batch failed after {MAX_RETRIES} attempts: {e}[/red]")
                         time.sleep(RETRY_BASE_DELAY * (2**attempt))
                 
                 if success_batch:
                     new_data.extend([beatmap_to_dict(b) for b in success_batch])
-                    for b in success_batch:
-                        progress["completed_ids"].append(int(b.id))
-                    progress["completed_count"] = len(progress["completed_ids"])
                 else:
                     for bid in batch:
                         bid_s = str(bid)
@@ -208,10 +223,13 @@ def main():
 
                 if len(new_data) >= SAVE_INTERVAL:
                     bar.console.print(f"[green]Saving checkpoint ({len(new_data)} items)...[/green]")
-                    beatmaps_df = pd.concat([beatmaps_df, pd.DataFrame(new_data)], ignore_index=True)
+                    new_df = pd.DataFrame(new_data)
+                    beatmaps_df = pd.concat([beatmaps_df, new_df], ignore_index=True)
+                    
                     atomic_save_parquet(beatmaps_df, BEATMAPS_PATH)
-                    atomic_save_json(progress, PROGRESS_STATE_PATH)
+                    
                     atomic_save_json(failed_state, FAILED_BEATMAPS_PATH)
+                    
                     new_data = []
 
                 time.sleep(API_RATE_LIMIT_DELAY)
@@ -222,9 +240,8 @@ def main():
             beatmaps_df = pd.concat([beatmaps_df, pd.DataFrame(new_data)], ignore_index=True)
             atomic_save_parquet(beatmaps_df, BEATMAPS_PATH)
         
-        atomic_save_json(progress, PROGRESS_STATE_PATH)
         atomic_save_json(failed_state, FAILED_BEATMAPS_PATH)
-        print(f"[bold green]Done! Total saved: {len(beatmaps_df)}[/bold green]")
+        print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
 
 if __name__ == "__main__":
     main()
