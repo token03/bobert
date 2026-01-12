@@ -1,8 +1,32 @@
 # BoBERT + CM2T2A (Bidirectional osu! Beatmap Encoder Representations from Transformers + Contrastive Map-Metadata-Tag-Topic Alignment)
 
-## BoBERT
-- Based on ModernBERT
-- Tokens are formed by stacking features of hit objects that were passed through FT-Transformer-esque feature embedding layers
+## Model Architecture
 
-## CM2TA
-- Utilizes a lightweight tabular transformer that encodes beatmap metadata, user tags and collection topics
+### BoBERT (Beatmap Encoder)
+Transformer encoder for learning beatmap representations from hit object sequences. Based on ModernBERT design principles.
+
+**Architecture:**
+- Hit object features grouped (spatial, rhythm, slider, categorical) and embedded via FT-Transformer-style feature embedding layers
+- Alternating local/global attention (every 3rd layer global, others use sliding window)
+- RoPE positional embeddings, Flash Attention 2, variable-length packing
+- SwiGLU FFN, RMSNorm, no biases
+
+**Pretraining (Phase 1):**
+- Span-masked language modeling on hit object sequences
+- Difficulty attribute regression (stars, aim, speed, slider_factor, AR, CS, slider_multiplier)
+
+### CM2T2A (Metadata-Tag-Topic Alignment)
+Lightweight tabular transformer encoding beatmap metadata, user tags, and collection topics.
+
+**Inputs:**
+- **Metadata**: Piecewise linear encoding for continuous features (ratings, AR, CS, etc.), learned embeddings for categorical (mapper, genre, language, status, etc.)
+- **User Tags**: Raw tags with vote counts from website (noisy, sparse, positive-unlabelled)
+- **Collection Topics**: NMF-derived topics from collection co-occurrence patterns (see `scripts/nmf.py`)
+
+**Alignment (Phase 2):**
+- Contrastive learning between BoBERT embeddings ↔ Tabformer embeddings
+- Goal: Align technical beatmap patterns with human sentiment and categorization
+- Primary: beatmap-to-beatmap retrieval | Secondary: metadata/tag-based search
+
+## Use Cases
+Semantic search, similarity/recommendation, quality/difficulty prediction — any understanding task (no generation)
