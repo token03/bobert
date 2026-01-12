@@ -13,8 +13,8 @@ Transformer encoder for learning beatmap representations from hit object sequenc
 * **Core Layers:** SwiGLU FFN, RMSNorm, no biases.
 
 **Pretraining (Phase 1):**
-1.  **SMLM:** Span-masked language modeling on hit object sequences.
-2.  **Regression:** Difficulty attribute regression (stars, aim, speed, slider_factor, AR, CS, slider_multiplier).
+1. **SMLM:** Span-masked language modeling on hit object sequences.
+2. **Regression:** Difficulty attribute regression (`stars`, `aim`, `speed`, `slider_factor`, `AR`, `CS`, `slider_multiplier`).
 
 ---
 
@@ -22,7 +22,7 @@ Transformer encoder for learning beatmap representations from hit object sequenc
 Lightweight tabular transformer encoding beatmap metadata, user tags, and collection topics.
 
 **Inputs:**
-* **Metadata:** Piecewise linear encoding for continuous features (ratings, AR, CS, etc.); learned embeddings for categorical (mapper, genre, language, status, etc.).
+* **Metadata:** Piecewise linear encoding for continuous features (ratings, `AR`, `CS`, etc.); learned embeddings for categorical (mapper, genre, language, status, etc.).
 * **User Tags:** Raw tags with vote counts from website (noisy, sparse, positive-unlabelled).
 * **Collection Topics:** NMF-derived topics from collection co-occurrence patterns (see `scripts/nmf.py`).
 
