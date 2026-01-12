@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import pandas as pd
 import numpy as np
-from scipy.sparse import csr_matrix, coo_matrix
+from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import svds
 from sklearn.feature_extraction.text import TfidfTransformer
 import torch
@@ -12,7 +12,6 @@ import time
 import requests
 import os
 import json
-import re
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +35,7 @@ COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collections.parquet"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
 
-class OsuCudaNMF:
+class OsuNMF:
     def __init__(
         self,
         n_components: int = 128,
@@ -113,7 +112,6 @@ class OsuCudaNMF:
         print(f"--- Initializing CUDA HALS NMF (Device: {self.device}) ---")
         n_samples, n_features = X_sparse.shape
         
-        # 1. Prepare Data on GPU
         coo = X_sparse.tocoo()
         indices = torch.stack([
             torch.from_numpy(coo.row), 
@@ -122,7 +120,6 @@ class OsuCudaNMF:
         values = torch.from_numpy(coo.data).to(self.device, dtype=self.dtype)
         X_gpu = torch.sparse_coo_tensor(indices, values, (n_samples, n_features))
 
-        # 2. Initialization
         if self.init == "nndsvda":
             W_np, H_np = self._nndsvd_init(X_sparse)
             self.W = torch.tensor(W_np, device=self.device, dtype=self.dtype)
@@ -373,7 +370,7 @@ def run_nmf():
     X_tfidf = tfidf.fit_transform(X)
 
     print(f"Running CUDA HALS NMF ({N_TOPICS} topics)...")
-    nmf = OsuCudaNMF(
+    nmf = OsuNMF(
         n_components=N_TOPICS,
         max_iter=1000,
         tol=1e-5,
