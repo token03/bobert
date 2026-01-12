@@ -21,12 +21,11 @@ if str(PROJECT_ROOT) not in sys.path:
 VERSION = "v3"
 MIN_MAPS_IN_COLLECTION = 10
 MAX_MAPS_IN_COLLECTION = 3000
-MAX_FREQUENCY_PER_MAP = 0.05
 MIN_COLLECTIONS_PER_MAP = 2
 JACCARD_THRESHOLD = 0.90
 SONG_DAMPENING_POWER = 0.95
 N_TOPICS = 128
-ALPHA = 1e-6
+ALPHA = 1e-5
 L1_RATIO = 0.3
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -109,66 +108,87 @@ class OsuNMF:
         return W, H
 
     def fit_transform(self, X_sparse):
-        print(f"--- Initializing CUDA HALS NMF (Device: {self.device}) ---")
-        n_samples, n_features = X_sparse.shape
-        
-        coo = X_sparse.tocoo()
-        indices = torch.stack([
-            torch.from_numpy(coo.row), 
-            torch.from_numpy(coo.col)
-        ]).to(self.device, dtype=torch.long)
-        values = torch.from_numpy(coo.data).to(self.device, dtype=self.dtype)
-        X_gpu = torch.sparse_coo_tensor(indices, values, (n_samples, n_features))
+            print(f"--- Initializing CUDA HALS NMF (Device: {self.device}) ---")
+            n_samples, n_features = X_sparse.shape
+            
+            coo = X_sparse.tocoo()
+            indices = torch.stack([
+                torch.from_numpy(coo.row), 
+                torch.from_numpy(coo.col)
+            ]).to(self.device, dtype=torch.long)
+            values = torch.from_numpy(coo.data).to(self.device, dtype=self.dtype)
+            X_gpu = torch.sparse_coo_tensor(indices, values, (n_samples, n_features))
 
-        if self.init == "nndsvda":
-            W_np, H_np = self._nndsvd_init(X_sparse)
-            self.W = torch.tensor(W_np, device=self.device, dtype=self.dtype)
-            self.H = torch.tensor(H_np, device=self.device, dtype=self.dtype)
-        else:
-            self.W = torch.rand(n_samples, self.k, device=self.device, dtype=self.dtype)
-            self.H = torch.rand(self.k, n_features, device=self.device, dtype=self.dtype)
+            if self.init == "nndsvda":
+                W_np, H_np = self._nndsvd_init(X_sparse)
+                self.W = torch.tensor(W_np, device=self.device, dtype=self.dtype)
+                self.H = torch.tensor(H_np, device=self.device, dtype=self.dtype)
+            else:
+                self.W = torch.rand(n_samples, self.k, device=self.device, dtype=self.dtype)
+                self.H = torch.rand(self.k, n_features, device=self.device, dtype=self.dtype)
 
-        eps = 1e-16
-        l1_reg = self.alpha * self.l1_ratio
-        l2_reg = self.alpha * (1 - self.l1_ratio)
+            eps = 1e-16
+            l1_reg = self.alpha * self.l1_ratio
+            l2_reg = self.alpha * (1 - self.l1_ratio)
 
-        if self.verbose:
-            pbar = tqdm(range(self.max_iter), desc="HALS Training")
-        else:
-            pbar = range(self.max_iter)
+            if self.verbose:
+                pbar = tqdm(range(self.max_iter), desc="HALS Training")
+            else:
+                pbar = range(self.max_iter)
 
-        for i in pbar:
-            WtW = torch.mm(self.W.t(), self.W)       
-            WtX = torch.sparse.mm(X_gpu.t(), self.W).t() 
+            for i in pbar:
+                WtW = torch.mm(self.W.t(), self.W)       
+                WtX = torch.sparse.mm(X_gpu.t(), self.W).t() 
 
-            for k in range(self.k):
-                denom = WtW[k, k] + l2_reg + eps
+                for k in range(self.k):
+                    denom = WtW[k, k] + l2_reg + eps
+                    
+                    current_projection = torch.mv(self.H.t(), WtW[k]) 
+                    numerator = WtX[k] - current_projection + (WtW[k, k] * self.H[k]) - l1_reg
+                    
+                    self.H[k] = torch.nn.functional.relu(numerator / denom)
+
+                HHt = torch.mm(self.H, self.H.t())      
+                XHt = torch.sparse.mm(X_gpu, self.H.t())
+
+                for k in range(self.k):
+                    denom = HHt[k, k] + l2_reg + eps
+                    
+                    current_projection = torch.mv(self.W, HHt[k])
+                    numerator = XHt[:, k] - current_projection + (HHt[k, k] * self.W[:, k]) - l1_reg
+                    
+                    self.W[:, k] = torch.nn.functional.relu(numerator / denom)
+
+                h_norm = torch.norm(self.H, p=2, dim=1)
                 
-                current_projection = torch.mv(self.H.t(), WtW[k]) 
-                numerator = WtX[k] - current_projection + (WtW[k, k] * self.H[k]) - l1_reg
+                dead_indices = torch.nonzero(h_norm < 1e-10).flatten()
                 
-                self.H[k] = torch.nn.functional.relu(numerator / denom)
+                if len(dead_indices) > 0:
+                    w_avg = self.W.mean().item() + 1e-6
+                    
+                    self.W[:, dead_indices] = torch.rand(
+                        (n_samples, len(dead_indices)), 
+                        device=self.device, 
+                        dtype=self.dtype
+                    ) * w_avg
+                    
+                    self.H[dead_indices, :] = torch.rand(
+                        (len(dead_indices), n_features), 
+                        device=self.device, 
+                        dtype=self.dtype
+                    )
+                    
+                    h_norm = torch.norm(self.H, p=2, dim=1)
 
-            HHt = torch.mm(self.H, self.H.t())      
-            XHt = torch.sparse.mm(X_gpu, self.H.t())
+                h_norm = h_norm + eps
+                self.H /= h_norm.unsqueeze(1)
+                self.W *= h_norm
 
-            for k in range(self.k):
-                denom = HHt[k, k] + l2_reg + eps
-                
-                current_projection = torch.mv(self.W, HHt[k])
-                numerator = XHt[:, k] - current_projection + (HHt[k, k] * self.W[:, k]) - l1_reg
-                
-                self.W[:, k] = torch.nn.functional.relu(numerator / denom)
+                if i % self.loss_check_interval == 0:
+                    pass
 
-            h_norm = torch.norm(self.H, p=2, dim=1) + eps
-            self.H /= h_norm.unsqueeze(1)
-            self.W *= h_norm
-
-            if i % self.loss_check_interval == 0:
-                pass
-
-        print("Done. Copying to CPU...")
-        return self.W.cpu().numpy()
+            print("Done. Copying to CPU...")
+            return self.W.cpu().numpy()
 
     @property
     def components_(self):
@@ -318,10 +338,7 @@ def run_nmf():
     df = deduplicate_collections(df)
 
     bm_counts = df["beatmap_id"].value_counts()
-    max_allowed = len(df["collection_id"].unique()) * MAX_FREQUENCY_PER_MAP
-    valid_maps = bm_counts[
-        (bm_counts >= MIN_COLLECTIONS_PER_MAP) & (bm_counts <= max_allowed)
-    ].index
+    valid_maps = bm_counts[(bm_counts >= MIN_COLLECTIONS_PER_MAP)].index
     df = df[df["beatmap_id"].isin(valid_maps)].copy()
 
     missing_metadata = df["beatmapset_id"].isna().sum()
