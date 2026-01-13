@@ -31,7 +31,7 @@ L1_RATIO = 0.3
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
 COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
-COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collections.parquet"
+COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
 
@@ -179,32 +179,32 @@ class OsuNMF:
 
             if len(dead_indices) > 0:
                 n_dead = len(dead_indices)
-                
+
                 random_row_indices = torch.randint(
                     0, n_samples, (n_dead,), device=self.device
                 )
-                
+
                 target_X = X_gpu.index_select(0, random_row_indices).to_dense()
-                
+
                 current_prediction = torch.mm(self.W[random_row_indices], self.H)
-                
+
                 residual = torch.nn.functional.relu(target_X - current_prediction)
-                
+
                 mask_empty = (residual.sum(dim=1) < 1e-10).unsqueeze(1)
                 final_revival = torch.where(mask_empty, target_X, residual)
 
                 self.H[dead_indices, :] = final_revival
-                
-                self.H[dead_indices, :] += torch.rand(
-                    (n_dead, n_features), device=self.device, dtype=self.dtype
-                ) * 1e-6
+
+                self.H[dead_indices, :] += (
+                    torch.rand(
+                        (n_dead, n_features), device=self.device, dtype=self.dtype
+                    )
+                    * 1e-6
+                )
 
                 w_avg = self.W.mean().item()
                 self.W[:, dead_indices] = torch.full(
-                    (n_samples, n_dead), 
-                    w_avg, 
-                    device=self.device, 
-                    dtype=self.dtype
+                    (n_samples, n_dead), w_avg, device=self.device, dtype=self.dtype
                 )
 
                 h_norm = torch.norm(self.H, p=2, dim=1)
