@@ -5,6 +5,7 @@ import numpy as np
 import os
 from scipy.sparse import csr_matrix
 from sklearn.decomposition import TruncatedSVD
+from scipy import stats
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -12,7 +13,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
-COLLECTIONS_PATH = COLLECTIONS_DIR / "collections.parquet"
+VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
+EDGE_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
+BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
 def gini_coefficient(x):
     x = np.array(x, dtype=np.float64)
@@ -39,61 +42,112 @@ def get_distribution_stats(series, name):
     for p in percentiles:
         print(f"{p*100:4.1f}%: {series.quantile(p):.2f}")
 
-def perform_eda(file_path):
-    if not os.path.exists(file_path):
-        print(f"Error: {file_path} not found.")
+def perform_eda(vertex_path, edge_path, beatmaps_path):
+    if not os.path.exists(vertex_path):
+        print(f"Error: {vertex_path} not found.")
+        return
+    if not os.path.exists(edge_path):
+        print(f"Error: {edge_path} not found.")
+        return
+    if not os.path.exists(beatmaps_path):
+        print(f"Error: {beatmaps_path} not found.")
         return
 
-    print(f"--- EDA for {file_path} ---")
-    df = pd.read_parquet(file_path)
+    print(f"--- EDA for Collections ---")
+    vertex_df = pd.read_parquet(vertex_path)
+    edge_df = pd.read_parquet(edge_path)
     
-    initial_records = len(df)
-    print(f"Initial Records: {initial_records}")
+    initial_edges = len(edge_df)
+    print(f"Initial Edge Records: {initial_edges}")
+    print(f"Initial Vertices: {len(vertex_df)}")
 
-    col_counts = df.groupby('collection_id')['beatmap_id'].count()
+    # Load beatmap metadata for mode filtering
+    print("--- Loading Beatmap Metadata for Mode Filtering ---")
+    beatmaps_df = pd.read_parquet(beatmaps_path, columns=["id", "mode"])
+    beatmaps_df = beatmaps_df.rename(columns={"id": "beatmap_id"})
+    edge_df = edge_df.merge(beatmaps_df, on="beatmap_id", how="left")
+    
+    # Filter collections: remove collections with >50% non-osu maps
+    print("--- Filtering by Game Mode ---")
+    collection_mode_stats = edge_df.groupby(['collection_id', 'source']).apply(
+        lambda x: (x['mode'] != 'osu').sum() / len(x) if len(x) > 0 else 0,
+        include_groups=False
+    )
+    collections_to_keep = collection_mode_stats[collection_mode_stats <= 0.5].index
+    edge_df = edge_df[edge_df.set_index(['collection_id', 'source']).index.isin(collections_to_keep)].copy()
+    
+    # Remove all non-osu beatmaps
+    edge_df = edge_df[edge_df['mode'] == 'osu'].copy()
+    print(f"After mode filtering: {len(edge_df)} edges")
+
+    # Filter edges: collections with 5-99th percentile beatmaps
+    col_counts = edge_df.groupby(['collection_id', 'source']).size()
     upper_bound = col_counts.quantile(0.99)
     valid_collections = col_counts[(col_counts >= 5) & (col_counts <= upper_bound)].index
-    df = df[df['collection_id'].isin(valid_collections)]
+    edge_df = edge_df.set_index(['collection_id', 'source']).loc[valid_collections].reset_index()
 
-    map_counts = df.groupby('beatmap_id')['collection_id'].count()
-    valid_maps = map_counts[map_counts >= 5].index
-    df = df[df['beatmap_id'].isin(valid_maps)]
+    # NO LONGER filtering beatmaps by occurrence - we keep all beatmaps that appear in valid collections
 
-    print(f"Records after pruning (<5 items, >99% size, <5 occurrences): {len(df)}")
-    print(f"Data retention: {len(df)/initial_records:.2%}")
+    # Filter vertices: only keep collections with valid edges
+    valid_col_sources = set(edge_df[['collection_id', 'source']].itertuples(index=False, name=None))
+    vertex_df = vertex_df[
+        vertex_df[['collection_id', 'source']].apply(tuple, axis=1).isin(valid_col_sources)
+    ]
 
-    df['collection_id'] = df['collection_id'].astype('category')
-    df['beatmap_id'] = df['beatmap_id'].astype('category')
+    print(f"Edges after pruning (<5 items, >99% size): {len(edge_df)}")
+    print(f"Edge retention: {len(edge_df)/initial_edges:.2%}")
+    print(f"Vertices after pruning: {len(vertex_df)}")
 
-    n_collections = df['collection_id'].nunique()
-    n_beatmaps = df['beatmap_id'].nunique()
+    n_collections = len(vertex_df)
+    n_beatmaps = edge_df['beatmap_id'].nunique()
     
     print(f"\n=== Matrix Dimensions ===")
     print(f"Rows (Collections): {n_collections}")
     print(f"Cols (Beatmaps):    {n_beatmaps}")
     
     matrix_size = n_collections * n_beatmaps
-    sparsity = 1 - (len(df) / matrix_size)
-    density = len(df) / matrix_size
+    sparsity = 1 - (len(edge_df) / matrix_size)
+    density = len(edge_df) / matrix_size
 
     print(f"Total Elements: {matrix_size}")
-    print(f"Non-zero Elements: {len(df)}")
+    print(f"Non-zero Elements: {len(edge_df)}")
     print(f"Sparsity: {sparsity:.6f}")
     print(f"Density:  {density:.6f} ({density*100:.4f}%)")
 
-    maps_per_collection = df.groupby('collection_id', observed=True)['beatmap_id'].count()
+    maps_per_collection = edge_df.groupby(['collection_id', 'source'], observed=True)['beatmap_id'].count()
     get_distribution_stats(maps_per_collection, "Beatmaps per Collection")
 
-    collections_per_map = df.groupby('beatmap_id', observed=True)['collection_id'].count()
-    get_distribution_stats(collections_per_map, "Collections per Beatmap")
+    collections_per_map = edge_df.groupby('beatmap_id', observed=True)['collection_id'].nunique()
+    get_distribution_stats(collections_per_map, "Collections per Beatmap (Prominence)")
+
+    print("\n=== Beatmap Prominence Statistics (IQR & Advanced) ===")
+    get_iqr_stats(collections_per_map, "Beatmap Prominence")
+    
+    # Add detailed breakdown for 1-10 collections (changed from 2-10)
+    print("\n=== Beatmap Occurrence Breakdown ===")
+    total_beatmaps = len(collections_per_map)
+    for count in range(1, 11):
+        beatmaps_with_count = (collections_per_map == count).sum()
+        percentage = (beatmaps_with_count / total_beatmaps) * 100
+        print(f"Beatmaps in exactly {count:2d} collection(s): {beatmaps_with_count:7,} ({percentage:5.2f}%)")
+    
+    # Also show >10 collections
+    beatmaps_over_10 = (collections_per_map > 10).sum()
+    percentage_over_10 = (beatmaps_over_10 / total_beatmaps) * 100
+    print(f"Beatmaps in >10 collections:         {beatmaps_over_10:7,} ({percentage_over_10:5.2f}%)")
 
     print("\n=== Latent Structure Analysis (SVD) ===")
     
-    row_idx = df['collection_id'].cat.codes
-    col_idx = df['beatmap_id'].cat.codes
-    sparse_interaction = csr_matrix((np.ones(len(df)), (row_idx, col_idx)), shape=(n_collections, n_beatmaps))
+    # Create mapping for matrix construction - fix unhashable type error
+    vertex_tuples = [tuple(row) for row in vertex_df[['collection_id', 'source']].drop_duplicates().values]
+    col_map = {col_tuple: idx for idx, col_tuple in enumerate(vertex_tuples)}
+    beatmap_map = {bid: idx for idx, bid in enumerate(sorted(edge_df['beatmap_id'].unique()))}
+    
+    row_idx = edge_df[['collection_id', 'source']].apply(lambda x: col_map[tuple(x)], axis=1).values
+    col_idx = edge_df['beatmap_id'].map(beatmap_map).values
+    sparse_interaction = csr_matrix((np.ones(len(edge_df)), (row_idx, col_idx)), shape=(n_collections, n_beatmaps))
 
-    n_components = 50
+    n_components = min(50, n_collections, n_beatmaps)
     svd = TruncatedSVD(n_components=n_components, random_state=42)
     svd.fit(sparse_interaction)
 
@@ -101,15 +155,13 @@ def perform_eda(file_path):
     cumulative_variance = np.cumsum(explained_variance)
 
     print(f"Top {n_components} Components Explained Variance Ratio:")
-    print(f"Component 1:   {explained_variance[0]:.6f}")
-    print(f"Component 5:   {explained_variance[4]:.6f}")
-    print(f"Component 10:  {explained_variance[9]:.6f}")
-    print(f"Component 25:  {explained_variance[24]:.6f}")
-    print(f"Component 50:  {explained_variance[49]:.6f}")
+    for i in [0, 4, 9, 24, 49]:
+        if i < n_components:
+            print(f"Component {i+1:2d}: {explained_variance[i]:.6f}")
 
-    print(f"\nCumulative Variance at k=10: {cumulative_variance[9]:.4f}")
-    print(f"Cumulative Variance at k=25: {cumulative_variance[24]:.4f}")
-    print(f"Cumulative Variance at k=50: {cumulative_variance[49]:.4f}")
+    print(f"\nCumulative Variance at k=10: {cumulative_variance[min(9, n_components-1)]:.4f}")
+    print(f"Cumulative Variance at k=25: {cumulative_variance[min(24, n_components-1)]:.4f}")
+    print(f"Cumulative Variance at k=50: {cumulative_variance[min(49, n_components-1)]:.4f}")
     
     singular_values = svd.singular_values_
     print(f"\nSingular Value Drop-off:")
@@ -117,5 +169,45 @@ def perform_eda(file_path):
     print(f"Min SV (at k={n_components}): {singular_values[-1]:.4f}")
     print(f"Condition Number (est): {singular_values[0] / singular_values[-1]:.4f}")
 
+def get_iqr_stats(series, name):
+    """Calculate IQR and advanced statistics for a distribution."""
+    series = pd.Series(series)
+    q1 = series.quantile(0.25)
+    q3 = series.quantile(0.75)
+    iqr = q3 - q1
+    
+    print(f"\n--- IQR Statistics ({name}) ---")
+    print(f"Q1 (25th percentile): {q1:.2f}")
+    print(f"Q2 (Median):          {series.median():.2f}")
+    print(f"Q3 (75th percentile): {q3:.2f}")
+    print(f"IQR (Q3 - Q1):        {iqr:.2f}")
+    
+    lower_fence = q1 - 1.5 * iqr
+    upper_fence = q3 + 1.5 * iqr
+    outliers = series[(series < lower_fence) | (series > upper_fence)]
+    
+    print(f"Lower Fence:          {lower_fence:.2f}")
+    print(f"Upper Fence:          {upper_fence:.2f}")
+    print(f"Outliers:             {len(outliers)} ({len(outliers)/len(series)*100:.2f}%)")
+    
+    # Mode and multimodality
+    try:
+        mode_result = stats.mode(series, keepdims=True)
+        print(f"Mode:                 {mode_result.mode[0]:.2f} (count: {mode_result.count[0]})")
+    except:
+        print(f"Mode:                 No unique mode")
+    
+    # Whisker values
+    lower_whisker = series[series >= lower_fence].min()
+    upper_whisker = series[series <= upper_fence].max()
+    print(f"Lower Whisker:        {lower_whisker:.2f}")
+    print(f"Upper Whisker:        {upper_whisker:.2f}")
+    
+    # Advanced stats
+    print(f"\nAdvanced Statistics ({name}):")
+    print(f"Coefficient of Variation: {series.std() / series.mean():.4f}")
+    print(f"Range:                    {series.max() - series.min()}")
+    print(f"Mid-range:                {(series.max() + series.min()) / 2:.2f}")
+
 if __name__ == "__main__":
-    perform_eda(COLLECTIONS_PATH)
+    perform_eda(VERTEX_PATH, EDGE_PATH, BEATMAPS_PATH)

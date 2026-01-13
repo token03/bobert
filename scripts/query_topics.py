@@ -39,7 +39,6 @@ def query_topics(beatmap_id, version=None):
     for _, row in beatmap_topics.iterrows():
         print(f"{int(row['topic_id']):<10} {row['weight']:<12.6f}")
 
-    print(f"\nLoading beatmap metadata from {BEATMAPS_PATH}...")
     beatmaps_df = pd.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
     )
@@ -51,8 +50,6 @@ def query_topics(beatmap_id, version=None):
         print(f"No metadata found for beatmap ID {beatmap_id}")
         return
     query_beatmapset_id = query_beatmapset_id[0]
-
-    print("Computing similarity scores...")
 
     pivot_df = df.pivot(index="beatmap_id", columns="topic_id", values="weight").fillna(
         0

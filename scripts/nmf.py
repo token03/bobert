@@ -9,9 +9,9 @@ from scipy.sparse.linalg import svds
 from sklearn.feature_extraction.text import TfidfTransformer
 import torch
 import time
-import requests
 import os
 import json
+import argparse
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,15 +22,16 @@ VERSION = "v3"
 MIN_MAPS_IN_COLLECTION = 10
 MAX_MAPS_IN_COLLECTION = 3000
 MIN_COLLECTIONS_PER_MAP = 2
-JACCARD_THRESHOLD = 0.90
+JACCARD_THRESHOLD = 0.75
 SONG_DAMPENING_POWER = 0.95
-N_TOPICS = 128
-ALPHA = 1e-5
-L1_RATIO = 0.3
+N_TOPICS = 144
+ALPHA = 1e-4
+L1_RATIO = 0.4
 
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
 COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
+VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
 COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
@@ -224,71 +225,72 @@ class OsuNMF:
         return self.H.cpu().numpy()
 
 
-def get_collection_names(collection_ids):
-    cache_file = DATA_DIR / "collection_names_cache.json"
-    cache = {}
-    if os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
-            cache = json.load(f)
+def get_collection_names(collection_tuples):
+    if not os.path.exists(VERTEX_PATH):
+        print(f"Warning: {VERTEX_PATH} not found, using 'Unknown' for all names")
+        return {key: "Unknown" for key in collection_tuples}
 
-    to_fetch = [cid for cid in collection_ids if str(cid) not in cache]
-    if to_fetch:
-        print(f"Fetching {len(to_fetch)} collection names...")
-        for cid in tqdm(to_fetch, desc="Fetching names"):
-            try:
-                response = requests.get(
-                    f"https://osucollector.com/api/collections/{cid}", timeout=10
-                )
-                if response.status_code == 200:
-                    cache[str(cid)] = response.json().get("name", "Unknown")
-                else:
-                    cache[str(cid)] = "Unknown"
-                time.sleep(0.2)
-            except Exception as e:
-                print(f"Error fetching {cid}: {e}")
-                cache[str(cid)] = "Unknown"
+    vertex_df = pd.read_parquet(VERTEX_PATH)
 
-        with open(cache_file, "w") as f:
-            json.dump(cache, f)
+    collection_ids = [cid for cid, _ in collection_tuples]
+    sources = [src for _, src in collection_tuples]
 
-    return {int(cid): cache.get(str(cid), "Unknown") for cid in collection_ids}
+    vertex_df = vertex_df[
+        (vertex_df["collection_id"].isin(collection_ids))
+        & (vertex_df["source"].isin(sources))
+    ]
+
+    name_map = {}
+    for _, row in vertex_df.iterrows():
+        key = (row["collection_id"], row["source"])
+        name = row.get("name", "Unknown")
+        if pd.isna(name):
+            name = "Unknown"
+        name_map[key] = name
+
+    for key in collection_tuples:
+        if key not in name_map:
+            name_map[key] = "Unknown"
+
+    return name_map
 
 
-def deduplicate_collections(df, threshold=0.90, probe_items=32):
+def deduplicate_collections(df, threshold, probe_items=32):
     print("--- Starting Deduplication Process ---")
     start_time = time.time()
 
     print("Grouping collections...")
-    col_groups = df.groupby("collection_id")["beatmap_id"].apply(set).to_dict()
+    df["collection_key"] = list(zip(df["collection_id"], df["source"]))
+    col_groups = df.groupby("collection_key")["beatmap_id"].apply(set).to_dict()
 
     print("Step 1: Removing Exact Duplicates...")
     content_hashes = {}
-    for cid, bms in col_groups.items():
+    for ckey, bms in col_groups.items():
         sig = tuple(sorted(bms))
         prev = content_hashes.get(sig)
-        if prev is None or cid < prev:
-            content_hashes[sig] = cid
+        if prev is None or ckey[0] < prev[0]:
+            content_hashes[sig] = ckey
 
-    unique_content_cids = set(content_hashes.values())
+    unique_content_ckeys = set(content_hashes.values())
     print(
-        f"Reduced from {len(col_groups)} to {len(unique_content_cids)} unique content sets."
+        f"Reduced from {len(col_groups)} to {len(unique_content_ckeys)} unique content sets."
     )
 
     print(f"Step 2: Fuzzy Deduplication (Threshold: {threshold})...")
 
-    sorted_cids = sorted(
-        unique_content_cids, key=lambda x: len(col_groups[x]), reverse=True
+    sorted_ckeys = sorted(
+        unique_content_ckeys, key=lambda x: len(col_groups[x]), reverse=True
     )
 
-    kept_cids = []
+    kept_ckeys = []
     kept_sets = {}
     postings = defaultdict(list)
 
     def min_required_overlap(len_a, len_b, t):
         return math.ceil((t * (len_a + len_b)) / (1.0 + t))
 
-    for cid in tqdm(sorted_cids, desc="Deduplicating"):
-        A = col_groups[cid]
+    for ckey in tqdm(sorted_ckeys, desc="Deduplicating"):
+        A = col_groups[ckey]
         len_a = len(A)
 
         items = list(A)
@@ -311,8 +313,8 @@ def deduplicate_collections(df, threshold=0.90, probe_items=32):
                 overlap_counts.items(), key=lambda kv: kv[1], reverse=True
             )
 
-            for kept_cid, approx_overlap in candidates:
-                B = kept_sets[kept_cid]
+            for kept_ckey, approx_overlap in candidates:
+                B = kept_sets[kept_ckey]
                 len_b = len(B)
 
                 if len_a < threshold * len_b or len_b < threshold * len_a:
@@ -334,29 +336,65 @@ def deduplicate_collections(df, threshold=0.90, probe_items=32):
                     break
 
         if not is_duplicate:
-            kept_cids.append(cid)
-            kept_sets[cid] = A
+            kept_ckeys.append(ckey)
+            kept_sets[ckey] = A
             for bm in A:
-                postings[bm].append(cid)
+                postings[bm].append(ckey)
 
     print(
-        f"Final Collection Count: {len(kept_cids)} (Removed {len(col_groups) - len(kept_cids)} duplicates)"
+        f"Final Collection Count: {len(kept_ckeys)} (Removed {len(col_groups) - len(kept_ckeys)} duplicates)"
     )
     print(f"Deduplication took {(time.time() - start_time):.2f}s")
 
-    return df[df["collection_id"].isin(kept_cids)].copy()
+    return df[df["collection_key"].isin(kept_ckeys)].copy()
 
 
-def run_nmf():
+def run_nmf(source_filter=None):
     print("--- Loading Data ---")
     df = pd.read_parquet(COLLECTIONS_DATA_PATH)
 
+    if source_filter is not None:
+        print(f"--- Filtering by Source: {source_filter} ---")
+        df = df[df["source"] == source_filter].copy()
+        print(f"Kept {len(df)} rows from source {source_filter}")
+
     if os.path.exists(COLLECTION_FILTER_PATH):
-        print("--- Applying Collection Filter ---")
+        print("--- Applying Collection and User Filters ---")
         with open(COLLECTION_FILTER_PATH, "r") as f:
-            filter_ids = set(json.load(f))
-        df = df[~df["collection_id"].isin(filter_ids)].copy()
-        print(f"Removed {len(filter_ids)} collections")
+            filter_data = json.load(f)
+
+        if "collections" in filter_data:
+            collections_to_remove = []
+            for source, collection_ids in filter_data["collections"].items():
+                collections_to_remove.extend(collection_ids)
+
+            if collections_to_remove:
+                initial_count = len(df)
+                df = df[~df["collection_id"].isin(collections_to_remove)].copy()
+                print(
+                    f"Removed {initial_count - len(df)} rows from {len(collections_to_remove)} filtered collections"
+                )
+
+        if "users" in filter_data:
+            if os.path.exists(VERTEX_PATH):
+                vertex_df = pd.read_parquet(VERTEX_PATH)
+
+                users_to_remove = []
+                for source, user_ids in filter_data["users"].items():
+                    users_to_remove.extend(user_ids)
+
+                if users_to_remove:
+                    filtered_collections = vertex_df[
+                        vertex_df["uploader_id"].isin(users_to_remove)
+                    ]["collection_id"].unique()
+
+                    initial_count = len(df)
+                    df = df[~df["collection_id"].isin(filtered_collections)].copy()
+                    print(
+                        f"Removed {initial_count - len(df)} rows from {len(filtered_collections)} collections by {len(set(users_to_remove))} filtered users"
+                    )
+            else:
+                print(f"Warning: {VERTEX_PATH} not found, skipping user filter")
 
     print("--- Loading Beatmap Metadata ---")
     beatmaps_df = pd.read_parquet(
@@ -364,6 +402,9 @@ def run_nmf():
     )
     beatmaps_df = beatmaps_df.rename(columns={"id": "beatmap_id"})
     df = df.merge(beatmaps_df, on="beatmap_id", how="left")
+
+    n_missing = df[df["beatmapset_id"].isna()]["beatmap_id"].nunique()
+    print(f"Unique beatmaps missing metadata: {n_missing}")
 
     print("--- Filtering by Game Mode ---")
     collection_mode_stats = df.groupby("collection_id").apply(
@@ -380,7 +421,7 @@ def run_nmf():
     ].index
     df = df[df["collection_id"].isin(valid_collections)].copy()
 
-    df = deduplicate_collections(df)
+    df = deduplicate_collections(df, JACCARD_THRESHOLD)
 
     bm_counts = df["beatmap_id"].value_counts()
     valid_maps = bm_counts[(bm_counts >= MIN_COLLECTIONS_PER_MAP)].index
@@ -397,12 +438,14 @@ def run_nmf():
     ].transform("count")
     df["weight"] = 1.0 / (df["song_occurrence"] ** SONG_DAMPENING_POWER)
 
-    unique_collections = sorted(df["collection_id"].unique())
+    df["collection_key"] = list(zip(df["collection_id"], df["source"]))
+    unique_collections = sorted(df["collection_key"].unique())
     unique_beatmaps = sorted(df["beatmap_id"].unique())
 
-    col_to_idx = {cid: i for i, cid in enumerate(unique_collections)}
+    col_to_idx = {ckey: i for i, ckey in enumerate(unique_collections)}
     bm_to_idx = {bid: i for i, bid in enumerate(unique_beatmaps)}
     idx_to_bm = {i: bid for bid, i in bm_to_idx.items()}
+    idx_to_col = {i: ckey for ckey, i in col_to_idx.items()}
 
     beatmap_to_beatmapset = (
         df.drop_duplicates("beatmap_id")
@@ -417,7 +460,7 @@ def run_nmf():
 
     print(f"Matrix: {len(unique_collections)} Col x {len(unique_beatmaps)} Maps")
 
-    row = df["collection_id"].map(col_to_idx).values
+    row = df["collection_key"].map(col_to_idx).values
     col = df["beatmap_id"].map(bm_to_idx).values
     data = df["weight"].values
 
@@ -485,10 +528,12 @@ def run_nmf():
     w_records = []
     for c_idx in range(len(unique_collections)):
         relevant_t_indices = np.where(W[c_idx] > 1e-4)[0]
+        collection_id, source = unique_collections[c_idx]
         for t_idx in relevant_t_indices:
             w_records.append(
                 {
-                    "collection_id": unique_collections[c_idx],
+                    "collection_id": collection_id,
+                    "source": source,
                     "topic_id": t_idx,
                     "weight": float(W[c_idx, t_idx]),
                 }
@@ -548,19 +593,22 @@ def run_nmf():
         summary.append({"topic_id": t_idx, "top_maps": " | ".join(song_displays)})
     summary_df = pd.DataFrame(summary)
 
-    all_top_cids = set()
-    top_cids_per_topic = []
+    all_top_ckeys = set()
+    top_ckeys_per_topic = []
     for t_idx in range(N_TOPICS):
-        top_indices = W[:, t_idx].argsort()[::-1][:5]
-        cids = [unique_collections[i] for i in top_indices]
-        top_cids_per_topic.append(cids)
-        all_top_cids.update(cids)
+        top_indices = W[:, t_idx].argsort()[::-1][:10]
+        ckeys = [unique_collections[i] for i in top_indices]
+        top_ckeys_per_topic.append(ckeys)
+        all_top_ckeys.update(ckeys)
 
-    col_names_map = get_collection_names(list(all_top_cids))
+    col_names_map = get_collection_names(list(all_top_ckeys))
     col_summary = []
     for t_idx in range(N_TOPICS):
-        cids = top_cids_per_topic[t_idx]
-        names = [f"{col_names_map.get(cid, 'Unknown')} ({cid})" for cid in cids]
+        ckeys = top_ckeys_per_topic[t_idx]
+        names = [
+            f"{col_names_map.get(ckey, 'Unknown')} ({ckey[0]}, src={ckey[1]})"
+            for ckey in ckeys
+        ]
         col_summary.append({"topic_id": t_idx, "top_collections": " | ".join(names)})
     col_summary_df = pd.DataFrame(col_summary)
 
@@ -582,4 +630,16 @@ def run_nmf():
 
 
 if __name__ == "__main__":
-    run_nmf()
+    parser = argparse.ArgumentParser(
+        description="Run NMF topic modeling on osu! collections"
+    )
+    parser.add_argument(
+        "-s",
+        "--source",
+        type=int,
+        choices=[1, 2],
+        help="Filter by source: 1=OsuCollector, 2=OsuStats (default: use all sources)",
+    )
+    args = parser.parse_args()
+
+    run_nmf(source_filter=args.source)
