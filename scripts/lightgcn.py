@@ -34,7 +34,7 @@ MIN_COLLECTIONS_PER_MAP = 2
 JACCARD_THRESHOLD = 0.75
 SONG_DAMPENING_POWER = 0.95
 
-EMBEDDING_DIM = 64
+EMBEDDING_DIM = 128
 NUM_LAYERS = 3
 BATCH_SIZE = 131072
 LR = 0.001
@@ -43,51 +43,6 @@ CL_RATE = 0.2
 EPS = 0.2
 TEMP = 0.2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def remove_status_bias(embeddings, status_labels, n_iterations=15):
-    embeddings = embeddings.detach().clone()
-    original_norm = embeddings.norm(dim=1, keepdim=True)
-    
-    P = torch.eye(embeddings.shape[1]).to(DEVICE)
-    
-    pbar = tqdm(range(n_iterations), desc="INLP Debiasing")
-    for i in pbar:
-        x_proj = embeddings @ P.t()
-        
-        clf = torch.nn.Linear(embeddings.shape[1], 1).to(DEVICE)
-        opt = torch.optim.Adam(clf.parameters(), lr=0.01)
-        
-        for _ in range(300):
-            pred = clf(x_proj.detach()) 
-            loss = F.binary_cross_entropy_with_logits(pred.squeeze(), status_labels)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-        
-        with torch.no_grad():
-            acc = ((torch.sigmoid(clf(x_proj).squeeze()) > 0.5).float() == status_labels).float().mean()
-        
-        w = clf.weight.data.squeeze() 
-        
-        row_space = w.unsqueeze(0) 
-        row_space = row_space / torch.norm(row_space, dim=1, keepdim=True)
-        proj_w = torch.mm(row_space.t(), row_space) 
-        null_P = torch.eye(embeddings.shape[1]).to(DEVICE) - proj_w
-        
-        P = torch.mm(null_P, P)
-        
-        pbar.set_postfix({'Acc': f"{acc:.3f}"})
-        
-        if acc < 0.55: 
-            print(f"Converged at iteration {i}")
-            break
-
-    final_embeddings = embeddings @ P.t()
-    
-    final_embeddings = final_embeddings / (final_embeddings.norm(dim=1, keepdim=True) + 1e-8) * original_norm
-    
-    return final_embeddings
 
 
 def deduplicate_collections(df, threshold, probe_items=32):
@@ -198,9 +153,6 @@ def load_and_process_data(source_filter=None):
     if df["beatmapset_id"].isna().sum() > 0:
         df = df.dropna(subset=["beatmapset_id"]).copy()
 
-    # Create binary status labels for debiasing
-    # Ranked/Approved/Qualified/Loved (1,2,3,4) -> 1
-    # Graveyard/WIP/Pending (-2,-1,0) -> 0
     df["is_ranked"] = df["status"].apply(lambda x: 1 if x in [1, 2, 3, 4] else 0)
 
     df["song_occurrence"] = df.groupby(["collection_id", "beatmapset_id"])[
@@ -241,44 +193,36 @@ def compute_normalized_laplacian(
     ).coalesce()
 
 
-class LightGCN(nn.Module):
-    def __init__(
-        self,
-        num_users,
-        num_items,
-        embedding_dim,
-        num_layers,
-        init_users=None,
-        init_items=None,
-    ):
-        super(LightGCN, self).__init__()
+class DisentangledLightGCN(nn.Module):
+    def __init__(self, num_users, num_items, embedding_dim, num_layers):
+        super(DisentangledLightGCN, self).__init__()
         self.num_users = num_users
         self.num_items = num_items
         self.num_layers = num_layers
 
         self.user_embedding = nn.Embedding(num_users, embedding_dim)
-        self.item_embedding = nn.Embedding(num_items, embedding_dim)
 
-        if init_users is not None and init_items is not None:
-            self.user_embedding.weight.data.copy_(init_users)
-            self.item_embedding.weight.data.copy_(init_items)
-        else:
-            nn.init.xavier_uniform_(self.user_embedding.weight)
-            nn.init.xavier_uniform_(self.item_embedding.weight)
+        self.item_semantic = nn.Embedding(num_items, embedding_dim)
+        self.item_bias = nn.Embedding(num_items, embedding_dim)
+
+        nn.init.xavier_uniform_(self.user_embedding.weight)
+        nn.init.xavier_uniform_(self.item_semantic.weight)
+        nn.init.xavier_uniform_(self.item_bias.weight)
 
     def forward(self, sparse_adj):
         with torch.amp.autocast("cuda", enabled=False):
-            ego_embeddings = torch.cat(
-                [self.user_embedding.weight, self.item_embedding.weight], dim=0
+            ego_semantic = torch.cat(
+                [self.user_embedding.weight, self.item_semantic.weight], dim=0
             ).float()
-            all_embeddings = [ego_embeddings]
+            all_semantic = [ego_semantic]
 
             for _ in range(self.num_layers):
-                ego_embeddings = torch.sparse.mm(sparse_adj, ego_embeddings)
-                all_embeddings.append(ego_embeddings)
+                ego_semantic = torch.sparse.mm(sparse_adj, ego_semantic)
+                all_semantic.append(ego_semantic)
 
-            final_embeddings = torch.stack(all_embeddings, dim=1).mean(dim=1)
-        return final_embeddings
+            final_semantic = torch.stack(all_semantic, dim=1).mean(dim=1)
+
+        return final_semantic, self.item_bias.weight
 
 
 def train(source_filter=None):
@@ -299,42 +243,37 @@ def train(source_filter=None):
     )
     weights = torch.tensor(df["weight"].values, dtype=torch.float32, device=DEVICE)
 
-    print("Computing SVD for initialization...")
-
-    row = df["collection_key"].map(col_to_idx).values
-    col = df["beatmap_id"].map(bm_to_idx).values
-    data = df["weight"].values
-
-    adj_mat = coo_matrix((data, (row, col)), shape=(num_users, num_items))
-
-    u, s, vt = svds(adj_mat.astype(float), k=EMBEDDING_DIM)
-
-    u = u[:, ::-1]
-    s = s[::-1]
-    vt = vt[::-1, :]
-
-    svd_u = u * np.power(s, 0.5)
-    svd_v = vt.T * np.power(s, 0.5)
-
-    pretrained_user_emb = torch.FloatTensor(svd_u.copy()).to(DEVICE)
-    pretrained_item_emb = torch.FloatTensor(svd_v.copy()).to(DEVICE)
+    bm_status_map = (
+        df[["beatmap_id", "is_ranked"]]
+        .drop_duplicates()
+        .set_index("beatmap_id")["is_ranked"]
+        .to_dict()
+    )
+    status_labels = torch.tensor(
+        [bm_status_map[beatmap_id] for beatmap_id in unique_beatmaps],
+        dtype=torch.float32,
+        device=DEVICE,
+    )
 
     print("Building Sparse Adjacency Matrix...")
     sparse_adj = compute_normalized_laplacian(
         user_indices, item_indices, weights, num_users, num_items
     )
 
-    model = LightGCN(
+    model = DisentangledLightGCN(
         num_users,
         num_items,
         EMBEDDING_DIM,
         NUM_LAYERS,
-        pretrained_user_emb,
-        pretrained_item_emb,
     ).to(DEVICE)
 
+    status_predictor = nn.Linear(EMBEDDING_DIM, 1).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+    opt_status = torch.optim.Adam(status_predictor.parameters(), lr=0.005)
     scaler = torch.amp.GradScaler("cuda")
+
+    LAMBDA_ORTHO = 0.1
+    LAMBDA_BIAS = 1.0
 
     print(f"--- Training (Batch Size: {BATCH_SIZE}) ---")
     total_edges = len(df)
@@ -351,37 +290,47 @@ def train(source_filter=None):
 
         for i in pbar:
             optimizer.zero_grad()
+            opt_status.zero_grad()
 
             idx = perm[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
             batch_users = user_indices[idx]
-            batch_pos = item_indices[idx] + num_users
-            batch_neg = (
-                torch.randint(0, num_items, (len(idx),), device=DEVICE) + num_users
-            )
+            batch_pos = item_indices[idx]
+            batch_neg = torch.randint(0, num_items, (len(idx),), device=DEVICE)
 
             with torch.amp.autocast("cuda"):
-                all_emb = model(sparse_adj)
+                final_emb, item_bias_static = model(sparse_adj)
 
-                u_emb = all_emb[batch_users]
-                p_emb = all_emb[batch_pos]
-                n_emb = all_emb[batch_neg]
+                u_emb = final_emb[batch_users]
+                p_emb_sem = final_emb[batch_pos + num_users]
+                n_emb_sem = final_emb[batch_neg + num_users]
 
-                pos_scores = (u_emb * p_emb).sum(dim=1)
-                neg_scores = (u_emb * n_emb).sum(dim=1)
+                pos_scores = (u_emb * p_emb_sem).sum(dim=1)
+                neg_scores = (u_emb * n_emb_sem).sum(dim=1)
+                rec_loss = F.softplus(neg_scores - pos_scores).mean()
 
-                reg_loss = (
-                    (1 / 2)
-                    * (
-                        u_emb.norm(2).pow(2)
-                        + p_emb.norm(2).pow(2)
-                        + n_emb.norm(2).pow(2)
-                    )
-                    / float(len(idx))
+                p_emb_bias = item_bias_static[batch_pos]
+                p_status_labels = status_labels[batch_pos]
+
+                pred_status = status_predictor(p_emb_bias).squeeze()
+                bias_loss = F.binary_cross_entropy_with_logits(
+                    pred_status, p_status_labels
                 )
-                loss = F.softplus(neg_scores - pos_scores).mean() + (1e-4 * reg_loss)
+
+                p_sem_static = model.item_semantic.weight[batch_pos]
+                p_bias_static = model.item_bias.weight[batch_pos]
+
+                p_sem_norm = F.normalize(p_sem_static, p=2, dim=1)
+                p_bias_norm = F.normalize(p_bias_static, p=2, dim=1)
+
+                ortho_loss = torch.mean((p_sem_norm * p_bias_norm).sum(dim=1) ** 2)
+
+                loss = (
+                    rec_loss + (LAMBDA_BIAS * bias_loss) + (LAMBDA_ORTHO * ortho_loss)
+                )
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
+            scaler.step(opt_status)
             scaler.update()
 
             total_loss += loss.item()
@@ -391,28 +340,10 @@ def train(source_filter=None):
     print("Saving...")
     model.eval()
     with torch.no_grad():
-        final_emb = model(sparse_adj)
+        final_emb, _ = model(sparse_adj)
 
     user_emb_np = final_emb[:num_users].cpu().numpy()
-    item_emb = final_emb[num_users:]
-
-    # Apply debiasing to item embeddings
-    print("Applying status debiasing to beatmap embeddings...")
-    # Create status labels for beatmaps in order of bm_to_idx
-    bm_status_map = (
-        df[["beatmap_id", "is_ranked"]]
-        .drop_duplicates()
-        .set_index("beatmap_id")["is_ranked"]
-        .to_dict()
-    )
-    status_labels = torch.tensor(
-        [bm_status_map[beatmap_id] for beatmap_id in unique_beatmaps],
-        dtype=torch.float32,
-        device=DEVICE,
-    )
-
-    item_emb_debiased = remove_status_bias(item_emb, status_labels)
-    item_emb_np = item_emb_debiased.cpu().numpy()
+    item_emb_np = final_emb[num_users:].cpu().numpy()
 
     pd.DataFrame(
         [
