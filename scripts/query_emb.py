@@ -15,6 +15,53 @@ COLLECTIONS_DIR = DATA_DIR / "collections"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
 
+def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
+    """Compare two specific beatmaps and return their cosine similarity."""
+    version_suffix = f"_{version}" if version else "_v1"
+    beatmap_embeddings_path = (
+        COLLECTIONS_DIR / f"beatmap_embeddings{version_suffix}.parquet"
+    )
+
+    print(f"Loading beatmap embeddings from {beatmap_embeddings_path}...")
+    df = pd.read_parquet(beatmap_embeddings_path)
+
+    # Check both IDs exist
+    if beatmap_id_1 not in df["beatmap_id"].values:
+        print(f"No embeddings found for beatmap ID {beatmap_id_1}")
+        return
+    if beatmap_id_2 not in df["beatmap_id"].values:
+        print(f"No embeddings found for beatmap ID {beatmap_id_2}")
+        return
+
+    # Load beatmap metadata
+    beatmaps_df = pd.read_parquet(
+        BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
+    )
+
+    # Get embeddings for both beatmaps
+    embedding_1 = df[df["beatmap_id"] == beatmap_id_1]["embedding"].values[0]
+    embedding_2 = df[df["beatmap_id"] == beatmap_id_2]["embedding"].values[0]
+
+    vector_1 = np.array(embedding_1).reshape(1, -1)
+    vector_2 = np.array(embedding_2).reshape(1, -1)
+
+    # Calculate cosine similarity
+    similarity = cosine_similarity(vector_1, vector_2)[0][0]
+
+    # Get titles for display
+    title_1 = beatmaps_df[beatmaps_df["id"] == beatmap_id_1]["title"].values
+    title_2 = beatmaps_df[beatmaps_df["id"] == beatmap_id_2]["title"].values
+
+    title_1 = title_1[0] if len(title_1) > 0 else "Unknown"
+    title_2 = title_2[0] if len(title_2) > 0 else "Unknown"
+
+    # Display results
+    print(f"\nCosine Similarity Comparison:\n")
+    print(f"Beatmap 1: {beatmap_id_1} - {title_1}")
+    print(f"Beatmap 2: {beatmap_id_2} - {title_2}")
+    print(f"\nSimilarity: {similarity:.6f}")
+
+
 def query_embeddings(beatmap_id, version=None):
     version_suffix = f"_{version}" if version else "_v1"
     beatmap_embeddings_path = (
@@ -97,8 +144,15 @@ def query_embeddings(beatmap_id, version=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Query embeddings for a beatmap")
-    parser.add_argument("beatmap_id", type=int, help="Beatmap ID to query")
+    parser = argparse.ArgumentParser(
+        description="Query embeddings for a beatmap or compare two beatmaps"
+    )
+    parser.add_argument(
+        "beatmap_id",
+        type=int,
+        nargs="+",
+        help="Beatmap ID(s) to query. Provide one ID to find similar beatmaps, or two IDs to compare them.",
+    )
     parser.add_argument(
         "-v",
         "--version",
@@ -108,4 +162,11 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    query_embeddings(args.beatmap_id, args.version)
+
+    if len(args.beatmap_id) == 1:
+        query_embeddings(args.beatmap_id[0], args.version)
+    elif len(args.beatmap_id) == 2:
+        compare_two_beatmaps(args.beatmap_id[0], args.beatmap_id[1], args.version)
+    else:
+        print("Error: Please provide either 1 or 2 beatmap IDs")
+        sys.exit(1)

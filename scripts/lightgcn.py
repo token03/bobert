@@ -13,6 +13,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import svds
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -30,7 +33,8 @@ MAX_MAPS_IN_COLLECTION = 3000
 MIN_COLLECTIONS_PER_MAP = 2
 JACCARD_THRESHOLD = 0.75
 SONG_DAMPENING_POWER = 0.95
-BRIDGE_POWER = 3.0
+BRIDGE_POWER = 1.0
+BRIDGE_BOOST = 5.0
 
 EMBEDDING_DIM = 128
 NUM_LAYERS = 4
@@ -140,14 +144,16 @@ def load_and_process_data(source_filter=None):
 
     df['is_ranked'] = df['status'].apply(lambda x: 1 if x == 0 else 0)
     col_stats = df.groupby("collection_id")['is_ranked'].mean().reset_index()
-    col_stats.rename(columns={'is_ranked': 'ranked_ratio'}, inplace=True)   
-    col_stats['bridge_weight'] = 1.0 - (2.0 * (0.5 - col_stats['ranked_ratio']).abs()) ** BRIDGE_POWER
-
-    col_stats['bridge_weight'] = col_stats['bridge_weight'].clip(lower=0.1)
+    col_stats.rename(columns={'is_ranked': 'ranked_ratio'}, inplace=True)
+    
+    col_stats['mixed_score'] = 1.0 - (2.0 * (0.5 - col_stats['ranked_ratio']).abs())
+    
+    col_stats['bridge_weight'] = 1.0 + (col_stats['mixed_score'] ** BRIDGE_POWER) * BRIDGE_BOOST
 
     df = df.merge(col_stats[['collection_id', 'bridge_weight']], on='collection_id', how='left')
 
     df["song_occurrence"] = df.groupby(["collection_id", "beatmapset_id"])["beatmap_id"].transform("count")
+    
     df["weight"] = (1.0 / (df["song_occurrence"] ** SONG_DAMPENING_POWER)) * df["bridge_weight"]
 
     unique_collections = sorted(df["collection_key"].unique())
@@ -179,7 +185,7 @@ def compute_normalized_laplacian(user_indices, item_indices, values, num_users, 
 
 
 class LightGCN(nn.Module):
-    def __init__(self, num_users, num_items, embedding_dim, num_layers):
+    def __init__(self, num_users, num_items, embedding_dim, num_layers, init_users=None, init_items=None):
         super(LightGCN, self).__init__()
         self.num_users = num_users
         self.num_items = num_items
@@ -188,8 +194,12 @@ class LightGCN(nn.Module):
         self.user_embedding = nn.Embedding(num_users, embedding_dim)
         self.item_embedding = nn.Embedding(num_items, embedding_dim)
         
-        nn.init.xavier_uniform_(self.user_embedding.weight)
-        nn.init.xavier_uniform_(self.item_embedding.weight)
+        if init_users is not None and init_items is not None:
+            self.user_embedding.weight.data.copy_(init_users)
+            self.item_embedding.weight.data.copy_(init_items)
+        else:
+            nn.init.xavier_uniform_(self.user_embedding.weight)
+            nn.init.xavier_uniform_(self.item_embedding.weight)
 
     def forward(self, sparse_adj):
         with torch.amp.autocast('cuda', enabled=False):
@@ -215,10 +225,31 @@ def train(source_filter=None):
     item_indices = torch.tensor(df["beatmap_id"].map(bm_to_idx).values, dtype=torch.long, device=DEVICE)
     weights = torch.tensor(df["weight"].values, dtype=torch.float32, device=DEVICE)
 
+    print("Computing SVD for initialization...")
+
+    row = df["collection_key"].map(col_to_idx).values
+    col = df["beatmap_id"].map(bm_to_idx).values
+    data = df["weight"].values 
+    
+    adj_mat = coo_matrix((data, (row, col)), shape=(num_users, num_items))
+    
+    u, s, vt = svds(adj_mat.astype(float), k=EMBEDDING_DIM)
+    
+    u = u[:, ::-1]
+    s = s[::-1]
+    vt = vt[::-1, :]
+    
+    svd_u = u * np.power(s, 0.5)
+    svd_v = vt.T * np.power(s, 0.5)
+
+    pretrained_user_emb = torch.FloatTensor(svd_u.copy()).to(DEVICE)
+    pretrained_item_emb = torch.FloatTensor(svd_v.copy()).to(DEVICE)
+
     print("Building Sparse Adjacency Matrix...")
     sparse_adj = compute_normalized_laplacian(user_indices, item_indices, weights, num_users, num_items)
     
-    model = LightGCN(num_users, num_items, EMBEDDING_DIM, NUM_LAYERS).to(DEVICE)
+    model = LightGCN(num_users, num_items, EMBEDDING_DIM, NUM_LAYERS, 
+                     pretrained_user_emb, pretrained_item_emb).to(DEVICE)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005) 
     scaler = torch.amp.GradScaler('cuda')
