@@ -4,7 +4,7 @@ import pandas as pd
 import argparse
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import shutil  
+import shutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -13,6 +13,54 @@ if str(PROJECT_ROOT) not in sys.path:
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
+
+
+def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
+    """Compare two specific beatmaps and return their cosine similarity."""
+    version_suffix = f"_{version}" if version else ""
+    beatmap_topic_weights_path = (
+        COLLECTIONS_DIR / f"beatmap_topic_weights{version_suffix}.parquet"
+    )
+
+    print(f"Loading beatmap topic weights from {beatmap_topic_weights_path}...")
+    df = pd.read_parquet(beatmap_topic_weights_path)
+
+    # Check both IDs exist
+    if beatmap_id_1 not in df["beatmap_id"].values:
+        print(f"No topics found for beatmap ID {beatmap_id_1}")
+        return
+    if beatmap_id_2 not in df["beatmap_id"].values:
+        print(f"No topics found for beatmap ID {beatmap_id_2}")
+        return
+
+    # Load beatmap metadata
+    beatmaps_df = pd.read_parquet(
+        BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
+    )
+
+    # Pivot to get topic vectors for both beatmaps
+    pivot_df = df.pivot(index="beatmap_id", columns="topic_id", values="weight").fillna(
+        0
+    )
+
+    vector_1 = pivot_df.loc[beatmap_id_1].values.reshape(1, -1)
+    vector_2 = pivot_df.loc[beatmap_id_2].values.reshape(1, -1)
+
+    # Calculate cosine similarity
+    similarity = cosine_similarity(vector_1, vector_2)[0][0]
+
+    # Get titles for display
+    title_1 = beatmaps_df[beatmaps_df["id"] == beatmap_id_1]["title"].values
+    title_2 = beatmaps_df[beatmaps_df["id"] == beatmap_id_2]["title"].values
+
+    title_1 = title_1[0] if len(title_1) > 0 else "Unknown"
+    title_2 = title_2[0] if len(title_2) > 0 else "Unknown"
+
+    # Display results
+    print(f"\nCosine Similarity Comparison:\n")
+    print(f"Beatmap 1: {beatmap_id_1} - {title_1}")
+    print(f"Beatmap 2: {beatmap_id_2} - {title_2}")
+    print(f"\nSimilarity: {similarity:.6f}")
 
 
 def query_topics(beatmap_id, version=None):
@@ -95,25 +143,34 @@ def query_topics(beatmap_id, version=None):
     sim_col_w = 6
     id_col_w = 10
     gutter = 2
-    
+
     fixed_width = sim_col_w + id_col_w + gutter
     max_title_len = terminal_width - fixed_width
 
     print(f"\nTop 10 most similar beatmaps:\n")
     print(f"{'Sim':<{sim_col_w}} {'ID':<{id_col_w}} {'Name'}")
-    print("-" * min(terminal_width, 100)) 
+    print("-" * min(terminal_width, 100))
 
     for row in unique_results:
-        title = str(row['title'])
+        title = str(row["title"])
         if len(title) > max_title_len:
-            title = title[:max_title_len - 3] + "..."
-            
-        print(f"{row['similarity']:<{sim_col_w}.3f} {int(row['beatmap_id']):<{id_col_w}} {title}")
+            title = title[: max_title_len - 3] + "..."
+
+        print(
+            f"{row['similarity']:<{sim_col_w}.3f} {int(row['beatmap_id']):<{id_col_w}} {title}"
+        )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Query topic weights for a beatmap")
-    parser.add_argument("beatmap_id", type=int, help="Beatmap ID to query")
+    parser = argparse.ArgumentParser(
+        description="Query topic weights for a beatmap or compare two beatmaps"
+    )
+    parser.add_argument(
+        "beatmap_id",
+        type=int,
+        nargs="+",
+        help="Beatmap ID(s) to query. Provide one ID to find similar beatmaps, or two IDs to compare them.",
+    )
     parser.add_argument(
         "-v",
         "--version",
@@ -123,4 +180,11 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    query_topics(args.beatmap_id, args.version)
+
+    if len(args.beatmap_id) == 1:
+        query_topics(args.beatmap_id[0], args.version)
+    elif len(args.beatmap_id) == 2:
+        compare_two_beatmaps(args.beatmap_id[0], args.beatmap_id[1], args.version)
+    else:
+        print("Error: Please provide either 1 or 2 beatmap IDs")
+        sys.exit(1)
