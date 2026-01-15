@@ -1,10 +1,34 @@
 import createScatterplot from 'regl-scatterplot';
 import * as d3 from 'd3';
+import { html, render } from 'lit-html';
 
-let scatterplot: any;
-let globalData: any = null;
-let meta: any = null;
-let idMap = new Map<string, number>();
+interface VizData {
+    ids: number[];
+    x: number[];
+    y: number[];
+    titles: string[];
+    artists: string[];
+    mappers: string[];
+    diffs: string[];
+    stars: number[];
+    bpms: number[];
+    lengths: number[];
+    max_combos: number[];
+    dates: string[];
+    statuses: number[];
+    neighbor_indices: number[][];
+    neighbor_distances: number[][];
+}
+
+interface MetaData {
+    status_map: Record<string, string>;
+}
+
+interface AppState {
+    viewMode: 'empty' | 'single' | 'multi';
+    selectedIdx: number | null;
+    multiIndices: number[];
+}
 
 const STATUS_COLORS: Record<string, string> = {
     "1": "#2ea4ff", "2": "#a5dc42", "3": "#55ccff", "4": "#ff66aa",
@@ -18,8 +42,19 @@ const STAR_RANGE = [
 ];
 
 const SIZE_BASE = 4;
-const SIZE_SELECTED = 8; 
-const SIZE_NEIGHBOR = 8; 
+const SIZE_SELECTED = 8;
+const SIZE_NEIGHBOR = 8;
+
+let scatterplot: any; 
+let globalData: VizData | null = null;
+let meta: MetaData | null = null;
+let idMap = new Map<string, number>();
+
+const appState: AppState = {
+    viewMode: 'empty',
+    selectedIdx: null,
+    multiIndices: []
+};
 
 let starColorScale: d3.ScaleLinear<string, string>;
 let smoothStarGradient: string[] = [];
@@ -31,44 +66,63 @@ async function init() {
             .range(STAR_RANGE)
             .clamp(true);
 
-        const GRADIENT_STEPS = 256;
         smoothStarGradient = d3.quantize(t => starColorScale(t * 8), 256).map(c => d3.color(c)!.formatHex());
 
         const response = await fetch('/viz_data.json');
         if (!response.ok) throw new Error("Failed to load viz_data.json");
 
         const payload = await response.json();
-        globalData = payload.data;
-        meta = payload.meta;
+        globalData = payload.data as VizData;
+        meta = payload.meta as MetaData;
 
         globalData.ids.forEach((id: number, index: number) => {
             idMap.set(String(id), index);
         });
 
-        document.getElementById('loader')!.style.display = 'none';
+        const loader = document.getElementById('loader');
+        if (loader) loader.style.display = 'none';
 
         initScatterplot();
-        
-        document.getElementById('color-mode')!.addEventListener('change', (e: any) => updateColorMode(e.target.value));
-        document.getElementById('search-btn')!.addEventListener('click', doSearch);
-        document.getElementById('search-input')!.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') doSearch();
-        });
+        initUI();
 
     } catch (e: any) {
         const loader = document.getElementById('loader');
         if (loader) {
-            loader.innerHTML = `<span class="error-message">ERROR: ${e.message}</span>`;
+            render(html`<span class="error-message">ERROR: ${e.message}</span>`, loader);
         }
         console.error(e);
     }
 }
 
-function initScatterplot() {
-    const canvasWrapper = document.getElementById('chart-canvas-wrapper')!;
-    const tooltip = document.getElementById('hover-tooltip')!;
+function initUI() {
+    const colorSelect = document.getElementById('color-mode');
+    if (colorSelect) {
+        colorSelect.addEventListener('change', (e) => {
+            const target = e.target as HTMLSelectElement;
+            updateColorMode(target.value);
+        });
+    }
 
-    tooltip.style.pointerEvents = 'none'; 
+    const searchBtn = document.getElementById('search-btn');
+    if (searchBtn) searchBtn.addEventListener('click', doSearch);
+
+    const searchInput = document.getElementById('search-input');
+    if (searchInput) {
+        searchInput.addEventListener('keydown', (e) => {
+            if ((e as KeyboardEvent).key === 'Enter') doSearch();
+        });
+    }
+
+    renderPanel();
+}
+
+function initScatterplot() {
+    const canvasWrapper = document.getElementById('chart-canvas-wrapper');
+    const tooltip = document.getElementById('hover-tooltip');
+
+    if (!canvasWrapper || !tooltip) return;
+
+    tooltip.style.pointerEvents = 'none';
 
     const canvas = document.createElement('canvas');
     canvasWrapper.appendChild(canvas);
@@ -83,11 +137,11 @@ function initScatterplot() {
         lassoInitiator: false,
         colorBy: 'valueA',
         sizeBy: 'valueB',
-        pointColor: STAR_RANGE,  
+        pointColor: STAR_RANGE,
     });
-    
-    const resizeObserver = new ResizeObserver(entries => {
-        for (let entry of entries) {
+
+    const resizeObserver = new ResizeObserver((entries: ResizeObserverEntry[]) => {
+        for (const entry of entries) {
             scatterplot.set({ width: entry.contentRect.width, height: entry.contentRect.height });
         }
     });
@@ -99,10 +153,10 @@ function initScatterplot() {
     scatterplot.subscribe('pointover', (pointIndex: number | null) => {
         lastHoverPoint = pointIndex;
         hoverUpdateTime = Date.now();
-        
-        if (pointIndex !== null) {
+
+        if (pointIndex !== null && globalData) {
             tooltip.style.display = 'block';
-            tooltip.innerHTML = `${globalData.titles[pointIndex]} [${globalData.diffs[pointIndex]}]`;
+            render(html`${globalData.titles[pointIndex]} [${globalData.diffs[pointIndex]}]`, tooltip);
             canvasWrapper.style.cursor = 'pointer';
         } else {
             tooltip.style.display = 'none';
@@ -113,7 +167,7 @@ function initScatterplot() {
     canvasWrapper.addEventListener('mousemove', (e) => {
         tooltip.style.left = (e.clientX + 15) + 'px';
         tooltip.style.top = (e.clientY + 15) + 'px';
-        
+
         if (lastHoverPoint !== null && Date.now() - hoverUpdateTime > 50) {
             tooltip.style.display = 'none';
             canvasWrapper.style.cursor = 'default';
@@ -135,189 +189,13 @@ function initScatterplot() {
         if (points.length === 0) {
             showEmptyState();
         } else if (points.length === 1) {
-            selectBeatmap(points[0]);
+            selectBeatmap(points[0] as number);
         } else {
             showLassoSelection(points);
         }
     });
 
     updateColorMode('stars');
-}
-
-function resetPointSize() {
-    if (scatterplot && globalData) {
-        const sizeValues = generateSizeValues();
-        const colorMode = (document.getElementById('color-mode') as HTMLSelectElement).value;
-        const colorValues = generateColorValues(colorMode);
-        scatterplot.draw({ 
-            x: globalData.x, 
-            y: globalData.y, 
-            valueA: colorValues,
-            valueB: sizeValues
-        });
-    }
-}
-
-function generateColorValues(mode: string): number[] {
-    if (!globalData) return [];
-    
-    const count = globalData.x.length;
-    const values = new Array(count);
-
-    if (mode === 'stars') {
-        for (let i = 0; i < count; i++) {
-            const starValue = globalData.stars[i];
-            const starNum = +starValue || 0;
-            values[i] = Math.min(1, Math.max(0, starNum / 8));
-        }
-    } else if (mode === 'status') {
-        for (let i = 0; i < count; i++) {
-            const statusStr = String(globalData.statuses[i]);
-            const statusMap: Record<string, number> = {
-                "1": 0, "2": 1, "3": 2, "4": 3,
-                "0": 4, "-1": 5, "-2": 6
-            };
-            values[i] = statusMap[statusStr] ?? 0;
-        }
-    } else if (mode === 'bpm' || mode === 'date' || mode === 'length' || mode === 'maxcombo') {
-        let dataKey: string;
-        if (mode === 'bpm') dataKey = 'bpms';
-        else if (mode === 'date') dataKey = 'dates';
-        else if (mode === 'length') dataKey = 'lengths';
-        else dataKey = 'max_combos';
-        
-        const rawValues = globalData[dataKey];
-        
-        let numericValues: number[];
-        if (mode === 'date') {
-            numericValues = rawValues.map((d: string) => new Date(d).getTime());
-        } else {
-            numericValues = rawValues.map((v: any) => +v || 0);
-        }
-        
-        const validValues = numericValues.filter((v: number) => !isNaN(v) && isFinite(v));
-        if (validValues.length === 0) {
-            throw new Error(`No valid values found for color mode: ${mode}`);
-        }
-        
-        const p10 = d3.quantile(validValues, 0.25)!;
-        const p90 = d3.quantile(validValues, 0.75)!;
-        
-        const range = p90 - p10;
-        if (range === 0) {
-            values.fill(0.5);
-        } else {
-            for (let i = 0; i < count; i++) {
-                const val = numericValues[i];
-                const clamped = Math.min(p90, Math.max(p10, val));
-                values[i] = (clamped - p10) / range;
-            }
-        }
-    } else {
-        throw new Error(`Unsupported color mode: ${mode}`);
-    }
-    
-    return values;
-}
-
-function generateSizeValues(highlightIdx: number | null = null, neighborIndices: number[] = []): number[] {
-    if (!globalData) return [];
-    
-    const count = globalData.x.length;
-    const values = new Array(count).fill(0); 
-    
-    neighborIndices.forEach((nIdx: number) => {
-        values[nIdx] = 1;
-    });
-    
-    if (highlightIdx !== null) {
-        values[highlightIdx] = 2;
-    }
-    
-    return values;
-}
-
-function updateColorMode(mode: string) {
-    if (!scatterplot || !globalData) return;
-    
-    const colorValues = generateColorValues(mode);
-    const sizeValues = generateSizeValues();
-    
-    let colorMap: string[] = [];
-    if (mode === 'stars') {
-        colorMap = smoothStarGradient; 
-        scatterplot.set({ pointColor: colorMap });
-    } else if (mode === 'status') {
-        colorMap = Object.values(STATUS_COLORS);
-        scatterplot.set({ pointColor: colorMap });
-    } else if (mode === 'bpm' || mode === 'date' || mode === 'length' || mode === 'maxcombo') {
-        const darkColor = '#a6084f';
-        const lightColor = '#ff87c6';
-        const colorInterpolator = d3.interpolateRgb(darkColor, lightColor);
-        
-        const GRADIENT_STEPS = 256;
-        colorMap = new Array(GRADIENT_STEPS).fill(0).map((_, i) => {
-            const t = i / (GRADIENT_STEPS - 1);
-            return d3.color(colorInterpolator(t))?.formatHex() || "#000000";
-        });
-        scatterplot.set({ pointColor: colorMap });
-    } else {
-        throw new Error(`Unsupported color mode: ${mode}`);
-    }
-    
-    scatterplot.draw({
-        x: globalData.x,
-        y: globalData.y,
-        valueA: colorValues,
-        valueB: sizeValues
-    });
-}
-
-function extractBeatmapId(input: string): string {
-    const trimmed = input.trim();
-    
-    // Check if it's an osu.ppy.sh URL
-    if (trimmed.includes('osu.ppy.sh')) {
-        // Try to match beatmapsets URL with hash fragment: /beatmapsets/{setId}#osu/{beatmapId}
-        const hashMatch = trimmed.match(/beatmapsets\/\d+#(?:osu|taiko|fruits|mania)\/(\d+)/);
-        if (hashMatch) {
-            return hashMatch[1];
-        }
-        
-        // Try to match direct beatmaps URL: /beatmaps/{beatmapId} or /b/{beatmapId}
-        const beatmapsMatch = trimmed.match(/\/(?:beatmaps|b)\/(\d+)/);
-        if (beatmapsMatch) {
-            return beatmapsMatch[1];
-        }
-    }
-    
-    // Return the original input if no URL pattern matched
-    return trimmed;
-}
-
-function doSearch() {
-    const input = document.getElementById('search-input') as HTMLInputElement;
-    const rawInput = input.value.trim();
-    const id = extractBeatmapId(rawInput);
-    const errorMsg = document.getElementById('search-error')!;
-
-    if (idMap.has(id)) {
-        errorMsg.style.display = 'none';
-        selectBeatmap(idMap.get(id)!);
-    } else {
-        errorMsg.style.display = 'block';
-    }
-}
-
-(window as any).selectBeatmap = selectBeatmap;
-
-function showEmptyState() {
-    resetPointSize(); 
-    const selectionPanel = document.getElementById('selection-panel')!;
-    selectionPanel.style.display = 'block';
-    document.getElementById('empty-state')!.style.display = 'block';
-    document.getElementById('single-select-panel')!.style.display = 'none';
-    document.getElementById('multi-select-panel')!.style.display = 'none';
 }
 
 function formatLength(seconds: number): string {
@@ -328,99 +206,275 @@ function formatDate(dateStr: string): string {
     return new Date(dateStr).toLocaleDateString();
 }
 
-function showLassoSelection(indices: number[]) {
-    if (!globalData) return;
+function generateColorValues(mode: string): number[] {
+    if (!globalData) return [];
 
-    resetPointSize();
-    
-    const selectionPanel = document.getElementById('selection-panel')!;
-    selectionPanel.style.display = 'block';
-    document.getElementById('empty-state')!.style.display = 'none';
-    document.getElementById('single-select-panel')!.style.display = 'none';
-    
-    const multiPanel = document.getElementById('multi-select-panel')!;
-    multiPanel.style.display = 'block';
-    document.getElementById('select-count')!.textContent = String(indices.length);
-    
-    let html = '';
-    indices.forEach((idx: number) => {
-        html += `
-            <div class="neighbor-item" onclick="selectBeatmap(${idx})">
-                <div class="neighbor-title">
-                    <span class="neighbor-title-text" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span>
-                    <span class="neighbor-title-diff" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span>
-                </div>
-                <div class="neighbor-sub">
-                    <span>${globalData.stars[idx]} ★ · ${globalData.bpms[idx]} BPM · ${formatLength(globalData.lengths[idx])}</span>
-                </div>
-            </div>
-        `;
-    });
-    document.getElementById('multi-select-container')!.innerHTML = html;
-}
+    const count = globalData.x.length;
+    const values = new Array(count);
 
-async function selectBeatmap(idx: number) {
-    if (!globalData) return;
+    if (mode === 'stars') {
+        for (let i = 0; i < count; i++) {
+            values[i] = Math.min(1, Math.max(0, (globalData.stars[i] || 0) / 8));
+        }
+    } else if (mode === 'status') {
+        const statusMap: Record<string, number> = {
+            "1": 0, "2": 1, "3": 2, "4": 3,
+            "0": 4, "-1": 5, "-2": 6
+        };
+        for (let i = 0; i < count; i++) {
+            values[i] = statusMap[String(globalData.statuses[i])] ?? 0;
+        }
+    } else if (mode === 'bpm' || mode === 'date' || mode === 'length' || mode === 'maxcombo') {
+        let dataKey: keyof VizData;
+        switch(mode) {
+            case 'bpm': dataKey = 'bpms'; break;
+            case 'date': dataKey = 'dates'; break;
+            case 'length': dataKey = 'lengths'; break;
+            default: dataKey = 'max_combos'; break;
+        }
 
-    const selectionPanel = document.getElementById('selection-panel')!;
-    selectionPanel.style.display = 'block';
-    document.getElementById('empty-state')!.style.display = 'none';
-    document.getElementById('multi-select-panel')!.style.display = 'none';
-    
-    const singlePanel = document.getElementById('single-select-panel')!;
-    singlePanel.style.display = 'block';
+        const rawValues = globalData[dataKey] as any[];
+        let numericValues: number[];
 
-    const externalLink = document.getElementById('external-link') as HTMLAnchorElement;
-    if (externalLink) {
-        externalLink.href = `https://osu.ppy.sh/b/${globalData.ids[idx]}`;
+        if (mode === 'date') {
+            numericValues = rawValues.map((d: string) => new Date(d).getTime());
+        } else {
+            numericValues = rawValues.map((v: any) => +v || 0);
+        }
+
+        const validValues = numericValues.filter((v) => !isNaN(v) && isFinite(v));
+        if (validValues.length === 0) throw new Error(`No valid values for: ${mode}`);
+
+        const p10 = d3.quantile(validValues, 0.25)!;
+        const p90 = d3.quantile(validValues, 0.75)!;
+        const range = p90 - p10;
+
+        if (range === 0) {
+            values.fill(0.5);
+        } else {
+            for (let i = 0; i < count; i++) {
+                const val = numericValues[i];
+                const clamped = Math.min(p90, Math.max(p10, val as number));
+                values[i] = (clamped - p10) / range;
+            }
+        }
+    } else {
+        throw new Error(`Unsupported color mode: ${mode}`);
     }
 
-    const statusTxt = meta.status_map[globalData.statuses[idx]] || "Unknown";
+    return values;
+}
+
+function generateSizeValues(highlightIdx: number | null = null, neighborIndices: number[] = []): number[] {
+    if (!globalData) return [];
+
+    const count = globalData.x.length;
+    const values = new Array(count).fill(0);
+
+    neighborIndices.forEach((nIdx) => values[nIdx] = 1);
+    if (highlightIdx !== null) values[highlightIdx] = 2;
+
+    return values;
+}
+
+function updateColorMode(mode: string) {
+    if (!scatterplot || !globalData) return;
+
+    const colorValues = generateColorValues(mode);
+    let sizeValues: number[] = [];
+    if (appState.selectedIdx !== null) {
+        sizeValues = generateSizeValues(appState.selectedIdx, globalData.neighbor_indices[appState.selectedIdx]);
+    } else {
+        sizeValues = generateSizeValues();
+    }
+
+    let colorMap: string[] = [];
+    if (mode === 'stars') {
+        colorMap = smoothStarGradient;
+        scatterplot.set({ pointColor: colorMap });
+    } else if (mode === 'status') {
+        colorMap = Object.values(STATUS_COLORS);
+        scatterplot.set({ pointColor: colorMap });
+    } else {
+        const darkColor = '#a6084f';
+        const lightColor = '#ff87c6';
+        const interpolator = d3.interpolateRgb(darkColor, lightColor);
+        colorMap = d3.quantize(interpolator, 256).map(c => d3.color(c)?.formatHex() || "#000000");
+        scatterplot.set({ pointColor: colorMap });
+    }
+
+    scatterplot.draw({
+        x: globalData.x,
+        y: globalData.y,
+        valueA: colorValues,
+        valueB: sizeValues
+    });
+}
+
+function extractBeatmapId(input: string): string {
+    const trimmed = input.trim();
+    if (trimmed.includes('osu.ppy.sh')) {
+        const hashMatch = trimmed.match(/beatmapsets\/\d+#(?:osu|taiko|fruits|mania)\/(\d+)/);
+        if (hashMatch) return hashMatch[1] as string;
+        const beatmapsMatch = trimmed.match(/\/(?:beatmaps|b)\/(\d+)/);
+        if (beatmapsMatch) return beatmapsMatch[1] as string;
+    }
+    return trimmed;
+}
+
+function doSearch() {
+    const input = document.getElementById('search-input') as HTMLInputElement;
+    if (!input) return;
     
-    document.getElementById('meta-container')!.innerHTML = `
+    const rawInput = input.value.trim();
+    const id = extractBeatmapId(rawInput);
+    const errorMsg = document.getElementById('search-error');
+
+    if (idMap.has(id)) {
+        if (errorMsg) errorMsg.style.display = 'none';
+        selectBeatmap(idMap.get(id)!);
+    } else {
+        if (errorMsg) errorMsg.style.display = 'block';
+    }
+}
+
+const beatmapItemTemplate = (idx: number, similarity?: number) => {
+    if (!globalData) return html``;
+    
+    const simString = similarity !== undefined ? (similarity * 100).toFixed(2) + '%' : '';
+
+    return html`
+        <div class="neighbor-item" @click=${() => selectBeatmap(idx)}>
+            <div class="neighbor-title">
+                <span class="neighbor-title-text" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span>
+                <span class="neighbor-title-diff" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span>
+            </div>
+            <div class="neighbor-sub">
+                <span>${globalData.stars[idx]} ★ · ${globalData.bpms[idx]} BPM · ${formatLength(globalData.lengths[idx] as number)}</span>
+                ${similarity !== undefined ? html`<span class="similarity-score">${simString}</span>` : ''}
+            </div>
+        </div>
+    `;
+};
+
+const metaInfoTemplate = (idx: number) => {
+    if (!globalData || !meta) return html``;
+    
+    const statusTxt = meta.status_map[globalData.statuses[idx] as number] || "Unknown";
+    const externalUrl = `https://osu.ppy.sh/b/${globalData.ids[idx]}`;
+
+    const extLinkEl = document.getElementById('external-link') as HTMLAnchorElement;
+    if (extLinkEl) extLinkEl.href = externalUrl;
+
+    return html`
         <div class="info-row"><span class="info-label">Title</span> <span class="info-val" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span></div>
         <div class="info-row"><span class="info-label">Artist</span> <span class="info-val" title="${globalData.artists[idx]}">${globalData.artists[idx]}</span></div>
         <div class="info-row"><span class="info-label">Mapper</span> <span class="info-val">${globalData.mappers[idx]}</span></div>
         <div class="info-row"><span class="info-label">Diff</span> <span class="info-val" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span></div>
         <div class="info-row"><span class="info-label">Stars</span> <span class="info-val">${globalData.stars[idx]} ★</span></div>
-        <div class="info-row"><span class="info-label">BPM</span> <span class="info-val">${globalData.bpms[idx]}</span></div>
-        <div class="info-row"><span class="info-label">Length</span> <span class="info-val">${formatLength(globalData.lengths[idx])}</span></div>
+        <div class="info-row"><span class="info-label">BPM</span> <span class="info-val">${globalData.bpms[idx]} BPM</span></div>
+        <div class="info-row"><span class="info-label">Length</span> <span class="info-val">${formatLength(globalData.lengths[idx] as number)}</span></div>
         <div class="info-row"><span class="info-label">Max Combo</span> <span class="info-val">${globalData.max_combos[idx]}x</span></div>
-        <div class="info-row"><span class="info-label">Date</span> <span class="info-val">${formatDate(globalData.dates[idx])}</span></div>
+        <div class="info-row"><span class="info-label">Date</span> <span class="info-val">${formatDate(globalData.dates[idx] as string)}</span></div>
         <div class="info-row"><span class="info-label">Status</span> <span class="info-val">${statusTxt}</span></div>
     `;
+};
 
-    let nbrHtml = '';
-    globalData.neighbor_indices[idx].forEach((nIdx: number, i: number) => {
-        // Calculate cosine similarity from cosine distance
-        const cosineDist = globalData.neighbor_distances[idx][i];
-        const similarity = (1 - cosineDist) * 100;
-        const simStr = similarity.toFixed(2) + '%';
+function renderPanel() {
+    const selectionPanel = document.getElementById('selection-panel');
+    const emptyState = document.getElementById('empty-state');
+    const singlePanel = document.getElementById('single-select-panel');
+    const multiPanel = document.getElementById('multi-select-panel');
+
+    if (!selectionPanel || !emptyState || !singlePanel || !multiPanel) return;
+
+    selectionPanel.style.display = 'block';
+    emptyState.style.display = appState.viewMode === 'empty' ? 'block' : 'none';
+    singlePanel.style.display = appState.viewMode === 'single' ? 'block' : 'none';
+    multiPanel.style.display = appState.viewMode === 'multi' ? 'block' : 'none';
+
+    if (appState.viewMode === 'single' && appState.selectedIdx !== null && globalData) {
+        render(metaInfoTemplate(appState.selectedIdx), document.getElementById('meta-container')!);
         
-        nbrHtml += `
-            <div class="neighbor-item" onclick="selectBeatmap(${nIdx})">
-                <div class="neighbor-title">
-                    <span class="neighbor-title-text" title="${globalData.titles[nIdx]}">${globalData.titles[nIdx]}</span>
-                    <span class="neighbor-title-diff" title="${globalData.diffs[nIdx]}">${globalData.diffs[nIdx]}</span>
-                </div>
-                <div class="neighbor-sub">
-                    <span>${globalData.stars[nIdx]} ★ · ${globalData.bpms[nIdx]} BPM · ${formatLength(globalData.lengths[nIdx])}</span>
-                    <span class="similarity-score">${simStr}</span>
-                </div>
-            </div>
-        `;
-    });
-    document.getElementById('neighbor-container')!.innerHTML = nbrHtml;
+        const neighbors = globalData.neighbor_indices[appState.selectedIdx];
+        const distances = globalData.neighbor_distances[appState.selectedIdx];
+
+        if (!neighbors || !distances) {
+            render(html`<div>No neighbor data available.</div>`, document.getElementById('neighbor-container')!);
+            return;
+        }
+        
+        const neighborTemplates = neighbors.map((nIdx, i) => {
+            const similarity = 1 - (distances[i] as number);
+            return beatmapItemTemplate(nIdx, similarity);
+        });
+        
+        render(html`${neighborTemplates}`, document.getElementById('neighbor-container')!);
+    } 
+    else if (appState.viewMode === 'multi') {
+        const countEl = document.getElementById('select-count');
+        if (countEl) countEl.textContent = String(appState.multiIndices.length);
+
+        const listTemplates = appState.multiIndices.map(idx => beatmapItemTemplate(idx));
+        render(html`${listTemplates}`, document.getElementById('multi-select-container')!);
+    }
+}
+
+function showEmptyState() {
+    appState.viewMode = 'empty';
+    appState.selectedIdx = null;
+    appState.multiIndices = [];
+    
+    renderPanel();
+    
+    if (scatterplot && globalData) {
+        const colorMode = (document.getElementById('color-mode') as HTMLSelectElement).value;
+        const colorValues = generateColorValues(colorMode);
+        const sizeValues = generateSizeValues();
+        scatterplot.draw({ 
+            x: globalData.x, y: globalData.y, 
+            valueA: colorValues, valueB: sizeValues 
+        });
+    }
+}
+
+function showLassoSelection(indices: number[]) {
+    appState.viewMode = 'multi';
+    appState.selectedIdx = null;
+    appState.multiIndices = indices;
+
+    renderPanel();
+
+    if (scatterplot && globalData) {
+        const colorMode = (document.getElementById('color-mode') as HTMLSelectElement).value;
+        const colorValues = generateColorValues(colorMode);
+        const sizeValues = generateSizeValues(null, indices);
+        scatterplot.draw({ 
+            x: globalData.x, y: globalData.y, 
+            valueA: colorValues, valueB: sizeValues 
+        });
+    }
+}
+
+async function selectBeatmap(idx: number) {
+    if (!globalData) return;
+
+    appState.viewMode = 'single';
+    appState.selectedIdx = idx;
+    appState.multiIndices = [];
+
+    renderPanel();
 
     const neighborIndices = globalData.neighbor_indices[idx] || [];
     const sizeValues = generateSizeValues(idx, neighborIndices);
 
     const colorMode = (document.getElementById('color-mode') as HTMLSelectElement).value;
     const colorValues = generateColorValues(colorMode);
+    
     await scatterplot.draw({ 
         x: globalData.x, 
         y: globalData.y, 
-        valueA: colorValues,
+        valueA: colorValues, 
         valueB: sizeValues
     });
 
@@ -432,5 +486,7 @@ async function selectBeatmap(idx: number) {
         { transition: true, duration: 800 }
     );
 }
+
+(window as any).selectBeatmap = selectBeatmap;
 
 init();
