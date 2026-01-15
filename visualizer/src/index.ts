@@ -32,11 +32,7 @@ async function init() {
             .clamp(true);
 
         const GRADIENT_STEPS = 256;
-        smoothStarGradient = new Array(GRADIENT_STEPS).fill(0).map((_, i) => {
-            const t = i / (GRADIENT_STEPS - 1); 
-            const colorStr = starColorScale(t * 8); 
-            return d3.color(colorStr)?.formatHex() || "#000000";
-        });
+        smoothStarGradient = d3.quantize(t => starColorScale(t * 8), 256).map(c => d3.color(c)!.formatHex());
 
         const response = await fetch('/viz_data.json');
         if (!response.ok) throw new Error("Failed to load viz_data.json");
@@ -62,7 +58,7 @@ async function init() {
     } catch (e: any) {
         const loader = document.getElementById('loader');
         if (loader) {
-            loader.innerHTML = `<span style="color:red; font-size: 1rem; text-align:center;">ERROR: ${e.message}</span>`;
+            loader.innerHTML = `<span class="error-message">ERROR: ${e.message}</span>`;
         }
         console.error(e);
     }
@@ -85,7 +81,6 @@ function initScatterplot() {
         opacity: 0.8,
         backgroundColor: '#0f0f12',
         lassoInitiator: false,
-        cameraRotation: false,
         colorBy: 'valueA',
         sizeBy: 'valueB',
         pointColor: STAR_RANGE,  
@@ -184,9 +179,42 @@ function generateColorValues(mode: string): number[] {
             };
             values[i] = statusMap[statusStr] ?? 0;
         }
+    } else if (mode === 'bpm' || mode === 'date' || mode === 'length' || mode === 'maxcombo') {
+        let dataKey: string;
+        if (mode === 'bpm') dataKey = 'bpms';
+        else if (mode === 'date') dataKey = 'dates';
+        else if (mode === 'length') dataKey = 'lengths';
+        else dataKey = 'max_combos';
         
+        const rawValues = globalData[dataKey];
+        
+        let numericValues: number[];
+        if (mode === 'date') {
+            numericValues = rawValues.map((d: string) => new Date(d).getTime());
+        } else {
+            numericValues = rawValues.map((v: any) => +v || 0);
+        }
+        
+        const validValues = numericValues.filter((v: number) => !isNaN(v) && isFinite(v));
+        if (validValues.length === 0) {
+            throw new Error(`No valid values found for color mode: ${mode}`);
+        }
+        
+        const p10 = d3.quantile(validValues, 0.25)!;
+        const p90 = d3.quantile(validValues, 0.75)!;
+        
+        const range = p90 - p10;
+        if (range === 0) {
+            values.fill(0.5);
+        } else {
+            for (let i = 0; i < count; i++) {
+                const val = numericValues[i];
+                const clamped = Math.min(p90, Math.max(p10, val));
+                values[i] = (clamped - p10) / range;
+            }
+        }
     } else {
-        values.fill(0.5);
+        throw new Error(`Unsupported color mode: ${mode}`);
     }
     
     return values;
@@ -196,16 +224,14 @@ function generateSizeValues(highlightIdx: number | null = null, neighborIndices:
     if (!globalData) return [];
     
     const count = globalData.x.length;
-    const values = new Array(count).fill(0); // 0 = SIZE_BASE
+    const values = new Array(count).fill(0); 
     
-    // Set neighbors to size category 1
     neighborIndices.forEach((nIdx: number) => {
-        values[nIdx] = 1; // 1 = SIZE_NEIGHBOR
+        values[nIdx] = 1;
     });
     
-    // Set selected point to size category 2
     if (highlightIdx !== null) {
-        values[highlightIdx] = 2; // 2 = SIZE_SELECTED
+        values[highlightIdx] = 2;
     }
     
     return values;
@@ -224,9 +250,19 @@ function updateColorMode(mode: string) {
     } else if (mode === 'status') {
         colorMap = Object.values(STATUS_COLORS);
         scatterplot.set({ pointColor: colorMap });
-    } else {
-        colorMap = ['#F062A1'];
+    } else if (mode === 'bpm' || mode === 'date' || mode === 'length' || mode === 'maxcombo') {
+        const darkColor = '#a6084f';
+        const lightColor = '#ff87c6';
+        const colorInterpolator = d3.interpolateRgb(darkColor, lightColor);
+        
+        const GRADIENT_STEPS = 256;
+        colorMap = new Array(GRADIENT_STEPS).fill(0).map((_, i) => {
+            const t = i / (GRADIENT_STEPS - 1);
+            return d3.color(colorInterpolator(t))?.formatHex() || "#000000";
+        });
         scatterplot.set({ pointColor: colorMap });
+    } else {
+        throw new Error(`Unsupported color mode: ${mode}`);
     }
     
     scatterplot.draw({
@@ -237,9 +273,32 @@ function updateColorMode(mode: string) {
     });
 }
 
+function extractBeatmapId(input: string): string {
+    const trimmed = input.trim();
+    
+    // Check if it's an osu.ppy.sh URL
+    if (trimmed.includes('osu.ppy.sh')) {
+        // Try to match beatmapsets URL with hash fragment: /beatmapsets/{setId}#osu/{beatmapId}
+        const hashMatch = trimmed.match(/beatmapsets\/\d+#(?:osu|taiko|fruits|mania)\/(\d+)/);
+        if (hashMatch) {
+            return hashMatch[1];
+        }
+        
+        // Try to match direct beatmaps URL: /beatmaps/{beatmapId} or /b/{beatmapId}
+        const beatmapsMatch = trimmed.match(/\/(?:beatmaps|b)\/(\d+)/);
+        if (beatmapsMatch) {
+            return beatmapsMatch[1];
+        }
+    }
+    
+    // Return the original input if no URL pattern matched
+    return trimmed;
+}
+
 function doSearch() {
     const input = document.getElementById('search-input') as HTMLInputElement;
-    const id = input.value.trim();
+    const rawInput = input.value.trim();
+    const id = extractBeatmapId(rawInput);
     const errorMsg = document.getElementById('search-error')!;
 
     if (idMap.has(id)) {
@@ -259,6 +318,14 @@ function showEmptyState() {
     document.getElementById('empty-state')!.style.display = 'block';
     document.getElementById('single-select-panel')!.style.display = 'none';
     document.getElementById('multi-select-panel')!.style.display = 'none';
+}
+
+function formatLength(seconds: number): string {
+    return new Date(seconds * 1000).toISOString().slice(14, 19);
+}
+
+function formatDate(dateStr: string): string {
+    return new Date(dateStr).toLocaleDateString();
 }
 
 function showLassoSelection(indices: number[]) {
@@ -284,7 +351,7 @@ function showLassoSelection(indices: number[]) {
                     <span class="neighbor-title-diff" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span>
                 </div>
                 <div class="neighbor-sub">
-                    <span>${globalData.stars[idx]} ★</span>
+                    <span>${globalData.stars[idx]} ★ · ${globalData.bpms[idx]} BPM · ${formatLength(globalData.lengths[idx])}</span>
                 </div>
             </div>
         `;
@@ -303,6 +370,11 @@ async function selectBeatmap(idx: number) {
     const singlePanel = document.getElementById('single-select-panel')!;
     singlePanel.style.display = 'block';
 
+    const externalLink = document.getElementById('external-link') as HTMLAnchorElement;
+    if (externalLink) {
+        externalLink.href = `https://osu.ppy.sh/b/${globalData.ids[idx]}`;
+    }
+
     const statusTxt = meta.status_map[globalData.statuses[idx]] || "Unknown";
     
     document.getElementById('meta-container')!.innerHTML = `
@@ -311,8 +383,11 @@ async function selectBeatmap(idx: number) {
         <div class="info-row"><span class="info-label">Mapper</span> <span class="info-val">${globalData.mappers[idx]}</span></div>
         <div class="info-row"><span class="info-label">Diff</span> <span class="info-val" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span></div>
         <div class="info-row"><span class="info-label">Stars</span> <span class="info-val">${globalData.stars[idx]} ★</span></div>
+        <div class="info-row"><span class="info-label">BPM</span> <span class="info-val">${globalData.bpms[idx]}</span></div>
+        <div class="info-row"><span class="info-label">Length</span> <span class="info-val">${formatLength(globalData.lengths[idx])}</span></div>
+        <div class="info-row"><span class="info-label">Max Combo</span> <span class="info-val">${globalData.max_combos[idx]}x</span></div>
+        <div class="info-row"><span class="info-label">Date</span> <span class="info-val">${formatDate(globalData.dates[idx])}</span></div>
         <div class="info-row"><span class="info-label">Status</span> <span class="info-val">${statusTxt}</span></div>
-        <div class="info-row"><span class="info-label">Link</span> <span class="info-val"><a href="https://osu.ppy.sh/b/${globalData.ids[idx]}" target="_blank" style="color:#F062A1">Open in osu!</a></span></div>
     `;
 
     let nbrHtml = '';
@@ -329,8 +404,8 @@ async function selectBeatmap(idx: number) {
                     <span class="neighbor-title-diff" title="${globalData.diffs[nIdx]}">${globalData.diffs[nIdx]}</span>
                 </div>
                 <div class="neighbor-sub">
-                    <span>${globalData.stars[nIdx]} ★</span>
-                    <span style="color: #F062A1; font-weight: 600;">${simStr}</span>
+                    <span>${globalData.stars[nIdx]} ★ · ${globalData.bpms[nIdx]} BPM · ${formatLength(globalData.lengths[nIdx])}</span>
+                    <span class="similarity-score">${simStr}</span>
                 </div>
             </div>
         `;

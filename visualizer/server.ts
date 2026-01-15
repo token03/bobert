@@ -4,6 +4,7 @@ const server = Bun.serve({
     const url = new URL(req.url);
 
     if (url.pathname === "/") return new Response(Bun.file("index.html"));
+    if (url.pathname === "/style.css") return new Response(Bun.file("style.css"));
     
     if (url.pathname === "/viz_data.json") return new Response(Bun.file("viz_data.json"));
 

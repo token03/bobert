@@ -1,0 +1,45 @@
+:root { --bg: #0f0f12; --panel: #1a1a1f; --text: #e0e0e0; --accent: #F062A1; --border: #2e2e33; --input-bg: #232329; }
+body, html { margin: 0; padding: 0; height: 100%; width: 100%; background-color: var(--bg); color: var(--text); font-family: 'Segoe UI', monospace; overflow: hidden; user-select: none; }
+#layout { display: flex; height: 100vh; }
+#sidebar { width: 320px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; overflow-y: auto; z-index: 100; box-shadow: 2px 0 10px rgba(0,0,0,0.5); flex-shrink: 0; }
+#sidebar::-webkit-scrollbar { width: 6px; }
+#sidebar::-webkit-scrollbar-track { background: transparent; }
+#sidebar::-webkit-scrollbar-thumb { background: rgba(92, 124, 250, 0.3); border-radius: 3px; }
+#sidebar::-webkit-scrollbar-thumb:hover { background: rgba(92, 124, 250, 0.5); }
+#sidebar { scrollbar-width: thin; scrollbar-color: rgba(92, 124, 250, 0.3) transparent; }
+h1 { font-size: 1.2rem; margin-top: 0; color: var(--accent); font-family: 'Courier New', monospace; letter-spacing: -1px; }
+h2 { font-size: 0.8rem; margin-top: 25px; border-bottom: 1px solid var(--border); padding-bottom: 5px; color: #666; font-weight: 700; letter-spacing: 1px; }
+.control-group { margin-bottom: 15px; }
+label { display: block; font-size: 0.75rem; margin-bottom: 6px; color: #888; font-weight: 600; }
+select, input, button { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); padding: 10px; font-family: inherit; border-radius: 4px; box-sizing: border-box; outline: none; font-size: 0.9rem; }
+select:focus, input:focus { border-color: var(--accent); }
+.search-container { display: flex; gap: 5px; }
+#search-btn { width: auto; background: var(--accent); color: white; border: none; cursor: pointer; font-weight: bold; }
+#search-btn:hover { background: #4b66d1; }
+#search-error { color: #ff5555; font-size: 0.75rem; margin-top: 5px; display: none; }
+.info-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.85rem; border-bottom: 1px solid #232329; padding-bottom: 2px;}
+.info-label { color: #777; }
+.info-val { text-align: right; font-weight: 600; color: #ddd; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.neighbor-item { padding: 10px; background: var(--input-bg); border: 1px solid transparent; border-left: 3px solid transparent; margin-bottom: 6px; cursor: pointer; transition: all 0.2s; border-radius: 0 4px 4px 0; }
+.neighbor-item:hover { background: #2a2a32; border-left-color: var(--accent); }
+.neighbor-title { font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 8px; }
+.neighbor-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.neighbor-title-diff { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 0; color: #888; font-size: 0.75rem; text-align: right; }
+.neighbor-sub { font-size: 0.75rem; color: #888; display: flex; justify-content: space-between;}
+#loader { position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%); font-size: 1.5rem; color: var(--accent); pointer-events: none; font-family: 'Courier New', monospace; z-index: 200; }
+#chart-canvas-wrapper { flex-grow: 1; height: 100%; position: relative; overflow: hidden; background: var(--bg); }
+canvas { outline: none; }
+.controls-hint { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 4px; font-size: 0.8rem; color: #aaa; pointer-events: none; border: 1px solid #333; z-index: 10; }
+#hover-tooltip { position: absolute; pointer-events: none; background: rgba(0, 0, 0, 0.8); border: 1px solid #444; padding: 5px 8px; border-radius: 4px; color: white; font-size: 0.8rem; display: none; z-index: 20; white-space: nowrap; }
+
+/* Inline styles moved from index.html */
+#selection-panel { display: none; }
+#empty-state { display: block; }
+#empty-state p { color: #666; font-size: 0.85rem; text-align: center; margin-top: 40px; }
+#single-select-panel { display: none; }
+#single-select-panel h2 { display: flex; justify-content: space-between; align-items: center; }
+#external-link { color: var(--accent); text-decoration: none; font-size: 1.1rem; margin-top: -2px; }
+#multi-select-panel { display: none; }
+
+.error-message { color: red; font-size: 1rem; text-align: center; }
+.similarity-score { color: var(--accent); font-weight: 600; }
