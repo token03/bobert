@@ -36,7 +36,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const STAR_DOMAIN = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-const STAR_RANGE = [
+const COLOR_GRADIENT = [
     '#4290fb', '#4fc0ff', '#4fffd5', '#7cff4f',
     '#f6f05c', '#ff8068', '#ff3c71', '#6563de', '#18158e'
 ];
@@ -63,7 +63,7 @@ async function init() {
     try {
         starColorScale = d3.scaleLinear<string>()
             .domain(STAR_DOMAIN)
-            .range(STAR_RANGE)
+            .range(COLOR_GRADIENT)
             .clamp(true);
 
         smoothStarGradient = d3.quantize(t => starColorScale(t * 8), 256).map(c => d3.color(c)!.formatHex());
@@ -137,7 +137,7 @@ function initScatterplot() {
         lassoInitiator: false,
         colorBy: 'valueA',
         sizeBy: 'valueB',
-        pointColor: STAR_RANGE,
+        pointColor: COLOR_GRADIENT,
     });
 
     const resizeObserver = new ResizeObserver((entries: ResizeObserverEntry[]) => {
@@ -209,60 +209,44 @@ function formatDate(dateStr: string): string {
 function generateColorValues(mode: string): number[] {
     if (!globalData) return [];
 
-    const count = globalData.x.length;
-    const values = new Array(count);
-
-    if (mode === 'stars') {
-        for (let i = 0; i < count; i++) {
-            values[i] = Math.min(1, Math.max(0, (globalData.stars[i] || 0) / 8));
-        }
-    } else if (mode === 'status') {
+    if (mode === 'status') {
         const statusMap: Record<string, number> = {
             "1": 0, "2": 1, "3": 2, "4": 3,
             "0": 4, "-1": 5, "-2": 6
         };
-        for (let i = 0; i < count; i++) {
-            values[i] = statusMap[String(globalData.statuses[i])] ?? 0;
-        }
-    } else if (mode === 'bpm' || mode === 'date' || mode === 'length' || mode === 'maxcombo') {
-        let dataKey: keyof VizData;
-        switch(mode) {
-            case 'bpm': dataKey = 'bpms'; break;
-            case 'date': dataKey = 'dates'; break;
-            case 'length': dataKey = 'lengths'; break;
-            default: dataKey = 'max_combos'; break;
-        }
-
-        const rawValues = globalData[dataKey] as any[];
-        let numericValues: number[];
-
-        if (mode === 'date') {
-            numericValues = rawValues.map((d: string) => new Date(d).getTime());
-        } else {
-            numericValues = rawValues.map((v: any) => +v || 0);
-        }
-
-        const validValues = numericValues.filter((v) => !isNaN(v) && isFinite(v));
-        if (validValues.length === 0) throw new Error(`No valid values for: ${mode}`);
-
-        const p10 = d3.quantile(validValues, 0.25)!;
-        const p90 = d3.quantile(validValues, 0.75)!;
-        const range = p90 - p10;
-
-        if (range === 0) {
-            values.fill(0.5);
-        } else {
-            for (let i = 0; i < count; i++) {
-                const val = numericValues[i];
-                const clamped = Math.min(p90, Math.max(p10, val as number));
-                values[i] = (clamped - p10) / range;
-            }
-        }
-    } else {
-        throw new Error(`Unsupported color mode: ${mode}`);
+        return Array.from(globalData.statuses, s => statusMap[String(s)] ?? 0);
     }
 
-    return values;
+    let values: number[] = [];
+    let scale = d3.scaleLinear().range([0, 1]).clamp(true);
+
+    if (mode === 'stars') {
+        values = globalData.stars;
+        scale.domain([0, 8]);
+    } 
+    else {
+        let rawValues: any[];
+        
+        switch(mode) {
+            case 'bpm': rawValues = globalData.bpms; break;
+            case 'date': rawValues = globalData.dates; break; 
+            case 'length': rawValues = globalData.lengths; break;
+            case 'maxcombo': rawValues = globalData.max_combos; break;
+            default: throw new Error(`Unsupported: ${mode}`);
+        }
+
+        values = mode === 'date' 
+            ? rawValues.map(d => new Date(d).getTime()) 
+            : rawValues.map(Number);
+
+        const sorted = values.sort(); 
+        const p10 = d3.quantileSorted(sorted, 0.25) || 0;
+        const p90 = d3.quantileSorted(sorted, 0.75) || 1;
+        
+        scale.domain([p10, p90]);
+    }
+
+    return values.map(v => scale(v));
 }
 
 function generateSizeValues(highlightIdx: number | null = null, neighborIndices: number[] = []): number[] {
@@ -296,9 +280,7 @@ function updateColorMode(mode: string) {
         colorMap = Object.values(STATUS_COLORS);
         scatterplot.set({ pointColor: colorMap });
     } else {
-        const darkColor = '#a6084f';
-        const lightColor = '#ff87c6';
-        const interpolator = d3.interpolateRgb(darkColor, lightColor);
+        const interpolator = d3.interpolateRgbBasis(COLOR_GRADIENT);
         colorMap = d3.quantize(interpolator, 256).map(c => d3.color(c)?.formatHex() || "#000000");
         scatterplot.set({ pointColor: colorMap });
     }
@@ -342,11 +324,13 @@ const beatmapItemTemplate = (idx: number, similarity?: number) => {
     if (!globalData) return html``;
     
     const simString = similarity !== undefined ? (similarity * 100).toFixed(2) + '%' : '';
+    const externalUrl = `https://osu.ppy.sh/b/${globalData.ids[idx]}`;
 
     return html`
         <div class="neighbor-item" @click=${() => selectBeatmap(idx)}>
             <div class="neighbor-title">
                 <span class="neighbor-title-text" title="${globalData.titles[idx] as string}">${globalData.titles[idx]}</span>
+                <a class="mini-external-link" href="${externalUrl}" target="_blank" @click=${(e: Event) => e.stopPropagation()} title="Open in osu!">↗</a>
                 <span class="neighbor-title-diff" title="${globalData.diffs[idx] as string}">${globalData.diffs[idx]}</span>
             </div>
             <div class="neighbor-sub">
