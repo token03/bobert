@@ -7,7 +7,7 @@ body, html { margin: 0; padding: 0; height: 100%; width: 100%; background-color:
 #sidebar::-webkit-scrollbar-thumb { background: rgba(92, 124, 250, 0.3); border-radius: 3px; }
 #sidebar::-webkit-scrollbar-thumb:hover { background: rgba(92, 124, 250, 0.5); }
 #sidebar { scrollbar-width: thin; scrollbar-color: rgba(92, 124, 250, 0.3) transparent; }
-h1 { font-size: 1.2rem; margin-top: 0; color: var(--accent); font-family: 'Courier New', monospace; letter-spacing: -1px; }
+h1 { font-size: 1.2rem; margin-top: 0; color: var(--accent); font-family: 'Segoe UI'; letter-spacing: -1px; }
 h2 { font-size: 0.8rem; margin-top: 25px; border-bottom: 1px solid var(--border); padding-bottom: 5px; color: #666; font-weight: 700; letter-spacing: 1px; }
 .control-group { margin-bottom: 15px; }
 label { display: block; font-size: 0.75rem; margin-bottom: 6px; color: #888; font-weight: 600; }

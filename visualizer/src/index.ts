@@ -123,6 +123,9 @@ function initScatterplot() {
 
     if (!canvasWrapper || !tooltip) return;
 
+    const canvasWidth = canvasWrapper.clientWidth;
+    const canvasHeight = canvasWrapper.clientHeight;
+
     tooltip.style.pointerEvents = 'none';
 
     const canvas = document.createElement('canvas');
@@ -196,7 +199,32 @@ function initScatterplot() {
         }
     });
 
+    if (!globalData) return;
+
+    let [xMin, xMax] = d3.extent(globalData.x) as [number, number];
+    let [yMin, yMax] = d3.extent(globalData.y) as [number, number];
+
+    const dataAspect = (xMax - xMin) / (yMax - yMin);
+    const screenAspect = canvasWrapper.clientWidth / canvasWrapper.clientHeight;
+
+    if ((dataAspect < 1 && screenAspect > 1) || (dataAspect > 1 && screenAspect < 1)) {
+        [globalData.x, globalData.y] = [globalData.y, globalData.x.map(v => -v)];
+        
+        [xMin, xMax, yMin, yMax] = [yMin, yMax, -xMax, -xMin];
+    }
+
     updateColorMode('stars');
+
+    const padding = 0.05;
+    const width = xMax - xMin;
+    const height = yMax - yMin;
+
+    scatterplot.zoomToArea({
+        x: xMin - width * padding,
+        y: yMin - height * padding,
+        width: width * (1 + padding * 2),
+        height: height * (1 + padding * 2)
+    }, { transition: false });
 }
 
 function formatLength(seconds: number): string {
@@ -353,7 +381,7 @@ const metaInfoTemplate = (idx: number) => {
         { label: 'Title', val: globalData.titles[idx], title: true },
         { label: 'Artist', val: globalData.artists[idx], title: true },
         { label: 'Mapper', val: globalData.mappers[idx] },
-        { label: 'Diff', val: globalData.diffs[idx], title: true },
+        { label: 'Version', val: globalData.diffs[idx], title: true },
         { label: 'Stars', val: `${globalData.stars[idx]} ★` },
         { label: 'BPM', val: `${globalData.bpms[idx]} BPM` },
         { label: 'Length', val: formatLength(globalData.lengths[idx] as number) },
