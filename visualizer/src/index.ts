@@ -17,6 +17,10 @@ const STAR_RANGE = [
     '#f6f05c', '#ff8068', '#ff3c71', '#6563de', '#18158e'
 ];
 
+const SIZE_BASE = 4;
+const SIZE_SELECTED = 8; 
+const SIZE_NEIGHBOR = 8; 
+
 let starColorScale: d3.ScaleLinear<string, string>;
 let smoothStarGradient: string[] = [];
 
@@ -77,12 +81,13 @@ function initScatterplot() {
         canvas: canvas,
         width: canvasWrapper.clientWidth,
         height: canvasWrapper.clientHeight,
-        pointSize: 4,
+        pointSize: [SIZE_BASE, SIZE_NEIGHBOR, SIZE_SELECTED],
         opacity: 0.8,
         backgroundColor: '#0f0f12',
         lassoInitiator: false,
         cameraRotation: false,
         colorBy: 'valueA',
+        sizeBy: 'valueB',
         pointColor: STAR_RANGE,  
     });
     
@@ -144,6 +149,20 @@ function initScatterplot() {
     updateColorMode('stars');
 }
 
+function resetPointSize() {
+    if (scatterplot && globalData) {
+        const sizeValues = generateSizeValues();
+        const colorMode = (document.getElementById('color-mode') as HTMLSelectElement).value;
+        const colorValues = generateColorValues(colorMode);
+        scatterplot.draw({ 
+            x: globalData.x, 
+            y: globalData.y, 
+            valueA: colorValues,
+            valueB: sizeValues
+        });
+    }
+}
+
 function generateColorValues(mode: string): number[] {
     if (!globalData) return [];
     
@@ -173,10 +192,30 @@ function generateColorValues(mode: string): number[] {
     return values;
 }
 
+function generateSizeValues(highlightIdx: number | null = null, neighborIndices: number[] = []): number[] {
+    if (!globalData) return [];
+    
+    const count = globalData.x.length;
+    const values = new Array(count).fill(0); // 0 = SIZE_BASE
+    
+    // Set neighbors to size category 1
+    neighborIndices.forEach((nIdx: number) => {
+        values[nIdx] = 1; // 1 = SIZE_NEIGHBOR
+    });
+    
+    // Set selected point to size category 2
+    if (highlightIdx !== null) {
+        values[highlightIdx] = 2; // 2 = SIZE_SELECTED
+    }
+    
+    return values;
+}
+
 function updateColorMode(mode: string) {
     if (!scatterplot || !globalData) return;
     
     const colorValues = generateColorValues(mode);
+    const sizeValues = generateSizeValues();
     
     let colorMap: string[] = [];
     if (mode === 'stars') {
@@ -186,14 +225,15 @@ function updateColorMode(mode: string) {
         colorMap = Object.values(STATUS_COLORS);
         scatterplot.set({ pointColor: colorMap });
     } else {
-        colorMap = ['#5c7cfa'];
+        colorMap = ['#F062A1'];
         scatterplot.set({ pointColor: colorMap });
     }
     
     scatterplot.draw({
         x: globalData.x,
         y: globalData.y,
-        valueA: colorValues  
+        valueA: colorValues,
+        valueB: sizeValues
     });
 }
 
@@ -213,6 +253,7 @@ function doSearch() {
 (window as any).selectBeatmap = selectBeatmap;
 
 function showEmptyState() {
+    resetPointSize(); 
     const selectionPanel = document.getElementById('selection-panel')!;
     selectionPanel.style.display = 'block';
     document.getElementById('empty-state')!.style.display = 'block';
@@ -222,6 +263,8 @@ function showEmptyState() {
 
 function showLassoSelection(indices: number[]) {
     if (!globalData) return;
+
+    resetPointSize();
     
     const selectionPanel = document.getElementById('selection-panel')!;
     selectionPanel.style.display = 'block';
@@ -237,8 +280,8 @@ function showLassoSelection(indices: number[]) {
         html += `
             <div class="neighbor-item" onclick="selectBeatmap(${idx})">
                 <div class="neighbor-title">
-                    <span class="neighbor-title-text">${globalData.titles[idx]}</span>
-                    <span class="neighbor-title-diff">${globalData.diffs[idx]}</span>
+                    <span class="neighbor-title-text" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span>
+                    <span class="neighbor-title-diff" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span>
                 </div>
                 <div class="neighbor-sub">
                     <span>${globalData.stars[idx]} ★</span>
@@ -249,7 +292,7 @@ function showLassoSelection(indices: number[]) {
     document.getElementById('multi-select-container')!.innerHTML = html;
 }
 
-function selectBeatmap(idx: number) {
+async function selectBeatmap(idx: number) {
     if (!globalData) return;
 
     const selectionPanel = document.getElementById('selection-panel')!;
@@ -266,10 +309,10 @@ function selectBeatmap(idx: number) {
         <div class="info-row"><span class="info-label">Title</span> <span class="info-val" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span></div>
         <div class="info-row"><span class="info-label">Artist</span> <span class="info-val" title="${globalData.artists[idx]}">${globalData.artists[idx]}</span></div>
         <div class="info-row"><span class="info-label">Mapper</span> <span class="info-val">${globalData.mappers[idx]}</span></div>
-        <div class="info-row"><span class="info-label">Diff</span> <span class="info-val">${globalData.diffs[idx]}</span></div>
+        <div class="info-row"><span class="info-label">Diff</span> <span class="info-val" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span></div>
         <div class="info-row"><span class="info-label">Stars</span> <span class="info-val">${globalData.stars[idx]} ★</span></div>
         <div class="info-row"><span class="info-label">Status</span> <span class="info-val">${statusTxt}</span></div>
-        <div class="info-row"><span class="info-label">Link</span> <span class="info-val"><a href="https://osu.ppy.sh/b/${globalData.ids[idx]}" target="_blank" style="color:#5c7cfa">Open in osu!</a></span></div>
+        <div class="info-row"><span class="info-label">Link</span> <span class="info-val"><a href="https://osu.ppy.sh/b/${globalData.ids[idx]}" target="_blank" style="color:#F062A1">Open in osu!</a></span></div>
     `;
 
     let nbrHtml = '';
@@ -282,17 +325,29 @@ function selectBeatmap(idx: number) {
         nbrHtml += `
             <div class="neighbor-item" onclick="selectBeatmap(${nIdx})">
                 <div class="neighbor-title">
-                    <span class="neighbor-title-text">${globalData.titles[nIdx]}</span>
-                    <span class="neighbor-title-diff">${globalData.diffs[nIdx]}</span>
+                    <span class="neighbor-title-text" title="${globalData.titles[nIdx]}">${globalData.titles[nIdx]}</span>
+                    <span class="neighbor-title-diff" title="${globalData.diffs[nIdx]}">${globalData.diffs[nIdx]}</span>
                 </div>
                 <div class="neighbor-sub">
                     <span>${globalData.stars[nIdx]} ★</span>
-                    <span style="color: #5c7cfa; font-weight: 600;">${simStr}</span>
+                    <span style="color: #F062A1; font-weight: 600;">${simStr}</span>
                 </div>
             </div>
         `;
     });
     document.getElementById('neighbor-container')!.innerHTML = nbrHtml;
+
+    const neighborIndices = globalData.neighbor_indices[idx] || [];
+    const sizeValues = generateSizeValues(idx, neighborIndices);
+
+    const colorMode = (document.getElementById('color-mode') as HTMLSelectElement).value;
+    const colorValues = generateColorValues(colorMode);
+    await scatterplot.draw({ 
+        x: globalData.x, 
+        y: globalData.y, 
+        valueA: colorValues,
+        valueB: sizeValues
+    });
 
     scatterplot.select([idx]);
     
