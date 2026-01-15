@@ -117,7 +117,7 @@ def query_embeddings(beatmap_id, version=None):
         if row["beatmapset_id"] not in seen_beatmapsets:
             seen_beatmapsets.add(row["beatmapset_id"])
             unique_results.append(row)
-        if len(unique_results) >= 10:
+        if len(unique_results) >= 20:
             break
 
     terminal_width = shutil.get_terminal_size((80, 20)).columns

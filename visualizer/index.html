@@ -3,388 +3,84 @@
 <head>
     <meta charset="UTF-8">
     <title>Beatmap Embedding Explorer (Regl)</title>
-    <!-- D3 for color scales -->
-    <script src="https://cdn.jsdelivr.net/npm/regl-scatterplot@1.15.0/dist/regl-scatterplot.bundled.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/d3-color@3"></script>
-    <script src="https://cdn.jsdelivr.net/npm/d3-interpolate@3"></script>
-    <script src="https://cdn.jsdelivr.net/npm/d3-scale-chromatic@3"></script>
-    <script src="https://cdn.jsdelivr.net/npm/d3-scale@4"></script>
-    
     <style>
-        :root {
-            --bg: #0f0f12;
-            --panel: #1a1a1f;
-            --text: #e0e0e0;
-            --accent: #5c7cfa;
-            --border: #2e2e33;
-            --input-bg: #232329;
-        }
-
-        body, html {
-            margin: 0; padding: 0;
-            height: 100%; width: 100%;
-            background-color: var(--bg);
-            color: var(--text);
-            font-family: 'Segoe UI', 'Roboto', 'Courier New', monospace;
-            overflow: hidden;
-            user-select: none; 
-        }
-
+        :root { --bg: #0f0f12; --panel: #1a1a1f; --text: #e0e0e0; --accent: #5c7cfa; --border: #2e2e33; --input-bg: #232329; }
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; background-color: var(--bg); color: var(--text); font-family: 'Segoe UI', monospace; overflow: hidden; user-select: none; }
         #layout { display: flex; height: 100vh; }
-
-        #sidebar {
-            width: 320px;
-            background: var(--panel);
-            border-right: 1px solid var(--border);
-            display: flex;
-            flex-direction: column;
-            padding: 20px;
-            box-sizing: border-box;
-            overflow-y: auto;
-            z-index: 100;
-            box-shadow: 2px 0 10px rgba(0,0,0,0.5);
-            flex-shrink: 0;
-        }
-
+        #sidebar { width: 320px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; overflow-y: auto; z-index: 100; box-shadow: 2px 0 10px rgba(0,0,0,0.5); flex-shrink: 0; }
+        #sidebar::-webkit-scrollbar { width: 6px; }
+        #sidebar::-webkit-scrollbar-track { background: transparent; }
+        #sidebar::-webkit-scrollbar-thumb { background: rgba(92, 124, 250, 0.3); border-radius: 3px; }
+        #sidebar::-webkit-scrollbar-thumb:hover { background: rgba(92, 124, 250, 0.5); }
+        #sidebar { scrollbar-width: thin; scrollbar-color: rgba(92, 124, 250, 0.3) transparent; }
         h1 { font-size: 1.2rem; margin-top: 0; color: var(--accent); font-family: 'Courier New', monospace; letter-spacing: -1px; }
         h2 { font-size: 0.8rem; margin-top: 25px; border-bottom: 1px solid var(--border); padding-bottom: 5px; color: #666; font-weight: 700; letter-spacing: 1px; }
-        
         .control-group { margin-bottom: 15px; }
         label { display: block; font-size: 0.75rem; margin-bottom: 6px; color: #888; font-weight: 600; }
-        
-        select, input, button {
-            width: 100%;
-            background: var(--input-bg);
-            color: var(--text);
-            border: 1px solid var(--border);
-            padding: 10px;
-            font-family: inherit;
-            border-radius: 4px;
-            box-sizing: border-box;
-            outline: none;
-            font-size: 0.9rem;
-        }
-        
+        select, input, button { width: 100%; background: var(--input-bg); color: var(--text); border: 1px solid var(--border); padding: 10px; font-family: inherit; border-radius: 4px; box-sizing: border-box; outline: none; font-size: 0.9rem; }
         select:focus, input:focus { border-color: var(--accent); }
-        
         .search-container { display: flex; gap: 5px; }
         #search-btn { width: auto; background: var(--accent); color: white; border: none; cursor: pointer; font-weight: bold; }
         #search-btn:hover { background: #4b66d1; }
         #search-error { color: #ff5555; font-size: 0.75rem; margin-top: 5px; display: none; }
-
-        /* Info Panel */
         .info-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 0.85rem; border-bottom: 1px solid #232329; padding-bottom: 2px;}
         .info-label { color: #777; }
         .info-val { text-align: right; font-weight: 600; color: #ddd; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        
-        .neighbor-item {
-            padding: 10px;
-            background: var(--input-bg);
-            border: 1px solid transparent;
-            border-left: 3px solid transparent;
-            margin-bottom: 6px;
-            cursor: pointer;
-            transition: all 0.2s;
-            border-radius: 0 4px 4px 0;
-        }
+        .neighbor-item { padding: 10px; background: var(--input-bg); border: 1px solid transparent; border-left: 3px solid transparent; margin-bottom: 6px; cursor: pointer; transition: all 0.2s; border-radius: 0 4px 4px 0; }
         .neighbor-item:hover { background: #2a2a32; border-left-color: var(--accent); }
         .neighbor-title { font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; margin-bottom: 4px; }
         .neighbor-sub { font-size: 0.75rem; color: #888; display: flex; justify-content: space-between;}
-
-        #loader {
-            position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%);
-            font-size: 1.5rem; color: var(--accent); pointer-events: none; font-family: 'Courier New', monospace;
-            z-index: 200;
-        }
-
-        #chart-canvas-wrapper { 
-            flex-grow: 1; 
-            height: 100%; 
-            position: relative; 
-            overflow: hidden; 
-            background: var(--bg);
-        }
-        
+        #loader { position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%); font-size: 1.5rem; color: var(--accent); pointer-events: none; font-family: 'Courier New', monospace; z-index: 200; }
+        #chart-canvas-wrapper { flex-grow: 1; height: 100%; position: relative; overflow: hidden; background: var(--bg); }
         canvas { outline: none; }
-
-        /* Hint overlay */
-        .controls-hint {
-            position: absolute; bottom: 20px; right: 20px;
-            background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 4px;
-            font-size: 0.8rem; color: #aaa; pointer-events: none;
-            border: 1px solid #333;
-            z-index: 10;
-        }
-        
-        /* Tooltip provided by app logic, not library */
-        #hover-tooltip {
-            position: absolute;
-            pointer-events: none;
-            background: rgba(0, 0, 0, 0.8);
-            border: 1px solid #444;
-            padding: 5px 8px;
-            border-radius: 4px;
-            color: white;
-            font-size: 0.8rem;
-            display: none;
-            z-index: 20;
-            white-space: nowrap;
-        }
+        .controls-hint { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 4px; font-size: 0.8rem; color: #aaa; pointer-events: none; border: 1px solid #333; z-index: 10; }
+        #hover-tooltip { position: absolute; pointer-events: none; background: rgba(0, 0, 0, 0.8); border: 1px solid #444; padding: 5px 8px; border-radius: 4px; color: white; font-size: 0.8rem; display: none; z-index: 20; white-space: nowrap; }
     </style>
 </head>
 <body>
-
-<div id="layout">
-    <div id="sidebar">
-        <h1>EMBEDDING<br>EXPLORER</h1>
-        
-        <div class="control-group">
-            <label>FIND BEATMAP (ID)</label>
-            <div class="search-container">
-                <input type="text" id="search-input" placeholder="e.g. 123456" onkeydown="if(event.key==='Enter') doSearch()">
-                <button id="search-btn" onclick="doSearch()">GO</button>
-            </div>
-            <div id="search-error">Beatmap ID not found.</div>
-        </div>
-
-        <div class="control-group">
-            <label>COLOR MODE</label>
-            <select id="color-mode">
-                <option value="stars">Star Rating (Difficulty)</option>
-                <option value="status">Ranked Status</option>
-                <option value="solid">Solid Color (Performance)</option>
-            </select>
-        </div>
-
-        <div id="selection-panel" style="display:none;">
-            <h2>Selected Beatmap</h2>
-            <div id="meta-container"></div>
-            
-            <h2>Nearest Neighbors</h2>
-            <div id="neighbor-container"></div>
-        </div>
-        
-        <div id="empty-state">
-            <p style="color: #666; font-size: 0.8rem; margin-top: 50px; line-height: 1.6;">
-                <strong>Controls:</strong><br>
-                • Scroll to Zoom<br>
-                • Left Drag to Pan<br>
-                • Click points to Select<br>
-            </p>
-        </div>
-    </div>
-
-    <div id="chart-canvas-wrapper">
-        <div class="controls-hint">L-Click: Select | Drag: Pan | Scroll: Zoom</div>
-        <div id="hover-tooltip"></div>
-    </div>
-    <div id="loader">LOADING DATASET...</div>
-</div>
-
-<script>
-    let scatterplot;
-    let globalData = null;
-    let meta = null;
-    let idMap = new Map();
-    let points = []; 
-    
-    // Config
-    const STATUS_COLORS = { 
-        "1": "#2ea4ff", "2": "#a5dc42", "3": "#55ccff", "4": "#ff66aa", 
-        "0": "#ffd966", "-1": "#ffcc22", "-2": "#666666" 
-    };
-    
-    // Star Rating Gradient
-    const STAR_DOMAIN = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-    const STAR_RANGE = [
-        '#4290fb', '#4fc0ff', '#4fffd5', '#7cff4f', 
-        '#f6f05c', '#ff8068', '#ff3c71', '#6563de', '#18158e'
-    ];
-    let starColorScale;
-
-    async function init() {
-        try {
-            // Setup D3 Scale for stars
-            starColorScale = d3.scaleLinear().domain(STAR_DOMAIN).range(STAR_RANGE).clamp(true);
-
-            // Fetch Data
-            const response = await fetch('viz_data.json');
-            if (!response.ok) throw new Error("Failed to load viz_data.json");
-            
-            const payload = await response.json();
-            globalData = payload.data;
-            meta = payload.meta;
-
-            // Process Data for Regl-Scatterplot (Flattened [x, y, x, y...]) or Array of Arrays
-            // regl-scatterplot supports flat Float32Array if width/height handled, 
-            // but standard usage often prefers array of points or Float32Array [x, y, x, y].
-            const count = globalData.x.length;
-            points = new Float32Array(count * 2);
-            
-            globalData.ids.forEach((id, index) => {
-                idMap.set(String(id), index);
-                points[index * 2] = globalData.x[index];
-                points[index * 2 + 1] = globalData.y[index];
-            });
-
-            document.getElementById('loader').style.display = 'none';
-            
-            initScatterplot(); 
-            
-            document.getElementById('color-mode').addEventListener('change', (e) => updateColorMode(e.target.value));
-
-        } catch (e) {
-            document.getElementById('loader').innerHTML = `<span style="color:red; font-size: 1rem; text-align:center;">ERROR: ${e.message}</span>`;
-            console.error(e);
-        }
-    }
-
-    function initScatterplot() {
-        const canvasWrapper = document.getElementById('chart-canvas-wrapper');
-        const tooltip = document.getElementById('hover-tooltip');
-        
-        // Create canvas element manually to ensure control
-        const canvas = document.createElement('canvas');
-        canvasWrapper.appendChild(canvas);
-
-        console.log(createScatterplot);
-
-        scatterplot = createScatterplot({
-            canvas: canvas,
-            width: canvasWrapper.clientWidth,
-            height: canvasWrapper.clientHeight,
-            pointSize: 4,
-            opacity: 0.8,
-            backgroundColor: '#0f0f12',
-            lassoInitiator: false,
-        });
-
-        // Handle Resizing
-        const resizeObserver = new ResizeObserver(entries => {
-            for (let entry of entries) {
-                // debounce slightly or just set
-                scatterplot.set({ width: entry.contentRect.width, height: entry.contentRect.height });
-            }
-        });
-        resizeObserver.observe(canvasWrapper);
-
-        // Interaction Handlers
-        scatterplot.subscribe('pointover', (pointIndex) => {
-            if (pointIndex === null) {
-                tooltip.style.display = 'none';
-                canvasWrapper.style.cursor = 'default';
-            } else {
-                tooltip.style.display = 'block';
-                tooltip.innerHTML = `${globalData.titles[pointIndex]} [${globalData.diffs[pointIndex]}]`;
-                canvasWrapper.style.cursor = 'pointer';
-            }
-        });
-
-        // Track mouse for tooltip positioning
-        canvasWrapper.addEventListener('mousemove', (e) => {
-            if(tooltip.style.display === 'block') {
-                const rect = canvasWrapper.getBoundingClientRect();
-                tooltip.style.left = (e.clientX - rect.left + 15) + 'px';
-                tooltip.style.top = (e.clientY - rect.top + 15) + 'px';
-            }
-        });
-
-        scatterplot.subscribe('pointclick', (pointIndex) => {
-            if (pointIndex !== null) {
-                selectBeatmap(pointIndex);
-            }
-        });
-
-        // Initial Draw
-        const colors = generateColors('stars');
-        scatterplot.draw(points, { color: colors });
-    }
-
-    function generateColors(mode) {
-        const count = globalData.x.length;
-        const colors = new Array(count); // Library accepts array of hex strings
-
-        if (mode === 'stars') {
-            for (let i = 0; i < count; i++) {
-                colors[i] = starColorScale(globalData.stars[i]);
-            }
-        } 
-        else if (mode === 'status') {
-            for (let i = 0; i < count; i++) {
-                const s = globalData.statuses[i];
-                colors[i] = STATUS_COLORS[s] || '#ffffff';
-            }
-        } 
-        else {
-            colors.fill('#5c7cfa');
-        }
-        return colors;
-    }
-
-    function updateColorMode(mode) {
-        if (!scatterplot) return;
-        const newColors = generateColors(mode);
-        // We re-draw. points data is cached by library if we pass the same reference? 
-        // Better to explicitly pass points again to be safe with this library version.
-        scatterplot.draw(points, { color: newColors });
-    }
-
-    function doSearch() {
-        const input = document.getElementById('search-input');
-        const id = input.value.trim();
-        const errorMsg = document.getElementById('search-error');
-        
-        if (idMap.has(id)) {
-            errorMsg.style.display = 'none';
-            selectBeatmap(idMap.get(id));
-        } else {
-            errorMsg.style.display = 'block';
-        }
-    }
-
-    function selectBeatmap(idx) {
-        const selectionPanel = document.getElementById('selection-panel');
-        document.getElementById('empty-state').style.display = 'none';
-        selectionPanel.style.display = 'block';
-
-        // Update DOM Info
-        const statusTxt = meta.status_map[globalData.statuses[idx]] || "Unknown";
-        document.getElementById('meta-container').innerHTML = `
-            <div class="info-row"><span class="info-label">Title</span> <span class="info-val" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span></div>
-            <div class="info-row"><span class="info-label">Artist</span> <span class="info-val" title="${globalData.artists[idx]}">${globalData.artists[idx]}</span></div>
-            <div class="info-row"><span class="info-label">Mapper</span> <span class="info-val">${globalData.mappers[idx]}</span></div>
-            <div class="info-row"><span class="info-label">Diff</span> <span class="info-val">${globalData.diffs[idx]}</span></div>
-            <div class="info-row"><span class="info-label">Stars</span> <span class="info-val">${globalData.stars[idx]} ★</span></div>
-            <div class="info-row"><span class="info-label">Status</span> <span class="info-val">${statusTxt}</span></div>
-            <div class="info-row"><span class="info-label">Link</span> <span class="info-val"><a href="https://osu.ppy.sh/b/${globalData.ids[idx]}" target="_blank" style="color:#5c7cfa">Open in osu!</a></span></div>
-        `;
-
-        let nbrHtml = '';
-        globalData.neighbor_indices[idx].forEach(nIdx => {
-            nbrHtml += `
-                <div class="neighbor-item" onclick="selectBeatmap(${nIdx})">
-                    <div class="neighbor-title">${globalData.titles[nIdx]}</div>
-                    <div class="neighbor-sub">
-                        <span>${globalData.stars[nIdx]} ★</span>
-                        <span>${globalData.diffs[nIdx]}</span>
-                    </div>
+    <div id="layout">
+        <div id="sidebar">
+            <h1>EMBEDDING<br>EXPLORER</h1>
+            <div class="control-group">
+                <label>FIND BEATMAP (ID)</label>
+                <div class="search-container">
+                    <input type="text" id="search-input" placeholder="e.g. 123456">
+                    <button id="search-btn">GO</button>
                 </div>
-            `;
-        });
-        document.getElementById('neighbor-container').innerHTML = nbrHtml;
-
-        // Visual Selection
-        scatterplot.select([idx]);
-        
-        // Zoom logic
-        const tx = points[idx * 2];
-        const ty = points[idx * 2 + 1];
-        
-        // Transition to point
-        scatterplot.zoomToLocation(tx, ty, 2.5, { transition: true, duration: 800 });
-    }
-
-    init();
-</script>
+                <div id="search-error">Beatmap ID not found.</div>
+            </div>
+            <div class="control-group">
+                <label>COLOR MODE</label>
+                <select id="color-mode">
+                    <option value="stars">Star Rating (Difficulty)</option>
+                    <option value="status">Ranked Status</option>
+                    <option value="solid">Solid Color (Performance)</option>
+                </select>
+            </div>
+            <div id="selection-panel" style="display:none;">
+                <div id="empty-state" style="display:block;">
+                    <p style="color:#666; font-size:0.85rem; text-align:center; margin-top:40px;">
+                        Click a point or search to view beatmap details
+                    </p>
+                </div>
+                <div id="single-select-panel" style="display:none;">
+                    <h2>Selected Beatmap</h2>
+                    <div id="meta-container"></div>
+                    <h2>Nearest Neighbors</h2>
+                    <div id="neighbor-container"></div>
+                </div>
+                <div id="multi-select-panel" style="display:none;">
+                    <h2>Selected Beatmaps (<span id="select-count">0</span>)</h2>
+                    <div id="multi-select-container"></div>
+                </div>
+            </div>
+        </div>
+        <div id="chart-canvas-wrapper">
+        </div>
+        <div id="loader">LOADING DATASET...</div>
+    </div>
+    <div id="hover-tooltip"></div>
+    </div>
+    <script type="module" src="/index.js"></script>
 </body>
 </html>

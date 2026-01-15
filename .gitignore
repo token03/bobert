@@ -22,5 +22,3 @@ experiments/
 .vscode/
 
 .venv
-
-*.html

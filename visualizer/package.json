@@ -1,0 +1,17 @@
+{
+  "name": "visualizer",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/d3": "^7.4.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "d3": "^7.9.0",
+    "regl-scatterplot": "^1.15.0"
+  }
+}
