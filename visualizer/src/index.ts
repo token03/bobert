@@ -95,8 +95,9 @@ async function init() {
 }
 
 function initUI() {
-    const colorSelect = document.getElementById('color-mode');
+    const colorSelect = document.getElementById('color-mode') as HTMLSelectElement;
     if (colorSelect) {
+        colorSelect.value = 'stars';
         colorSelect.addEventListener('change', (e) => {
             const target = e.target as HTMLSelectElement;
             updateColorMode(target.value);
@@ -275,15 +276,13 @@ function updateColorMode(mode: string) {
     let colorMap: string[] = [];
     if (mode === 'stars') {
         colorMap = smoothStarGradient;
-        scatterplot.set({ pointColor: colorMap });
     } else if (mode === 'status') {
         colorMap = Object.values(STATUS_COLORS);
-        scatterplot.set({ pointColor: colorMap });
     } else {
         const interpolator = d3.interpolateRgbBasis(COLOR_GRADIENT);
         colorMap = d3.quantize(interpolator, 256).map(c => d3.color(c)?.formatHex() || "#000000");
-        scatterplot.set({ pointColor: colorMap });
     }
+    scatterplot.set({ pointColor: colorMap });
 
     scatterplot.draw({
         x: globalData.x,

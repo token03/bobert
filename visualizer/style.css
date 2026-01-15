@@ -29,7 +29,9 @@ select:focus, input:focus { border-color: var(--accent); }
 .neighbor-item:hover .mini-external-link { opacity: 1; }
 .mini-external-link:hover { filter: brightness(1.2); }
 .neighbor-sub { font-size: 0.75rem; color: #888; display: flex; justify-content: space-between;}
-#loader { position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%); font-size: 1.5rem; color: var(--accent); pointer-events: none; font-family: 'Courier New', monospace; z-index: 200; }
+#loader { position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%); z-index: 200; pointer-events: none; }
+.spinner { width: 30px; height: 30px; border: 3px solid rgba(240, 98, 161, 0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 #chart-canvas-wrapper { flex-grow: 1; height: 100%; position: relative; overflow: hidden; background: var(--bg); }
 canvas { outline: none; }
 .controls-hint { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 4px; font-size: 0.8rem; color: #aaa; pointer-events: none; border: 1px solid #333; z-index: 10; }
