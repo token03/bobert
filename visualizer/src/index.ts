@@ -151,38 +151,27 @@ function initScatterplot() {
     });
     resizeObserver.observe(canvasWrapper);
 
-    let lastHoverPoint: number | null = null;
-    let hoverUpdateTime = 0;
-
-    scatterplot.subscribe('pointover', (pointIndex: number | null) => {
-        lastHoverPoint = pointIndex;
-        hoverUpdateTime = Date.now();
-
-        if (pointIndex !== null && globalData) {
+    scatterplot.subscribe('pointover', (pointIndex: number) => {
+        if (globalData) {
             tooltip.style.display = 'block';
             render(html`${globalData.titles[pointIndex]} [${globalData.diffs[pointIndex]}]`, tooltip);
             canvasWrapper.style.cursor = 'pointer';
-        } else {
-            tooltip.style.display = 'none';
-            canvasWrapper.style.cursor = 'default';
         }
+    });
+
+    scatterplot.subscribe('pointout', () => {
+        tooltip.style.display = 'none';
+        canvasWrapper.style.cursor = 'default';
     });
 
     canvasWrapper.addEventListener('mousemove', (e) => {
         tooltip.style.left = (e.clientX + 15) + 'px';
         tooltip.style.top = (e.clientY + 15) + 'px';
-
-        if (lastHoverPoint !== null && Date.now() - hoverUpdateTime > 50) {
-            tooltip.style.display = 'none';
-            canvasWrapper.style.cursor = 'default';
-            lastHoverPoint = null;
-        }
     });
 
     canvasWrapper.addEventListener('mouseleave', () => {
         tooltip.style.display = 'none';
         canvasWrapper.style.cursor = 'default';
-        lastHoverPoint = null;
     });
 
     scatterplot.subscribe('pointclick', (pointIndex: number | null) => {
