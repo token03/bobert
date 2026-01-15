@@ -35,7 +35,6 @@ canvas { outline: none; }
 .controls-hint { position: absolute; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 4px; font-size: 0.8rem; color: #aaa; pointer-events: none; border: 1px solid #333; z-index: 10; }
 #hover-tooltip { position: absolute; pointer-events: none; background: rgba(0, 0, 0, 0.8); border: 1px solid #444; padding: 5px 8px; border-radius: 4px; color: white; font-size: 0.8rem; display: none; z-index: 20; white-space: nowrap; }
 
-/* Inline styles moved from index.html */
 #selection-panel { display: none; }
 #empty-state { display: block; }
 #empty-state p { color: #666; font-size: 0.85rem; text-align: center; margin-top: 40px; }
