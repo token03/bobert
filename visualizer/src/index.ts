@@ -346,8 +346,8 @@ const beatmapItemTemplate = (idx: number, similarity?: number) => {
     return html`
         <div class="neighbor-item" @click=${() => selectBeatmap(idx)}>
             <div class="neighbor-title">
-                <span class="neighbor-title-text" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span>
-                <span class="neighbor-title-diff" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span>
+                <span class="neighbor-title-text" title="${globalData.titles[idx] as string}">${globalData.titles[idx]}</span>
+                <span class="neighbor-title-diff" title="${globalData.diffs[idx] as string}">${globalData.diffs[idx]}</span>
             </div>
             <div class="neighbor-sub">
                 <span>${globalData.stars[idx]} ★ · ${globalData.bpms[idx]} BPM · ${formatLength(globalData.lengths[idx] as number)}</span>
@@ -366,18 +366,25 @@ const metaInfoTemplate = (idx: number) => {
     const extLinkEl = document.getElementById('external-link') as HTMLAnchorElement;
     if (extLinkEl) extLinkEl.href = externalUrl;
 
-    return html`
-        <div class="info-row"><span class="info-label">Title</span> <span class="info-val" title="${globalData.titles[idx]}">${globalData.titles[idx]}</span></div>
-        <div class="info-row"><span class="info-label">Artist</span> <span class="info-val" title="${globalData.artists[idx]}">${globalData.artists[idx]}</span></div>
-        <div class="info-row"><span class="info-label">Mapper</span> <span class="info-val">${globalData.mappers[idx]}</span></div>
-        <div class="info-row"><span class="info-label">Diff</span> <span class="info-val" title="${globalData.diffs[idx]}">${globalData.diffs[idx]}</span></div>
-        <div class="info-row"><span class="info-label">Stars</span> <span class="info-val">${globalData.stars[idx]} ★</span></div>
-        <div class="info-row"><span class="info-label">BPM</span> <span class="info-val">${globalData.bpms[idx]} BPM</span></div>
-        <div class="info-row"><span class="info-label">Length</span> <span class="info-val">${formatLength(globalData.lengths[idx] as number)}</span></div>
-        <div class="info-row"><span class="info-label">Max Combo</span> <span class="info-val">${globalData.max_combos[idx]}x</span></div>
-        <div class="info-row"><span class="info-label">Date</span> <span class="info-val">${formatDate(globalData.dates[idx] as string)}</span></div>
-        <div class="info-row"><span class="info-label">Status</span> <span class="info-val">${statusTxt}</span></div>
-    `;
+    const infoItems = [
+        { label: 'Title', val: globalData.titles[idx], title: true },
+        { label: 'Artist', val: globalData.artists[idx], title: true },
+        { label: 'Mapper', val: globalData.mappers[idx] },
+        { label: 'Diff', val: globalData.diffs[idx], title: true },
+        { label: 'Stars', val: `${globalData.stars[idx]} ★` },
+        { label: 'BPM', val: `${globalData.bpms[idx]} BPM` },
+        { label: 'Length', val: formatLength(globalData.lengths[idx] as number) },
+        { label: 'Max Combo', val: `${globalData.max_combos[idx]}x` },
+        { label: 'Date', val: formatDate(globalData.dates[idx] as string) },
+        { label: 'Status', val: statusTxt },
+    ];
+
+    return html`${infoItems.map(item => html`
+        <div class="info-row">
+            <span class="info-label">${item.label}</span>
+            <span class="info-val" title="${item.title ? item.val as string : ''}">${item.val}</span>
+        </div>
+    `)}`;
 };
 
 function renderPanel() {
