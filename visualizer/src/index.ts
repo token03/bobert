@@ -18,6 +18,7 @@ const STAR_RANGE = [
 ];
 
 let starColorScale: d3.ScaleLinear<string, string>;
+let smoothStarGradient: string[] = [];
 
 async function init() {
     try {
@@ -25,6 +26,13 @@ async function init() {
             .domain(STAR_DOMAIN)
             .range(STAR_RANGE)
             .clamp(true);
+
+        const GRADIENT_STEPS = 256;
+        smoothStarGradient = new Array(GRADIENT_STEPS).fill(0).map((_, i) => {
+            const t = i / (GRADIENT_STEPS - 1); 
+            const colorStr = starColorScale(t * 8); 
+            return d3.color(colorStr)?.formatHex() || "#000000";
+        });
 
         const response = await fetch('/viz_data.json');
         if (!response.ok) throw new Error("Failed to load viz_data.json");
@@ -172,7 +180,7 @@ function updateColorMode(mode: string) {
     
     let colorMap: string[] = [];
     if (mode === 'stars') {
-        colorMap = STAR_RANGE;
+        colorMap = smoothStarGradient; 
         scatterplot.set({ pointColor: colorMap });
     } else if (mode === 'status') {
         colorMap = Object.values(STATUS_COLORS);
@@ -228,10 +236,12 @@ function showLassoSelection(indices: number[]) {
     indices.forEach((idx: number) => {
         html += `
             <div class="neighbor-item" onclick="selectBeatmap(${idx})">
-                <div class="neighbor-title">${globalData.titles[idx]}</div>
+                <div class="neighbor-title">
+                    <span class="neighbor-title-text">${globalData.titles[idx]}</span>
+                    <span class="neighbor-title-diff">${globalData.diffs[idx]}</span>
+                </div>
                 <div class="neighbor-sub">
                     <span>${globalData.stars[idx]} ★</span>
-                    <span>${globalData.diffs[idx]}</span>
                 </div>
             </div>
         `;
@@ -263,13 +273,21 @@ function selectBeatmap(idx: number) {
     `;
 
     let nbrHtml = '';
-    globalData.neighbor_indices[idx].forEach((nIdx: number) => {
+    globalData.neighbor_indices[idx].forEach((nIdx: number, i: number) => {
+        // Calculate cosine similarity from cosine distance
+        const cosineDist = globalData.neighbor_distances[idx][i];
+        const similarity = (1 - cosineDist) * 100;
+        const simStr = similarity.toFixed(2) + '%';
+        
         nbrHtml += `
             <div class="neighbor-item" onclick="selectBeatmap(${nIdx})">
-                <div class="neighbor-title">${globalData.titles[nIdx]}</div>
+                <div class="neighbor-title">
+                    <span class="neighbor-title-text">${globalData.titles[nIdx]}</span>
+                    <span class="neighbor-title-diff">${globalData.diffs[nIdx]}</span>
+                </div>
                 <div class="neighbor-sub">
                     <span>${globalData.stars[nIdx]} ★</span>
-                    <span>${globalData.diffs[nIdx]}</span>
+                    <span style="color: #5c7cfa; font-weight: 600;">${simStr}</span>
                 </div>
             </div>
         `;
@@ -279,9 +297,8 @@ function selectBeatmap(idx: number) {
     scatterplot.select([idx]);
     
     scatterplot.zoomToLocation(
-        globalData.x[idx], 
-        globalData.y[idx], 
-        2.5, 
+        [globalData.x[idx], globalData.y[idx]], 
+        0.5, 
         { transition: true, duration: 800 }
     );
 }

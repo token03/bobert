@@ -28,7 +28,9 @@
         .info-val { text-align: right; font-weight: 600; color: #ddd; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .neighbor-item { padding: 10px; background: var(--input-bg); border: 1px solid transparent; border-left: 3px solid transparent; margin-bottom: 6px; cursor: pointer; transition: all 0.2s; border-radius: 0 4px 4px 0; }
         .neighbor-item:hover { background: #2a2a32; border-left-color: var(--accent); }
-        .neighbor-title { font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; margin-bottom: 4px; }
+        .neighbor-title { font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 8px; }
+        .neighbor-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+        .neighbor-title-diff { flex-shrink: 0; color: #888; font-size: 0.75rem; }
         .neighbor-sub { font-size: 0.75rem; color: #888; display: flex; justify-content: space-between;}
         #loader { position: absolute; top: 50%; left: 55%; transform: translate(-50%, -50%); font-size: 1.5rem; color: var(--accent); pointer-events: none; font-family: 'Courier New', monospace; z-index: 200; }
         #chart-canvas-wrapper { flex-grow: 1; height: 100%; position: relative; overflow: hidden; background: var(--bg); }
