@@ -45,9 +45,6 @@ def process():
     matrix_cpu = np.stack(df["embedding"].values).astype(np.float32)
     matrix_gpu = cp.asarray(matrix_cpu)
 
-    norms = cp.linalg.norm(matrix_gpu, axis=1, keepdims=True)
-    matrix_gpu = matrix_gpu / (norms + 1e-10)
-
     print(f"Calculating {N_EXPORT_NEIGHBORS} Nearest Neighbors (GPU)...")
     knn_cuml = NearestNeighbors(
         n_neighbors=N_EXPORT_NEIGHBORS + 1, 
