@@ -1,6 +1,7 @@
 import createScatterplot from 'regl-scatterplot';
 import * as d3 from 'd3';
 import { html, render } from 'lit-html';
+import * as duckdb from '@duckdb/duckdb-wasm';
 
 interface VizData {
     ids: number[];
@@ -59,6 +60,36 @@ const appState: AppState = {
 let starColorScale: d3.ScaleLinear<string, string>;
 let smoothStarGradient: string[] = [];
 
+let db: duckdb.AsyncDuckDB;
+
+async function initDuckDB() {
+    const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
+    
+    const bundle = await duckdb.selectBundle(JSDELIVR_BUNDLES);
+    const worker_url = URL.createObjectURL(
+        new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' })
+    );
+
+    const worker = new Worker(worker_url);
+    const logger = new duckdb.ConsoleLogger();
+    db = new duckdb.AsyncDuckDB(logger, worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    URL.revokeObjectURL(worker_url);
+}
+
+async function loadParquetWithDuckDB(filename: string, query: string) {
+    const response = await fetch(`/viz_data/${filename}`);
+    if (!response.ok) throw new Error(`Failed to load ${filename}`);
+    const buffer = await response.arrayBuffer();
+    
+    const conn = await db.connect();
+    await db.registerFileBuffer(filename, new Uint8Array(buffer));
+    const result = await conn.query(query);
+    await conn.close();
+    
+    return result;
+}
+
 async function init() {
     try {
         starColorScale = d3.scaleLinear<string>()
@@ -68,12 +99,66 @@ async function init() {
 
         smoothStarGradient = d3.quantize(t => starColorScale(t * 8), 256).map(c => d3.color(c)!.formatHex());
 
-        const response = await fetch('/viz_data.json');
-        if (!response.ok) throw new Error("Failed to load viz_data.json");
+        await initDuckDB();
 
-        const payload = await response.json();
-        globalData = payload.data as VizData;
-        meta = payload.meta as MetaData;
+        const [pointsResult, attributesResult, neighborsResult, metaResult, statusMapResult] = await Promise.all([
+            loadParquetWithDuckDB('points.parquet', 'SELECT * FROM "points.parquet"'),
+            loadParquetWithDuckDB('attributes.parquet', 'SELECT * FROM "attributes.parquet"'),
+            loadParquetWithDuckDB('neighbors.parquet', 'SELECT * FROM "neighbors.parquet"'),
+            loadParquetWithDuckDB('meta.parquet', 'SELECT * FROM "meta.parquet"'),
+            loadParquetWithDuckDB('status_map.parquet', 'SELECT * FROM "status_map.parquet"')
+        ]);
+
+        const ids = pointsResult.toArray().map((row: any) => Number(row.id));
+        const x = pointsResult.toArray().map((row: any) => Number(row.x));
+        const y = pointsResult.toArray().map((row: any) => Number(row.y));
+
+        const attrRows = attributesResult.toArray();
+        const titles = attrRows.map((row: any) => row.title);
+        const artists = attrRows.map((row: any) => row.artist);
+        const mappers = attrRows.map((row: any) => row.mapper);
+        const diffs = attrRows.map((row: any) => row.diff);
+        const stars = attrRows.map((row: any) => Number(row.stars));
+        const dates = attrRows.map((row: any) => row.date);
+        const playcounts = attrRows.map((row: any) => Number(row.playcount));
+        const max_combos = attrRows.map((row: any) => Number(row.max_combo));
+        const lengths = attrRows.map((row: any) => Number(row.length));
+        const bpms = attrRows.map((row: any) => Number(row.bpm));
+        const statuses = attrRows.map((row: any) => row.status);
+
+        const neighborRows = neighborsResult.toArray();
+        const neighbor_indices = neighborRows.map((row: any) => 
+            Array.from(row.indices).map((v: any) => Number(v))
+        );
+        const neighbor_distances = neighborRows.map((row: any) => 
+            Array.from(row.distances).map((v: any) => Number(v))
+        );
+
+        const status_map: Record<string, string> = {};
+        const statusMapRows = statusMapResult.toArray();
+        for (const row of statusMapRows) {
+            status_map[row.status_code] = row.status_name;
+        }
+
+        globalData = {
+            ids,
+            x,
+            y,
+            titles,
+            artists,
+            mappers,
+            diffs,
+            stars,
+            bpms,
+            lengths,
+            max_combos,
+            dates,
+            statuses,
+            neighbor_indices,
+            neighbor_distances
+        };
+
+        meta = { status_map };
 
         globalData.ids.forEach((id: number, index: number) => {
             idMap.set(String(id), index);

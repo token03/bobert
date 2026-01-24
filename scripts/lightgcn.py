@@ -74,9 +74,6 @@ NUM_LAYERS = 3
 BATCH_SIZE = 131072
 LR = 0.001
 EPOCHS = 30
-CL_RATE = 0.2
-EPS = 0.2
-TEMP = 0.2
 ADV_LAMBDA = 0.1
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

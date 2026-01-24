@@ -26,7 +26,7 @@ API_TIERS = [
 ]
 
 CHECKPOINT_INTERVAL = 10
-WORKERS_PER_TIER = 5  # Number of concurrent workers per API tier
+WORKERS_PER_TIER = 1
 
 last_request_time = {tier["url"]: 0.0 for tier in API_TIERS}
 last_request_lock = threading.Lock()
@@ -237,6 +237,8 @@ def main():
 
     with failed_downloads_lock:
         failed_downloads.clear()
+        if not args.retry_failed:
+            failed_downloads.update(previously_failed)
 
     for beatmap_id in beatmap_ids_to_download:
         tier_queues[0].put(beatmap_id)
@@ -264,13 +266,13 @@ def main():
             threads.append(thread)
             thread.start()
 
+    tier1_threads = [t for t in threads if t.name.startswith(API_TIERS[0]["name"])]
+
     with tqdm.tqdm(
-        total=len(beatmap_ids_to_download), desc="Downloading", unit="maps"
+        total=len(beatmap_ids_to_download), desc="Downloading (Tier 1)", unit="maps"
     ) as pbar:
         initial_count = len(beatmap_ids_to_download)
-        while any(not q.empty() for q in tier_queues) or any(
-            t.is_alive() for t in threads
-        ):
+        while not tier_queues[0].empty() or any(t.is_alive() for t in tier1_threads):
             with processed_ids_lock:
                 successful = len(processed_ids) - len(downloaded_ids)
             with failed_downloads_lock:
@@ -284,8 +286,14 @@ def main():
         pbar.n = initial_count
         pbar.refresh()
 
-    for q in tier_queues:
-        q.join()
+    tier_queues[0].join()
+
+    tier2_pending = tier_queues[1].qsize()
+    tier3_pending = tier_queues[2].qsize()
+    if tier2_pending > 0 or tier3_pending > 0:
+        print(
+            f"\nTier 2/3 still processing {tier2_pending + tier3_pending:,} failed items in background..."
+        )
 
     if failed_downloads:
         save_failed_downloads()

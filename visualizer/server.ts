@@ -6,7 +6,10 @@ const server = Bun.serve({
     if (url.pathname === "/") return new Response(Bun.file("index.html"));
     if (url.pathname === "/style.css") return new Response(Bun.file("style.css"));
     
-    if (url.pathname === "/viz_data.json") return new Response(Bun.file("viz_data.json"));
+    if (url.pathname.startsWith("/viz_data/")) {
+      const fileName = url.pathname.replace("/viz_data/", "");
+      return new Response(Bun.file(`viz_data/${fileName}`));
+    }
 
     if (url.pathname === "/index.js") {
         const build = await Bun.build({
