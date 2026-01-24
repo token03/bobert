@@ -17,8 +17,6 @@ data/*.tar.gz
 experiments/
 *.pth
 
-visualizer/*/*.parquet
-
 # IDE
 .idea/
 .vscode/
