@@ -42,9 +42,7 @@ class StatusClassifier(nn.Module):
         super(StatusClassifier, self).__init__()
         self.grl = GradientReversal(lambda_=ADV_LAMBDA)
         self.fc = nn.Sequential(
-            nn.Linear(embedding_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(embedding_dim, 64), nn.ReLU(), nn.Linear(64, 1)
         )
 
     def forward(self, x):
@@ -65,9 +63,13 @@ COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
 VERSION = "v1"
 MIN_MAPS_IN_COLLECTION = 5
 MAX_MAPS_IN_COLLECTION = 3000
-MIN_COLLECTIONS_PER_MAP = 3
-JACCARD_THRESHOLD = 0.75
-SONG_DAMPENING_POWER = 0.95
+MIN_COLLECTIONS_PER_MAP = 2
+JACCARD_THRESHOLD = 0.9
+SONG_DAMPENING_POWER = 1.0
+
+RANKED_COLLECTION_THRESHOLD = 0.95
+RANKED_COLLECTION_WEIGHT = 0.3
+UNRANKED_MAP_WEIGHT = 2.0
 
 EMBEDDING_DIM = 64
 NUM_LAYERS = 3
@@ -153,14 +155,21 @@ def load_and_process_data(source_filter=None):
     if source_filter:
         df = df[df["source"] == source_filter].copy()
 
+    df["collection_key"] = list(zip(df["collection_id"], df["source"]))
+
     if os.path.exists(COLLECTION_FILTER_PATH):
         with open(COLLECTION_FILTER_PATH, "r") as f:
             filter_data = json.load(f)
         if "collections" in filter_data:
-            bad_ids = []
+            bad_collection_keys = set()
             for src, ids in filter_data["collections"].items():
-                bad_ids.extend(ids)
-            df = df[~df["collection_id"].isin(bad_ids)]
+                src_id = int(src)
+                bad_collection_keys.update((cid, src_id) for cid in ids)
+            if bad_collection_keys:
+                key_series = pd.Series(
+                    list(zip(df["collection_id"], df["source"])), index=df.index
+                )
+                df = df[~key_series.isin(bad_collection_keys)].copy()
 
     beatmaps_df = pd.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "mode", "status"]
@@ -171,11 +180,11 @@ def load_and_process_data(source_filter=None):
 
     df = df[df["mode"] == "osu"].copy()
 
-    col_counts = df.groupby("collection_id")["beatmap_id"].count()
+    col_counts = df.groupby("collection_key")["beatmap_id"].count()
     valid_cols = col_counts[
         (col_counts >= MIN_MAPS_IN_COLLECTION) & (col_counts <= MAX_MAPS_IN_COLLECTION)
     ].index
-    df = df[df["collection_id"].isin(valid_cols)].copy()
+    df = df[df["collection_key"].isin(valid_cols)].copy()
 
     df = deduplicate_collections(df, JACCARD_THRESHOLD)
 
@@ -186,11 +195,25 @@ def load_and_process_data(source_filter=None):
     if df["beatmapset_id"].isna().sum() > 0:
         df = df.dropna(subset=["beatmapset_id"]).copy()
 
-    df["song_occurrence"] = df.groupby(["collection_id", "beatmapset_id"])[
+    df["is_ranked"] = df["status"].isin(["1", "2", "3", "4"])
+    col_ranked_stats = df.groupby("collection_key").agg(
+        total=("beatmap_id", "count"), ranked=("is_ranked", "sum")
+    )
+    col_ranked_stats["ratio"] = col_ranked_stats["ranked"] / col_ranked_stats["total"]
+    pure_ranked_cols = col_ranked_stats[
+        col_ranked_stats["ratio"] > RANKED_COLLECTION_THRESHOLD
+    ].index
+
+    df["song_occurrence"] = df.groupby(["collection_key", "beatmapset_id"])[
         "beatmap_id"
     ].transform("count")
 
     df["weight"] = 1.0 / (df["song_occurrence"] ** SONG_DAMPENING_POWER)
+
+    df.loc[df["collection_key"].isin(pure_ranked_cols), "weight"] *= (
+        RANKED_COLLECTION_WEIGHT
+    )
+    df.loc[~df["is_ranked"], "weight"] *= UNRANKED_MAP_WEIGHT
 
     unique_collections = sorted(df["collection_key"].unique())
     unique_beatmaps = sorted(df["beatmap_id"].unique())
@@ -204,7 +227,7 @@ def load_and_process_data(source_filter=None):
     for bid, idx in bm_to_idx.items():
         if bid in status_map:
             status = status_map[bid]
-            status_labels[idx] = 1.0 if status in ['1', '2', '3', '4'] else 0.0
+            status_labels[idx] = 1.0 if status in ["1", "2", "3", "4"] else 0.0
 
     return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, status_labels
 
@@ -284,7 +307,6 @@ def train(source_filter=None):
         df["beatmap_id"].map(bm_to_idx).values, dtype=torch.long, device=DEVICE
     )
     weights = torch.tensor(df["weight"].values, dtype=torch.float32, device=DEVICE)
-
 
     print("Building Sparse Adjacency Matrix...")
     sparse_adj = compute_normalized_laplacian(
