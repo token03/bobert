@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 
 def json_safe(value):
@@ -36,11 +36,14 @@ def atomic_json(data: dict, path: Path, *, indent: int | None = None) -> None:
         raise
 
 
-def atomic_parquet(df: pd.DataFrame, path: Path, **kwargs) -> None:
+def atomic_parquet(df, path: Path, **kwargs) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
     try:
-        df.to_parquet(temp_path, index=False, **kwargs)
+        if hasattr(df, "write_parquet"):
+            df.write_parquet(temp_path, **kwargs)
+        else:
+            df.to_parquet(temp_path, index=False, **kwargs)
         temp_path.replace(path)
     except Exception:
         if temp_path.exists():
@@ -72,10 +75,14 @@ def append_dedup_parquet(
     if not records:
         return
 
-    new_df = pd.DataFrame(records)
+    new_df = pl.DataFrame(records)
     if path.exists():
-        existing_df = pd.read_parquet(path)
-        new_df = pd.concat([existing_df, new_df], ignore_index=True)
-        new_df = new_df.drop_duplicates(subset=dedup_columns, keep=keep)
+        existing_df = pl.read_parquet(path)
+        new_df = pl.concat([existing_df, new_df], how="diagonal_relaxed")
+        new_df = new_df.unique(
+            subset=dedup_columns,
+            keep=keep,
+            maintain_order=True,
+        )
 
     atomic_parquet(new_df, path)

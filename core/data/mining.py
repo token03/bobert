@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-import pandas as pd
 import polars as pl
 
 
@@ -51,12 +50,18 @@ class MiningTable:
         return len(self.beatmap_ids)
 
 
-def load_cache(cache_path: str | Path) -> pd.DataFrame:
-    cache = pd.read_parquet(cache_path)
+def load_cache(cache_path: str | Path) -> pl.DataFrame:
+    cache = pl.read_parquet(cache_path)
+    exprs = []
     for col in CACHE_LIST_COLUMNS:
         if col in cache.columns:
-            cache[col] = cache[col].apply(lambda x: list(x) if x is not None else [])
-    return cache
+            exprs.append(
+                pl.when(pl.col(col).is_null())
+                .then(pl.lit([]))
+                .otherwise(pl.col(col))
+                .alias(col)
+            )
+    return cache.with_columns(exprs) if exprs else cache
 
 
 def build_cache(
@@ -64,7 +69,7 @@ def build_cache(
     dataset_dir: str | Path | None = None,
     output_path: str | Path = "data/mining_cache.parquet",
     config: MiningConfig | None = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     cfg = config or MiningConfig()
     data_path = Path(data_dir)
     dataset_path = Path(dataset_dir) if dataset_dir is not None else None
@@ -100,9 +105,9 @@ def build_cache(
         for i in range(table.size)
     ]
 
-    cache = pd.DataFrame(rows)
+    cache = pl.DataFrame(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cache.to_parquet(output_path, index=False)
+    cache.write_parquet(output_path)
     return cache
 
 
@@ -161,7 +166,9 @@ def _load_table(
         .alias("status_group")
     )
     if cfg.max_anchors is not None and cfg.max_anchors < meta.height:
-        sampled = rng.choice(np.arange(meta.height), size=cfg.max_anchors, replace=False)
+        sampled = rng.choice(
+            np.arange(meta.height), size=cfg.max_anchors, replace=False
+        )
         sampled.sort()
         meta = meta[sampled.tolist()]
 
@@ -169,7 +176,9 @@ def _load_table(
 
 
 def _to_table(meta: pl.DataFrame) -> MiningTable:
-    components = meta.select(["aim", "speed", "slider_factor"]).to_numpy().astype(np.float32)
+    components = (
+        meta.select(["aim", "speed", "slider_factor"]).to_numpy().astype(np.float32)
+    )
     components = np.nan_to_num(components, nan=0.0, posinf=0.0, neginf=0.0)
     denom = np.clip(np.abs(components).sum(axis=1, keepdims=True), 1e-6, None)
 
@@ -194,7 +203,11 @@ def _read_dataset_ids(dataset_dir: Path | None) -> set[int] | None:
     if not beatmaps_dir.exists():
         return None
 
-    ids = pl.scan_parquet(str(beatmaps_dir / "**" / "*.parquet")).select("beatmap_id").collect()
+    ids = (
+        pl.scan_parquet(str(beatmaps_dir / "**" / "*.parquet"))
+        .select("beatmap_id")
+        .collect()
+    )
     return {int(x) for x in ids["beatmap_id"].unique().to_list()}
 
 
@@ -326,7 +339,9 @@ def _filtered_candidates(
             continue
 
         star_delta = abs(float(table.stars[anchor_idx]) - float(table.stars[cand_idx]))
-        ratio_delta = float(np.linalg.norm(table.ratios[anchor_idx] - table.ratios[cand_idx]))
+        ratio_delta = float(
+            np.linalg.norm(table.ratios[anchor_idx] - table.ratios[cand_idx])
+        )
         same_set = table.beatmapset_ids[anchor_idx] == table.beatmapset_ids[cand_idx]
 
         if star_delta > cfg.max_star_delta or ratio_delta > cfg.max_ratio_distance:

@@ -162,7 +162,7 @@ class AlignData(BeatmapData):
 
         cache = load_cache(cache_path)
         self.mining_cache = cache
-        return {int(row["beatmap_id"]): row.to_dict() for _, row in cache.iterrows()}
+        return {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
 
     def setup(self, stage=None):
         if self.train_dataset is not None:
@@ -237,7 +237,9 @@ class AlignData(BeatmapData):
                 user_indices = torch.tensor([0], dtype=torch.long)
 
             if collection_topics:
-                topic_indices, _ = self.collection_topic_tokenizer.encode(collection_topics)
+                topic_indices, _ = self.collection_topic_tokenizer.encode(
+                    collection_topics
+                )
             else:
                 topic_indices = torch.tensor([0], dtype=torch.long)
 

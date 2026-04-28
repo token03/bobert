@@ -36,10 +36,6 @@ def _scan_parquet(path: str) -> pl.LazyFrame:
     return pl.scan_parquet(_parquet_source(path))
 
 
-def _read_parquet(path: str) -> pl.DataFrame:
-    return pl.read_parquet(_parquet_source(path))
-
-
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
         import google.colab  # type: ignore
@@ -90,8 +86,7 @@ def _load_metadata_chunk(
             return {bid: {} for bid in beatmap_ids}
 
         metadata_df = (
-            metadata_lf
-            .filter(pl.col("id").is_in(beatmap_ids))
+            metadata_lf.filter(pl.col("id").is_in(beatmap_ids))
             .select(available_cols)
             .collect()
         )
@@ -158,6 +153,7 @@ def _load_collection_topics_chunk(
 def _load_ratings(
     ratings_path: str,
     ids_to_load: Optional[List[int]],
+    max_seq_len: Optional[int],
     require_ratings: bool,
 ) -> Dict[tuple[int, int], Dict[str, float]]:
     if require_ratings and not os.path.exists(ratings_path):
@@ -169,6 +165,8 @@ def _load_ratings(
     ratings_lf = _scan_parquet(ratings_path)
     if ids_to_load:
         ratings_lf = ratings_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
+    if max_seq_len is not None:
+        ratings_lf = ratings_lf.filter(pl.col("seq_len") == max_seq_len)
 
     ratings_df = ratings_lf.select(
         ["beatmap_id", "seq_len", "stars", "aim", "speed", "slider_factor"]
@@ -183,6 +181,65 @@ def _load_ratings(
             "slider_factor": float(row["slider_factor"]),
         }
     return ratings
+
+
+def _selected_beatmaps_lf(
+    beatmaps_path: str,
+    ratings_path: str,
+    ids_to_load: Optional[List[int]],
+    max_seq_len: Optional[int],
+    min_sr: Optional[float],
+    max_sr: Optional[float],
+    require_ratings: bool,
+    include_user_tags: bool,
+) -> pl.LazyFrame:
+    beatmaps_lf = _scan_parquet(beatmaps_path)
+    wanted_cols = [
+        "beatmap_id",
+        "cs",
+        "ar",
+        "slider_multiplier",
+        *(["user_tags"] if include_user_tags else []),
+    ]
+    available_cols = [
+        col for col in wanted_cols if col in beatmaps_lf.collect_schema().names()
+    ]
+    beatmaps_lf = beatmaps_lf.select(available_cols).unique("beatmap_id")
+
+    if ids_to_load:
+        beatmaps_lf = beatmaps_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
+
+    if not os.path.exists(ratings_path):
+        if require_ratings:
+            raise FileNotFoundError(f"Ratings file not found at '{ratings_path}'. ")
+        return beatmaps_lf
+
+    ratings_lf = _scan_parquet(ratings_path)
+    if max_seq_len is not None:
+        ratings_lf = ratings_lf.filter(pl.col("seq_len") == max_seq_len)
+
+    if min_sr is not None:
+        ratings_lf = ratings_lf.filter(pl.col("stars") >= min_sr)
+    if max_sr is not None:
+        ratings_lf = ratings_lf.filter(pl.col("stars") <= max_sr)
+
+    if max_seq_len is None:
+        ratings_lf = ratings_lf.select("beatmap_id").unique()
+    else:
+        ratings_lf = ratings_lf.select(
+            ["beatmap_id", "seq_len", "stars", "aim", "speed", "slider_factor"]
+        )
+
+    return beatmaps_lf.join(
+        ratings_lf,
+        on="beatmap_id",
+        how="inner" if require_ratings else "left",
+    )
+
+
+def _chunked(values: List[int], chunk_size: int):
+    for i in range(0, len(values), chunk_size):
+        yield values[i : i + chunk_size]
 
 
 def load_beatmap_dataset(
@@ -211,30 +268,62 @@ def load_beatmap_dataset(
     if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
         raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
 
-    beatmaps_lf = _scan_parquet(beatmaps_path)
     if ids_to_load:
+        ids_to_load = [int(bid) for bid in ids_to_load]
         print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
-        beatmaps_lf = beatmaps_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
 
-    all_beatmaps_df = beatmaps_lf.collect()
-    all_beatmap_ids = sorted(all_beatmaps_df["beatmap_id"].unique().to_list())
+    selected_beatmaps = _selected_beatmaps_lf(
+        beatmaps_path,
+        ratings_path,
+        ids_to_load,
+        max_seq_len,
+        min_sr,
+        max_sr,
+        require_ratings,
+        include_user_tags,
+    ).collect()
+    all_beatmap_ids = sorted(selected_beatmaps["beatmap_id"].unique().to_list())
 
     print(
-        f"Found metadata for {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}..."
+        f"Selected {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}..."
     )
-    print("Loading difficulty ratings...")
-    ratings_lookup = _load_ratings(ratings_path, ids_to_load, require_ratings)
-    print(f"Loaded {len(ratings_lookup)} difficulty ratings")
+    ratings_lookup = {}
+    if max_seq_len is None or not os.path.exists(ratings_path):
+        print("Loading difficulty ratings...")
+        ratings_lookup = _load_ratings(
+            ratings_path, ids_to_load, max_seq_len, require_ratings
+        )
+        print(f"Loaded {len(ratings_lookup)} difficulty ratings")
 
     all_beatmap_data = []
     missing_ratings_count = 0
 
-    for i in tqdm(range(0, len(all_beatmap_ids), chunk_size), desc="Processing Chunks"):
-        chunk_ids = [int(x) for x in all_beatmap_ids[i : i + chunk_size]]
-        beatmaps_chunk = all_beatmaps_df.filter(pl.col("beatmap_id").is_in(chunk_ids))
+    hitobject_cols = [
+        "beatmap_id",
+        "x",
+        "y",
+        "time",
+        "object_type",
+        "is_new_combo",
+        "end_time",
+        "pixel_length",
+        "bpm",
+        "slider_repeats",
+        "slider_end_x",
+        "slider_end_y",
+        "beat_in_measure",
+        "rhythmic_snap",
+    ]
+
+    for chunk_ids in tqdm(
+        list(_chunked([int(x) for x in all_beatmap_ids], chunk_size)),
+        desc="Processing Chunks",
+    ):
+        beatmaps_chunk = selected_beatmaps.filter(pl.col("beatmap_id").is_in(chunk_ids))
         hitobjects_chunk = (
             _scan_parquet(hitobjects_path)
             .filter(pl.col("beatmap_id").is_in(chunk_ids))
+            .select(hitobject_cols)
             .collect()
         )
 
@@ -242,7 +331,8 @@ def load_beatmap_dataset(
             continue
 
         hitobject_data, ids, original_counts = build_feature_tensors(
-            beatmaps_chunk.to_pandas(), hitobjects_chunk.to_pandas()
+            beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
+            hitobjects_chunk,
         )
 
         chunk_metadata = (
@@ -271,13 +361,24 @@ def load_beatmap_dataset(
             lookup_len = max_seq_len if max_seq_len is not None else original_count
             truncate_len = min(original_count, lookup_len)
 
-            ratings = ratings_lookup.get((bid_int, lookup_len))
-            if require_ratings and not ratings:
-                missing_ratings_count += 1
-                continue
-
             beatmap_row = beatmap_rows.get(bid_int)
             if beatmap_row is None:
+                continue
+
+            ratings = None
+            if max_seq_len is not None and "stars" in beatmap_row:
+                stars = beatmap_row.get("stars")
+                if stars is not None:
+                    ratings = {
+                        "stars": float(stars),
+                        "aim": float(beatmap_row.get("aim") or 0.0),
+                        "speed": float(beatmap_row.get("speed") or 0.0),
+                        "slider_factor": float(beatmap_row.get("slider_factor") or 0.0),
+                    }
+            if ratings is None:
+                ratings = ratings_lookup.get((bid_int, lookup_len))
+            if require_ratings and not ratings:
+                missing_ratings_count += 1
                 continue
 
             beatmap_attrs = {
@@ -296,7 +397,7 @@ def load_beatmap_dataset(
 
             beatmap_entry = {
                 "beatmap_id": bid_int,
-                "hitobjects": vectors[:truncate_len],
+                "hitobjects": vectors[:truncate_len].clone(),
                 "difficulty": {k: attrs.get(k, 0.0) for k in DIFFICULTY_ATTRIBUTES},
             }
 

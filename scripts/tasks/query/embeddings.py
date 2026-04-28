@@ -1,7 +1,8 @@
-import pandas as pd
 import argparse
+import sys
+
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import polars as pl
 
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
 from scripts.common.query import print_similarity_table
@@ -15,39 +16,34 @@ def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
     )
 
     print(f"Loading beatmap embeddings from {beatmap_embeddings_path}...")
-    df = pd.read_parquet(beatmap_embeddings_path)
+    df = pl.read_parquet(beatmap_embeddings_path)
 
-    # Check both IDs exist
-    if beatmap_id_1 not in df["beatmap_id"].values:
+    if not df["beatmap_id"].is_in([beatmap_id_1]).any():
         print(f"No embeddings found for beatmap ID {beatmap_id_1}")
         return
-    if beatmap_id_2 not in df["beatmap_id"].values:
+    if not df["beatmap_id"].is_in([beatmap_id_2]).any():
         print(f"No embeddings found for beatmap ID {beatmap_id_2}")
         return
 
-    # Load beatmap metadata
-    beatmaps_df = pd.read_parquet(
+    beatmaps_df = pl.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
     )
 
-    # Get embeddings for both beatmaps
-    embedding_1 = df[df["beatmap_id"] == beatmap_id_1]["embedding"].values[0]
-    embedding_2 = df[df["beatmap_id"] == beatmap_id_2]["embedding"].values[0]
+    embedding_1 = df.filter(pl.col("beatmap_id") == beatmap_id_1)["embedding"][0]
+    embedding_2 = df.filter(pl.col("beatmap_id") == beatmap_id_2)["embedding"][0]
 
-    vector_1 = np.array(embedding_1).reshape(1, -1)
-    vector_2 = np.array(embedding_2).reshape(1, -1)
+    vector_1 = np.asarray(embedding_1, dtype=np.float32)
+    vector_2 = np.asarray(embedding_2, dtype=np.float32)
 
-    # Calculate cosine similarity
-    similarity = cosine_similarity(vector_1, vector_2)[0][0]
+    denom = max(np.linalg.norm(vector_1) * np.linalg.norm(vector_2), 1e-12)
+    similarity = float(vector_1 @ vector_2 / denom)
 
-    # Get titles for display
-    title_1 = beatmaps_df[beatmaps_df["id"] == beatmap_id_1]["title"].values
-    title_2 = beatmaps_df[beatmaps_df["id"] == beatmap_id_2]["title"].values
+    title_1 = beatmaps_df.filter(pl.col("id") == beatmap_id_1)["title"].to_list()
+    title_2 = beatmaps_df.filter(pl.col("id") == beatmap_id_2)["title"].to_list()
 
     title_1 = title_1[0] if len(title_1) > 0 else "Unknown"
     title_2 = title_2[0] if len(title_2) > 0 else "Unknown"
 
-    # Display results
     print(f"\nCosine Similarity Comparison:\n")
     print(f"Beatmap 1: {beatmap_id_1} - {title_1}")
     print(f"Beatmap 2: {beatmap_id_2} - {title_2}")
@@ -61,51 +57,41 @@ def query_embeddings(beatmap_id, version=None):
     )
 
     print(f"Loading beatmap embeddings from {beatmap_embeddings_path}...")
-    df = pd.read_parquet(beatmap_embeddings_path)
+    df = pl.read_parquet(beatmap_embeddings_path)
 
-    if beatmap_id not in df["beatmap_id"].values:
+    if not df["beatmap_id"].is_in([beatmap_id]).any():
         print(f"No embeddings found for beatmap ID {beatmap_id}")
         return
 
-    beatmaps_df = pd.read_parquet(
+    beatmaps_df = pl.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
     )
 
-    query_beatmapset_id = beatmaps_df[beatmaps_df["id"] == beatmap_id][
-        "beatmapset_id"
-    ].values
-    if len(query_beatmapset_id) == 0:
+    query_rows = beatmaps_df.filter(pl.col("id") == beatmap_id)
+    if query_rows.is_empty():
         print(f"No metadata found for beatmap ID {beatmap_id}")
         return
-    query_beatmapset_id = query_beatmapset_id[0]
+    query_beatmapset_id = query_rows["beatmapset_id"][0]
 
-    query_embedding = df[df["beatmap_id"] == beatmap_id]["embedding"].values[0]
-    query_vector = np.array(query_embedding).reshape(1, -1)
+    beatmap_ids = df["beatmap_id"].to_numpy()
+    all_embeddings = np.asarray(df["embedding"].to_list(), dtype=np.float32)
+    norms = np.linalg.norm(all_embeddings, axis=1, keepdims=True)
+    all_embeddings = all_embeddings / np.maximum(norms, 1e-12)
 
-    all_embeddings = np.stack(df["embedding"].values)
+    query_idx = int(np.where(beatmap_ids == beatmap_id)[0][0])
+    similarities = all_embeddings @ all_embeddings[query_idx]
 
-    similarities = cosine_similarity(query_vector, all_embeddings)[0]
-
-    similarity_df = pd.DataFrame(
-        {"beatmap_id": df["beatmap_id"].values, "similarity": similarities}
+    similarity_df = (
+        pl.DataFrame({"beatmap_id": beatmap_ids, "similarity": similarities})
+        .filter(pl.col("beatmap_id") != beatmap_id)
+        .join(beatmaps_df, left_on="beatmap_id", right_on="id", how="left")
+        .filter(pl.col("beatmapset_id") != query_beatmapset_id)
+        .sort("similarity", descending=True)
     )
-
-    similarity_df = similarity_df[similarity_df["beatmap_id"] != beatmap_id]
-
-    similarity_df = similarity_df.merge(
-        beatmaps_df[["id", "beatmapset_id", "title"]],
-        left_on="beatmap_id",
-        right_on="id",
-        how="left",
-    )
-
-    similarity_df = similarity_df[similarity_df["beatmapset_id"] != query_beatmapset_id]
-
-    similarity_df = similarity_df.sort_values("similarity", ascending=False)
 
     seen_beatmapsets = set()
     unique_results = []
-    for _, row in similarity_df.iterrows():
+    for row in similarity_df.iter_rows(named=True):
         if row["beatmapset_id"] not in seen_beatmapsets:
             seen_beatmapsets.add(row["beatmapset_id"])
             unique_results.append(row)

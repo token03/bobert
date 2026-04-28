@@ -1,10 +1,25 @@
-import pandas as pd
 import argparse
+import sys
+
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import polars as pl
 
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
 from scripts.common.query import print_similarity_table
+
+
+def topic_matrix(df: pl.DataFrame):
+    beatmap_ids = np.array(sorted(df["beatmap_id"].unique().to_list()), dtype=np.int64)
+    topic_ids = np.array(sorted(df["topic_id"].unique().to_list()), dtype=np.int64)
+    beatmap_index = {int(bid): idx for idx, bid in enumerate(beatmap_ids)}
+    topic_index = {int(tid): idx for idx, tid in enumerate(topic_ids)}
+    matrix = np.zeros((len(beatmap_ids), len(topic_ids)), dtype=np.float32)
+    for row in df.select(["beatmap_id", "topic_id", "weight"]).iter_rows(named=True):
+        matrix[
+            beatmap_index[int(row["beatmap_id"])],
+            topic_index[int(row["topic_id"])],
+        ] = float(row["weight"])
+    return beatmap_ids, matrix
 
 
 def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
@@ -15,40 +30,32 @@ def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
     )
 
     print(f"Loading beatmap topic weights from {beatmap_topic_weights_path}...")
-    df = pd.read_parquet(beatmap_topic_weights_path)
+    df = pl.read_parquet(beatmap_topic_weights_path)
 
-    # Check both IDs exist
-    if beatmap_id_1 not in df["beatmap_id"].values:
+    if not df["beatmap_id"].is_in([beatmap_id_1]).any():
         print(f"No topics found for beatmap ID {beatmap_id_1}")
         return
-    if beatmap_id_2 not in df["beatmap_id"].values:
+    if not df["beatmap_id"].is_in([beatmap_id_2]).any():
         print(f"No topics found for beatmap ID {beatmap_id_2}")
         return
 
-    # Load beatmap metadata
-    beatmaps_df = pd.read_parquet(
+    beatmaps_df = pl.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
     )
 
-    # Pivot to get topic vectors for both beatmaps
-    pivot_df = df.pivot(index="beatmap_id", columns="topic_id", values="weight").fillna(
-        0
-    )
+    beatmap_ids, matrix = topic_matrix(df)
+    vector_1 = matrix[int(np.where(beatmap_ids == beatmap_id_1)[0][0])]
+    vector_2 = matrix[int(np.where(beatmap_ids == beatmap_id_2)[0][0])]
 
-    vector_1 = pivot_df.loc[beatmap_id_1].values.reshape(1, -1)
-    vector_2 = pivot_df.loc[beatmap_id_2].values.reshape(1, -1)
+    denom = max(np.linalg.norm(vector_1) * np.linalg.norm(vector_2), 1e-12)
+    similarity = float(vector_1 @ vector_2 / denom)
 
-    # Calculate cosine similarity
-    similarity = cosine_similarity(vector_1, vector_2)[0][0]
-
-    # Get titles for display
-    title_1 = beatmaps_df[beatmaps_df["id"] == beatmap_id_1]["title"].values
-    title_2 = beatmaps_df[beatmaps_df["id"] == beatmap_id_2]["title"].values
+    title_1 = beatmaps_df.filter(pl.col("id") == beatmap_id_1)["title"].to_list()
+    title_2 = beatmaps_df.filter(pl.col("id") == beatmap_id_2)["title"].to_list()
 
     title_1 = title_1[0] if len(title_1) > 0 else "Unknown"
     title_2 = title_2[0] if len(title_2) > 0 else "Unknown"
 
-    # Display results
     print(f"\nCosine Similarity Comparison:\n")
     print(f"Beatmap 1: {beatmap_id_1} - {title_1}")
     print(f"Beatmap 2: {beatmap_id_2} - {title_2}")
@@ -62,68 +69,50 @@ def query_topics(beatmap_id, version=None):
     )
 
     print(f"Loading beatmap topic weights from {beatmap_topic_weights_path}...")
-    df = pd.read_parquet(beatmap_topic_weights_path)
+    df = pl.read_parquet(beatmap_topic_weights_path)
 
-    beatmap_topics = df[df["beatmap_id"] == beatmap_id].copy()
+    beatmap_topics = df.filter(pl.col("beatmap_id") == beatmap_id)
 
-    if len(beatmap_topics) == 0:
+    if beatmap_topics.is_empty():
         print(f"No topics found for beatmap ID {beatmap_id}")
         return
 
-    beatmap_topics = beatmap_topics.sort_values("weight", ascending=False).head(10)
+    beatmap_topics = beatmap_topics.sort("weight", descending=True).head(10)
 
     print(f"\nTop 10 most relevant topics for beatmap {beatmap_id}:\n")
     print(f"{'Topic ID':<10} {'Weight':<12}")
     print("-" * 25)
 
-    for _, row in beatmap_topics.iterrows():
+    for row in beatmap_topics.iter_rows(named=True):
         print(f"{int(row['topic_id']):<10} {row['weight']:<12.6f}")
 
-    beatmaps_df = pd.read_parquet(
+    beatmaps_df = pl.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
     )
 
-    query_beatmapset_id = beatmaps_df[beatmaps_df["id"] == beatmap_id][
-        "beatmapset_id"
-    ].values
-    if len(query_beatmapset_id) == 0:
+    query_rows = beatmaps_df.filter(pl.col("id") == beatmap_id)
+    if query_rows.is_empty():
         print(f"No metadata found for beatmap ID {beatmap_id}")
         return
-    query_beatmapset_id = query_beatmapset_id[0]
+    query_beatmapset_id = query_rows["beatmapset_id"][0]
 
-    pivot_df = df.pivot(index="beatmap_id", columns="topic_id", values="weight").fillna(
-        0
+    beatmap_ids, matrix = topic_matrix(df)
+    query_idx = int(np.where(beatmap_ids == beatmap_id)[0][0])
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    normalized = matrix / np.maximum(norms, 1e-12)
+    similarities = normalized @ normalized[query_idx]
+
+    similarity_df = (
+        pl.DataFrame({"beatmap_id": beatmap_ids, "similarity": similarities})
+        .filter(pl.col("beatmap_id") != beatmap_id)
+        .join(beatmaps_df, left_on="beatmap_id", right_on="id", how="left")
+        .filter(pl.col("beatmapset_id") != query_beatmapset_id)
+        .sort("similarity", descending=True)
     )
-
-    if beatmap_id not in pivot_df.index:
-        print(f"Beatmap {beatmap_id} not in topic weights")
-        return
-
-    query_vector = pivot_df.loc[beatmap_id].values.reshape(1, -1)
-    all_vectors = pivot_df.values
-
-    similarities = cosine_similarity(query_vector, all_vectors)[0]
-
-    similarity_df = pd.DataFrame(
-        {"beatmap_id": pivot_df.index, "similarity": similarities}
-    )
-
-    similarity_df = similarity_df[similarity_df["beatmap_id"] != beatmap_id]
-
-    similarity_df = similarity_df.merge(
-        beatmaps_df[["id", "beatmapset_id", "title"]],
-        left_on="beatmap_id",
-        right_on="id",
-        how="left",
-    )
-
-    similarity_df = similarity_df[similarity_df["beatmapset_id"] != query_beatmapset_id]
-
-    similarity_df = similarity_df.sort_values("similarity", ascending=False)
 
     seen_beatmapsets = set()
     unique_results = []
-    for _, row in similarity_df.iterrows():
+    for row in similarity_df.iter_rows(named=True):
         if row["beatmapset_id"] not in seen_beatmapsets:
             seen_beatmapsets.add(row["beatmapset_id"])
             unique_results.append(row)

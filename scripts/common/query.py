@@ -3,10 +3,11 @@ from __future__ import annotations
 import re
 import shutil
 import time
+from math import isnan
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import requests
 from scripts.common.osu import (
     API_TIERS,
@@ -29,7 +30,9 @@ def extract_beatmap_id(raw_input: str) -> int:
         raise ValueError("empty input")
 
     if "osu.ppy.sh" in text:
-        hash_match = re.search(r"beatmapsets/\d+#(?:osu|taiko|fruits|mania)/(\d+)", text)
+        hash_match = re.search(
+            r"beatmapsets/\d+#(?:osu|taiko|fruits|mania)/(\d+)", text
+        )
         if hash_match:
             return int(hash_match.group(1))
         beatmaps_match = re.search(r"/(?:beatmaps|b)/(\d+)", text)
@@ -52,21 +55,21 @@ def load_embeddings(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"Embeddings parquet not found: {path}")
 
-    df = pd.read_parquet(path)
+    df = pl.read_parquet(path)
     if "beatmap_id" not in df.columns or "embedding" not in df.columns:
         raise ValueError(f"Expected beatmap_id and embedding columns in {path}")
 
-    beatmap_ids = df["beatmap_id"].astype(np.int64).to_numpy()
-    embeddings = np.asarray(df["embedding"].tolist(), dtype=np.float32)
+    beatmap_ids = df["beatmap_id"].to_numpy().astype(np.int64)
+    embeddings = np.asarray(df["embedding"].to_list(), dtype=np.float32)
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     embeddings = embeddings / np.maximum(norms, 1e-12)
     id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
     return beatmap_ids, embeddings, id_to_index
 
 
-def load_metadata(path: Path) -> pd.DataFrame:
+def load_metadata(path: Path) -> pl.DataFrame:
     if not path.exists():
-        return pd.DataFrame()
+        return pl.DataFrame()
 
     wanted = [
         "id",
@@ -78,28 +81,25 @@ def load_metadata(path: Path) -> pd.DataFrame:
         "bpm",
     ]
     try:
-        return pd.read_parquet(path, columns=wanted)
+        return pl.read_parquet(path, columns=wanted)
     except Exception:
-        return pd.read_parquet(path)
+        return pl.read_parquet(path)
 
 
-def metadata_by_id(metadata_df: pd.DataFrame) -> dict[int, dict]:
-    if metadata_df.empty or "id" not in metadata_df.columns:
+def metadata_by_id(metadata_df: pl.DataFrame) -> dict[int, dict]:
+    if metadata_df.is_empty() or "id" not in metadata_df.columns:
         return {}
     return {
-        int(row["id"]): row.to_dict()
-        for _, row in metadata_df.drop_duplicates("id").iterrows()
+        int(row["id"]): row
+        for row in metadata_df.unique("id", maintain_order=True).iter_rows(named=True)
     }
 
 
 def clean_value(value, default="?"):
     if value is None:
         return default
-    try:
-        if pd.isna(value):
-            return default
-    except ValueError:
-        pass
+    if isinstance(value, float) and isnan(value):
+        return default
     return value
 
 
@@ -164,8 +164,8 @@ def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
     if not validate_beatmap(raw_beatmap):
         raise ValueError(f"Could not parse a valid beatmap from {path}")
 
-    beatmaps_df = pd.DataFrame([extract_beatmap_record(raw_beatmap)])
-    hitobjects_df = pd.DataFrame(extract_hitobject_records(raw_beatmap))
+    beatmaps_df = pl.DataFrame([extract_beatmap_record(raw_beatmap)])
+    hitobjects_df = pl.DataFrame(extract_hitobject_records(raw_beatmap))
     vectors, ids, original_counts = build_feature_tensors(beatmaps_df, hitobjects_df)
     if not vectors:
         raise ValueError(f"Could not engineer hitobject features for {path}")
@@ -198,7 +198,9 @@ class LazyEmbedder:
         self.config = OmegaConf.load(self.config_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         ckpt_path = find_checkpoint(self.checkpoint_path)
-        self.model, checkpoint = load_alignment_model(self.config, ckpt_path, self.device)
+        self.model, checkpoint = load_alignment_model(
+            self.config, ckpt_path, self.device
+        )
         self.normalizer = BeatmapNormalizer(
             vector_stats=checkpoint["vector_stats"],
             attribute_stats=checkpoint.get("attribute_stats", {}),
@@ -213,7 +215,9 @@ class LazyEmbedder:
         vectors = beatmap_vectors_from_osu(path, self.config.data.max_seq_len)
         vectors = self.normalizer.normalize_vectors(vectors)
         vector_dim = vectors.shape[1]
-        padded, mask, cu_seqlens = pad_batch([vectors], self.config.data.max_seq_len, vector_dim)
+        padded, mask, cu_seqlens = pad_batch(
+            [vectors], self.config.data.max_seq_len, vector_dim
+        )
 
         padded = padded.to(self.device)
         mask = mask.to(self.device)
@@ -256,14 +260,14 @@ def format_beatmap_line(beatmap_id: int, row: dict | None):
     return f"{url}\n    {artist} - {title} [{version}]\n    {stars}★ · {bpm} BPM"
 
 
-def load_beatmap_titles(path, columns=("id", "beatmapset_id", "title")) -> pd.DataFrame:
-    return pd.read_parquet(path, columns=list(columns))
+def load_beatmap_titles(path, columns=("id", "beatmapset_id", "title")) -> pl.DataFrame:
+    return pl.read_parquet(path, columns=list(columns))
 
 
-def unique_beatmapset_results(df: pd.DataFrame, limit: int) -> list[pd.Series]:
+def unique_beatmapset_results(df: pl.DataFrame, limit: int) -> list[dict]:
     seen = set()
     rows = []
-    for _, row in df.iterrows():
+    for row in df.iter_rows(named=True):
         if row["beatmapset_id"] in seen:
             continue
         seen.add(row["beatmapset_id"])
@@ -273,7 +277,9 @@ def unique_beatmapset_results(df: pd.DataFrame, limit: int) -> list[pd.Series]:
     return rows
 
 
-def print_similarity_table(rows: list[pd.Series], *, title: str, max_width: int = 100) -> None:
+def print_similarity_table(
+    rows: list[dict], *, title: str, max_width: int = 100
+) -> None:
     terminal_width = shutil.get_terminal_size((80, 20)).columns
     sim_col_w = 6
     id_col_w = 10
@@ -287,4 +293,6 @@ def print_similarity_table(rows: list[pd.Series], *, title: str, max_width: int 
         name = str(row["title"])
         if len(name) > max_title_len:
             name = name[: max_title_len - 3] + "..."
-        print(f"{row['similarity']:<{sim_col_w}.3f} {int(row['beatmap_id']):<{id_col_w}} {name}")
+        print(
+            f"{row['similarity']:<{sim_col_w}.3f} {int(row['beatmap_id']):<{id_col_w}} {name}"
+        )

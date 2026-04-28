@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
@@ -25,7 +25,9 @@ class ExportDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.beatmaps[idx]
-        return int(item["beatmap_id"]), self.normalizer.normalize_vectors(item["hitobjects"])
+        return int(item["beatmap_id"]), self.normalizer.normalize_vectors(
+            item["hitobjects"]
+        )
 
 
 def collate_export(batch, max_seq_len: int, vector_dim: int):
@@ -51,7 +53,9 @@ def find_checkpoint(path: str | Path | None) -> Path:
     return candidates[0]
 
 
-def normalize_checkpoint_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def normalize_checkpoint_state(
+    state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
     normalized = {}
     for key, value in state.items():
         for prefix in ("model._orig_mod.", "model.", "_orig_mod."):
@@ -97,8 +101,8 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
 
 def sample_ids(dataset_dir: Path, limit: int | None, seed: int):
     beatmaps_dir = dataset_dir / "beatmaps"
-    beatmaps_df = pd.read_parquet(beatmaps_dir, columns=["beatmap_id"])
-    ids = np.array(sorted(beatmaps_df["beatmap_id"].unique()), dtype=np.int64)
+    beatmaps_df = pl.read_parquet(beatmaps_dir, columns=["beatmap_id"])
+    ids = np.array(sorted(beatmaps_df["beatmap_id"].unique().to_list()), dtype=np.int64)
     if limit is not None and limit > 0 and len(ids) > limit:
         rng = np.random.default_rng(seed)
         ids = rng.choice(ids, size=limit, replace=False)
@@ -149,13 +153,17 @@ def export_embeddings(
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
-        collate_fn=lambda batch: collate_export(batch, config.data.max_seq_len, vector_dim),
+        collate_fn=lambda batch: collate_export(
+            batch, config.data.max_seq_len, vector_dim
+        ),
     )
 
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     rows = []
     with torch.no_grad():
-        for beatmap_ids, vectors, attention_mask, cu_seqlens in tqdm(loader, desc="Embedding"):
+        for beatmap_ids, vectors, attention_mask, cu_seqlens in tqdm(
+            loader, desc="Embedding"
+        ):
             vectors = vectors.to(device)
             attention_mask = attention_mask.to(device)
             cu_seqlens = cu_seqlens.to(device)
@@ -170,17 +178,27 @@ def export_embeddings(
                 rows.append({"beatmap_id": int(bid), "embedding": embedding.tolist()})
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_parquet(output_path, index=False)
+    pl.DataFrame(rows).write_parquet(output_path)
     print(f"Saved {len(rows):,} embeddings to {output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export Bobert alignment embeddings")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
-    parser.add_argument("--checkpoint", default=None, help="Defaults to newest experiments/**/checkpoints/last.ckpt")
-    parser.add_argument("--dataset", default=None, help="Defaults to config.alignment.db_path")
-    parser.add_argument("--output", default=str(PROJECT_ROOT / "data" / "embeddings.parquet"))
-    parser.add_argument("--limit", type=int, default=None, help="Random sample size, e.g. 50000")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Defaults to newest experiments/**/checkpoints/last.ckpt",
+    )
+    parser.add_argument(
+        "--dataset", default=None, help="Defaults to config.alignment.db_path"
+    )
+    parser.add_argument(
+        "--output", default=str(PROJECT_ROOT / "data" / "embeddings.parquet")
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

@@ -19,8 +19,9 @@ components:
   compile_mode: "default" 
     
 pretraining:
-  db_path: './data/beatmap_dataset100k/'
+  # db_path: './data/beatmap_dataset100k/'
   # db_path: './data/beatmap_dataset50k/'
+  db_path: './data/beatmap_dataset20k/'
   batch_size: 8
   num_epochs: 8
 
