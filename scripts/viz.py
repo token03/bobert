@@ -2,7 +2,7 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "umap": "scripts.tasks.run_umap",
+    "umap": "scripts.tasks.viz.umap",
 }
 
 

@@ -1,19 +1,14 @@
 import argparse
-from pathlib import Path
-import sys
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.alignment_mining import AlignmentMiningConfig, build_alignment_mining_cache
+from scripts.common.paths import DATA_DIR
 
 
 def main():
     parser = argparse.ArgumentParser(description="Build Bobert alignment mining cache")
-    parser.add_argument("--data-dir", default=str(PROJECT_ROOT / "data"))
-    parser.add_argument("--dataset-dir", default=str(PROJECT_ROOT / "data" / "beatmap_dataset175k"))
-    parser.add_argument("--output", default=str(PROJECT_ROOT / "data" / "alignment_mining_cache.parquet"))
+    parser.add_argument("--data-dir", default=str(DATA_DIR))
+    parser.add_argument("--dataset-dir", default=str(DATA_DIR / "beatmap_dataset175k"))
+    parser.add_argument("--output", default=str(DATA_DIR / "alignment_mining_cache.parquet"))
     parser.add_argument("--top-k", type=int, default=32)
     parser.add_argument("--candidate-k", type=int, default=256)
     parser.add_argument("--block-size", type=int, default=256)

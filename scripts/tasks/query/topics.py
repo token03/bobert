@@ -1,36 +1,28 @@
-from pathlib import Path
-import sys
 import pandas as pd
 import argparse
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import shutil
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-DATA_DIR = PROJECT_ROOT / "data"
-COLLECTIONS_DIR = DATA_DIR / "collections"
-BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
+from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
+from scripts.common.query import print_similarity_table
 
 
 def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
     """Compare two specific beatmaps and return their cosine similarity."""
-    version_suffix = f"_{version}" if version else "_v1"
-    beatmap_embeddings_path = (
-        COLLECTIONS_DIR / f"beatmap_embeddings{version_suffix}.parquet"
+    version_suffix = f"_{version}" if version else ""
+    beatmap_topic_weights_path = (
+        COLLECTIONS_DIR / f"beatmap_topic_weights{version_suffix}.parquet"
     )
 
-    print(f"Loading beatmap embeddings from {beatmap_embeddings_path}...")
-    df = pd.read_parquet(beatmap_embeddings_path)
+    print(f"Loading beatmap topic weights from {beatmap_topic_weights_path}...")
+    df = pd.read_parquet(beatmap_topic_weights_path)
 
     # Check both IDs exist
     if beatmap_id_1 not in df["beatmap_id"].values:
-        print(f"No embeddings found for beatmap ID {beatmap_id_1}")
+        print(f"No topics found for beatmap ID {beatmap_id_1}")
         return
     if beatmap_id_2 not in df["beatmap_id"].values:
-        print(f"No embeddings found for beatmap ID {beatmap_id_2}")
+        print(f"No topics found for beatmap ID {beatmap_id_2}")
         return
 
     # Load beatmap metadata
@@ -38,12 +30,13 @@ def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
     )
 
-    # Get embeddings for both beatmaps
-    embedding_1 = df[df["beatmap_id"] == beatmap_id_1]["embedding"].values[0]
-    embedding_2 = df[df["beatmap_id"] == beatmap_id_2]["embedding"].values[0]
+    # Pivot to get topic vectors for both beatmaps
+    pivot_df = df.pivot(index="beatmap_id", columns="topic_id", values="weight").fillna(
+        0
+    )
 
-    vector_1 = np.array(embedding_1).reshape(1, -1)
-    vector_2 = np.array(embedding_2).reshape(1, -1)
+    vector_1 = pivot_df.loc[beatmap_id_1].values.reshape(1, -1)
+    vector_2 = pivot_df.loc[beatmap_id_2].values.reshape(1, -1)
 
     # Calculate cosine similarity
     similarity = cosine_similarity(vector_1, vector_2)[0][0]
@@ -62,18 +55,29 @@ def compare_two_beatmaps(beatmap_id_1, beatmap_id_2, version=None):
     print(f"\nSimilarity: {similarity:.6f}")
 
 
-def query_embeddings(beatmap_id, version=None):
-    version_suffix = f"_{version}" if version else "_v1"
-    beatmap_embeddings_path = (
-        COLLECTIONS_DIR / f"beatmap_embeddings{version_suffix}.parquet"
+def query_topics(beatmap_id, version=None):
+    version_suffix = f"_{version}" if version else ""
+    beatmap_topic_weights_path = (
+        COLLECTIONS_DIR / f"beatmap_topic_weights{version_suffix}.parquet"
     )
 
-    print(f"Loading beatmap embeddings from {beatmap_embeddings_path}...")
-    df = pd.read_parquet(beatmap_embeddings_path)
+    print(f"Loading beatmap topic weights from {beatmap_topic_weights_path}...")
+    df = pd.read_parquet(beatmap_topic_weights_path)
 
-    if beatmap_id not in df["beatmap_id"].values:
-        print(f"No embeddings found for beatmap ID {beatmap_id}")
+    beatmap_topics = df[df["beatmap_id"] == beatmap_id].copy()
+
+    if len(beatmap_topics) == 0:
+        print(f"No topics found for beatmap ID {beatmap_id}")
         return
+
+    beatmap_topics = beatmap_topics.sort_values("weight", ascending=False).head(10)
+
+    print(f"\nTop 10 most relevant topics for beatmap {beatmap_id}:\n")
+    print(f"{'Topic ID':<10} {'Weight':<12}")
+    print("-" * 25)
+
+    for _, row in beatmap_topics.iterrows():
+        print(f"{int(row['topic_id']):<10} {row['weight']:<12.6f}")
 
     beatmaps_df = pd.read_parquet(
         BEATMAPS_PATH, columns=["id", "beatmapset_id", "title"]
@@ -87,15 +91,21 @@ def query_embeddings(beatmap_id, version=None):
         return
     query_beatmapset_id = query_beatmapset_id[0]
 
-    query_embedding = df[df["beatmap_id"] == beatmap_id]["embedding"].values[0]
-    query_vector = np.array(query_embedding).reshape(1, -1)
+    pivot_df = df.pivot(index="beatmap_id", columns="topic_id", values="weight").fillna(
+        0
+    )
 
-    all_embeddings = np.stack(df["embedding"].values)
+    if beatmap_id not in pivot_df.index:
+        print(f"Beatmap {beatmap_id} not in topic weights")
+        return
 
-    similarities = cosine_similarity(query_vector, all_embeddings)[0]
+    query_vector = pivot_df.loc[beatmap_id].values.reshape(1, -1)
+    all_vectors = pivot_df.values
+
+    similarities = cosine_similarity(query_vector, all_vectors)[0]
 
     similarity_df = pd.DataFrame(
-        {"beatmap_id": df["beatmap_id"].values, "similarity": similarities}
+        {"beatmap_id": pivot_df.index, "similarity": similarities}
     )
 
     similarity_df = similarity_df[similarity_df["beatmap_id"] != beatmap_id]
@@ -117,35 +127,15 @@ def query_embeddings(beatmap_id, version=None):
         if row["beatmapset_id"] not in seen_beatmapsets:
             seen_beatmapsets.add(row["beatmapset_id"])
             unique_results.append(row)
-        if len(unique_results) >= 20:
+        if len(unique_results) >= 10:
             break
 
-    terminal_width = shutil.get_terminal_size((80, 20)).columns
-
-    sim_col_w = 6
-    id_col_w = 10
-    gutter = 2
-
-    fixed_width = sim_col_w + id_col_w + gutter
-    max_title_len = terminal_width - fixed_width
-
-    print(f"\nTop 10 most similar beatmaps:\n")
-    print(f"{'Sim':<{sim_col_w}} {'ID':<{id_col_w}} {'Name'}")
-    print("-" * min(terminal_width, 100))
-
-    for row in unique_results:
-        title = str(row["title"])
-        if len(title) > max_title_len:
-            title = title[: max_title_len - 3] + "..."
-
-        print(
-            f"{row['similarity']:<{sim_col_w}.3f} {int(row['beatmap_id']):<{id_col_w}} {title}"
-        )
+    print_similarity_table(unique_results, title="Top 10 most similar beatmaps")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Query embeddings for a beatmap or compare two beatmaps"
+        description="Query topic weights for a beatmap or compare two beatmaps"
     )
     parser.add_argument(
         "beatmap_id",
@@ -158,13 +148,13 @@ if __name__ == "__main__":
         "--version",
         type=str,
         default=None,
-        help="Version suffix (e.g., v1). If not specified, defaults to v1.",
+        help="Version suffix (e.g., v3). If not specified, no version suffix is used.",
     )
 
     args = parser.parse_args()
 
     if len(args.beatmap_id) == 1:
-        query_embeddings(args.beatmap_id[0], args.version)
+        query_topics(args.beatmap_id[0], args.version)
     elif len(args.beatmap_id) == 2:
         compare_two_beatmaps(args.beatmap_id[0], args.beatmap_id[1], args.version)
     else:

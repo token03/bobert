@@ -1,4 +1,3 @@
-import sys
 import os
 import json
 import argparse
@@ -8,7 +7,6 @@ import queue
 import time
 import tqdm
 import pandas as pd
-from pathlib import Path
 
 from scripts.common.osu import (
     API_TIERS,
@@ -16,13 +14,8 @@ from scripts.common.osu import (
     get_sharded_path,
     is_valid_osu_file,
 )
+from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-DATA_DIR = PROJECT_ROOT / "data"
-BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPS_DIR = DATA_DIR / "beatmaps"
 FAILED_DOWNLOADS_PATH = DATA_DIR / ".failed_downloads.json"
 

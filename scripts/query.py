@@ -2,9 +2,9 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "embeddings": "scripts.tasks.query_emb",
-    "recommend": "scripts.tasks.recommend_beatmap",
-    "topics": "scripts.tasks.query_topics",
+    "embeddings": "scripts.tasks.query.embeddings",
+    "recommend": "scripts.tasks.query.recommend",
+    "topics": "scripts.tasks.query.topics",
 }
 
 ALIASES = {

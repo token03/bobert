@@ -3,32 +3,13 @@ import argparse
 import yaml
 import pandas as pd
 import concurrent.futures
-from pathlib import Path
 from typing import Optional, Dict, Tuple, List
 from tqdm import tqdm
 import itertools
 import rosu_pp_py as rosu
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def resolve_path(path: str) -> str:
-    path_obj = Path(path).expanduser()
-    if path_obj.is_absolute() or path_obj.exists():
-        return str(path_obj)
-    project_path = PROJECT_ROOT / path_obj
-    if project_path.exists() or path_obj.parts[:1] == ("data",):
-        return str(project_path)
-    return str(path_obj)
-
-def get_shard_from_id(beatmap_id: int) -> str:
-    return str(beatmap_id)[-2:].zfill(2)
-
-
-def get_sharded_path(beatmap_id: int, base_dir: str) -> str:
-    shard = get_shard_from_id(beatmap_id)
-    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
+from scripts.common.osu import get_sharded_path
+from scripts.common.paths import resolve_path
 
 
 def _calculate_difficulty_attributes_worker(
@@ -78,7 +59,7 @@ def _calculate_difficulty_attributes_worker(
 
 
 def load_config(config_path: str = "./config.yaml") -> dict:
-    config_path = resolve_path(config_path)
+    config_path = str(resolve_path(config_path))
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
@@ -205,9 +186,9 @@ def main():
     dataset_path = (
         args.dataset if args.dataset is not None else config["pretraining"]["db_path"]
     )
-    dataset_path = resolve_path(dataset_path)
-    output_path = resolve_path(args.output)
-    raw_beatmap_path = resolve_path(args.raw_beatmaps)
+    dataset_path = str(resolve_path(dataset_path))
+    output_path = str(resolve_path(args.output))
+    raw_beatmap_path = str(resolve_path(args.raw_beatmaps))
 
     print(f"Configuration:")
     print(f"  Dataset: {dataset_path}")

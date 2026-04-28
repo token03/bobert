@@ -2,9 +2,9 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "beatmaps": "scripts.tasks.fetch_beatmaps",
-    "beatmapsets": "scripts.tasks.fetch_beatmapsets",
-    "osu": "scripts.tasks.fetch_osu",
+    "beatmaps": "scripts.tasks.fetch.maps",
+    "beatmapsets": "scripts.tasks.fetch.sets",
+    "osu": "scripts.tasks.fetch.files",
 }
 
 

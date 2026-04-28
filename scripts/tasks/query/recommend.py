@@ -1,6 +1,5 @@
 import argparse
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -9,10 +8,6 @@ import pandas as pd
 import requests
 import torch
 from omegaconf import OmegaConf
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.datamodule import _pad_batch
 from core.data.features import engineer_features_vectorized
@@ -24,24 +19,18 @@ from scripts.common.osu import (
     get_sharded_path,
     is_valid_osu_file,
 )
-from scripts.tasks.create_dataset import (
+from scripts.common.paths import PROJECT_ROOT, resolve_path
+from scripts.tasks.data.dataset import (
     extract_beatmap_record,
     extract_hitobject_records,
     validate_beatmap,
 )
-from scripts.tasks.export_bobert_embeddings import find_checkpoint, load_alignment_model
+from scripts.tasks.embed.bobert import find_checkpoint, load_alignment_model
 
 DEFAULT_EMBEDDINGS_PATH = PROJECT_ROOT / "data" / "bobert_alignment_embeddings.parquet"
 DEFAULT_METADATA_PATH = PROJECT_ROOT / "data" / "beatmaps.parquet"
 DEFAULT_BEATMAPS_DIR = PROJECT_ROOT / "data" / "beatmaps"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
-
-
-def resolve_path(path: str | Path) -> Path:
-    path = Path(str(path).strip()).expanduser()
-    if path.is_absolute() or path.exists():
-        return path
-    return PROJECT_ROOT / path
 
 
 def extract_beatmap_id(raw_input: str) -> int:

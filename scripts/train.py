@@ -2,9 +2,9 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "beatmap2vec": "scripts.tasks.beatmap2vec",
-    "lightgcn": "scripts.tasks.lightgcn",
-    "nmf": "scripts.tasks.nmf",
+    "beatmap2vec": "scripts.tasks.train.cooccurrence",
+    "lightgcn": "scripts.tasks.train.graph",
+    "nmf": "scripts.tasks.train.topics",
 }
 
 

@@ -2,10 +2,10 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "alignment-cache": "scripts.tasks.build_alignment_cache",
-    "dataset": "scripts.tasks.create_dataset",
-    "ratings": "scripts.tasks.create_ratings",
-    "shard": "scripts.tasks.shard_beatmaps",
+    "alignment-cache": "scripts.tasks.data.alignment",
+    "dataset": "scripts.tasks.data.dataset",
+    "ratings": "scripts.tasks.data.ratings",
+    "shard": "scripts.tasks.data.shard",
 }
 
 

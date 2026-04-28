@@ -1,11 +1,6 @@
-import os
-import sys
 import json
 import signal
-import numpy as np
-from pathlib import Path
 
-from dotenv import load_dotenv
 from rich import print
 from rich.progress import (
     Progress,
@@ -14,77 +9,19 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from ossapi import Ossapi
 import pandas as pd
 import time
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.common.api import osu_api
+from scripts.common.io import atomic_json, atomic_parquet
+from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
-DATA_DIR = PROJECT_ROOT / "data"
-BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
-COLLECTIONS_DIR = DATA_DIR / "collections"
 COLLECTION_BEATMAPS_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
 FAILED_BEATMAPS_PATH = DATA_DIR / ".failed_beatmaps.json"
 
 BATCH_SIZE = 50
 SAVE_INTERVAL = 5000
 API_RATE_LIMIT_DELAY = 0.9
-
-
-def atomic_save_parquet(df: pd.DataFrame, path: Path):
-    """Saves to a temp file then renames to prevent corruption."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
-    df.to_parquet(temp_path, index=False)
-    if path.exists():
-        path.unlink()
-    temp_path.rename(path)
-
-
-def atomic_save_json(data: dict, path: Path):
-    """Saves to a temp file then renames to prevent corruption."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
-
-    def convert_to_serializable(obj):
-        if isinstance(obj, dict):
-            return {k: convert_to_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_to_serializable(item) for item in obj]
-        elif isinstance(obj, (np.integer, np.int64, np.int32)):
-            return int(obj)
-        elif isinstance(obj, (np.floating, np.float64, np.float32)):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, (str, int, float, bool, type(None))):
-            return obj
-        else:
-            return str(obj)
-
-    try:
-        cleaned_data = convert_to_serializable(data)
-        with open(temp_path, "w") as f:
-            json.dump(cleaned_data, f)
-        if path.exists():
-            path.unlink()
-        temp_path.rename(path)
-    except Exception as e:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise e
-
-
-def initialize_api() -> Ossapi:
-    load_dotenv()
-    client_id = os.getenv("client_id")
-    client_secret = os.getenv("client_secret")
-    if not all([client_id, client_secret]):
-        print("[red]Error: API credentials missing in .env[/red]")
-        exit(1)
-    return Ossapi(client_id, client_secret)
 
 
 def beatmap_to_dict(bm) -> dict:
@@ -177,7 +114,7 @@ def main():
 
     print(f"[cyan]Total left to fetch: {len(todo_ids)}[/cyan]")
 
-    api = initialize_api()
+    api = osu_api()
     new_data = []
     is_shutting_down = False
 
@@ -230,9 +167,9 @@ def main():
                     new_df = pd.DataFrame(new_data)
                     beatmaps_df = pd.concat([beatmaps_df, new_df], ignore_index=True)
 
-                    atomic_save_parquet(beatmaps_df, BEATMAPS_PATH)
+                    atomic_parquet(beatmaps_df, BEATMAPS_PATH)
 
-                    atomic_save_json(failed_state, FAILED_BEATMAPS_PATH)
+                    atomic_json(failed_state, FAILED_BEATMAPS_PATH)
 
                     new_data = []
 
@@ -246,9 +183,9 @@ def main():
             beatmaps_df = pd.concat(
                 [beatmaps_df, pd.DataFrame(new_data)], ignore_index=True
             )
-            atomic_save_parquet(beatmaps_df, BEATMAPS_PATH)
+            atomic_parquet(beatmaps_df, BEATMAPS_PATH)
 
-        atomic_save_json(failed_state, FAILED_BEATMAPS_PATH)
+        atomic_json(failed_state, FAILED_BEATMAPS_PATH)
         print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
 
 

@@ -4,10 +4,7 @@ from tqdm import tqdm
 import argparse
 
 from scripts.common.osu import get_shard_from_id
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.common.paths import DATA_DIR
 
 
 def shard_beatmaps(input_dir: str, dry_run: bool = False, subdir: str | None = None):
@@ -108,7 +105,7 @@ def shard_beatmaps(input_dir: str, dry_run: bool = False, subdir: str | None = N
 
 
 def main():
-    DEFAULT_INPUT_DIR = PROJECT_ROOT / "data" / "beatmaps"
+    DEFAULT_INPUT_DIR = DATA_DIR / "beatmaps"
 
     parser = argparse.ArgumentParser(
         description="Reorganize beatmap files from flat to sharded structure"

@@ -2,7 +2,7 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "bobert": "scripts.tasks.export_bobert_embeddings",
+    "bobert": "scripts.tasks.embed.bobert",
 }
 
 

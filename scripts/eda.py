@@ -2,7 +2,7 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "collections": "scripts.tasks.eda_collections",
+    "collections": "scripts.tasks.eda.collections",
 }
 
 

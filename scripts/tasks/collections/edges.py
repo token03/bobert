@@ -1,10 +1,8 @@
 import httpx
 import pandas as pd
-import sys
 import signal
 import argparse
 import os
-from pathlib import Path
 from abc import ABC, abstractmethod
 from rich import print
 from rich.progress import (
@@ -14,18 +12,13 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from dotenv import load_dotenv
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-load_dotenv(PROJECT_ROOT / ".env")
-
+from scripts.common.api import load_project_env
+from scripts.common.io import append_dedup_parquet
 from scripts.common.osdb import get_beatmap_ids_from_osdb_bytes
+from scripts.common.paths import COLLECTIONS_DIR
 
-DATA_DIR = PROJECT_ROOT / "data"
-COLLECTIONS_DIR = DATA_DIR / "collections"
+load_project_env()
+
 VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
 EDGE_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
 
@@ -77,26 +70,9 @@ class BaseEdgeFetcher(ABC):
         if not new_records:
             return
 
-        new_df = pd.DataFrame(new_records)
-        temp_path = self.edge_path.with_suffix(".parquet.tmp")
-
-        try:
-            if self.edge_path.exists():
-                existing_df = pd.read_parquet(self.edge_path)
-                combined = pd.concat([existing_df, new_df], ignore_index=True)
-                combined = combined.drop_duplicates(
-                    subset=["collection_id", "source", "beatmap_id"]
-                )
-                combined.to_parquet(temp_path, index=False)
-            else:
-                COLLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-                new_df.to_parquet(temp_path, index=False)
-
-            temp_path.replace(self.edge_path)
-        except Exception as e:
-            if temp_path.exists():
-                temp_path.unlink()
-            raise e
+        append_dedup_parquet(
+            new_records, self.edge_path, ["collection_id", "source", "beatmap_id"]
+        )
 
     @abstractmethod
     def fetch_all(self):

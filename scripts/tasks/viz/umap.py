@@ -1,18 +1,12 @@
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, PROJECT_ROOT, resolve_path
 
-DATA_DIR = PROJECT_ROOT / "data"
-COLLECTIONS_DIR = DATA_DIR / "collections"
-BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 EMBEDDINGS_PATH = COLLECTIONS_DIR / "beatmap_embeddings_v1.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
 
@@ -33,12 +27,7 @@ def _load_gpu_backend():
 
 
 def _resolve_path(path: str | Path) -> Path:
-    if isinstance(path, str):
-        path = path.strip()
-    path = Path(path).expanduser()
-    if path.is_absolute() or path.exists():
-        return path
-    return PROJECT_ROOT / path
+    return resolve_path(path)
 
 
 def _sample_df(df: pd.DataFrame, limit: int | None, seed: int) -> pd.DataFrame:

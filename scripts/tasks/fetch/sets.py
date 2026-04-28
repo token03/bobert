@@ -1,10 +1,7 @@
-import os
-import sys
 import json
 import signal
 from pathlib import Path
 
-from dotenv import load_dotenv
 from rich import print
 from rich.progress import (
     Progress,
@@ -13,18 +10,15 @@ from rich.progress import (
     TextColumn,
     TimeRemainingColumn,
 )
-from ossapi import Ossapi
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import time
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.common.api import osu_api
+from scripts.common.io import atomic_json, atomic_pyarrow_table
+from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
 
-DATA_DIR = PROJECT_ROOT / "data"
-BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAP_DATASET_DIR = DATA_DIR / "beatmap_dataset" / "beatmaps"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 
@@ -52,37 +46,9 @@ BEATMAPSETS_SCHEMA = pa.schema(
 )
 
 
-def atomic_save_parquet(df: pd.DataFrame, path: Path):
-    """Saves to a temp file then renames to prevent corruption."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
+def save_beatmapsets(df: pd.DataFrame, path: Path):
     table = pa.Table.from_pandas(df, schema=BEATMAPSETS_SCHEMA, preserve_index=False)
-    pq.write_table(table, temp_path)
-    if path.exists():
-        path.unlink()
-    temp_path.rename(path)
-
-
-def atomic_save_json(data: dict, path: Path):
-    """Saves to a temp file then renames to prevent corruption."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
-    with open(temp_path, "w") as f:
-        json.dump(data, f, indent=2)
-    if path.exists():
-        path.unlink()
-    temp_path.rename(path)
-
-
-def initialize_api() -> Ossapi:
-    load_dotenv()
-    client_id = os.getenv("client_id")
-    client_secret = os.getenv("client_secret")
-    if not all([client_id, client_secret]):
-        print("[red]Error: API credentials missing in .env[/red]")
-        exit(1)
-    assert client_id is not None and client_secret is not None
-    return Ossapi(int(client_id), client_secret)
+    atomic_pyarrow_table(table, path)
 
 
 def load_intersection_data():
@@ -129,7 +95,7 @@ def main():
     intersection_beatmap_ids, all_beatmapset_ids = load_intersection_data()
 
     # Initialize API
-    api = initialize_api()
+    api = osu_api()
 
     # Fetch tag map once at startup
     print("[cyan]Fetching tag map from API...[/cyan]")
@@ -306,12 +272,12 @@ def main():
                         combined_df = pd.concat(
                             [existing_df, pd.DataFrame(new_data)], ignore_index=True
                         )
-                        atomic_save_parquet(combined_df, BEATMAPSETS_PATH)
+                        save_beatmapsets(combined_df, BEATMAPSETS_PATH)
                         existing_df = combined_df
                         new_data = []
 
-                    atomic_save_json(progress, PROGRESS_STATE_PATH)
-                    atomic_save_json(failed_state, FAILED_BEATMAPSETS_PATH)
+                    atomic_json(progress, PROGRESS_STATE_PATH, indent=2)
+                    atomic_json(failed_state, FAILED_BEATMAPSETS_PATH, indent=2)
 
                 if success:
                     time.sleep(API_RATE_LIMIT_DELAY)
@@ -325,17 +291,17 @@ def main():
             combined_df = pd.concat(
                 [existing_df, pd.DataFrame(new_data)], ignore_index=True
             )
-            atomic_save_parquet(combined_df, BEATMAPSETS_PATH)
+            save_beatmapsets(combined_df, BEATMAPSETS_PATH)
 
         # Save metadata JSON files
         print("[cyan]Saving metadata files...[/cyan]")
-        atomic_save_json(tag_map, TAGS_JSON_PATH)
-        atomic_save_json(genre_map, GENRE_JSON_PATH)
-        atomic_save_json(language_map, LANGUAGE_JSON_PATH)
+        atomic_json(tag_map, TAGS_JSON_PATH, indent=2)
+        atomic_json(genre_map, GENRE_JSON_PATH, indent=2)
+        atomic_json(language_map, LANGUAGE_JSON_PATH, indent=2)
 
         # Save progress state
-        atomic_save_json(progress, PROGRESS_STATE_PATH)
-        atomic_save_json(failed_state, FAILED_BEATMAPSETS_PATH)
+        atomic_json(progress, PROGRESS_STATE_PATH, indent=2)
+        atomic_json(failed_state, FAILED_BEATMAPSETS_PATH, indent=2)
 
         print(
             f"[bold green]Done! Total beatmapsets processed: {progress['completed_count']}[/bold green]"

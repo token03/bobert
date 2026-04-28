@@ -1,11 +1,9 @@
 import httpx
 import pandas as pd
-import sys
 import signal
 import argparse
 import time
 from datetime import datetime
-from pathlib import Path
 from abc import ABC, abstractmethod
 from rich import print
 from rich.progress import (
@@ -16,12 +14,9 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.common.io import append_dedup_parquet
+from scripts.common.paths import COLLECTIONS_DIR
 
-DATA_DIR = PROJECT_ROOT / "data"
-COLLECTIONS_DIR = DATA_DIR / "collections"
 VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
 
 SAVE_INTERVAL = 100
@@ -59,26 +54,7 @@ class BaseVertexFetcher(ABC):
         if not new_records:
             return
 
-        new_df = pd.DataFrame(new_records)
-        temp_path = self.vertex_path.with_suffix(".parquet.tmp")
-
-        try:
-            if self.vertex_path.exists():
-                existing_df = pd.read_parquet(self.vertex_path)
-                combined = pd.concat([existing_df, new_df], ignore_index=True)
-                combined = combined.drop_duplicates(
-                    subset=["collection_id", "source"], keep="last"
-                )
-                combined.to_parquet(temp_path, index=False)
-            else:
-                COLLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-                new_df.to_parquet(temp_path, index=False)
-
-            temp_path.replace(self.vertex_path)
-        except Exception as e:
-            if temp_path.exists():
-                temp_path.unlink()
-            raise e
+        append_dedup_parquet(new_records, self.vertex_path, ["collection_id", "source"])
 
     @abstractmethod
     def fetch_all(self):

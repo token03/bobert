@@ -1,7 +1,6 @@
 import os
 import argparse
 import random
-import sys
 import time
 import shutil
 import multiprocessing as mp
@@ -11,10 +10,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data.parser import parse_osu_file, RawBeatmap
 

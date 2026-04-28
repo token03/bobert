@@ -2,8 +2,8 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "edges": "scripts.tasks.fetch_collection_edge",
-    "vertices": "scripts.tasks.fetch_collection_vertex",
+    "edges": "scripts.tasks.collections.edges",
+    "vertices": "scripts.tasks.collections.vertices",
 }
 
 ALIASES = {

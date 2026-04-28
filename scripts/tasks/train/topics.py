@@ -1,7 +1,3 @@
-from collections import defaultdict
-import math
-from pathlib import Path
-import sys
 import pandas as pd
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -14,9 +10,8 @@ import json
 import argparse
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from scripts.common.collections import deduplicate_collections
+from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
 
 VERSION = "v3"
 MIN_MAPS_IN_COLLECTION = 10
@@ -28,12 +23,9 @@ N_TOPICS = 144
 ALPHA = 1e-4
 L1_RATIO = 0.4
 
-DATA_DIR = PROJECT_ROOT / "data"
-COLLECTIONS_DIR = DATA_DIR / "collections"
 COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
 VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
 COLLECTIONS_DATA_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
-BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 
 
 class OsuNMF:
@@ -255,100 +247,6 @@ def get_collection_names(collection_tuples):
     return name_map
 
 
-def deduplicate_collections(df, threshold, probe_items=32):
-    print("--- Starting Deduplication Process ---")
-    start_time = time.time()
-
-    print("Grouping collections...")
-    df["collection_key"] = list(zip(df["collection_id"], df["source"]))
-    col_groups = df.groupby("collection_key")["beatmap_id"].apply(set).to_dict()
-
-    print("Step 1: Removing Exact Duplicates...")
-    content_hashes = {}
-    for ckey, bms in col_groups.items():
-        sig = tuple(sorted(bms))
-        prev = content_hashes.get(sig)
-        if prev is None or ckey[0] < prev[0]:
-            content_hashes[sig] = ckey
-
-    unique_content_ckeys = set(content_hashes.values())
-    print(
-        f"Reduced from {len(col_groups)} to {len(unique_content_ckeys)} unique content sets."
-    )
-
-    print(f"Step 2: Fuzzy Deduplication (Threshold: {threshold})...")
-
-    sorted_ckeys = sorted(
-        unique_content_ckeys, key=lambda x: len(col_groups[x]), reverse=True
-    )
-
-    kept_ckeys = []
-    kept_sets = {}
-    postings = defaultdict(list)
-
-    def min_required_overlap(len_a, len_b, t):
-        return math.ceil((t * (len_a + len_b)) / (1.0 + t))
-
-    for ckey in tqdm(sorted_ckeys, desc="Deduplicating"):
-        A = col_groups[ckey]
-        len_a = len(A)
-
-        items = list(A)
-        if len(items) > 4 * probe_items:
-            step = max(1, len(items) // (4 * probe_items))
-            items = items[::step]
-
-        items.sort(key=lambda x: len(postings.get(x, [])))
-        probe = items[:probe_items]
-
-        overlap_counts = defaultdict(int)
-        for bm in probe:
-            for kc in postings.get(bm, []):
-                overlap_counts[kc] += 1
-
-        is_duplicate = False
-
-        if overlap_counts:
-            candidates = sorted(
-                overlap_counts.items(), key=lambda kv: kv[1], reverse=True
-            )
-
-            for kept_ckey, approx_overlap in candidates:
-                B = kept_sets[kept_ckey]
-                len_b = len(B)
-
-                if len_a < threshold * len_b or len_b < threshold * len_a:
-                    continue
-
-                req = min_required_overlap(len_a, len_b, threshold)
-
-                if approx_overlap == 0:
-                    continue
-
-                inter = len(A & B)
-                if inter < req:
-                    continue
-
-                union = len_a + len_b - inter
-                jacc = inter / union
-                if jacc >= threshold:
-                    is_duplicate = True
-                    break
-
-        if not is_duplicate:
-            kept_ckeys.append(ckey)
-            kept_sets[ckey] = A
-            for bm in A:
-                postings[bm].append(ckey)
-
-    print(
-        f"Final Collection Count: {len(kept_ckeys)} (Removed {len(col_groups) - len(kept_ckeys)} duplicates)"
-    )
-    print(f"Deduplication took {(time.time() - start_time):.2f}s")
-
-    return df[df["collection_key"].isin(kept_ckeys)].copy()
-
-
 def run_nmf(source_filter=None):
     print("--- Loading Data ---")
     df = pd.read_parquet(COLLECTIONS_DATA_PATH)
@@ -421,7 +319,7 @@ def run_nmf(source_filter=None):
     ].index
     df = df[df["collection_id"].isin(valid_collections)].copy()
 
-    df = deduplicate_collections(df, JACCARD_THRESHOLD)
+    df = deduplicate_collections(df, JACCARD_THRESHOLD, verbose=True)
 
     bm_counts = df["beatmap_id"].value_counts()
     valid_maps = bm_counts[(bm_counts >= MIN_COLLECTIONS_PER_MAP)].index

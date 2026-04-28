@@ -1,5 +1,4 @@
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -9,14 +8,11 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 from core.data.datamodule import _pad_batch
 from core.data.loader import load_beatmap_data
 from core.data.transforms import BeatmapNormalizer
 from core.model.bobert import BobertForAlignment
+from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
 class ExportDataset(Dataset):
@@ -36,13 +32,6 @@ def collate_export(batch, max_seq_len: int, vector_dim: int):
     beatmap_ids, vectors = zip(*batch)
     padded, mask, cu_seqlens = _pad_batch(list(vectors), max_seq_len, vector_dim)
     return torch.tensor(beatmap_ids, dtype=torch.long), padded, mask, cu_seqlens
-
-
-def resolve_path(path: str | Path) -> Path:
-    path = Path(str(path).strip()).expanduser()
-    if path.is_absolute() or path.exists():
-        return path
-    return PROJECT_ROOT / path
 
 
 def find_checkpoint(path: str | Path | None) -> Path:
