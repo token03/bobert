@@ -24,7 +24,7 @@ Lightweight tabular transformer encoding beatmap metadata, user tags, and collec
 **Inputs:**
 * **Metadata:** Piecewise linear encoding for continuous features (ratings, `AR`, `CS`, etc.); learned embeddings for categorical (mapper, genre, language, status, etc.).
 * **User Tags:** Raw tags with vote counts from website (noisy, sparse, positive-unlabelled).
-* **Collection Topics:** NMF-derived topics from collection co-occurrence patterns (see `scripts/nmf.py`).
+* **Collection Topics:** NMF-derived topics from collection co-occurrence patterns (see `uv run python -m scripts.train nmf`).
 
 **Alignment (Phase 2):**
 * **Mechanism:** Contrastive learning between BoBERT embeddings $\leftrightarrow$ Tabformer embeddings.

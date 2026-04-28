@@ -1,21 +1,13 @@
-import os
 import sys
 from pathlib import Path
 from tqdm import tqdm
 import argparse
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from scripts.common.osu import get_shard_from_id
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-
-def get_shard_from_id(beatmap_id: str) -> str:
-    return str(beatmap_id)[-2:].zfill(2)
-
-
-def get_sharded_path(beatmap_id: str, base_dir: str) -> str:
-    shard = get_shard_from_id(beatmap_id)
-    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
 
 
 def shard_beatmaps(input_dir: str, dry_run: bool = False, subdir: str | None = None):

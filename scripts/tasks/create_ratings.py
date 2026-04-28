@@ -10,7 +10,7 @@ import itertools
 import rosu_pp_py as rosu
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def resolve_path(path: str) -> str:

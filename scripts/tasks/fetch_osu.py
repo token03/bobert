@@ -10,7 +10,14 @@ import tqdm
 import pandas as pd
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from scripts.common.osu import (
+    API_TIERS,
+    DOWNLOAD_HEADERS,
+    get_sharded_path,
+    is_valid_osu_file,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -18,12 +25,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPS_DIR = DATA_DIR / "beatmaps"
 FAILED_DOWNLOADS_PATH = DATA_DIR / ".failed_downloads.json"
-
-API_TIERS = [
-    {"url": "https://osu.ppy.sh/osu/{id}", "delay": 0.2, "name": "osu.ppy.sh"},
-    {"url": "https://osu.direct/api/osu/{id}", "delay": 1.0, "name": "osu.direct"},
-    {"url": "https://catboy.best/osu/{id}", "delay": 2.0, "name": "catboy.best"},
-]
 
 CHECKPOINT_INTERVAL = 10
 WORKERS_PER_TIER = 1
@@ -39,23 +40,6 @@ failed_downloads_lock = threading.Lock()
 
 checkpoint_counter = 0
 checkpoint_lock = threading.Lock()
-
-DOWNLOAD_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-}
-
-
-def is_valid_osu_file(content: bytes) -> bool:
-    if len(content) < 100:
-        return False
-
-    try:
-        first_line = content.decode("utf-8", errors="ignore").split("\n")[0]
-        return first_line.strip().startswith("osu file format v")
-    except:
-        return False
-
 
 def load_failed_downloads() -> set:
     if not FAILED_DOWNLOADS_PATH.exists():
@@ -89,15 +73,6 @@ def maybe_checkpoint():
         checkpoint_counter += 1
         if checkpoint_counter % CHECKPOINT_INTERVAL == 0:
             save_failed_downloads()
-
-
-def get_shard_from_id(beatmap_id: str) -> str:
-    return str(beatmap_id)[-2:].zfill(2)
-
-
-def get_sharded_path(beatmap_id: str, base_dir: str) -> str:
-    shard = get_shard_from_id(beatmap_id)
-    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
 
 
 def scan_existing_beatmaps(osu_dir):

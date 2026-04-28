@@ -16,13 +16,13 @@ from rich.progress import (
 )
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from scripts.gah import get_beatmap_ids_from_osdb_bytes
+from scripts.common.osdb import get_beatmap_ids_from_osdb_bytes
 
 DATA_DIR = PROJECT_ROOT / "data"
 COLLECTIONS_DIR = DATA_DIR / "collections"
@@ -48,7 +48,7 @@ class BaseEdgeFetcher(ABC):
         """
         if not self.vertex_path.exists():
             print(
-                "[yellow]No vertex data found. Please run fetch_collection_vertex.py first.[/yellow]"
+                "[yellow]No vertex data found. Please run `uv run python -m scripts.collections vertices` first.[/yellow]"
             )
             return {}
 

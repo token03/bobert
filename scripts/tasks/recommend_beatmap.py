@@ -10,7 +10,7 @@ import requests
 import torch
 from omegaconf import OmegaConf
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -18,14 +18,18 @@ from core.data.datamodule import _pad_batch
 from core.data.features import engineer_features_vectorized
 from core.data.parser import parse_osu_file
 from core.data.transforms import BeatmapNormalizer
-from scripts.create_dataset import (
+from scripts.common.osu import (
+    API_TIERS,
+    DOWNLOAD_HEADERS,
+    get_sharded_path,
+    is_valid_osu_file,
+)
+from scripts.tasks.create_dataset import (
     extract_beatmap_record,
     extract_hitobject_records,
     validate_beatmap,
 )
-from scripts.export_bobert_embeddings import find_checkpoint, load_alignment_model
-from scripts.fetch_osu import API_TIERS, DOWNLOAD_HEADERS, is_valid_osu_file
-from scripts.shard_beatmaps import get_sharded_path
+from scripts.tasks.export_bobert_embeddings import find_checkpoint, load_alignment_model
 
 DEFAULT_EMBEDDINGS_PATH = PROJECT_ROOT / "data" / "bobert_alignment_embeddings.parquet"
 DEFAULT_METADATA_PATH = PROJECT_ROOT / "data" / "beatmaps.parquet"
