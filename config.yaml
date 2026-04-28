@@ -65,7 +65,7 @@ alignment:
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
   group_size: 4
-  mining_cache_path: './data/alignment_mining_cache.parquet'
+  mining_cache_path: './data/mining_cache.parquet'
 
   adam_lr: 3e-5
   adam_wd: 0.05

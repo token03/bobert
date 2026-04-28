@@ -17,7 +17,7 @@ from scripts.common.osu import (
 from scripts.common.paths import PROJECT_ROOT
 
 
-DEFAULT_EMBEDDINGS_PATH = PROJECT_ROOT / "data" / "bobert_alignment_embeddings.parquet"
+DEFAULT_EMBEDDINGS_PATH = PROJECT_ROOT / "data" / "embeddings.parquet"
 DEFAULT_METADATA_PATH = PROJECT_ROOT / "data" / "beatmaps.parquet"
 DEFAULT_BEATMAPS_DIR = PROJECT_ROOT / "data" / "beatmaps"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
@@ -152,7 +152,7 @@ def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -
 
 
 def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
-    from core.data.features import engineer_features_vectorized
+    from core.data.feature import build_feature_tensors
     from core.data.parser import parse_osu_file
     from scripts.tasks.data.dataset import (
         extract_beatmap_record,
@@ -166,7 +166,7 @@ def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
 
     beatmaps_df = pd.DataFrame([extract_beatmap_record(raw_beatmap)])
     hitobjects_df = pd.DataFrame(extract_hitobject_records(raw_beatmap))
-    vectors, ids, original_counts = engineer_features_vectorized(beatmaps_df, hitobjects_df)
+    vectors, ids, original_counts = build_feature_tensors(beatmaps_df, hitobjects_df)
     if not vectors:
         raise ValueError(f"Could not engineer hitobject features for {path}")
 
@@ -189,7 +189,7 @@ class LazyEmbedder:
         import torch
         from omegaconf import OmegaConf
 
-        from core.data.transforms import BeatmapNormalizer
+        from core.data.normalizer import BeatmapNormalizer
         from scripts.tasks.embed.bobert import find_checkpoint, load_alignment_model
 
         if self.model is not None:
@@ -207,13 +207,13 @@ class LazyEmbedder:
     def embed_osu(self, path: Path) -> np.ndarray:
         import torch
 
-        from core.data.datamodule import _pad_batch
+        from core.data.batch import pad_batch
 
         self.load()
         vectors = beatmap_vectors_from_osu(path, self.config.data.max_seq_len)
         vectors = self.normalizer.normalize_vectors(vectors)
         vector_dim = vectors.shape[1]
-        padded, mask, cu_seqlens = _pad_batch([vectors], self.config.data.max_seq_len, vector_dim)
+        padded, mask, cu_seqlens = pad_batch([vectors], self.config.data.max_seq_len, vector_dim)
 
         padded = padded.to(self.device)
         mask = mask.to(self.device)

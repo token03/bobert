@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from core.data.datamodule import PretrainDataModule
+from core.data.module import PretrainData
 
 from .setup import create_trainer, create_optimizer, create_scheduler
 from .loss import pretrain_loss_fn
@@ -18,7 +18,7 @@ class PretrainingModule(pl.LightningModule):
         self,
         model: nn.Module,
         config: DictConfig,
-        datamodule: PretrainDataModule,
+        datamodule: PretrainData,
     ):
         super().__init__()
         self.model = model
@@ -183,7 +183,7 @@ class PretrainingModule(pl.LightningModule):
 
 def setup_pretraining(
     config: DictConfig,
-    datamodule: PretrainDataModule,
+    datamodule: PretrainData,
     model: nn.Module,
 ) -> Tuple[PretrainingModule, pl.Trainer]:
     module = PretrainingModule(model, config, datamodule)

@@ -8,9 +8,9 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from core.data.datamodule import _pad_batch
-from core.data.loader import load_beatmap_data
-from core.data.transforms import BeatmapNormalizer
+from core.data.batch import pad_batch
+from core.data.normalizer import BeatmapNormalizer
+from core.data.source import load_beatmap_dataset
 from core.model.bobert import BobertForAlignment
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
@@ -30,7 +30,7 @@ class ExportDataset(Dataset):
 
 def collate_export(batch, max_seq_len: int, vector_dim: int):
     beatmap_ids, vectors = zip(*batch)
-    padded, mask, cu_seqlens = _pad_batch(list(vectors), max_seq_len, vector_dim)
+    padded, mask, cu_seqlens = pad_batch(list(vectors), max_seq_len, vector_dim)
     return torch.tensor(beatmap_ids, dtype=torch.long), padded, mask, cu_seqlens
 
 
@@ -128,7 +128,7 @@ def export_embeddings(
 
     ids = sample_ids(dataset_dir, limit, seed)
     print(f"Loading {len(ids):,} beatmaps from {dataset_dir}")
-    beatmaps = load_beatmap_data(
+    beatmaps = load_beatmap_dataset(
         str(dataset_dir),
         max_seq_len=config.data.max_seq_len,
         ids_to_load=ids,
@@ -179,7 +179,7 @@ def main():
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
     parser.add_argument("--checkpoint", default=None, help="Defaults to newest experiments/**/checkpoints/last.ckpt")
     parser.add_argument("--dataset", default=None, help="Defaults to config.alignment.db_path")
-    parser.add_argument("--output", default=str(PROJECT_ROOT / "data" / "bobert_alignment_embeddings.parquet"))
+    parser.add_argument("--output", default=str(PROJECT_ROOT / "data" / "embeddings.parquet"))
     parser.add_argument("--limit", type=int, default=None, help="Random sample size, e.g. 50000")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)

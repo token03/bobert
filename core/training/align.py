@@ -8,7 +8,7 @@ from core.training.metrics import ContrastiveMetrics
 
 from .setup import create_optimizer, create_scheduler, create_trainer
 from .loss import alignment_loss_fn
-from ..data.transforms import BeatmapNormalizer
+from ..data.normalizer import BeatmapNormalizer
 
 
 class AlignmentModule(pl.LightningModule):

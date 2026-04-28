@@ -1,7 +1,7 @@
-# transforms.py
-import torch
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-from typing import List, Tuple, Optional, Dict
+import torch
 
 from .beatmap import DIFFICULTY_ATTRIBUTES
 from .hitobject import HitObject, NormalizationType, OBJECT_TYPE_SLIDER_HEAD
@@ -39,9 +39,7 @@ class BeatmapNormalizer:
         self, attributes: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
         if not self.attribute_stats:
-            raise ValueError(
-                "Attribute normalization requested but no statistics are set."
-            )
+            raise ValueError("Attribute normalization requested but no statistics are set.")
 
         normalized_attrs = {}
         for key, tensor in attributes.items():
@@ -83,18 +81,17 @@ class BeatmapNormalizer:
         vector_stats = {}
         for i, field_name in enumerate(vector_field_names):
             norm_type = vector_norm_specs[field_name]
-
-            if field_name in slider_only_features:
-                field_data = all_vectors_tensor[slider_mask, i]
-            else:
-                field_data = all_vectors_tensor[:, i]
+            field_data = (
+                all_vectors_tensor[slider_mask, i]
+                if field_name in slider_only_features
+                else all_vectors_tensor[:, i]
+            )
 
             if norm_type == NormalizationType.STANDARD:
-                mean, std = (
+                vector_stats[field_name] = (
                     field_data.mean(),
                     torch.clamp(field_data.std(), min=epsilon),
                 )
-                vector_stats[field_name] = (mean, std)
             elif norm_type == NormalizationType.MINMAX:
                 vector_stats[field_name] = (field_data.min(), field_data.max())
 
@@ -102,13 +99,12 @@ class BeatmapNormalizer:
         for key, values in difficulty_attributes.items():
             tensor = torch.from_numpy(values.astype(np.float32))
             if tensor.numel() > 0:
-                mean = tensor.mean()
-                std = torch.clamp(tensor.std(unbiased=False), min=epsilon)
-                attribute_stats[key] = (mean, std)
+                attribute_stats[key] = (
+                    tensor.mean(),
+                    torch.clamp(tensor.std(unbiased=False), min=epsilon),
+                )
 
-        return cls(
-            vector_stats=vector_stats, attribute_stats=attribute_stats, epsilon=epsilon
-        )
+        return cls(vector_stats=vector_stats, attribute_stats=attribute_stats, epsilon=epsilon)
 
     def get_vector_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
         return self.vector_stats
@@ -120,9 +116,7 @@ class BeatmapNormalizer:
         if not torch.is_tensor(values):
             values = torch.as_tensor(values, dtype=torch.float32)
         if values.numel() == 0:
-            raise ValueError(
-                f"Cannot compute statistics for '{key}' from an empty tensor."
-            )
+            raise ValueError(f"Cannot compute statistics for '{key}' from an empty tensor.")
 
         values = values.to(dtype=torch.float32)
         mean = values.mean()
@@ -137,9 +131,7 @@ class BeatmapNormalizer:
         if not torch.is_tensor(ratings):
             ratings = torch.as_tensor(ratings, dtype=torch.float32)
         if ratings.numel() == 0:
-            raise ValueError(
-                "Cannot compute difficulty statistics from an empty ratings tensor."
-            )
+            raise ValueError("Cannot compute difficulty statistics from an empty ratings tensor.")
 
         ratings = ratings.to(dtype=torch.float32)
 
@@ -154,38 +146,3 @@ class BeatmapNormalizer:
 
         self.attribute_stats["stars"] = (mean, std)
         return self.attribute_stats["stars"]
-
-
-class BeatmapAugmenter:
-    def __init__(self, flip_prob: float = 1.0):
-        feature_info = HitObject.get_feature_info()
-        self.norm_x_idx = feature_info["continuous"]["norm_x"]
-        self.norm_y_idx = feature_info["continuous"]["norm_y"]
-        self.delta_x_idx = feature_info["continuous"]["delta_x"]
-        self.delta_y_idx = feature_info["continuous"]["delta_y"]
-        self.flip_prob = flip_prob
-
-    def __call__(self, vectors: torch.Tensor) -> torch.Tensor:
-        if torch.rand(1).item() >= self.flip_prob:
-            return vectors.clone()
-
-        aug_type = int(torch.randint(0, 4, (1,)).item())
-        return self._apply_flip(vectors, aug_type)
-
-    def _apply_flip(self, vectors: torch.Tensor, aug_type: int) -> torch.Tensor:
-        """Apply geometric flip augmentation."""
-        if aug_type == 0:
-            return vectors.clone()
-
-        aug_vectors = vectors.clone()
-        flip_x = aug_type in [1, 3]
-        flip_y = aug_type in [2, 3]
-
-        if flip_x:
-            aug_vectors[:, self.norm_x_idx] *= -1
-            aug_vectors[:, self.delta_x_idx] *= -1
-        if flip_y:
-            aug_vectors[:, self.norm_y_idx] *= -1
-            aug_vectors[:, self.delta_y_idx] *= -1
-
-        return aug_vectors

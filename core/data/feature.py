@@ -253,7 +253,7 @@ def _finalize_vectors(
     return [torch.from_numpy(vectors) for vectors in vector_arrays]
 
 
-def engineer_features_vectorized(
+def build_feature_tensors(
     beatmaps_df: pd.DataFrame, hitobjects_df: pd.DataFrame
 ) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]]:
     beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)

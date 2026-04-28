@@ -5,6 +5,7 @@ pytorch-optimizer==3.8.0
 torchmetrics==1.8.2
 numpy==2.3.3
 pandas==2.3.3
+polars==1.35.1
 pyarrow==21.0.0
 scipy==1.16.2
 scikit-learn==1.7.2

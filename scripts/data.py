@@ -2,7 +2,7 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "alignment-cache": "scripts.tasks.data.alignment",
+    "mining-cache": "scripts.tasks.data.mining",
     "dataset": "scripts.tasks.data.dataset",
     "ratings": "scripts.tasks.data.ratings",
     "shard": "scripts.tasks.data.shard",
