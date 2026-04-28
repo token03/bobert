@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from typing import Tuple, List, Optional, Dict, Any
 import gdown
 import numpy as np
@@ -10,6 +11,21 @@ from collections import defaultdict
 
 from .beatmap import DIFFICULTY_ATTRIBUTES
 from .features import engineer_features_vectorized
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_path(path: str) -> str:
+    path_obj = Path(path).expanduser()
+    if path_obj.is_absolute() or path_obj.exists():
+        return str(path_obj)
+
+    project_path = PROJECT_ROOT / path_obj
+    if project_path.exists():
+        return str(project_path)
+
+    return str(path_obj)
 
 
 def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
@@ -98,6 +114,20 @@ def _load_collection_topics_chunk(
     )
     topics_dict = {}
 
+    if {"topic_id", "weight"}.issubset(topics_df.columns):
+        for bid, group in topics_df.groupby("beatmap_id"):
+            topics_dict[int(bid)] = {
+                f"topic_{int(row.topic_id)}": float(row.weight)
+                for row in group.itertuples(index=False)
+                if float(row.weight) > 0
+            }
+
+        for bid in beatmap_ids:
+            if bid not in topics_dict:
+                topics_dict[bid] = {}
+
+        return topics_dict
+
     for _, row in topics_df.iterrows():
         bid = int(row["beatmap_id"])
         topics_dict[bid] = {
@@ -126,7 +156,13 @@ def load_beatmap_data(
     collection_topics_path: str = "./data/collections/beatmap_topic_weights.parquet",
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
+    require_ratings: bool = True,
 ) -> List[Dict[str, Any]]:
+    dataset_path = _resolve_path(dataset_path)
+    ratings_path = _resolve_path(ratings_path)
+    metadata_parquet_path = _resolve_path(metadata_parquet_path)
+    collection_topics_path = _resolve_path(collection_topics_path)
+
     beatmaps_path = os.path.join(dataset_path, "beatmaps")
     hitobjects_path = os.path.join(dataset_path, "hitobjects")
 
@@ -148,10 +184,12 @@ def load_beatmap_data(
     )
 
     print("Loading difficulty ratings...")
-    if not os.path.exists(ratings_path):
+    if require_ratings and not os.path.exists(ratings_path):
         raise FileNotFoundError(f"Ratings file not found at '{ratings_path}'. ")
 
-    if ids_to_load:
+    if not os.path.exists(ratings_path):
+        ratings_df = pd.DataFrame()
+    elif ids_to_load:
         ratings_df = pd.read_parquet(
             ratings_path, filters=[("beatmap_id", "in", ids_to_load)]
         )
@@ -240,7 +278,7 @@ def load_beatmap_data(
             vectors = id_to_vectors[bid_int]
 
             ratings = ratings_lookup.get((bid_int, lookup_len))
-            if not ratings:
+            if require_ratings and not ratings:
                 missing_ratings_count += 1
                 continue
 
@@ -254,18 +292,21 @@ def load_beatmap_data(
                 "slider_multiplier": beatmap_row.iloc[0].get("slider_multiplier", 1.4),
             }
 
-            attrs = {**ratings, **beatmap_attrs}
+            attrs = {**(ratings or {}), **beatmap_attrs}
 
-            sr = attrs.get("stars", 0.0)
-            if min_sr is not None and sr < min_sr:
-                continue
-            if max_sr is not None and sr > max_sr:
-                continue
+            if ratings:
+                sr = attrs.get("stars", 0.0)
+                if min_sr is not None and sr < min_sr:
+                    continue
+                if max_sr is not None and sr > max_sr:
+                    continue
 
             beatmap_entry = {
                 "beatmap_id": bid_int,
                 "hitobjects": vectors[:truncate_len],
-                "difficulty": {k: attrs[k] for k in DIFFICULTY_ATTRIBUTES},
+                "difficulty": {
+                    k: attrs.get(k, 0.0) for k in DIFFICULTY_ATTRIBUTES
+                },
             }
 
             if include_metadata:

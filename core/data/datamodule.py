@@ -1,8 +1,9 @@
 import os
+import random
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from typing import Callable, Dict, List, Optional, Any, Tuple, Union
 
 from .loader import load_beatmap_data, setup_dataset
@@ -16,6 +17,7 @@ from .vocab import (
     CollectionTopicTokenizer,
     MapperTagTokenizer,
 )
+from .alignment_mining import load_alignment_cache
 
 
 def _pad_batch(vectors: List[torch.Tensor], max_seq_len: int, vector_dim: int):
@@ -82,12 +84,12 @@ def pretrain_collate_fn(
 
 
 def align_collate_fn(
-    batch: List[Tuple[torch.Tensor, Dict, torch.Tensor, Dict]],
+    batch: List[Tuple],
     max_seq_len: int,
     vector_dim: int,
     max_tags: int = 50,
 ):
-    vectors, metadata, tags, attrs = zip(*batch)
+    vectors, metadata, tags, attrs, beatmap_ids, targets = zip(*batch)
     padded_vec, mask, cu_seqlens = _pad_batch(vectors, max_seq_len, vector_dim)
 
     tag_lens = [min(t.shape[0], max_tags) for t in tags]
@@ -98,15 +100,93 @@ def align_collate_fn(
         if l > 0:
             padded_tags[i, :l] = t[:l]
 
+    teacher_dim = 0
+    for target in targets:
+        teacher_dim = max(teacher_dim, len(target.get("lgcn_embedding", [])))
+    teacher_dim = teacher_dim or 64
+    lgcn_teacher = torch.zeros(len(batch), teacher_dim, dtype=torch.float32)
+    status_labels = torch.zeros(len(batch), dtype=torch.float32)
+    has_teacher = torch.zeros(len(batch), dtype=torch.bool)
+    for i, target in enumerate(targets):
+        teacher = target.get("lgcn_embedding", [])
+        if teacher:
+            teacher_tensor = torch.tensor(teacher[:teacher_dim], dtype=torch.float32)
+            lgcn_teacher[i, : teacher_tensor.shape[0]] = teacher_tensor
+            has_teacher[i] = True
+        status_labels[i] = 1.0 if target.get("status_group") == "ranked" else 0.0
+
     return (
         padded_vec,
         mask,
         cu_seqlens,
-        None,
-        None,
+        torch.tensor(beatmap_ids, dtype=torch.long),
+        lgcn_teacher,
+        has_teacher,
+        status_labels,
         padded_tags,
         _stack_dicts(attrs),
     )
+
+
+class AlignmentBatchSampler(Sampler[List[int]]):
+    def __init__(
+        self,
+        beatmap_ids: List[int],
+        mining_lookup: Dict[int, Dict[str, Any]],
+        batch_size: int,
+        group_size: int = 4,
+        seed: int = 42,
+    ):
+        if batch_size % group_size != 0:
+            raise ValueError("alignment batch_size must be divisible by group_size")
+
+        self.beatmap_ids = [int(x) for x in beatmap_ids]
+        self.mining_lookup = mining_lookup
+        self.batch_size = batch_size
+        self.group_size = group_size
+        self.seed = seed
+        self.id_to_idx = {bid: i for i, bid in enumerate(self.beatmap_ids)}
+        self.groups_per_batch = batch_size // group_size
+
+    def __len__(self) -> int:
+        return max(1, len(self.beatmap_ids) // self.batch_size)
+
+    def _choose_id(self, ids: List[int], rng: random.Random) -> Optional[int]:
+        available = [int(bid) for bid in ids if int(bid) in self.id_to_idx]
+        if not available:
+            return None
+        return rng.choice(available)
+
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        anchor_indices = list(range(len(self.beatmap_ids)))
+        rng.shuffle(anchor_indices)
+
+        batch: List[int] = []
+        for anchor_idx in anchor_indices:
+            anchor_id = self.beatmap_ids[anchor_idx]
+            mining = self.mining_lookup.get(anchor_id, {})
+
+            positive_ids = mining.get("positive_ids", [])
+            cross_ids = mining.get("cross_status_positive_ids", [])
+            negative_ids = mining.get("hard_negative_ids", [])
+
+            p1 = self._choose_id(positive_ids, rng)
+            p2 = self._choose_id(cross_ids, rng) or self._choose_id(positive_ids, rng)
+            n1 = self._choose_id(negative_ids, rng)
+
+            group = [anchor_idx]
+            for chosen in [p1, p2, n1]:
+                if chosen is not None and chosen not in [self.beatmap_ids[i] for i in group]:
+                    group.append(self.id_to_idx[chosen])
+
+            while len(group) < self.group_size:
+                group.append(rng.randrange(len(self.beatmap_ids)))
+
+            batch.extend(group[: self.group_size])
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
 
 
 class BeatmapDataset(Dataset):
@@ -119,6 +199,7 @@ class BeatmapDataset(Dataset):
         beatmap_ids: Optional[List[int]] = None,
         metadata: Optional[Dict[int, Dict]] = None,
         tags: Optional[Dict[int, torch.Tensor]] = None,
+        alignment_targets: Optional[Dict[int, Dict[str, Any]]] = None,
     ):
         self.beatmap_data = beatmap_data
         self.normalizer = normalizer
@@ -127,6 +208,7 @@ class BeatmapDataset(Dataset):
         self.beatmap_ids = beatmap_ids
         self.metadata = metadata or {}
         self.tags = tags or {}
+        self.alignment_targets = alignment_targets or {}
         self.has_meta = beatmap_ids is not None
 
         self.augmenter = BeatmapAugmenter() if is_training else None
@@ -167,7 +249,14 @@ class BeatmapDataset(Dataset):
 
         bid = self.beatmap_ids[idx]
         tags = self.tags.get(bid, torch.tensor([0], dtype=torch.long))
-        return vec, self.metadata.get(bid, {}), tags, attrs
+        return (
+            vec,
+            self.metadata.get(bid, {}),
+            tags,
+            attrs,
+            int(bid),
+            self.alignment_targets.get(int(bid), {}),
+        )
 
 
 class BeatmapDataModule(pl.LightningDataModule):
@@ -191,10 +280,12 @@ class BeatmapDataModule(pl.LightningDataModule):
         include_metadata=False,
         include_user_tags=False,
         include_collection_topics=False,
+        ids_to_load: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         return load_beatmap_data(
             self.db_path,
             max_seq_len=self.config["data"]["max_seq_len"],
+            ids_to_load=ids_to_load,
             include_metadata=include_metadata,
             include_user_tags=include_user_tags,
             include_collection_topics=include_collection_topics,
@@ -293,15 +384,34 @@ class AlignDataModule(BeatmapDataModule):
         self.user_tag_tokenizer = UserTagTokenizer()
         self.collection_topic_tokenizer = CollectionTopicTokenizer()
         self.mapper_tag_tokenizer = MapperTagTokenizer()
+        self.mining_cache = None
+        self.train_mining_lookup: Dict[int, Dict[str, Any]] = {}
+        self.val_mining_lookup: Dict[int, Dict[str, Any]] = {}
+
+    def _alignment_config(self):
+        return self.config.get("alignment", self.config.get("align", {}))
+
+    def _load_mining_targets(self) -> Dict[int, Dict[str, Any]]:
+        cache_path = self._alignment_config().get("mining_cache_path")
+        if not cache_path or not os.path.exists(cache_path):
+            return {}
+
+        cache = load_alignment_cache(cache_path)
+        self.mining_cache = cache
+        return {int(row["beatmap_id"]): row.to_dict() for _, row in cache.iterrows()}
 
     def setup(self, stage=None):
         if self.train_dataset:
             return
 
+        mining_targets = self._load_mining_targets()
+        ids_to_load = list(mining_targets) if mining_targets else None
+
         all_beatmap_data = self._setup_common(
             include_metadata=True,
             include_user_tags=True,
             include_collection_topics=True,
+            ids_to_load=ids_to_load,
         )
 
         all_data = [b["hitobjects"] for b in all_beatmap_data]
@@ -310,6 +420,15 @@ class AlignDataModule(BeatmapDataModule):
             for k in all_beatmap_data[0]["difficulty"].keys()
         }
         all_ids = [b["beatmap_id"] for b in all_beatmap_data]
+        if mining_targets:
+            keep = {bid for bid in all_ids if int(bid) in mining_targets}
+            keep_mask = [int(bid) in keep for bid in all_ids]
+            all_data = [x for x, keep_item in zip(all_data, keep_mask) if keep_item]
+            all_ids = [x for x, keep_item in zip(all_ids, keep_mask) if keep_item]
+            diff_attrs = {
+                key: [x for x, keep_item in zip(values, keep_mask) if keep_item]
+                for key, values in diff_attrs.items()
+            }
 
         meta_store = {b["beatmap_id"]: b.get("metadata", {}) for b in all_beatmap_data}
         user_tag_store = {}
@@ -362,6 +481,7 @@ class AlignDataModule(BeatmapDataModule):
             beatmap_ids=train_s["ids"],
             metadata=meta_store,
             tags=tag_store_combined,
+            alignment_targets=mining_targets,
         )
         self.val_dataset = BeatmapDataset(
             val_s["data"],
@@ -371,7 +491,18 @@ class AlignDataModule(BeatmapDataModule):
             beatmap_ids=val_s["ids"],
             metadata=meta_store,
             tags=tag_store_combined,
+            alignment_targets=mining_targets,
         )
+        self.train_mining_lookup = {
+            int(bid): mining_targets[int(bid)]
+            for bid in train_s["ids"]
+            if int(bid) in mining_targets
+        }
+        self.val_mining_lookup = {
+            int(bid): mining_targets[int(bid)]
+            for bid in val_s["ids"]
+            if int(bid) in mining_targets
+        }
         print(
             f"Data split: {len(self.train_dataset)} training, {len(self.val_dataset)} validation"
         )
@@ -381,8 +512,23 @@ class AlignDataModule(BeatmapDataModule):
             b,
             self.config["data"]["max_seq_len"],
             self.vector_dim,
-            self.config["alignment"].get("max_tags", 50),
+            self._alignment_config().get("max_tags", 50),
         )
+        if self.train_mining_lookup:
+            sampler = AlignmentBatchSampler(
+                self.train_dataset.beatmap_ids,
+                self.train_mining_lookup,
+                self.batch_size,
+                group_size=self._alignment_config().get("group_size", 4),
+                seed=self._alignment_config().get("seed", 42),
+            )
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=sampler,
+                collate_fn=collate,
+                num_workers=os.cpu_count() or 1,
+                pin_memory=True,
+            )
         return self._get_dataloader(self.train_dataset, True, collate)
 
     def val_dataloader(self):
@@ -390,6 +536,6 @@ class AlignDataModule(BeatmapDataModule):
             b,
             self.config["data"]["max_seq_len"],
             self.vector_dim,
-            self.config["alignment"].get("max_tags", 50),
+            self._alignment_config().get("max_tags", 50),
         )
         return self._get_dataloader(self.val_dataset, False, collate)

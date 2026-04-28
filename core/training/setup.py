@@ -84,9 +84,9 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
     muon_lr = float(phase_config.get("muon_lr", 0.02))
     muon_wd = float(phase_config.get("muon_wd", 0.01))
 
-    adam_lr = float(phase_config.get("adam_lr", 2e-4))
+    adam_lr = float(phase_config.get("adam_lr", phase_config.get("learning_rate", 2e-4)))
     adam_betas = tuple(phase_config.get("adam_betas", (0.9, 0.95)))
-    adam_wd = float(phase_config.get("adam_wd", 0.01))
+    adam_wd = float(phase_config.get("adam_wd", phase_config.get("weight_decay", 0.01)))
 
     muon_params = []
 
@@ -123,7 +123,7 @@ def create_scheduler(
 ) -> LRScheduler:
     phase_config = config[phase]
 
-    base_lr = float(phase_config["adam_lr"])
+    base_lr = float(phase_config.get("adam_lr", phase_config.get("learning_rate", 2e-4)))
     min_lr = float(phase_config.get("min_lr", 1e-6))
 
     warmup_ratio = float(phase_config.get("warmup_ratio", 0.05))

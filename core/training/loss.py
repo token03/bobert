@@ -133,4 +133,77 @@ def pretrain_loss_fn(
 def contrastive_loss_fn(
     predictions: Dict[str, torch.Tensor], labels: Dict[str, Any], config: Dict[str, Any]
 ) -> Dict[str, torch.Tensor]:
-    raise NotImplementedError("Multimodal contrastive loss not yet implemented")
+    embeddings = predictions["embedding"]
+    if not labels.get("use_contrastive", True):
+        return {"contrastive_loss": torch.zeros((), device=embeddings.device)}
+    phase_config = config.get("alignment", config.get("align", {}))
+    group_size = int(phase_config.get("group_size", 4))
+    temperature = float(phase_config.get("temperature", 0.07))
+
+    batch_size = embeddings.shape[0]
+    device = embeddings.device
+    if batch_size < group_size or batch_size % group_size != 0:
+        return {"contrastive_loss": torch.zeros((), device=device)}
+
+    logits = embeddings @ embeddings.t() / temperature
+    logits = logits.masked_fill(torch.eye(batch_size, dtype=torch.bool, device=device), -1e9)
+
+    positive_mask = torch.zeros(batch_size, batch_size, dtype=torch.bool, device=device)
+    for start in range(0, batch_size, group_size):
+        positive_indices = torch.arange(start, start + min(3, group_size), device=device)
+        positive_mask[positive_indices[:, None], positive_indices[None, :]] = True
+    positive_mask.fill_diagonal_(False)
+
+    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    positive_counts = positive_mask.sum(dim=1).clamp_min(1)
+    loss = -(log_prob * positive_mask).sum(dim=1) / positive_counts
+    loss = loss[positive_mask.any(dim=1)].mean()
+
+    return {"contrastive_loss": loss}
+
+
+def alignment_loss_fn(
+    predictions: Dict[str, Any],
+    labels: Dict[str, Any],
+    config: DictConfig,
+    phase: str = "alignment",
+) -> Dict[str, torch.Tensor]:
+    phase_config = config.get(phase, config.get("align", {}))
+    losses = contrastive_loss_fn(predictions, labels, config)
+    device = predictions["embedding"].device
+
+    total_loss = losses["contrastive_loss"] * float(
+        phase_config.get("contrastive_weight", 1.0)
+    )
+
+    teacher = labels.get("lgcn_teacher")
+    has_teacher = labels.get("has_teacher")
+    if teacher is not None and has_teacher is not None and torch.any(has_teacher):
+        pred_teacher = predictions["lgcn_embedding"][has_teacher]
+        target_teacher = F.normalize(teacher[has_teacher].to(pred_teacher.dtype), dim=-1)
+        lgcn_loss = 1.0 - F.cosine_similarity(pred_teacher, target_teacher, dim=-1).mean()
+    else:
+        lgcn_loss = torch.zeros((), device=device)
+    losses["lgcn_loss"] = lgcn_loss
+    total_loss = total_loss + lgcn_loss * float(phase_config.get("lgcn_weight", 0.3))
+
+    difficulty_labels = labels.get("difficulty")
+    if difficulty_labels:
+        diff_losses = difficulty_loss_fn(
+            predictions["difficulty"], difficulty_labels, config, phase=phase
+        )
+        losses.update(diff_losses)
+        total_loss = total_loss + diff_losses["difficulty_loss"]
+
+    status_labels = labels.get("status_labels")
+    if status_labels is not None:
+        status_loss = F.binary_cross_entropy_with_logits(
+            predictions["status_logits"], status_labels.to(predictions["status_logits"].dtype)
+        )
+    else:
+        status_loss = torch.zeros((), device=device)
+    losses["status_loss"] = status_loss
+    total_loss = total_loss + status_loss * float(phase_config.get("status_weight", 0.05))
+
+    losses["total_loss"] = total_loss
+    return losses

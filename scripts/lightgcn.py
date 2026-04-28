@@ -195,7 +195,8 @@ def load_and_process_data(source_filter=None):
     if df["beatmapset_id"].isna().sum() > 0:
         df = df.dropna(subset=["beatmapset_id"]).copy()
 
-    df["is_ranked"] = df["status"].isin(["1", "2", "3", "4"])
+    status_num = pd.to_numeric(df["status"], errors="coerce")
+    df["is_ranked"] = status_num.isin([1, 2, 3, 4])
     col_ranked_stats = df.groupby("collection_key").agg(
         total=("beatmap_id", "count"), ranked=("is_ranked", "sum")
     )
@@ -226,8 +227,8 @@ def load_and_process_data(source_filter=None):
     )
     for bid, idx in bm_to_idx.items():
         if bid in status_map:
-            status = status_map[bid]
-            status_labels[idx] = 1.0 if status in ["1", "2", "3", "4"] else 0.0
+            status = pd.to_numeric(status_map[bid], errors="coerce")
+            status_labels[idx] = 1.0 if status in [1, 2, 3, 4] else 0.0
 
     return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, status_labels
 

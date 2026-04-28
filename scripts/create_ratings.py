@@ -3,10 +3,24 @@ import argparse
 import yaml
 import pandas as pd
 import concurrent.futures
+from pathlib import Path
 from typing import Optional, Dict, Tuple, List
 from tqdm import tqdm
 import itertools
 import rosu_pp_py as rosu
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_path(path: str) -> str:
+    path_obj = Path(path).expanduser()
+    if path_obj.is_absolute() or path_obj.exists():
+        return str(path_obj)
+    project_path = PROJECT_ROOT / path_obj
+    if project_path.exists() or path_obj.parts[:1] == ("data",):
+        return str(project_path)
+    return str(path_obj)
 
 def get_shard_from_id(beatmap_id: int) -> str:
     return str(beatmap_id)[-2:].zfill(2)
@@ -64,6 +78,7 @@ def _calculate_difficulty_attributes_worker(
 
 
 def load_config(config_path: str = "./config.yaml") -> dict:
+    config_path = resolve_path(config_path)
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
@@ -190,12 +205,15 @@ def main():
     dataset_path = (
         args.dataset if args.dataset is not None else config["pretraining"]["db_path"]
     )
+    dataset_path = resolve_path(dataset_path)
+    output_path = resolve_path(args.output)
+    raw_beatmap_path = resolve_path(args.raw_beatmaps)
 
     print(f"Configuration:")
     print(f"  Dataset: {dataset_path}")
     print(f"  Sequence length: {seq_len}")
-    print(f"  Raw beatmaps: {args.raw_beatmaps}")
-    print(f"  Output: {args.output}")
+    print(f"  Raw beatmaps: {raw_beatmap_path}")
+    print(f"  Output: {output_path}")
     print()
 
     print("Loading beatmap IDs from dataset...")
@@ -204,12 +222,12 @@ def main():
     print()
 
     print("Loading existing ratings...")
-    existing_ratings = load_existing_ratings(args.output)
+    existing_ratings = load_existing_ratings(output_path)
     print(f"Found {len(existing_ratings)} existing ratings")
     print()
 
     new_ratings, num_cached, num_failed = calculate_missing_ratings(
-        beatmap_ids, seq_len, existing_ratings, args.raw_beatmaps
+        beatmap_ids, seq_len, existing_ratings, raw_beatmap_path
     )
 
     if new_ratings:
@@ -225,7 +243,7 @@ def main():
 
     print()
     print("Saving ratings...")
-    save_ratings(combined_ratings, args.output)
+    save_ratings(combined_ratings, output_path)
 
     print()
     print("=" * 60)
