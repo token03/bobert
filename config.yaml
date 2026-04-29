@@ -14,9 +14,9 @@ model:
 
   
 components:
-  use_flash_attention: true
   compile_model: true
   compile_mode: "default" 
+  activation_checkpointing: false
     
 pretraining:
   # db_path: './data/beatmap_dataset100k/'

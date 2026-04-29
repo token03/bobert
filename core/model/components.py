@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
-from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
+from rotary_embedding_torch import apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
 from flash_attn.ops.triton.layer_norm import RMSNorm
 
@@ -23,9 +23,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
 
-        self.wq = nn.Linear(d_model, d_model, bias=False)
-        self.wk = nn.Linear(d_model, d_model, bias=False)
-        self.wv = nn.Linear(d_model, d_model, bias=False)
+        self.wqkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
         self.dropout = dropout
@@ -33,29 +31,20 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.is_global = is_global
 
     def forward(self, x, **kwargs):
-        rotary_emb = kwargs.get("rotary_emb")
         cu_seqlens = kwargs.get("cu_seqlens")
         max_seqlen = kwargs.get("max_seqlen")
+        rotary_freqs = kwargs.get("rotary_freqs")
 
         total_tokens, _ = x.shape
 
-        q = self.wq(x).view(total_tokens, self.n_heads, self.d_head)
-        k = self.wk(x).view(total_tokens, self.n_heads, self.d_head)
-        v = self.wv(x).view(total_tokens, self.n_heads, self.d_head)
+        q, k, v = self.wqkv(x).view(
+            total_tokens, 3, self.n_heads, self.d_head
+        ).unbind(dim=1)
 
-        if rotary_emb is not None:
-            token_idx = torch.arange(total_tokens, device=x.device)
-            batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
-            pos = token_idx - cu_seqlens[batch_ids]
+        if rotary_freqs is not None:
+            q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
+            k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
 
-            t = torch.arange(max_seqlen, device=x.device)
-            all_freqs = rotary_emb(t, seq_len=max_seqlen)
-
-            freqs = all_freqs[pos].view(total_tokens, 1, self.d_head)
-
-            q = apply_rotary_emb(freqs, q, seq_dim=0)
-            k = apply_rotary_emb(freqs, k, seq_dim=0)
-        
         qkv = torch.stack([q, k, v], dim=1)
 
         window_size = (
@@ -114,7 +103,7 @@ class BobertEncoderLayer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        rotary_emb: Optional[RotaryEmbedding] = None,
+        rotary_freqs: Optional[torch.Tensor] = None,
         cu_seqlens: torch.Tensor = None,
         max_seqlen: int = None,
     ) -> torch.Tensor:
@@ -122,7 +111,7 @@ class BobertEncoderLayer(nn.Module):
             self.norm1(src),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            rotary_emb=rotary_emb,
+            rotary_freqs=rotary_freqs,
         )
 
         src = src + self.dropout1(src2)
@@ -255,20 +244,13 @@ class SpanMasker(nn.Module):
 
         encoder_input = x_embed.clone()
 
-        valid_embeddings = x_embed[attention_mask]
-        batch_size, seq_len, _ = x_embed.shape
-        rand_indices = torch.randint(
-            0,
-            max(1, valid_embeddings.shape[0]), 
-            (batch_size, seq_len),
-            device=x_embed.device,
-        )
-        rand_indices = rand_indices.clamp(0, max(0, valid_embeddings.shape[0] - 1))
-        random_embeds = valid_embeddings[rand_indices]
-
-        encoder_input = torch.where(
-            mask_random.unsqueeze(-1), random_embeds, encoder_input
-        )
+        batch_size, seq_len = mask_random.shape
+        valid_lengths = attention_mask.sum(dim=1).clamp_min(1)
+        rand_batch = torch.randint(batch_size, (batch_size, seq_len), device=x_embed.device)
+        rand_pos = torch.randint(seq_len, (batch_size, seq_len), device=x_embed.device)
+        rand_pos = rand_pos % valid_lengths[rand_batch]
+        random_embeds = x_embed[rand_batch, rand_pos]
+        encoder_input = torch.where(mask_random.unsqueeze(-1), random_embeds, encoder_input)
 
         encoder_input = torch.where(
             mask_replace.unsqueeze(-1),

@@ -20,20 +20,21 @@ def mlm_loss_fn(
     )
     cont_indices = [feature_info["continuous"][name] for name in cont_names]
 
+    masked_targets = targets[mask]
     cont_preds = predictions["continuous"]
-    cont_targets = targets[..., cont_indices]
+    cont_targets = masked_targets[:, cont_indices]
 
-    actual_object_type = targets[
-        ..., feature_info["categorical"]["object_type"]["index"]
+    actual_object_type = masked_targets[
+        :, feature_info["categorical"]["object_type"]["index"]
     ].long()
     is_slider_head_mask = actual_object_type == OBJECT_TYPE_SLIDER_HEAD
 
     slider_feature_names = set(feature_info["slider"].keys())
     is_slider_feature = torch.tensor(
         [name in slider_feature_names for name in cont_names], device=targets.device
-    ).view(1, 1, -1)
+    ).view(1, -1)
 
-    should_zero = is_slider_feature & (~is_slider_head_mask.unsqueeze(-1))
+    should_zero = is_slider_feature & (~is_slider_head_mask.unsqueeze(1))
     final_cont_targets = torch.where(
         should_zero, torch.zeros_like(cont_targets), cont_targets
     )
@@ -42,14 +43,14 @@ def mlm_loss_fn(
         cont_preds, final_cont_targets, reduction="none", beta=0.5
     )
 
-    should_include_loss = ~is_slider_feature | is_slider_head_mask.unsqueeze(-1)
+    should_include_loss = ~is_slider_feature | is_slider_head_mask.unsqueeze(1)
     cont_loss = cont_loss * should_include_loss
 
-    total_loss = cont_loss[mask].sum()
+    total_loss = cont_loss.sum()
 
     for name, info in feature_info["categorical"].items():
         cat_logits = predictions["categorical"][name]
-        cat_targets = targets[..., info["index"]].long()
+        cat_targets = masked_targets[:, info["index"]].long()
 
         if name in slider_feature_names:
             zero_target = torch.zeros_like(cat_targets)
@@ -58,14 +59,13 @@ def mlm_loss_fn(
             final_target = cat_targets
 
         loss = F.cross_entropy(
-            cat_logits.view(-1, info["cardinality"]),
-            final_target.view(-1),
+            cat_logits,
+            final_target,
             reduction="none",
         )
-        loss = loss.view(mask.shape)
-        total_loss += loss[mask].sum()
+        total_loss += loss.sum()
 
-    num_masked = torch.sum(mask)
+    num_masked = masked_targets.shape[0]
     return total_loss / (num_masked + 1e-9)
 
 

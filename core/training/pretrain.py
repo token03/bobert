@@ -50,8 +50,6 @@ class PretrainingModule(pl.LightningModule):
 
         max_seq_len = self.config["data"]["max_seq_len"]
         
-        vector_dim = self.datamodule.vector_dim
-
         target_dtype = torch.float32
         
         precision_str = str(self.trainer.precision)
@@ -60,31 +58,15 @@ class PretrainingModule(pl.LightningModule):
         elif "16" in precision_str:
             target_dtype = torch.float16
 
-        dummy_vectors = torch.zeros(
-            (1, max_seq_len, vector_dim), 
-            dtype=target_dtype, 
-            device=self.device
-        )
-        
-        dummy_mask = torch.ones(
-            (1, max_seq_len), 
-            dtype=torch.bool, 
-            device=self.device
-        )
-
-        dummy_cu_seqlens = torch.tensor(
-            [0, max_seq_len], 
-            dtype=torch.int32, 
-            device=self.device
-        )
-
         model_to_run = self.model
         if hasattr(model_to_run, "_orig_mod"):
             model_to_run = model_to_run._orig_mod
 
         with torch.no_grad():
             with torch.autocast(device_type=self.device.type, dtype=target_dtype):
-                model_to_run(dummy_vectors, dummy_mask, dummy_cu_seqlens)
+                model_to_run.bert.rotary_emb(
+                    torch.arange(max_seq_len, device=self.device), seq_len=max_seq_len
+                )
 
         if self.global_rank == 0:
             print(f"Warmup complete. RoPE cache initialized for L={max_seq_len} using {target_dtype}.")

@@ -64,30 +64,31 @@ class MLMMetrics(nn.Module):
         if not torch.any(mask):
             return
 
+        masked_targets = targets[mask]
         object_type_idx = self.feature_info["categorical"]["object_type"]["index"]
-        object_types = targets[..., object_type_idx].long()
+        object_types = masked_targets[:, object_type_idx].long()
 
         for i, name in enumerate(self.cont_names):
             target_idx = self.feature_info["continuous"][name]
             pred_idx = i
 
             if name in self.slider_feature_names:
-                slider_mask = mask & (object_types == OBJECT_TYPE_SLIDER_HEAD)
+                slider_mask = object_types == OBJECT_TYPE_SLIDER_HEAD
                 if not torch.any(slider_mask):
                     continue
-                preds = predictions["continuous"][slider_mask][:, pred_idx]
-                targs = targets[slider_mask][:, target_idx]
+                preds = predictions["continuous"][slider_mask, pred_idx]
+                targs = masked_targets[slider_mask, target_idx]
             else:
-                preds = predictions["continuous"][mask][:, pred_idx]
-                targs = targets[mask][:, target_idx]
+                preds = predictions["continuous"][:, pred_idx]
+                targs = masked_targets[:, target_idx]
 
             abs_error = torch.abs(preds - targs)
             self.cont_metrics[name].update(abs_error)
 
         for name, info in self.feature_info["categorical"].items():
-            pred_logits = predictions["categorical"][name][mask]
+            pred_logits = predictions["categorical"][name]
             pred_classes = torch.argmax(pred_logits, dim=-1)
-            target_classes = targets[mask][:, info["index"]].long()
+            target_classes = masked_targets[:, info["index"]].long()
             self.cat_metrics[name]["accuracy"].update(pred_classes, target_classes)
             self.cat_metrics[name]["precision"].update(pred_classes, target_classes)
             self.cat_metrics[name]["recall"].update(pred_classes, target_classes)
