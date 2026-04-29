@@ -82,14 +82,9 @@ alignment:
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 4
 
-  user_tag_classes: 42
-  collection_label_classes: 5
   temperature: 0.05
 
-  user_tag_weight: 0.0
-  collection_label_weight: 0.2
   difficulty_loss_weight: 0.4
-  difficulty_rating_weight: 0.1
   aim_loss_weight: 0.1
   speed_loss_weight: 0.1
   contrastive_weight: 1.0

@@ -1,4 +1,5 @@
-from typing import Dict, Any, Optional, Tuple, List
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -131,6 +132,63 @@ def setup_alignment(
         config["alignment"]["checkpoint_dir"] = checkpoint_dir
     trainer = create_trainer(config, "alignment")
     return module, trainer
+
+
+def find_pretraining_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return None
+
+    candidates = sorted(
+        checkpoint_dir.glob("last*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    candidates = candidates or sorted(
+        checkpoint_dir.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    return candidates[0] if candidates else None
+
+
+def load_pretraining_weights(
+    model: nn.Module,
+    checkpoint_path: str | Path,
+    map_location: str | torch.device = "cpu",
+) -> Dict[str, Any]:
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+
+    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    raw_state = checkpoint.get("state_dict", checkpoint)
+    state = {}
+
+    for key, value in raw_state.items():
+        for prefix in ("model._orig_mod.", "model.", "_orig_mod."):
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                break
+        if key.startswith("difficulty_head.head."):
+            key = key.replace("difficulty_head.head.", "difficulty_head.", 1)
+        state[key] = value
+
+    target = getattr(model, "_orig_mod", model)
+    model_state = target.state_dict()
+    compatible_state = {
+        key: value
+        for key, value in state.items()
+        if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
+    }
+    missing, unexpected = target.load_state_dict(compatible_state, strict=False)
+    skipped = sorted(set(state) - set(compatible_state))
+
+    return {
+        "checkpoint_path": checkpoint_path,
+        "loaded": len(compatible_state),
+        "skipped": len(skipped),
+        "missing": len(missing),
+        "unexpected": len(unexpected),
+        "loaded_difficulty_head": "difficulty_head.weight" in compatible_state
+        and "difficulty_head.bias" in compatible_state,
+    }
 
 
 def train(
