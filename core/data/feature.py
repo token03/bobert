@@ -18,7 +18,12 @@ from .hitobject import (
     CENTER_X,
     CENTER_Y,
     DEFAULT_PRE_START_MS,
+    canonicalize_bpm_array,
 )
+
+
+RHYTHM_EPSILON = 1e-4
+CANONICAL_METER = 4
 
 
 def _calculate_nps_vectorized(
@@ -50,6 +55,44 @@ def _shift_within_group(
     shifted = np.roll(arr, 1)
     shifted[is_new_group] = fill_values
     return shifted
+
+
+def _canonical_rhythmic_snap(beat_fraction: np.ndarray) -> np.ndarray:
+    snap = np.full(len(beat_fraction), 5, dtype=np.int32)
+
+    def close_to(targets: list[float]) -> np.ndarray:
+        mask = np.zeros(len(beat_fraction), dtype=bool)
+        for target in targets:
+            mask |= np.abs(beat_fraction - target) < RHYTHM_EPSILON
+        return mask
+
+    snap[(beat_fraction < RHYTHM_EPSILON) | (beat_fraction > 1.0 - RHYTHM_EPSILON)] = 0
+    snap[close_to([0.5])] = 1
+    snap[close_to([0.25, 0.75])] = 2
+    snap[close_to([1 / 3, 2 / 3, 1 / 6, 5 / 6])] = 3
+    snap[
+        close_to(
+            [
+                1 / 8,
+                3 / 8,
+                5 / 8,
+                7 / 8,
+                1 / 12,
+                5 / 12,
+                7 / 12,
+                11 / 12,
+                1 / 16,
+                3 / 16,
+                5 / 16,
+                7 / 16,
+                9 / 16,
+                11 / 16,
+                13 / 16,
+                15 / 16,
+            ]
+        )
+    ] = 4
+    return snap
 
 
 def _expand_sliders_and_spinners(
@@ -194,7 +237,7 @@ def _apply_temporal_features(
     time_diff_ms = np.maximum(time - prev_time, 0)
     log_time_diff_ms = np.log1p(np.maximum(time_diff_ms, 0))
 
-    bpm = df["bpm"].to_numpy().astype(np.float32)
+    bpm = canonicalize_bpm_array(df["bpm"].to_numpy().astype(np.float32))
     beat_length_ms = np.divide(
         60000.0,
         bpm,
@@ -215,6 +258,14 @@ def _apply_temporal_features(
         cum_beats_arr[s:e] = np.cumsum(tdb_values[s:e])
 
     beat_id = np.floor(cum_beats_arr + 1e-4)
+    absolute_beats = time / beat_length_ms
+    absolute_beats = np.nan_to_num(absolute_beats, nan=0.0, posinf=0.0, neginf=0.0)
+    beat_fraction = absolute_beats - np.floor(absolute_beats)
+    beat_fraction[beat_fraction > 1.0 - RHYTHM_EPSILON] = 0.0
+    beat_in_measure = (
+        np.floor(absolute_beats + RHYTHM_EPSILON).astype(np.int32) % CANONICAL_METER
+    )
+    rhythmic_snap = _canonical_rhythmic_snap(beat_fraction)
 
     dist = df["dist"].to_numpy().astype(np.float32)
     velocity = np.divide(
@@ -240,6 +291,8 @@ def _apply_temporal_features(
         pl.Series("time_diff_bin", time_diff_bin),
         pl.Series("cum_beats", cum_beats_arr),
         pl.Series("beat_id", beat_id),
+        pl.Series("beat_in_measure", beat_in_measure),
+        pl.Series("rhythmic_snap", rhythmic_snap),
         pl.Series("velocity", velocity),
         pl.Series("rhythm_change", rhythm_change),
         pl.Series("notes_per_second", _calculate_nps_vectorized(time, split_indices)),

@@ -311,8 +311,6 @@ def load_beatmap_dataset(
         "slider_repeats",
         "slider_end_x",
         "slider_end_y",
-        "beat_in_measure",
-        "rhythmic_snap",
     ]
 
     for chunk_ids in tqdm(

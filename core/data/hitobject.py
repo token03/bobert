@@ -31,6 +31,33 @@ DURATION_BINS = [
     64,
 ]
 
+CANONICAL_BPM_MIN = 120.0
+CANONICAL_BPM_MAX = 240.0
+
+
+def canonicalize_bpm(bpm: float) -> float:
+    if not np.isfinite(bpm) or bpm <= 0:
+        return float("nan")
+
+    while bpm < CANONICAL_BPM_MIN:
+        bpm *= 2.0
+    while bpm >= CANONICAL_BPM_MAX:
+        bpm /= 2.0
+    return float(bpm)
+
+
+def canonicalize_bpm_array(bpm: np.ndarray) -> np.ndarray:
+    canonical = bpm.astype(np.float32, copy=True)
+    valid = np.isfinite(canonical) & (canonical > 0)
+    canonical[~valid] = np.nan
+
+    while np.any(valid & (canonical < CANONICAL_BPM_MIN)):
+        canonical[valid & (canonical < CANONICAL_BPM_MIN)] *= 2.0
+    while np.any(valid & (canonical >= CANONICAL_BPM_MAX)):
+        canonical[valid & (canonical >= CANONICAL_BPM_MAX)] /= 2.0
+
+    return canonical
+
 FEATURE_GROUPS = {
     "spatial": {
         "features": ["norm_x", "norm_y", "delta_x", "delta_y", "relative_angle"],
@@ -39,7 +66,6 @@ FEATURE_GROUPS = {
     "rhythm": {
         "features": [
             "log_time_diff_ms",
-            "bpm",
             "notes_per_second",
             "velocity",
             "rhythm_change",
@@ -98,7 +124,6 @@ class HitObject(NamedTuple):
     delta_x: float
     delta_y: float
     log_time_diff_ms: float
-    bpm: float
     notes_per_second: float
     velocity: float
     relative_angle: float
@@ -185,7 +210,6 @@ class HitObject(NamedTuple):
             "delta_x": NormalizationType.STANDARD,
             "delta_y": NormalizationType.STANDARD,
             "log_time_diff_ms": NormalizationType.STANDARD,
-            "bpm": NormalizationType.STANDARD,
             "notes_per_second": NormalizationType.STANDARD,
             "velocity": NormalizationType.STANDARD,
             "relative_angle": NormalizationType.NONE,
