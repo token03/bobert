@@ -3,7 +3,7 @@ from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Dict, Any, Type, TypeVar, Optional, cast
+from typing import Tuple, Dict, Any, Type, TypeVar, Optional, Sequence, cast
 
 from rotary_embedding_torch import RotaryEmbedding
 from flash_attn.ops.triton.layer_norm import RMSNorm
@@ -29,6 +29,7 @@ class BobertModel(nn.Module):
         n_layers: int,
         dim_feedforward: int,
         local_attention_window: int,
+        global_attention_layers: Sequence[int] = (),
         dropout: float = 0.1,
         max_seq_len: int = 2048,
         activation_checkpointing: bool = False,
@@ -38,6 +39,7 @@ class BobertModel(nn.Module):
         self.n_heads = n_heads
         self.n_layers = n_layers
         self.activation_checkpointing = activation_checkpointing
+        self.global_attention_layers = set(global_attention_layers)
 
         self.feature_info = HitObject.get_feature_info()
 
@@ -83,7 +85,7 @@ class BobertModel(nn.Module):
                     n_heads,
                     dim_feedforward,
                     dropout,
-                    is_global=((i + 1) % 3 == 0),
+                    is_global=i in self.global_attention_layers,
                     local_window_size=local_attention_window,
                     activation_checkpointing=activation_checkpointing,
                 )
@@ -112,6 +114,7 @@ class BobertModel(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=model_config.dropout,
             local_attention_window=model_config.local_attention_window,
+            global_attention_layers=model_config.get("global_attention_layers", []),
             max_seq_len=data_config.max_seq_len,
             activation_checkpointing=components_config.get(
                 "activation_checkpointing", False
