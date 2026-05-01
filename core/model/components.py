@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import apply_rotary_emb
 from flash_attn import flash_attn_varlen_qkvpacked_func
 from flash_attn.ops.triton.layer_norm import RMSNorm
+from torch.utils.checkpoint import checkpoint
 
 
 class MultiHeadAttentionWithRoPE(nn.Module):
@@ -56,7 +57,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             qkv,
             cu_seqlens,
             max_seqlen,
-            dropout_p=self.dropout if self.training else 0.0,
+            dropout_p=0.0,
             causal=False,
             window_size=window_size,
         )
@@ -84,9 +85,11 @@ class BobertEncoderLayer(nn.Module):
         dropout: float = 0.1,
         is_global: bool = True,
         local_window_size: int = 128,
+        activation_checkpointing: bool = False,
     ):
         super().__init__()
         self.is_global = is_global
+        self.activation_checkpointing = activation_checkpointing
 
         self.self_attn = MultiHeadAttentionWithRoPE(
             d_model, n_heads, dropout, local_window_size, is_global=is_global
@@ -116,7 +119,11 @@ class BobertEncoderLayer(nn.Module):
 
         src = src + self.dropout1(src2)
 
-        src2 = self.ffn(self.norm2(src))
+        if self.training and self.activation_checkpointing:
+            src2 = checkpoint(self.ffn, self.norm2(src), use_reentrant=False)
+        else:
+            src2 = self.ffn(self.norm2(src))
+
         src = src + self.dropout2(src2)
 
         return src

@@ -3,7 +3,6 @@ from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from typing import Tuple, Dict, Any, Type, TypeVar, Optional, cast
 
 from rotary_embedding_torch import RotaryEmbedding
@@ -86,6 +85,7 @@ class BobertModel(nn.Module):
                     dropout,
                     is_global=((i + 1) % 3 == 0),
                     local_window_size=local_attention_window,
+                    activation_checkpointing=activation_checkpointing,
                 )
                 for i in range(n_layers)
             ]
@@ -187,24 +187,12 @@ class BobertModel(nn.Module):
         rotary_freqs = all_freqs[pos].view(total_tokens, 1, self.d_model // self.n_heads)
 
         for layer in self.layers:
-            if self.activation_checkpointing and self.training:
-                packed_output = checkpoint(
-                    lambda hidden, layer=layer: layer(
-                        hidden,
-                        rotary_freqs=rotary_freqs,
-                        cu_seqlens=cu_seqlens,
-                        max_seqlen=max_seqlen,
-                    ),
-                    packed_output,
-                    use_reentrant=False,
-                )
-            else:
-                packed_output = layer(
-                    packed_output,
-                    rotary_freqs=rotary_freqs,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
+            packed_output = layer(
+                packed_output,
+                rotary_freqs=rotary_freqs,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
 
         packed_output = self.final_norm(packed_output)
 
