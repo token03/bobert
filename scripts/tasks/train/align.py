@@ -23,7 +23,7 @@ from core.training.setup import setup_device
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT alignment.")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--db-path")
+    parser.add_argument("--dataset-path")
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--mining-cache-path")
     parser.add_argument("--pretrain-ckpt")
@@ -55,8 +55,8 @@ def parse_args() -> argparse.Namespace:
 def load_config(args: argparse.Namespace) -> DictConfig:
     config = cast(DictConfig, OmegaConf.load(args.config))
 
-    if args.db_path:
-        config.alignment.db_path = args.db_path
+    if args.dataset_path:
+        config.data.dataset_path = args.dataset_path
     if args.checkpoint_dir:
         config.alignment.checkpoint_dir = args.checkpoint_dir
     if args.mining_cache_path:
@@ -84,7 +84,7 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
     print(f"Building mining cache: {cache_path}")
     build_cache(
         data_dir=Path("data"),
-        dataset_dir=Path(config.alignment.db_path),
+        dataset_dir=Path(config.data.dataset_path),
         output_path=cache_path,
         config=MiningConfig(
             top_k=32,
@@ -93,7 +93,8 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
             star_radius=0.5,
             max_star_delta=1.0,
             max_ratio_distance=0.35,
-            max_anchors=32768,
+            max_anchors=config.alignment.get("max_mining_cache_anchors"),
+            random_seed=config.alignment.get("mining_cache_seed", 42),
         ),
     )
 

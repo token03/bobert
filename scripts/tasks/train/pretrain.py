@@ -16,7 +16,9 @@ from core.training.setup import setup_device
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT pretraining.")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--db-path")
+    parser.add_argument("--dataset-path")
+    parser.add_argument("--dataset-size", type=int)
+    parser.add_argument("--dataset-seed", type=int)
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
@@ -40,8 +42,12 @@ def parse_args() -> argparse.Namespace:
 def load_config(args: argparse.Namespace) -> DictConfig:
     config = cast(DictConfig, OmegaConf.load(args.config))
 
-    if args.db_path:
-        config.pretraining.db_path = args.db_path
+    if args.dataset_path:
+        config.data.dataset_path = args.dataset_path
+    if args.dataset_size is not None:
+        config.data.dataset_size = args.dataset_size
+    if args.dataset_seed is not None:
+        config.data.dataset_seed = args.dataset_seed
     if args.checkpoint_dir:
         config.pretraining.checkpoint_dir = args.checkpoint_dir
     if args.batch_size is not None:

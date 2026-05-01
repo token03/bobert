@@ -19,14 +19,14 @@ from .vocab import CollectionTopicTokenizer, MapperTagTokenizer, UserTagTokenize
 
 class BeatmapData(pl.LightningDataModule):
     def __init__(
-        self, config: Dict[str, Any], section: str, db_path: Optional[str] = None
+        self, config: Dict[str, Any], section: str, dataset_path: Optional[str] = None
     ):
         super().__init__()
         self.config = config
         self.section = section
         self.data_config = config["data"]
         self.phase_config = config[section]
-        self.db_path = db_path or self.phase_config.get("db_path")
+        self.dataset_path = dataset_path or self.data_config["dataset_path"]
         self.batch_size = self.phase_config["batch_size"]
         self.vector_dim: Optional[int] = None
         self.normalizer: Optional[BeatmapNormalizer] = None
@@ -34,7 +34,7 @@ class BeatmapData(pl.LightningDataModule):
         self.val_dataset: Optional[BeatmapDataset] = None
 
     def prepare_data(self):
-        setup_dataset(self.db_path, self.phase_config.get("colab_url"))
+        setup_dataset(self.dataset_path, self.phase_config.get("colab_url"))
 
     def _load_data(
         self,
@@ -44,9 +44,11 @@ class BeatmapData(pl.LightningDataModule):
         ids_to_load: Optional[List[int]] = None,
     ) -> List[Dict[str, Any]]:
         return load_beatmap_dataset(
-            self.db_path,
+            self.dataset_path,
             max_seq_len=self.data_config["max_seq_len"],
             ids_to_load=ids_to_load,
+            dataset_size=self.data_config.get("dataset_size"),
+            dataset_seed=self.data_config.get("dataset_seed", 42),
             include_metadata=include_metadata,
             include_user_tags=include_user_tags,
             include_collection_topics=include_collection_topics,
@@ -105,8 +107,8 @@ class BeatmapData(pl.LightningDataModule):
 
 
 class PretrainData(BeatmapData):
-    def __init__(self, config, db_path=None, sampler_fn=None):
-        super().__init__(config, "pretraining", db_path)
+    def __init__(self, config, dataset_path=None, sampler_fn=None):
+        super().__init__(config, "pretraining", dataset_path)
         self.sampler_fn = sampler_fn
         self._sampler = None
 
@@ -142,8 +144,8 @@ class PretrainData(BeatmapData):
 
 
 class AlignData(BeatmapData):
-    def __init__(self, config, tag_tokenizer, db_path=None):
-        super().__init__(config, "alignment", db_path)
+    def __init__(self, config, tag_tokenizer, dataset_path=None):
+        super().__init__(config, "alignment", dataset_path)
         self.tag_tokenizer = tag_tokenizer
         self.user_tag_tokenizer = UserTagTokenizer()
         self.collection_topic_tokenizer = CollectionTopicTokenizer()
@@ -156,11 +158,16 @@ class AlignData(BeatmapData):
         return self.config.get("alignment", self.config.get("align", {}))
 
     def _load_mining_targets(self) -> Dict[int, Dict[str, Any]]:
-        cache_path = self._alignment_config().get("mining_cache_path")
+        align_config = self._alignment_config()
+        cache_path = align_config.get("mining_cache_path")
         if not cache_path or not os.path.exists(cache_path):
             return {}
 
-        cache = load_cache(cache_path)
+        cache = load_cache(
+            cache_path,
+            max_anchors=align_config.get("max_mining_cache_anchors"),
+            random_seed=align_config.get("mining_cache_seed", 42),
+        )
         self.mining_cache = cache
         return {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
 
@@ -169,18 +176,11 @@ class AlignData(BeatmapData):
             return
 
         mining_targets = self._load_mining_targets()
-        ids_to_load = list(mining_targets) if mining_targets else None
         all_beatmap_data = self._load_data(
             include_metadata=True,
             include_user_tags=True,
             include_collection_topics=True,
-            ids_to_load=ids_to_load,
         )
-
-        if mining_targets:
-            all_beatmap_data = [
-                b for b in all_beatmap_data if int(b["beatmap_id"]) in mining_targets
-            ]
 
         train_s, val_s = self._split_loaded_data(all_beatmap_data)
         train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}

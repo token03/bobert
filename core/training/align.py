@@ -34,13 +34,25 @@ class AlignmentModule(pl.LightningModule):
         return self.model(*args, **kwargs)
 
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        vectors, attention_mask, cu_seqlens, beatmap_ids, lgcn_teacher, has_teacher, status_labels, _, attrs = batch
+        (
+            vectors,
+            attention_mask,
+            cu_seqlens,
+            beatmap_ids,
+            lgcn_teacher,
+            has_teacher,
+            status_labels,
+            positive_weights,
+            _,
+            attrs,
+        ) = batch
         predictions = self(vectors, attention_mask, cu_seqlens)
         labels = {
             "beatmap_ids": beatmap_ids,
             "lgcn_teacher": lgcn_teacher,
             "has_teacher": has_teacher,
             "status_labels": status_labels,
+            "positive_weights": positive_weights,
             "difficulty": attrs,
             "use_contrastive": True,
         }
@@ -67,13 +79,25 @@ class AlignmentModule(pl.LightningModule):
         return loss_dict["total_loss"]
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        vectors, attention_mask, cu_seqlens, beatmap_ids, lgcn_teacher, has_teacher, status_labels, _, attrs = batch
+        (
+            vectors,
+            attention_mask,
+            cu_seqlens,
+            beatmap_ids,
+            lgcn_teacher,
+            has_teacher,
+            status_labels,
+            positive_weights,
+            _,
+            attrs,
+        ) = batch
         predictions = self(vectors, attention_mask, cu_seqlens)
         labels = {
             "beatmap_ids": beatmap_ids,
             "lgcn_teacher": lgcn_teacher,
             "has_teacher": has_teacher,
             "status_labels": status_labels,
+            "positive_weights": positive_weights,
             "difficulty": attrs,
             "use_contrastive": False,
         }

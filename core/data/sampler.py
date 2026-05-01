@@ -27,11 +27,23 @@ class AlignmentBatchSampler(Sampler[List[int]]):
     def __len__(self) -> int:
         return max(1, len(self.beatmap_ids) // self.batch_size)
 
-    def _choose_id(self, ids: List[int], rng: random.Random) -> Optional[int]:
-        available = [int(bid) for bid in ids if int(bid) in self.id_to_idx]
+    def _choose_id(
+        self, ids: List[int], weights: List[float], rng: random.Random
+    ) -> Optional[int]:
+        available = []
+        available_weights = []
+        if len(weights) != len(ids):
+            weights = [1.0] * len(ids)
+        for bid, weight in zip(ids, weights):
+            bid = int(bid)
+            if bid in self.id_to_idx:
+                available.append(bid)
+                available_weights.append(max(float(weight), 0.0))
         if not available:
             return None
-        return rng.choice(available)
+        if sum(available_weights) <= 0.0:
+            return rng.choice(available)
+        return rng.choices(available, weights=available_weights, k=1)[0]
 
     def __iter__(self):
         rng = random.Random(self.seed)
@@ -44,12 +56,17 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             mining = self.mining_lookup.get(anchor_id, {})
 
             positive_ids = mining.get("positive_ids", [])
+            positive_weights = mining.get("positive_weights", [])
             cross_ids = mining.get("cross_status_positive_ids", [])
+            cross_weights = mining.get("cross_status_positive_weights", [])
             negative_ids = mining.get("hard_negative_ids", [])
+            negative_weights = mining.get("hard_negative_weights", [])
 
-            p1 = self._choose_id(positive_ids, rng)
-            p2 = self._choose_id(cross_ids, rng) or self._choose_id(positive_ids, rng)
-            n1 = self._choose_id(negative_ids, rng)
+            p1 = self._choose_id(positive_ids, positive_weights, rng)
+            p2 = self._choose_id(cross_ids, cross_weights, rng) or self._choose_id(
+                positive_ids, positive_weights, rng
+            )
+            n1 = self._choose_id(negative_ids, negative_weights, rng)
 
             group = [anchor_idx]
             group_ids = {anchor_id}

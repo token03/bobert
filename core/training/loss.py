@@ -146,18 +146,37 @@ def contrastive_loss_fn(
         return {"contrastive_loss": torch.zeros((), device=device)}
 
     logits = embeddings @ embeddings.t() / temperature
-    logits = logits.masked_fill(torch.eye(batch_size, dtype=torch.bool, device=device), -1e9)
+    logits = logits.masked_fill(
+        torch.eye(batch_size, dtype=torch.bool, device=device), -1e9
+    )
 
-    positive_mask = torch.zeros(batch_size, batch_size, dtype=torch.bool, device=device)
+    group_positive_mask = torch.zeros(
+        batch_size, batch_size, dtype=torch.bool, device=device
+    )
     for start in range(0, batch_size, group_size):
         positive_indices = torch.arange(start, start + min(3, group_size), device=device)
-        positive_mask[positive_indices[:, None], positive_indices[None, :]] = True
-    positive_mask.fill_diagonal_(False)
+        group_positive_mask[positive_indices[:, None], positive_indices[None, :]] = True
+    group_positive_mask.fill_diagonal_(False)
+
+    positive_weights = labels.get("positive_weights")
+    if positive_weights is not None:
+        positive_weights = positive_weights.to(device=device, dtype=logits.dtype)
+        positive_weights = positive_weights.masked_fill(
+            torch.eye(batch_size, dtype=torch.bool, device=device), 0.0
+        )
+        fallback = group_positive_mask & (positive_weights <= 0.0)
+        positive_weights = positive_weights + fallback.to(logits.dtype)
+    else:
+        positive_weights = group_positive_mask.to(logits.dtype)
 
     log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
-    positive_counts = positive_mask.sum(dim=1).clamp_min(1)
-    loss = -(log_prob * positive_mask).sum(dim=1) / positive_counts
-    loss = loss[positive_mask.any(dim=1)].mean()
+    positive_sums = positive_weights.sum(dim=1)
+    valid = positive_sums > 0.0
+    if not torch.any(valid):
+        return {"contrastive_loss": torch.zeros((), device=device)}
+
+    loss = -(log_prob * positive_weights).sum(dim=1) / positive_sums.clamp_min(1e-9)
+    loss = loss[valid].mean()
 
     return {"contrastive_loss": loss}
 

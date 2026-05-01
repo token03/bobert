@@ -229,31 +229,6 @@ class BobertModel(nn.Module):
         return packed_output, attention_mask
 
 
-class BobertSequencePooler(nn.Module):
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.d_model = d_model
-        self.output_dim = d_model
-
-    def forward(
-        self, packed_output: torch.Tensor, cu_seqlens: torch.Tensor
-    ) -> torch.Tensor:
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
-        batch_size = seqlens.numel()
-
-        batch_idx = torch.repeat_interleave(
-            torch.arange(batch_size, device=packed_output.device), seqlens
-        )
-
-        pooled_sum = torch.zeros(
-            batch_size, self.d_model, device=packed_output.device, dtype=torch.float32
-        )
-        pooled_sum.index_add_(0, batch_idx, packed_output.float())
-        pooled_output = (pooled_sum / seqlens.unsqueeze(1)).to(packed_output.dtype)
-
-        return pooled_output
-
-
 class BobertProjectedStatsPooler(nn.Module):
     def __init__(
         self,
@@ -413,7 +388,14 @@ class BobertForPretraining(nn.Module):
 
         mlm_head = BobertMaskedLMHead(base_model.d_model)
 
-        pooler = BobertSequencePooler(base_model.d_model)
+        pooling_stats = tuple(
+            pretraining_config.get("pooling_stats", ["mean", "max", "std"])
+        )
+        pooler = BobertProjectedStatsPooler(
+            base_model.d_model,
+            stat_dim=pretraining_config.get("pooling_stat_dim", 256),
+            stats=pooling_stats,
+        )
         difficulty_head = BobertDifficultyHead(base_model.d_model, pooler)
 
         model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
@@ -466,25 +448,22 @@ class BobertForAlignment(nn.Module):
         self,
         bert_model: BobertModel,
         pooler: nn.Module,
-        difficulty_pooler: Optional[nn.Module] = None,
         embedding_dim: int = 128,
         teacher_dim: int = 64,
     ):
         super().__init__()
         self.bert = bert_model
         self.pooler = pooler
-        self.difficulty_pooler = difficulty_pooler or pooler
         self.embedding_dim = embedding_dim
         self.teacher_dim = teacher_dim
         pooled_dim = getattr(pooler, "output_dim", bert_model.d_model)
-        difficulty_dim = getattr(self.difficulty_pooler, "output_dim", pooled_dim)
         self.retrieval_head = nn.Sequential(
             nn.Linear(pooled_dim, bert_model.d_model),
             nn.GELU(),
             nn.Linear(bert_model.d_model, embedding_dim),
         )
         self.lgcn_head = nn.Linear(pooled_dim, teacher_dim)
-        self.difficulty_head = nn.Linear(difficulty_dim, len(DIFFICULTY_ATTRIBUTES))
+        self.difficulty_head = nn.Linear(pooled_dim, len(DIFFICULTY_ATTRIBUTES))
         self.status_head = nn.Linear(pooled_dim, 1)
         self.is_compiled = False
 
@@ -502,12 +481,10 @@ class BobertForAlignment(nn.Module):
             stat_dim=alignment_config.get("pooling_stat_dim", 256),
             stats=pooling_stats,
         )
-        difficulty_pooler = BobertSequencePooler(base_model.d_model)
 
         model = cls(
             base_model,
             pooler,
-            difficulty_pooler=difficulty_pooler,
             embedding_dim=alignment_config.get("embedding_dim", 128),
             teacher_dim=alignment_config.get("teacher_dim", 64),
         )
@@ -541,10 +518,9 @@ class BobertForAlignment(nn.Module):
         )
 
         pooled_output = self.pooler(packed_output, cu_seqlens)
-        difficulty_output = self.difficulty_pooler(packed_output, cu_seqlens)
         retrieval_embedding = F.normalize(self.retrieval_head(pooled_output), dim=-1)
         lgcn_embedding = F.normalize(self.lgcn_head(pooled_output), dim=-1)
-        difficulty_raw = self.difficulty_head(difficulty_output)
+        difficulty_raw = self.difficulty_head(pooled_output)
 
         return {
             "embedding": retrieval_embedding,

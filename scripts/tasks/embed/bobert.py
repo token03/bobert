@@ -119,7 +119,7 @@ def export_embeddings(
     seed: int,
 ):
     config = OmegaConf.load(config_path)
-    dataset_dir = dataset_dir or resolve_path(config.alignment.db_path)
+    dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
     dataset_dir = resolve_path(dataset_dir)
     ckpt_path = find_checkpoint(checkpoint_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -191,7 +191,7 @@ def main():
         help="Defaults to newest experiments/**/checkpoints/last.ckpt",
     )
     parser.add_argument(
-        "--dataset", default=None, help="Defaults to config.alignment.db_path"
+        "--dataset", default=None, help="Defaults to config.data.dataset_path"
     )
     parser.add_argument(
         "--output", default=str(PROJECT_ROOT / "data" / "embeddings.parquet")

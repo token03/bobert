@@ -76,6 +76,20 @@ def collate_align(
             has_teacher[i] = True
         status_labels[i] = 1.0 if target.get("status_group") == "ranked" else 0.0
 
+    id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
+    positive_weights = torch.zeros(len(batch), len(batch), dtype=torch.float32)
+    for i, target in enumerate(targets):
+        for ids_key, weights_key in (
+            ("positive_ids", "positive_weights"),
+            ("cross_status_positive_ids", "cross_status_positive_weights"),
+        ):
+            for bid, weight in zip(target.get(ids_key, []), target.get(weights_key, [])):
+                j = id_to_batch.get(int(bid))
+                if j is not None and j != i:
+                    positive_weights[i, j] = max(
+                        float(positive_weights[i, j]), float(weight)
+                    )
+
     return (
         padded_vec,
         mask,
@@ -84,6 +98,7 @@ def collate_align(
         lgcn_teacher,
         has_teacher,
         status_labels,
+        positive_weights,
         padded_tags,
         stack_dicts(attrs),
     )

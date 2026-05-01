@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import gdown
+import numpy as np
 import polars as pl
 from tqdm import tqdm
 
@@ -40,10 +41,10 @@ def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
     try:
         import google.colab  # type: ignore
 
-        colab_path = "/content/beatmap_dataset"
+        colab_path = "/content/dataset"
         if not os.path.exists(colab_path) and colab_url:
             print("Downloading dataset for Colab environment...")
-            zip_path = "/content/beatmap_dataset.zip"
+            zip_path = "/content/dataset.zip"
             gdown.download(colab_url, zip_path, quiet=False)
             print("Unzipping dataset...")
             import zipfile
@@ -242,10 +243,24 @@ def _chunked(values: List[int], chunk_size: int):
         yield values[i : i + chunk_size]
 
 
+def _sample_beatmap_ids(
+    beatmap_ids: List[int], dataset_size: Optional[int], dataset_seed: int
+) -> List[int]:
+    beatmap_ids = sorted(int(bid) for bid in beatmap_ids)
+    if dataset_size is None or dataset_size <= 0 or dataset_size >= len(beatmap_ids):
+        return beatmap_ids
+
+    rng = np.random.default_rng(dataset_seed)
+    selected = rng.choice(np.array(beatmap_ids), size=dataset_size, replace=False)
+    return sorted(int(bid) for bid in selected)
+
+
 def load_beatmap_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
+    dataset_size: Optional[int] = None,
+    dataset_seed: int = 42,
     ratings_path: str = "./data/ratings.parquet",
     chunk_size: int = 5000,
     include_metadata: bool = False,
@@ -282,7 +297,16 @@ def load_beatmap_dataset(
         require_ratings,
         include_user_tags,
     ).collect()
-    all_beatmap_ids = sorted(selected_beatmaps["beatmap_id"].unique().to_list())
+
+    all_beatmap_ids = _sample_beatmap_ids(
+        selected_beatmaps["beatmap_id"].unique().to_list(),
+        None if ids_to_load else dataset_size,
+        dataset_seed,
+    )
+    if len(all_beatmap_ids) < selected_beatmaps["beatmap_id"].n_unique():
+        selected_beatmaps = selected_beatmaps.filter(
+            pl.col("beatmap_id").is_in(all_beatmap_ids)
+        )
 
     print(
         f"Selected {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}..."
@@ -291,7 +315,7 @@ def load_beatmap_dataset(
     if max_seq_len is None or not os.path.exists(ratings_path):
         print("Loading difficulty ratings...")
         ratings_lookup = _load_ratings(
-            ratings_path, ids_to_load, max_seq_len, require_ratings
+            ratings_path, all_beatmap_ids, max_seq_len, require_ratings
         )
         print(f"Loaded {len(ratings_lookup)} difficulty ratings")
 

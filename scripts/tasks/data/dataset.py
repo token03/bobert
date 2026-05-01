@@ -17,6 +17,13 @@ BATCH_SIZE = 1024
 MIN_OBJECTS_PER_MAP = 1
 MAX_OBJECTS_PER_MAP = 4000
 
+
+def multiprocessing_context():
+    try:
+        return mp.get_context("fork")
+    except ValueError:
+        return mp.get_context()
+
 BEATMAPS_SCHEMA = pa.schema(
     [
         ("beatmap_id", pa.int64()),
@@ -273,8 +280,7 @@ def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
         ),
     ]
 
-    with mp.Pool(3) as pool:
-        results = pool.starmap(consolidate_table, consolidation_args)
+    results = [consolidate_table(*args) for args in consolidation_args]
 
     beatmap_count, hitobject_count, curvepoint_count = results
     print(f"Consolidated {beatmap_count} beatmap records.")
@@ -284,22 +290,17 @@ def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
     return beatmap_count
 
 
-def format_count(count: int) -> str:
-    if count < 1000:
-        return str(count)
-    k_value = count / 1000.0
-    if k_value == int(k_value):
-        return f"{int(k_value)}k"
-    else:
-        return f"{k_value:.1f}k"
-
-
 def create_dataset(
-    root_dir: str, output_base: str, sample_size: Optional[int] = None
+    root_dir: str,
+    output_dir: str,
+    sample_size: Optional[int] = None,
+    sample_seed: int = 42,
 ) -> str:
-    temp_dir = output_base + "_temp_processing"
+    temp_dir = output_dir + "_temp_processing"
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
     os.makedirs(os.path.join(temp_dir, "beatmaps"))
     os.makedirs(os.path.join(temp_dir, "hitobjects"))
     os.makedirs(os.path.join(temp_dir, "curvepoints"))
@@ -315,25 +316,26 @@ def create_dataset(
     ]
     print(f"Found {len(all_files)} total .osu files.")
 
-    files_to_process = (
-        random.sample(all_files, sample_size)
-        if sample_size and len(all_files) > sample_size
-        else all_files
-    )
+    if sample_size and len(all_files) > sample_size:
+        rng = random.Random(sample_seed)
+        files_to_process = rng.sample(all_files, sample_size)
+    else:
+        files_to_process = all_files
     print(f"Processing {len(files_to_process)} files.")
 
-    tasks_q = mp.Queue()
+    ctx = multiprocessing_context()
+    tasks_q = ctx.Queue()
     for file_path in files_to_process:
         tasks_q.put(file_path)
     for _ in range(num_workers):
         tasks_q.put(None)
 
-    progress_counter = mp.Value("i", 0)
+    progress_counter = ctx.Value("i", 0)
 
     print(f"Phase 1: Starting {num_workers} worker processes for parallel parsing...")
     start_time = time.time()
     processes = [
-        mp.Process(target=worker, args=(tasks_q, temp_dir, progress_counter))
+        ctx.Process(target=worker, args=(tasks_q, temp_dir, progress_counter))
         for _ in range(num_workers)
     ]
     for p in processes:
@@ -357,20 +359,13 @@ def create_dataset(
     maps_per_sec = len(files_to_process) / elapsed if elapsed > 0 else 0
     print(f"Phase 1 complete in {elapsed:.2f} seconds ({maps_per_sec:.2f} maps/sec).")
 
-    beatmap_count = consolidate_dataset(temp_dir, output_base)
-
-    formatted_count = format_count(beatmap_count)
-    final_dir = f"{output_base}{formatted_count}"
-
-    if os.path.exists(final_dir):
-        shutil.rmtree(final_dir)
-    shutil.move(output_base, final_dir)
+    consolidate_dataset(temp_dir, output_dir)
 
     print("Cleaning up temporary directory...")
     shutil.rmtree(temp_dir)
-    print(f"Dataset creation complete: {final_dir}")
+    print(f"Dataset creation complete: {output_dir}")
 
-    return final_dir
+    return output_dir
 
 
 def main():
@@ -386,8 +381,8 @@ def main():
         "-o",
         "--output-dir",
         type=str,
-        default="./data/beatmap_dataset",
-        help="Base name for output directory (will be renamed with count).",
+        default="./data/dataset",
+        help="Output directory for the parsed parquet dataset.",
     )
     parser.add_argument(
         "-s",
@@ -396,14 +391,21 @@ def main():
         default=None,
         help="Number of beatmaps to randomly sample. If not specified, processes all files.",
     )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=42,
+        help="Random seed used with --sample-size.",
+    )
     args = parser.parse_args()
 
     total_start_time = time.time()
-    final_dir = create_dataset(args.directory, args.output_dir, args.sample_size)
+    final_dir = create_dataset(
+        args.directory, args.output_dir, args.sample_size, args.sample_seed
+    )
     print(f"Total time taken: {time.time() - total_start_time:.2f} seconds.")
     print(f"Output directory: {final_dir}")
 
 
 if __name__ == "__main__":
-    mp.set_start_method("spawn")
     main()

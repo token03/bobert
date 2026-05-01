@@ -22,13 +22,13 @@ CACHE_LIST_COLUMNS = [
 
 @dataclass(frozen=True)
 class MiningConfig:
-    top_k: int = 32
-    candidate_k: int = 256
+    top_k: int = 48
+    candidate_k: int = 512
     block_size: int = 256
-    star_radius: float = 1.0
-    max_star_delta: float = 2.0
+    star_radius: float = 0.75
+    max_star_delta: float = 1.5
     max_ratio_distance: float = 0.35
-    hard_negative_ratio_distance: float = 0.55
+    hard_negative_ratio_distance: float = 0.50
     max_anchors: int | None = None
     random_seed: int = 42
 
@@ -50,8 +50,31 @@ class MiningTable:
         return len(self.beatmap_ids)
 
 
-def load_cache(cache_path: str | Path) -> pl.DataFrame:
-    cache = pl.read_parquet(cache_path)
+def load_cache(
+    cache_path: str | Path,
+    max_anchors: int | None = None,
+    random_seed: int = 42,
+) -> pl.DataFrame:
+    cache_path = Path(cache_path)
+    if max_anchors is None:
+        cache = pl.read_parquet(cache_path)
+    else:
+        beatmap_ids = (
+            pl.scan_parquet(str(cache_path)).select("beatmap_id").collect()["beatmap_id"]
+        )
+        if max_anchors < beatmap_ids.len():
+            rng = np.random.default_rng(random_seed)
+            selected_ids = rng.choice(
+                beatmap_ids.to_numpy(), size=max_anchors, replace=False
+            ).tolist()
+        else:
+            selected_ids = beatmap_ids.to_list()
+
+        cache = (
+            pl.scan_parquet(str(cache_path))
+            .filter(pl.col("beatmap_id").is_in(selected_ids))
+            .collect()
+        )
     exprs = []
     for col in CACHE_LIST_COLUMNS:
         if col in cache.columns:
@@ -282,14 +305,14 @@ def _build_row(
         anchor_idx, topic_idx[anchor_idx], topic_scores[anchor_idx], table, cfg
     )
     comp_pos, comp_w = _component_candidates(anchor_idx, table, cfg)
-    neg_ids, neg_w = _hard_negatives(anchor_idx, table, cfg, rng)
+    neg_ids, neg_w = _hard_negatives(anchor_idx, table, cfg, rng, lgcn_idx[anchor_idx])
 
     positive_scores = _merge_scores(
-        [(lgcn_pos, lgcn_w, 1.0), (topic_pos, topic_w, 0.8), (comp_pos, comp_w, 0.5)],
+        [(lgcn_pos, lgcn_w, 1.0), (topic_pos, topic_w, 0.25), (comp_pos, comp_w, 0.15)],
         cfg.top_k,
     )
     cross_scores = _merge_scores(
-        [(cross_pos, cross_w, 1.0), (topic_cross, topic_cross_w, 1.0)], cfg.top_k
+        [(cross_pos, cross_w, 1.0), (topic_cross, topic_cross_w, 0.25)], cfg.top_k
     )
 
     return {
@@ -346,6 +369,8 @@ def _filtered_candidates(
 
         if star_delta > cfg.max_star_delta or ratio_delta > cfg.max_ratio_distance:
             continue
+        if same_set and pos_ids:
+            continue
         if same_set and (
             star_delta > cfg.star_radius or ratio_delta > cfg.max_ratio_distance * 0.75
         ):
@@ -393,7 +418,18 @@ def _component_candidates(
 
     idx = np.argpartition(-score, k - 1)[:k]
     idx = idx[np.argsort(-score[idx])]
-    return [int(table.beatmap_ids[i]) for i in idx], [float(score[i]) for i in idx]
+    ids = []
+    weights = []
+    same_set_seen = False
+    anchor_set = table.beatmapset_ids[anchor_idx]
+    for i in idx:
+        same_set = table.beatmapset_ids[i] == anchor_set
+        if same_set and same_set_seen:
+            continue
+        same_set_seen = same_set_seen or same_set
+        ids.append(int(table.beatmap_ids[i]))
+        weights.append(float(score[i]))
+    return ids, weights
 
 
 def _hard_negatives(
@@ -401,21 +437,32 @@ def _hard_negatives(
     table: MiningTable,
     cfg: MiningConfig,
     rng: np.random.Generator,
+    lgcn_neighbors: Iterable[int],
 ) -> tuple[list[int], list[float]]:
     star_delta = np.abs(table.stars - table.stars[anchor_idx])
     ratio_delta = np.linalg.norm(table.ratios - table.ratios[anchor_idx], axis=1)
     same_status = table.status_groups == table.status_groups[anchor_idx]
+    same_set = table.beatmapset_ids == table.beatmapset_ids[anchor_idx]
+    safe_neighbors = np.fromiter((int(i) for i in lgcn_neighbors), dtype=np.int64)
+    safe_neighbors = safe_neighbors[: min(128, safe_neighbors.shape[0])]
+    safe_neighbor_mask = np.zeros(table.size, dtype=bool)
+    safe_neighbor_mask[safe_neighbors] = True
     mask = (
         (star_delta <= cfg.star_radius)
         & (ratio_delta >= cfg.hard_negative_ratio_distance)
         & same_status
+        & ~same_set
+        & ~safe_neighbor_mask
     )
     mask[anchor_idx] = False
 
     idx = np.flatnonzero(mask)
     if len(idx) < cfg.top_k:
         fallback = np.flatnonzero(
-            (star_delta <= cfg.star_radius) & (ratio_delta >= cfg.max_ratio_distance)
+            (star_delta <= cfg.star_radius)
+            & (ratio_delta >= cfg.max_ratio_distance)
+            & ~same_set
+            & ~safe_neighbor_mask
         )
         fallback = fallback[fallback != anchor_idx]
         idx = np.unique(np.concatenate([idx, fallback]))

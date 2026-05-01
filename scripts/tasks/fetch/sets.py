@@ -19,7 +19,7 @@ from scripts.common.api import osu_api
 from scripts.common.io import atomic_json, atomic_pyarrow_table
 from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
 
-BEATMAP_DATASET_DIR = DATA_DIR / "beatmap_dataset" / "beatmaps"
+DATASET_BEATMAPS_DIR = DATA_DIR / "dataset" / "beatmaps"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 
 TAGS_JSON_PATH = DATA_DIR / "tags.json"
@@ -52,20 +52,20 @@ def save_beatmapsets(df: pd.DataFrame, path: Path):
 
 
 def load_intersection_data():
-    """Load beatmaps.parquet and beatmap_dataset, return intersection beatmap IDs and beatmapset IDs."""
+    """Load beatmaps.parquet and dataset, return intersection beatmap IDs and beatmapset IDs."""
     if not BEATMAPS_PATH.exists():
         print(f"[red]Error: {BEATMAPS_PATH} not found[/red]")
         exit(1)
 
-    if not BEATMAP_DATASET_DIR.exists():
-        print(f"[red]Error: {BEATMAP_DATASET_DIR} not found[/red]")
+    if not DATASET_BEATMAPS_DIR.exists():
+        print(f"[red]Error: {DATASET_BEATMAPS_DIR} not found[/red]")
         exit(1)
 
     print("[cyan]Loading beatmaps.parquet...[/cyan]")
     beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
 
-    print("[cyan]Loading beatmap_dataset...[/cyan]")
-    dataset = pq.ParquetDataset(BEATMAP_DATASET_DIR)
+    print("[cyan]Loading dataset...[/cyan]")
+    dataset = pq.ParquetDataset(DATASET_BEATMAPS_DIR)
     dataset_df = dataset.read().to_pandas()
 
     # Find intersection

@@ -184,7 +184,7 @@ def main():
     seq_len = args.length if args.length is not None else config["data"]["max_seq_len"]
 
     dataset_path = (
-        args.dataset if args.dataset is not None else config["pretraining"]["db_path"]
+        args.dataset if args.dataset is not None else config["data"]["dataset_path"]
     )
     dataset_path = str(resolve_path(dataset_path))
     output_path = str(resolve_path(args.output))
