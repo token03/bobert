@@ -187,7 +187,6 @@ class AlignData(BeatmapData):
         cache = load_cache(
             cache_path,
             alignment_size=align_config.get("alignment_size"),
-            random_seed=align_config.get("mining_cache_seed", 42),
         )
         self.mining_cache = cache
         return {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}

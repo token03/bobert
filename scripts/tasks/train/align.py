@@ -7,7 +7,7 @@ from typing import cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from core.data.mining import MiningConfig, build_cache
+from core.data.mining import build_cache
 from core.data.module import AlignData
 from core.data.vocab import TagTokenizer
 from core.model.bobert import BobertForAlignment
@@ -89,32 +89,6 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
         data_dir=Path("data"),
         dataset_dir=Path(config.data.dataset_path),
         output_path=cache_path,
-        config=MiningConfig(
-            top_k=32,
-            candidate_k=config.alignment.get("embedding_candidate_k", 256),
-            block_size=128,
-            alignment_size=config.alignment.get("alignment_size"),
-            random_seed=config.alignment.get("mining_cache_seed", 42),
-            difficulty_candidate_k=config.alignment.get("difficulty_candidate_k", 256),
-            target_embedding_close_k=config.alignment.get(
-                "target_embedding_close_k", 64
-            ),
-            target_difficulty_close_k=config.alignment.get(
-                "target_difficulty_close_k", 64
-            ),
-            target_positives_per_anchor=config.alignment.get(
-                "target_positives_per_anchor", 6
-            ),
-            min_positives_per_anchor=config.alignment.get(
-                "min_positives_per_anchor", 2
-            ),
-            hard_negative_far_difficulty_quantile=config.alignment.get(
-                "hard_negative_far_difficulty_quantile", 0.80
-            ),
-            hard_negative_far_embedding_quantile=config.alignment.get(
-                "hard_negative_far_embedding_quantile", 0.30
-            ),
-        ),
     )
 
 

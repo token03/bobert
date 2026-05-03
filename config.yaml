@@ -63,7 +63,7 @@ alignment:
   model_name: "model"
   trainable_layers: 2
   batch_size: 64
-  num_epochs: 4
+  num_epochs: 3
 
   embedding_dim: 256
   teacher_dim: 64
@@ -71,8 +71,7 @@ alignment:
   pooling_stat_dim: 256
   group_size: 4
   mining_cache_path: './data/mining_cache.parquet'
-  alignment_size: 50000
-  mining_cache_seed: 42
+  alignment_size: 100000
 
   adam_lr: 3e-5
   adam_wd: 0.05
@@ -100,16 +99,6 @@ alignment:
   difficulty_decay_scale: 0.3
   cross_label_similarity_factor: 0.2
   same_label_base_similarity: 0.4 
-
-  embedding_candidate_k: 256
-  difficulty_candidate_k: 256
-  target_embedding_close_k: 64
-  target_difficulty_close_k: 64
-  target_positives_per_anchor: 6
-  min_positives_per_anchor: 2
-  hard_negative_far_difficulty_quantile: 0.80
-  hard_negative_far_embedding_quantile: 0.30
-  max_same_set_per_anchor: 1
 
   sampler:
     max_ease_factor: 1.0
