@@ -244,14 +244,14 @@ def _chunked(values: List[int], chunk_size: int):
 
 
 def _sample_beatmap_ids(
-    beatmap_ids: List[int], dataset_size: Optional[int], dataset_seed: int
+    beatmap_ids: List[int], sample_size: Optional[int], dataset_seed: int
 ) -> List[int]:
     beatmap_ids = sorted(int(bid) for bid in beatmap_ids)
-    if dataset_size is None or dataset_size <= 0 or dataset_size >= len(beatmap_ids):
+    if sample_size is None or sample_size <= 0 or sample_size >= len(beatmap_ids):
         return beatmap_ids
 
     rng = np.random.default_rng(dataset_seed)
-    selected = rng.choice(np.array(beatmap_ids), size=dataset_size, replace=False)
+    selected = rng.choice(np.array(beatmap_ids), size=sample_size, replace=False)
     return sorted(int(bid) for bid in selected)
 
 
@@ -259,7 +259,7 @@ def load_beatmap_dataset(
     dataset_path: str,
     max_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
-    dataset_size: Optional[int] = None,
+    sample_size: Optional[int] = None,
     dataset_seed: int = 42,
     ratings_path: str = "./data/ratings.parquet",
     chunk_size: int = 5000,
@@ -300,7 +300,7 @@ def load_beatmap_dataset(
 
     all_beatmap_ids = _sample_beatmap_ids(
         selected_beatmaps["beatmap_id"].unique().to_list(),
-        None if ids_to_load else dataset_size,
+        None if ids_to_load else sample_size,
         dataset_seed,
     )
     if len(all_beatmap_ids) < selected_beatmaps["beatmap_id"].n_unique():
@@ -373,7 +373,7 @@ def load_beatmap_dataset(
 
         id_to_vectors = {int(bid): vec for bid, vec in zip(ids, hitobject_data)}
         beatmap_rows = {
-            int(row["beatmap_id"]): row for row in beatmaps_chunk.iter_rows(named=True)
+            int(row["beatmap_id"]): row for row in beatmaps_chunk.to_dicts()
         }
 
         for bid in ids:

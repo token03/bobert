@@ -28,15 +28,20 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         return max(1, len(self.beatmap_ids) // self.batch_size)
 
     def _choose_id(
-        self, ids: List[int], weights: List[float], rng: random.Random
+        self,
+        ids: List[int],
+        weights: List[float],
+        rng: random.Random,
+        exclude: Optional[set[int]] = None,
     ) -> Optional[int]:
         available = []
         available_weights = []
+        exclude = exclude or set()
         if len(weights) != len(ids):
             weights = [1.0] * len(ids)
         for bid, weight in zip(ids, weights):
             bid = int(bid)
-            if bid in self.id_to_idx:
+            if bid in self.id_to_idx and bid not in exclude:
                 available.append(bid)
                 available_weights.append(max(float(weight), 0.0))
         if not available:
@@ -62,21 +67,32 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             negative_ids = mining.get("hard_negative_ids", [])
             negative_weights = mining.get("hard_negative_weights", [])
 
-            p1 = self._choose_id(positive_ids, positive_weights, rng)
-            p2 = self._choose_id(cross_ids, cross_weights, rng) or self._choose_id(
-                positive_ids, positive_weights, rng
-            )
-            n1 = self._choose_id(negative_ids, negative_weights, rng)
-
             group = [anchor_idx]
             group_ids = {anchor_id}
-            for chosen in [p1, p2, n1]:
-                if chosen is not None and chosen not in group_ids:
-                    group.append(self.id_to_idx[chosen])
-                    group_ids.add(chosen)
+
+            p1 = self._choose_id(positive_ids, positive_weights, rng, group_ids)
+            if p1 is None:
+                p1 = self._choose_id(cross_ids, cross_weights, rng, group_ids)
+
+            if p1 is not None:
+                group.append(self.id_to_idx[p1])
+                group_ids.add(p1)
+
+            negative_slots = max(0, self.group_size - 2)
+            for _ in range(negative_slots):
+                neg = self._choose_id(negative_ids, negative_weights, rng, group_ids)
+                if neg is None:
+                    break
+                group.append(self.id_to_idx[neg])
+                group_ids.add(neg)
 
             while len(group) < self.group_size:
-                group.append(rng.randrange(len(self.beatmap_ids)))
+                random_idx = rng.randrange(len(self.beatmap_ids))
+                random_id = self.beatmap_ids[random_idx]
+                if len(group_ids) < len(self.beatmap_ids) and random_id in group_ids:
+                    continue
+                group.append(random_idx)
+                group_ids.add(random_id)
 
             batch.extend(group[: self.group_size])
             if len(batch) == self.batch_size:

@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pretrain-checkpoint-dir", default="experiments/checkpoints")
     parser.add_argument("--resume-ckpt")
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--alignment-size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument(
         "--build-cache",
@@ -63,6 +64,8 @@ def load_config(args: argparse.Namespace) -> DictConfig:
         config.alignment.mining_cache_path = args.mining_cache_path
     if args.batch_size is not None:
         config.alignment.batch_size = args.batch_size
+    if args.alignment_size is not None:
+        config.alignment.alignment_size = args.alignment_size
     if args.epochs is not None:
         config.alignment.num_epochs = args.epochs
     if args.compile_model is not None:
@@ -88,13 +91,29 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
         output_path=cache_path,
         config=MiningConfig(
             top_k=32,
-            candidate_k=256,
+            candidate_k=config.alignment.get("embedding_candidate_k", 256),
             block_size=128,
-            star_radius=0.5,
-            max_star_delta=1.0,
-            max_ratio_distance=0.35,
-            max_anchors=config.alignment.get("max_mining_cache_anchors"),
+            alignment_size=config.alignment.get("alignment_size"),
             random_seed=config.alignment.get("mining_cache_seed", 42),
+            difficulty_candidate_k=config.alignment.get("difficulty_candidate_k", 256),
+            target_embedding_close_k=config.alignment.get(
+                "target_embedding_close_k", 64
+            ),
+            target_difficulty_close_k=config.alignment.get(
+                "target_difficulty_close_k", 64
+            ),
+            target_positives_per_anchor=config.alignment.get(
+                "target_positives_per_anchor", 6
+            ),
+            min_positives_per_anchor=config.alignment.get(
+                "min_positives_per_anchor", 2
+            ),
+            hard_negative_far_difficulty_quantile=config.alignment.get(
+                "hard_negative_far_difficulty_quantile", 0.80
+            ),
+            hard_negative_far_embedding_quantile=config.alignment.get(
+                "hard_negative_far_embedding_quantile", 0.30
+            ),
         ),
     )
 

@@ -458,6 +458,21 @@ class BobertForAlignment(nn.Module):
         self.status_head = nn.Linear(pooled_dim, 1)
         self.is_compiled = False
 
+    def freeze_bert_except_top_layers(self, trainable_layers: int) -> None:
+        if trainable_layers < 0 or trainable_layers > self.bert.n_layers:
+            raise ValueError(
+                f"trainable_layers must be between 0 and {self.bert.n_layers}, "
+                f"got {trainable_layers}"
+            )
+
+        for parameter in self.bert.parameters():
+            parameter.requires_grad = False
+
+        if trainable_layers > 0:
+            for layer in self.bert.layers[-trainable_layers:]:
+                for parameter in layer.parameters():
+                    parameter.requires_grad = True
+
     @classmethod
     def from_config(
         cls, config: DictConfig, device: torch.device
@@ -479,6 +494,9 @@ class BobertForAlignment(nn.Module):
             embedding_dim=alignment_config.get("embedding_dim", 128),
             teacher_dim=alignment_config.get("teacher_dim", 64),
         )
+        trainable_layers = alignment_config.get("trainable_layers")
+        if trainable_layers is not None:
+            model.freeze_bert_except_top_layers(int(trainable_layers))
         model = model.to(device)
 
         if config.components.get("compile_model", False):

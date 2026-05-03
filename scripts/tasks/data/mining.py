@@ -13,17 +13,41 @@ def main():
     parser.add_argument("--top-k", type=int, default=defaults.top_k)
     parser.add_argument("--candidate-k", type=int, default=defaults.candidate_k)
     parser.add_argument("--block-size", type=int, default=defaults.block_size)
-    parser.add_argument("--max-anchors", type=int, default=defaults.max_anchors)
+    parser.add_argument("--alignment-size", type=int, default=defaults.alignment_size)
+    parser.add_argument("--workers", type=int, default=defaults.num_workers)
     parser.add_argument("--seed", type=int, default=defaults.random_seed)
-    parser.add_argument("--star-radius", type=float, default=defaults.star_radius)
-    parser.add_argument("--max-star-delta", type=float, default=defaults.max_star_delta)
     parser.add_argument(
-        "--max-ratio-distance", type=float, default=defaults.max_ratio_distance
+        "--difficulty-candidate-k", type=int, default=defaults.difficulty_candidate_k
     )
     parser.add_argument(
-        "--hard-negative-ratio-distance",
+        "--target-embedding-close-k",
+        type=int,
+        default=defaults.target_embedding_close_k,
+    )
+    parser.add_argument(
+        "--target-difficulty-close-k",
+        type=int,
+        default=defaults.target_difficulty_close_k,
+    )
+    parser.add_argument(
+        "--target-positives-per-anchor",
+        type=int,
+        default=defaults.target_positives_per_anchor,
+    )
+    parser.add_argument(
+        "--min-positives-per-anchor",
+        type=int,
+        default=defaults.min_positives_per_anchor,
+    )
+    parser.add_argument(
+        "--hard-negative-far-difficulty-quantile",
         type=float,
-        default=defaults.hard_negative_ratio_distance,
+        default=defaults.hard_negative_far_difficulty_quantile,
+    )
+    parser.add_argument(
+        "--hard-negative-far-embedding-quantile",
+        type=float,
+        default=defaults.hard_negative_far_embedding_quantile,
     )
     args = parser.parse_args()
 
@@ -35,11 +59,19 @@ def main():
             top_k=args.top_k,
             candidate_k=args.candidate_k,
             block_size=args.block_size,
-            max_anchors=args.max_anchors,
-            star_radius=args.star_radius,
-            max_star_delta=args.max_star_delta,
-            max_ratio_distance=args.max_ratio_distance,
-            hard_negative_ratio_distance=args.hard_negative_ratio_distance,
+            alignment_size=args.alignment_size,
+            num_workers=args.workers,
+            difficulty_candidate_k=args.difficulty_candidate_k,
+            target_embedding_close_k=args.target_embedding_close_k,
+            target_difficulty_close_k=args.target_difficulty_close_k,
+            target_positives_per_anchor=args.target_positives_per_anchor,
+            min_positives_per_anchor=args.min_positives_per_anchor,
+            hard_negative_far_difficulty_quantile=(
+                args.hard_negative_far_difficulty_quantile
+            ),
+            hard_negative_far_embedding_quantile=(
+                args.hard_negative_far_embedding_quantile
+            ),
             random_seed=args.seed,
         ),
     )

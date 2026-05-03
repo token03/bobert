@@ -199,7 +199,7 @@ def main():
     parser.add_argument(
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

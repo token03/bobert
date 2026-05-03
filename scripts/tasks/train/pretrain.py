@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT pretraining.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dataset-path")
-    parser.add_argument("--dataset-size", type=int)
+    parser.add_argument("--pretrain-size", type=int)
     parser.add_argument("--dataset-seed", type=int)
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--batch-size", type=int)
@@ -44,8 +44,8 @@ def load_config(args: argparse.Namespace) -> DictConfig:
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
-    if args.dataset_size is not None:
-        config.data.dataset_size = args.dataset_size
+    if args.pretrain_size is not None:
+        config.pretraining.pretrain_size = args.pretrain_size
     if args.dataset_seed is not None:
         config.data.dataset_seed = args.dataset_seed
     if args.checkpoint_dir:

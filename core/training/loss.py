@@ -83,7 +83,7 @@ def difficulty_loss_fn(
         "stars": phase_config.get("stars_loss_weight", 1.0),
         "aim": phase_config.get("aim_loss_weight", 1.0),
         "speed": phase_config.get("speed_loss_weight", 1.0),
-        "slider_factor": phase_config.get("slider_factor_loss_weight", 0.5),
+        "slider_factor": phase_config.get("slider_factor_loss_weight", 1.0),
         "ar": phase_config.get("ar_loss_weight", 0.3),
         "cs": phase_config.get("cs_loss_weight", 0.2),
         "slider_multiplier": phase_config.get("slider_multiplier_loss_weight", 0.2),
@@ -150,23 +150,20 @@ def contrastive_loss_fn(
         torch.eye(batch_size, dtype=torch.bool, device=device), -1e9
     )
 
-    group_positive_mask = torch.zeros(
-        batch_size, batch_size, dtype=torch.bool, device=device
-    )
-    for start in range(0, batch_size, group_size):
-        positive_indices = torch.arange(start, start + min(3, group_size), device=device)
-        group_positive_mask[positive_indices[:, None], positive_indices[None, :]] = True
-    group_positive_mask.fill_diagonal_(False)
-
     positive_weights = labels.get("positive_weights")
     if positive_weights is not None:
         positive_weights = positive_weights.to(device=device, dtype=logits.dtype)
         positive_weights = positive_weights.masked_fill(
             torch.eye(batch_size, dtype=torch.bool, device=device), 0.0
         )
-        fallback = group_positive_mask & (positive_weights <= 0.0)
-        positive_weights = positive_weights + fallback.to(logits.dtype)
     else:
+        group_positive_mask = torch.zeros(
+            batch_size, batch_size, dtype=torch.bool, device=device
+        )
+        for start in range(0, batch_size, group_size):
+            positive_indices = torch.arange(start, start + min(2, group_size), device=device)
+            group_positive_mask[positive_indices[:, None], positive_indices[None, :]] = True
+        group_positive_mask.fill_diagonal_(False)
         positive_weights = group_positive_mask.to(logits.dtype)
 
     log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)

@@ -42,12 +42,13 @@ class BeatmapData(pl.LightningDataModule):
         include_user_tags: bool = False,
         include_collection_topics: bool = False,
         ids_to_load: Optional[List[int]] = None,
+        sample_size: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         return load_beatmap_dataset(
             self.dataset_path,
             max_seq_len=self.data_config["max_seq_len"],
             ids_to_load=ids_to_load,
-            dataset_size=self.data_config.get("dataset_size"),
+            sample_size=sample_size,
             dataset_seed=self.data_config.get("dataset_seed", 42),
             include_metadata=include_metadata,
             include_user_tags=include_user_tags,
@@ -116,6 +117,26 @@ class PretrainData(BeatmapData):
         if self.sampler_fn:
             self._sampler = self.sampler_fn(np.array(train_attrs["stars"]))
 
+    def setup(self, stage: Optional[str] = None):
+        if self.train_dataset is not None:
+            return
+
+        all_beatmap_data = self._load_data(
+            sample_size=self.phase_config.get("pretrain_size")
+        )
+        train_s, val_s = self._split_loaded_data(all_beatmap_data)
+
+        train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
+        self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
+        self.vector_dim = train_s["data"][0].shape[1]
+
+        self.train_dataset, self.val_dataset = self._create_datasets(train_s, val_s)
+        self._setup_sampler(train_s["attrs"])
+
+        print(
+            f"Data split: {len(self.train_dataset)} training, {len(self.val_dataset)} validation"
+        )
+
     def _create_datasets(self, train_s, val_s):
         return (
             BeatmapDataset(
@@ -165,7 +186,7 @@ class AlignData(BeatmapData):
 
         cache = load_cache(
             cache_path,
-            max_anchors=align_config.get("max_mining_cache_anchors"),
+            alignment_size=align_config.get("alignment_size"),
             random_seed=align_config.get("mining_cache_seed", 42),
         )
         self.mining_cache = cache
@@ -176,11 +197,17 @@ class AlignData(BeatmapData):
             return
 
         mining_targets = self._load_mining_targets()
+        if not mining_targets:
+            raise RuntimeError("Alignment requires a non-empty mining cache.")
+
         all_beatmap_data = self._load_data(
             include_metadata=True,
             include_user_tags=True,
             include_collection_topics=True,
+            ids_to_load=list(mining_targets.keys()),
         )
+        if not all_beatmap_data:
+            raise RuntimeError("No beatmaps from the mining cache were found in the dataset.")
 
         train_s, val_s = self._split_loaded_data(all_beatmap_data)
         train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}

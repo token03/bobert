@@ -1,6 +1,5 @@
 data:
   dataset_path: './data/dataset'
-  dataset_size: 20000
   dataset_seed: 42
   max_seq_len: 2048
   val_split: 0.1
@@ -23,6 +22,7 @@ components:
   activation_checkpointing: true
     
 pretraining:
+  pretrain_size: null
   batch_size: 32
   num_epochs: 8
 
@@ -61,8 +61,9 @@ pretraining:
 alignment:
   checkpoint_dir: "./experiments"
   model_name: "model"
-  batch_size: 32
-  num_epochs: 3
+  trainable_layers: 2
+  batch_size: 64
+  num_epochs: 4
 
   embedding_dim: 256
   teacher_dim: 64
@@ -70,7 +71,7 @@ alignment:
   pooling_stat_dim: 256
   group_size: 4
   mining_cache_path: './data/mining_cache.parquet'
-  max_mining_cache_anchors: 50000
+  alignment_size: 50000
   mining_cache_seed: 42
 
   adam_lr: 3e-5
@@ -85,9 +86,9 @@ alignment:
 
   use_amp: true
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
 
-  temperature: 0.05
+  temperature: 0.15
 
   difficulty_loss_weight: 0.4
   aim_loss_weight: 0.1
@@ -100,8 +101,15 @@ alignment:
   cross_label_similarity_factor: 0.2
   same_label_base_similarity: 0.4 
 
-  positive_difficulty_threshold: 0.15
-  hard_negative_difficulty_threshold: 0.50
+  embedding_candidate_k: 256
+  difficulty_candidate_k: 256
+  target_embedding_close_k: 64
+  target_difficulty_close_k: 64
+  target_positives_per_anchor: 6
+  min_positives_per_anchor: 2
+  hard_negative_far_difficulty_quantile: 0.80
+  hard_negative_far_embedding_quantile: 0.30
+  max_same_set_per_anchor: 1
 
   sampler:
     max_ease_factor: 1.0

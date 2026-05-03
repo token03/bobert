@@ -29,24 +29,24 @@ CANONICAL_METER = 4
 def _calculate_nps_vectorized(
     times: np.ndarray, split_indices: np.ndarray
 ) -> np.ndarray:
-    nps_array = np.zeros(len(times), dtype=np.float32)
-
-    boundaries = np.concatenate(([0], split_indices, [len(times)]))
-
-    for i in range(len(boundaries) - 1):
-        start, end = boundaries[i], boundaries[i + 1]
-        map_times = times[start:end]
-        if len(map_times) == 0:
-            continue
-
-        thresholds = map_times - 1000.0
-
-        start_indices = np.searchsorted(map_times, thresholds, side="left")
-
-        current_indices = np.arange(len(map_times))
-        nps_array[start:end] = (current_indices - start_indices + 1).astype(np.float32)
-
-    return nps_array
+    if len(times) == 0:
+        return np.array([], dtype=np.float32)
+        
+    times_64 = times.astype(np.float64)
+    
+    map_indices = np.zeros(len(times_64), dtype=np.int32)
+    if len(split_indices) > 0:
+        map_indices[split_indices] = 1
+        np.cumsum(map_indices, out=map_indices)
+        
+    global_times = times_64 + (map_indices * 10000000.0)
+    
+    thresholds = global_times - 1000.0
+    
+    start_indices = np.searchsorted(global_times, thresholds, side="left")
+    
+    current_indices = np.arange(len(global_times))
+    return (current_indices - start_indices + 1).astype(np.float32)
 
 
 def _shift_within_group(
@@ -60,50 +60,29 @@ def _shift_within_group(
 def _canonical_rhythmic_snap(beat_fraction: np.ndarray) -> np.ndarray:
     snap = np.full(len(beat_fraction), 5, dtype=np.int32)
 
-    def close_to(targets: list[float]) -> np.ndarray:
-        mask = np.zeros(len(beat_fraction), dtype=bool)
-        for target in targets:
-            mask |= np.abs(beat_fraction - target) < RHYTHM_EPSILON
-        return mask
+    scaled = np.round(beat_fraction * 48.0).astype(np.int32)
+    error = np.abs(beat_fraction - scaled / 48.0)
 
-    snap[(beat_fraction < RHYTHM_EPSILON) | (beat_fraction > 1.0 - RHYTHM_EPSILON)] = 0
-    snap[close_to([0.5])] = 1
-    snap[close_to([0.25, 0.75])] = 2
-    snap[close_to([1 / 3, 2 / 3, 1 / 6, 5 / 6])] = 3
-    snap[
-        close_to(
-            [
-                1 / 8,
-                3 / 8,
-                5 / 8,
-                7 / 8,
-                1 / 12,
-                5 / 12,
-                7 / 12,
-                11 / 12,
-                1 / 16,
-                3 / 16,
-                5 / 16,
-                7 / 16,
-                9 / 16,
-                11 / 16,
-                13 / 16,
-                15 / 16,
-            ]
-        )
-    ] = 4
+    valid = error < RHYTHM_EPSILON
+
+    mapping = np.full(49, 5, dtype=np.int32)
+    mapping[[0, 48]] = 0
+    mapping[24] = 1
+    mapping[[12, 36]] = 2
+    mapping[[8, 16, 32, 40]] = 3
+    mapping[[3, 4, 6, 9, 15, 18, 20, 21, 27, 28, 30, 33, 39, 42, 44, 45]] = 4
+
+    scaled_valid = scaled[valid]
+    snap[valid] = mapping[scaled_valid]
+    
     return snap
 
 
 def _expand_sliders_and_spinners(
     df: pl.DataFrame,
 ) -> Tuple[pl.DataFrame, Dict[int, int]]:
-    original_counts = {
-        int(row["beatmap_id"]): int(row["len"])
-        for row in df.group_by("beatmap_id", maintain_order=True)
-        .len()
-        .iter_rows(named=True)
-    }
+    counts_df = df.group_by("beatmap_id", maintain_order=True).len()
+    original_counts = dict(zip(counts_df["beatmap_id"].to_list(), counts_df["len"].to_list()))
 
     cols_to_zero = [
         col
@@ -249,13 +228,13 @@ def _apply_temporal_features(
         np.nan_to_num(time_diff_beats, nan=0.0), DURATION_BINS
     )
 
-    cum_beats_arr = np.zeros(len(df), dtype=np.float32)
-    boundaries = np.concatenate(([0], split_indices, [len(df)]))
     tdb_values = np.nan_to_num(time_diff_beats, nan=0.0)
-
-    for i in range(len(boundaries) - 1):
-        s, e = boundaries[i], boundaries[i + 1]
-        cum_beats_arr[s:e] = np.cumsum(tdb_values[s:e])
+    cum_beats_arr = np.cumsum(tdb_values)
+    
+    if len(split_indices) > 0:
+        offsets = np.zeros_like(cum_beats_arr)
+        offsets[split_indices] = cum_beats_arr[split_indices - 1]
+        cum_beats_arr -= np.maximum.accumulate(offsets)
 
     beat_id = np.floor(cum_beats_arr + 1e-4)
     absolute_beats = time / beat_length_ms

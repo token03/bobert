@@ -5,9 +5,9 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, PROJECT_ROOT, resolve_path
+from scripts.common.paths import BEATMAPS_PATH, DATA_DIR, PROJECT_ROOT, resolve_path
 
-EMBEDDINGS_PATH = COLLECTIONS_DIR / "beatmap_embeddings_v1.parquet"
+EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
 
 N_EXPORT_NEIGHBORS = 25
