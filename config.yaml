@@ -22,9 +22,9 @@ components:
   activation_checkpointing: true
     
 pretraining:
-  pretrain_size: null
+  pretrain_size: 80000
   batch_size: 32
-  num_epochs: 8
+  num_epochs: 10
 
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 4

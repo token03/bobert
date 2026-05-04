@@ -76,9 +76,14 @@ def load_metadata(path: Path) -> pl.DataFrame:
         "beatmapset_id",
         "artist",
         "title",
+        "creator",
         "version",
+        "status",
+        "ranked",
         "difficulty_rating",
         "bpm",
+        "total_length",
+        "hit_length",
     ]
     try:
         return pl.read_parquet(path, columns=wanted)
@@ -245,6 +250,61 @@ def format_number(value, decimals: int = 2):
     if abs(number - round(number)) < 1e-6:
         return str(int(round(number)))
     return f"{number:.{decimals}f}"
+
+
+def format_length(value):
+    value = clean_value(value, None)
+    if value is None:
+        return "?"
+    seconds = int(round(float(value)))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def format_bpm(value):
+    value = clean_value(value, None)
+    if value is None:
+        return "?"
+    return str(int(float(value)))
+
+
+def beatmap_table_values(beatmap_id: int, row: dict | None):
+    if row is None:
+        return str(beatmap_id), "?", "?", "?", "?", "?", "?"
+
+    title = clean_value(row.get("title"))
+    creator = clean_value(row.get("creator"))
+    version = clean_value(row.get("version"))
+    stars = format_number(row.get("difficulty_rating"), 2)
+    bpm = format_bpm(row.get("bpm"))
+    length = format_length(clean_value(row.get("total_length"), row.get("hit_length")))
+    return str(beatmap_id), title, creator, version, stars, bpm, length
+
+
+def beatmap_table_values_missing(row: dict | None) -> bool:
+    if row is None:
+        return True
+    return any(
+        clean_value(value, None) is None
+        for value in (
+            row.get("title"),
+            row.get("creator"),
+            row.get("version"),
+            row.get("difficulty_rating"),
+            row.get("bpm"),
+            clean_value(row.get("total_length"), row.get("hit_length")),
+        )
+    )
+
+
+def beatmap_map_style(row: dict | None) -> str:
+    status = str(clean_value((row or {}).get("status"), "")).lower()
+    ranked = str(clean_value((row or {}).get("ranked"), "")).lower()
+    values = {status, ranked}
+    if "ranked" in values or "1" in values:
+        return "yellow"
+    if "loved" in values or "4" in values:
+        return "bright_magenta"
+    return "grey70"
 
 
 def format_beatmap_line(beatmap_id: int, row: dict | None):

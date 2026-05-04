@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+import sys
 import requests
 import threading
 import queue
@@ -77,6 +78,11 @@ def scan_existing_beatmaps(osu_dir):
     return downloaded_ids
 
 
+def load_ids_file(path):
+    with open(path, "r") as f:
+        return [line.strip() for line in f if line.strip()]
+
+
 def download_worker(
     current_queue,
     next_queue,
@@ -151,6 +157,17 @@ def main():
         action="store_true",
         help="Retry previously failed downloads (ignore .failed_downloads.json)",
     )
+    parser.add_argument(
+        "--ids-file",
+        type=str,
+        default=None,
+        help="Optional newline-delimited beatmap IDs to download instead of all missing maps.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Download requested maps even if an .osu file already exists.",
+    )
     args = parser.parse_args()
 
     start_time = time.time()
@@ -166,7 +183,10 @@ def main():
     print("Loading beatmaps from parquet...")
     df = pd.read_parquet(BEATMAPS_PATH)
     df_osu_std = df[df["mode_int"] == 0]
-    all_beatmap_ids = df_osu_std["id"].tolist()
+    all_beatmap_ids = df_osu_std["id"].drop_duplicates().tolist()
+    if args.ids_file:
+        requested_ids = set(load_ids_file(args.ids_file))
+        all_beatmap_ids = [bid for bid in all_beatmap_ids if str(bid) in requested_ids]
     print(f"Found {len(all_beatmap_ids):,} osu!standard beatmaps")
 
     print("Scanning existing downloads...")
@@ -188,7 +208,8 @@ def main():
     beatmap_ids_to_download = [
         str(bid)
         for bid in all_beatmap_ids
-        if str(bid) not in downloaded_ids and str(bid) not in previously_failed
+        if (args.force or str(bid) not in downloaded_ids)
+        and str(bid) not in previously_failed
     ]
 
     print(f"Beatmaps to download: {len(beatmap_ids_to_download):,}")
@@ -201,7 +222,8 @@ def main():
 
     with processed_ids_lock:
         processed_ids.clear()
-        processed_ids.update(downloaded_ids)
+        if not args.force:
+            processed_ids.update(downloaded_ids)
 
     with failed_downloads_lock:
         failed_downloads.clear()
@@ -242,7 +264,9 @@ def main():
         initial_count = len(beatmap_ids_to_download)
         while not tier_queues[0].empty() or any(t.is_alive() for t in tier1_threads):
             with processed_ids_lock:
-                successful = len(processed_ids) - len(downloaded_ids)
+                successful = len(processed_ids)
+                if not args.force:
+                    successful -= len(downloaded_ids)
             with failed_downloads_lock:
                 failed = len(failed_downloads)
 
@@ -271,7 +295,9 @@ def main():
 
     end_time = time.time()
     with processed_ids_lock:
-        successful = len(processed_ids) - len(downloaded_ids)
+        successful = len(processed_ids)
+        if not args.force:
+            successful -= len(downloaded_ids)
     print(f"\nCompleted in {end_time - start_time:.2f} seconds.")
     print(f"Successfully downloaded: {successful:,}")
     print(f"Failed: {len(failed_downloads):,}")

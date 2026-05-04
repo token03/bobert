@@ -1,5 +1,5 @@
 """
-osu_corpora - Universal embedding encoder for osu beatmaps
+bobert - bidirectional osu beatmap encoder representations (from) transformer
 """
 
 __version__ = "0.1.0"
