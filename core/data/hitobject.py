@@ -61,7 +61,7 @@ def canonicalize_bpm_array(bpm: np.ndarray) -> np.ndarray:
 FEATURE_GROUPS = {
     "spatial": {
         "features": ["norm_x", "norm_y", "delta_x", "delta_y", "relative_angle"],
-        "output_dim": 192,
+        "output_dim": 144,  # 192 * 0.75
     },
     "rhythm": {
         "features": [
@@ -70,7 +70,7 @@ FEATURE_GROUPS = {
             "velocity",
             "rhythm_change",
         ],
-        "output_dim": 160,
+        "output_dim": 120,  # 160 * 0.75
     },
     "slider": {
         "features": [
@@ -78,7 +78,7 @@ FEATURE_GROUPS = {
             "log_slider_repeats",
             "slider_tortuosity",
         ],
-        "output_dim": 64,
+        "output_dim": 48,   # 64 * 0.75
     },
     "categorical": {
         "features": [
@@ -88,7 +88,7 @@ FEATURE_GROUPS = {
             "time_diff_bin",
             "rhythmic_snap",
         ],
-        "output_dim": 96,
+        "output_dim": 72,   # 96 * 0.75
     },
 }
 
