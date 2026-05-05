@@ -9,9 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from scipy.sparse import coo_matrix
-from scipy.sparse.linalg import svds
-
 from scripts.common.collections import deduplicate_collections
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
 from scripts.common.torch import GradientReversal

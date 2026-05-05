@@ -1,0 +1,76 @@
+[project] 
+name = "bobert" 
+version = "0.1.0" 
+description = "BoBERT: osu! beatmap representation learning" 
+readme = "README.md" 
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "cuml-cu12==26.2.0",
+    "cupy-cuda12x==14.0.1",
+    "faiss-gpu-cu12>=1.14.1.post1",
+    "flash-attn==2.8.3",
+    "gdown>=5.2.0",
+    "httpx>=0.28.1",
+    "matplotlib>=3.10.6",
+    "muon-optimizer",
+    "numpy>=2.2,<2.3",
+    "omegaconf>=2.3.0",
+    "ossapi>=5.3.3",
+    "pandas>=2.3.3",
+    "plotly>=6.3.0",
+    "polars>=1.35.1",
+    "pyarrow>=21.0.0",
+    "python-dotenv>=1.1.1",
+    "pytorch-lightning>=2.6.0",
+    "pytorch-optimizer>=3.8.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.5",
+    "rich>=14.1.0",
+    "rosu-pp-py>=3.1.0",
+    "rotary-embedding-torch>=0.8.9",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.16.2",
+    "seaborn>=0.13.2",
+    "torch==2.11.0",
+    "torchmetrics>=1.8.2",
+    "tqdm>=4.67.1",
+    "umap-learn>=0.5.9.post2",
+]
+
+[project.scripts]
+collections = "scripts.collections:main"
+data = "scripts.data:main"
+eda = "scripts.eda:main"
+embed = "scripts.embed:main"
+fetch = "scripts.fetch:main"
+query = "scripts.query:main"
+train = "scripts.train:main"
+viz = "scripts.viz:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scripts", "core"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com/"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
+flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+cuml-cu12 = { index = "nvidia" }

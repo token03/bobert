@@ -61,6 +61,8 @@ def process(
     embeddings_path: Path = EMBEDDINGS_PATH,
     output_dir: Path = OUTPUT_DIR,
     limit: int | None = None,
+    min_star: float | None = None,
+    max_star: float | None = None,
     use_gpu: bool = True,
     n_export_neighbors: int = N_EXPORT_NEIGHBORS,
     umap_neighbors: int = UMAP_NEIGHBORS,
@@ -99,6 +101,12 @@ def process(
 
     print("Merging metadata...")
     df = emb_df.merge(meta_df, left_on="beatmap_id", right_on="id", how="inner")
+    if min_star is not None:
+        df = df[df["difficulty_rating"] >= min_star]
+    if max_star is not None:
+        df = df[df["difficulty_rating"] <= max_star]
+    if len(df) == 0:
+        raise ValueError("No beatmaps remain after applying filters.")
     df = _sample_df(df, limit, random_state)
 
     del emb_df, meta_df
@@ -225,6 +233,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--limit", type=int, default=None, help="Optional random sample size")
+    parser.add_argument("--min-star", type=float, default=None, help="Minimum star rating to include")
+    parser.add_argument("--max-star", type=float, default=None, help="Maximum star rating to include")
     parser.add_argument("--cpu", action="store_true", help="Force CPU backend")
     parser.add_argument("--neighbors", type=int, default=N_EXPORT_NEIGHBORS)
     parser.add_argument("--umap-neighbors", type=int, default=UMAP_NEIGHBORS)
@@ -235,6 +245,8 @@ if __name__ == "__main__":
         embeddings_path=Path(args.embeddings),
         output_dir=Path(args.output_dir),
         limit=args.limit,
+        min_star=args.min_star,
+        max_star=args.max_star,
         use_gpu=not args.cpu,
         n_export_neighbors=args.neighbors,
         umap_neighbors=args.umap_neighbors,
