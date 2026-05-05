@@ -74,7 +74,7 @@ adapt:
   checkpoint_dir: "./experiments/adapt"
   batch_size: 32
   num_epochs: 5
-  adaptation_size: 5000
+  adaptation_size: 10000
 
   synthetic_chunk_probability: 0.4
   min_len_for_synthetic_chunking: 1200
