@@ -149,27 +149,8 @@ def build_cache(
         use_gpu=cfg.use_faiss_gpu,
     )
 
-    topic_matrix = _topic_matrix(
-        data_path / "collections" / "beatmap_topic_weights.parquet", table.beatmap_ids
-    )
-    if topic_matrix is not None:
-        topic_idx, topic_scores = _topk_faiss(
-            topic_matrix,
-            query_indices,
-            candidate_k=min(cfg.candidate_k, table.size),
-            block_size=cfg.block_size,
-            desc="Topic neighbors",
-            metric="ip",
-            use_gpu=cfg.use_faiss_gpu,
-        )
-    else:
-        topic_idx = np.empty((table.size, 0), dtype=np.int64)
-        topic_scores = np.empty((table.size, 0), dtype=np.float32)
-
     row_index = _build_row_candidate_index(table, cfg)
-    rows = _build_rows(
-        table, lgcn_idx, lgcn_scores, topic_idx, topic_scores, cfg, row_index
-    )
+    rows = _build_rows(table, lgcn_idx, lgcn_scores, cfg, row_index)
 
     cache = pl.DataFrame(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -378,8 +359,6 @@ def _build_rows(
     table: MiningTable,
     lgcn_idx: np.ndarray,
     lgcn_scores: np.ndarray,
-    topic_idx: np.ndarray,
-    topic_scores: np.ndarray,
     cfg: MiningConfig,
     row_index: RowCandidateIndex,
 ) -> list[dict]:
@@ -439,15 +418,7 @@ def _build_rows(
             lgcn_idx[start:end], lgcn_scores[start:end], 1.0
         )
 
-        if topic_idx.shape[1] > 0:
-            topic_c_idx, topic_pos_w, topic_cross_w = process_candidates(
-                topic_idx[start:end], topic_scores[start:end], 0.25
-            )
-            all_c_idx = np.concatenate([lgcn_c_idx, topic_c_idx], axis=1)
-            all_pos_w = np.concatenate([lgcn_pos_w, topic_pos_w], axis=1)
-            all_cross_w = np.concatenate([lgcn_cross_w, topic_cross_w], axis=1)
-        else:
-            all_c_idx, all_pos_w, all_cross_w = lgcn_c_idx, lgcn_pos_w, lgcn_cross_w
+        all_c_idx, all_pos_w, all_cross_w = lgcn_c_idx, lgcn_pos_w, lgcn_cross_w
 
         emb_pool = lgcn_idx[start:end]
         valid_emb = (emb_pool >= 0) & (emb_pool != anchor_idx)
@@ -618,29 +589,3 @@ def _build_rows(
             )
 
     return all_rows
-
-
-def _topic_matrix(topics_path: Path, beatmap_ids: np.ndarray) -> np.ndarray | None:
-    if not topics_path.exists():
-        return None
-
-    topics = (
-        pl.scan_parquet(str(topics_path))
-        .filter(pl.col("beatmap_id").is_in(beatmap_ids.tolist()))
-        .select(["beatmap_id", "topic_id", "weight"])
-        .collect()
-    )
-    if topics.is_empty():
-        return None
-
-    topic_ids = np.sort(topics["topic_id"].unique().to_numpy())
-    topic_to_col = {int(tid): i for i, tid in enumerate(topic_ids)}
-    id_to_row = {int(bid): i for i, bid in enumerate(beatmap_ids)}
-    matrix = np.zeros((len(beatmap_ids), len(topic_ids)), dtype=np.float32)
-
-    for bid, topic_id, weight in topics.iter_rows():
-        row = id_to_row.get(int(bid))
-        if row is not None:
-            matrix[row, topic_to_col[int(topic_id)]] = float(weight)
-
-    return _normalize_rows(matrix)
