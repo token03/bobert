@@ -6,7 +6,6 @@ import os
 API_TIERS = [
     {"url": "https://osu.ppy.sh/osu/{id}", "delay": 0.2, "name": "osu.ppy.sh"},
     {"url": "https://osu.direct/api/osu/{id}", "delay": 1.0, "name": "osu.direct"},
-    {"url": "https://catboy.best/osu/{id}", "delay": 2.0, "name": "catboy.best"},
 ]
 
 DOWNLOAD_HEADERS = {

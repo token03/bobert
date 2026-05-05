@@ -70,40 +70,6 @@ pretraining:
     num_bins: 100
     strength: 0.5
 
-adapt:
-  checkpoint_dir: "./experiments/adapt"
-  batch_size: 32
-  num_epochs: 5
-  adaptation_size: 10000
-
-  synthetic_chunk_probability: 0.4
-  min_len_for_synthetic_chunking: 1200
-  trainable_encoder_layers: 1
-
-  adam_lr: 3e-4
-  adam_wd: 0.05
-  adam_betas: [0.9, 0.95]
-  muon_lr: 0.005
-  muon_wd: 0.01
-  min_lr: 1e-6
-  cooldown_type: "cosine"
-  warmup_ratio: 0.1
-  stable_ratio: 0.1
-  use_amp: true
-  grad_clip_norm: 1.0
-  gradient_accumulation_steps: 2
-
-  difficulty_loss_weight: 1.0
-  rep_consistency_weight: 0.5
-  pred_consistency_weight: 0.5
-
-  sampler:
-    short_weight: 0.30
-    medium_weight: 0.40
-    long_weight: 0.30
-    num_star_bins: 5
-    seed: 42
-
 alignment:
   checkpoint_dir: "./experiments/align"
   model_name: "model"
