@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
@@ -172,15 +172,12 @@ class DifficultyMetrics(nn.Module):
 
 
 class ContrastiveMetrics(nn.Module):
-    def __init__(self, k_values: List[int], device: torch.device):
+    def __init__(self, device: torch.device):
         super().__init__()
-        self.k_values = k_values
         self._device = device
         self.loss_metric = MeanMetric().to(device)
 
-    def update(
-        self, embeddings: torch.Tensor, labels: Any, loss: Optional[float] = None
-    ):
+    def update(self, loss: Optional[float] = None):
         if loss is not None:
             self.loss_metric.update(loss)
 
@@ -188,9 +185,6 @@ class ContrastiveMetrics(nn.Module):
         results = {}
         if self.loss_metric.update_count > 0:
             results["contrastive_loss"] = self.loss_metric.compute().item()
-        for k in self.k_values:
-            results[f"Recall@{k}"] = 0.0
-            results[f"nDCG@{k}"] = 0.0
         return results
 
     def reset(self):

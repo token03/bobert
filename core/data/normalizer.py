@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from .beatmap import DIFFICULTY_ATTRIBUTES
 from .hitobject import HitObject, NormalizationType, OBJECT_TYPE_SLIDER_HEAD
 
 
@@ -28,41 +27,7 @@ class BeatmapNormalizer:
             if norm_type == NormalizationType.STANDARD:
                 mean, std = self.vector_stats[field_name]
                 normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
-            elif norm_type == NormalizationType.MINMAX:
-                min_val, max_val = self.vector_stats[field_name]
-                normalized_vectors[:, i] = (vectors[:, i] - min_val) / (
-                    max_val - min_val + self.epsilon
-                )
         return normalized_vectors
-
-    def normalize_attributes(
-        self, attributes: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
-        if not self.attribute_stats:
-            raise ValueError(
-                "Attribute normalization requested but no statistics are set."
-            )
-
-        normalized_attrs = {}
-        for key, tensor in attributes.items():
-            if key in self.attribute_stats:
-                mean, std = self.attribute_stats[key]
-                normalized_attrs[key] = (tensor - mean) / (std + self.epsilon)
-            else:
-                normalized_attrs[key] = tensor
-        return normalized_attrs
-
-    def normalize_difficulty(self, ratings: torch.Tensor) -> torch.Tensor:
-        if ratings.dim() == 1 or ratings.shape[1] == 1:
-            mean, std = self.attribute_stats["stars"]
-            return (ratings - mean) / (std + self.epsilon)
-
-        normalized = torch.zeros_like(ratings)
-        for i, key in enumerate(DIFFICULTY_ATTRIBUTES):
-            if i < ratings.shape[1] and key in self.attribute_stats:
-                mean, std = self.attribute_stats[key]
-                normalized[:, i] = (ratings[:, i] - mean) / (std + self.epsilon)
-        return normalized
 
     @classmethod
     def from_data(
@@ -80,14 +45,12 @@ class BeatmapNormalizer:
         vector_stats = {}
         for i, field_name in enumerate(vector_field_names):
             norm_type = vector_norm_specs[field_name]
-            if norm_type not in {NormalizationType.STANDARD, NormalizationType.MINMAX}:
+            if norm_type != NormalizationType.STANDARD:
                 continue
 
             count = 0
             total = torch.tensor(0.0)
             total_sq = torch.tensor(0.0)
-            min_val = None
-            max_val = None
 
             for vectors in train_data:
                 field_data = vectors[:, i]
@@ -100,46 +63,27 @@ class BeatmapNormalizer:
                 field_data = field_data.to(dtype=torch.float32)
                 count += int(field_data.numel())
 
-                if norm_type == NormalizationType.STANDARD:
-                    total += field_data.sum()
-                    total_sq += (field_data * field_data).sum()
-                elif norm_type == NormalizationType.MINMAX:
-                    batch_min = field_data.min()
-                    batch_max = field_data.max()
-                    min_val = (
-                        batch_min
-                        if min_val is None
-                        else torch.minimum(min_val, batch_min)
-                    )
-                    max_val = (
-                        batch_max
-                        if max_val is None
-                        else torch.maximum(max_val, batch_max)
-                    )
+                total += field_data.sum()
+                total_sq += (field_data * field_data).sum()
 
             if count == 0:
-                if norm_type == NormalizationType.STANDARD:
-                    vector_stats[field_name] = (
-                        torch.tensor(0.0),
-                        torch.tensor(epsilon),
-                    )
-                elif norm_type == NormalizationType.MINMAX:
-                    vector_stats[field_name] = (torch.tensor(0.0), torch.tensor(0.0))
+                vector_stats[field_name] = (
+                    torch.tensor(0.0),
+                    torch.tensor(epsilon),
+                )
                 continue
 
-            if norm_type == NormalizationType.STANDARD:
-                mean = total / count
-                if count > 1:
-                    variance = (total_sq - total * total / count) / (count - 1)
-                else:
-                    variance = torch.tensor(0.0)
-                variance = torch.clamp(variance, min=0.0)
-                vector_stats[field_name] = (
-                    mean,
-                    torch.clamp(torch.sqrt(variance), min=epsilon),
-                )
-            elif norm_type == NormalizationType.MINMAX:
-                vector_stats[field_name] = (min_val, max_val)
+            mean = total / count
+            variance = (
+                (total_sq - total * total / count) / (count - 1)
+                if count > 1
+                else torch.tensor(0.0)
+            )
+            variance = torch.clamp(variance, min=0.0)
+            vector_stats[field_name] = (
+                mean,
+                torch.clamp(torch.sqrt(variance), min=epsilon),
+            )
 
         attribute_stats = {}
         for key, values in difficulty_attributes.items():
@@ -159,42 +103,3 @@ class BeatmapNormalizer:
 
     def get_attribute_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
         return self.attribute_stats
-
-    def update_attribute_stats(self, key: str, values: torch.Tensor):
-        if not torch.is_tensor(values):
-            values = torch.as_tensor(values, dtype=torch.float32)
-        if values.numel() == 0:
-            raise ValueError(
-                f"Cannot compute statistics for '{key}' from an empty tensor."
-            )
-
-        values = values.to(dtype=torch.float32)
-        mean = values.mean()
-        std = torch.clamp(values.std(unbiased=False), min=self.epsilon)
-
-        self.attribute_stats[key] = (mean, std)
-        return self.attribute_stats[key]
-
-    def update_difficulty_stats(
-        self, ratings: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if not torch.is_tensor(ratings):
-            ratings = torch.as_tensor(ratings, dtype=torch.float32)
-        if ratings.numel() == 0:
-            raise ValueError(
-                "Cannot compute difficulty statistics from an empty ratings tensor."
-            )
-
-        ratings = ratings.to(dtype=torch.float32)
-
-        if ratings.dim() > 1 and ratings.shape[1] > 1:
-            for i, key in enumerate(DIFFICULTY_ATTRIBUTES):
-                if i < ratings.shape[1]:
-                    self.update_attribute_stats(key, ratings[:, i])
-            return self.attribute_stats["stars"]
-
-        mean = ratings.mean()
-        std = torch.clamp(ratings.std(unbiased=False), min=self.epsilon)
-
-        self.attribute_stats["stars"] = (mean, std)
-        return self.attribute_stats["stars"]

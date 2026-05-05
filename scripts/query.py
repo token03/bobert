@@ -2,15 +2,12 @@ from scripts.common.cli import dispatch
 
 
 COMMANDS = {
-    "compare": "scripts.tasks.query.compare",
-    "embeddings": "scripts.tasks.query.embeddings",
+    "compare": "scripts.tasks.query.recommend",
     "recommend": "scripts.tasks.query.recommend",
-    "topics": "scripts.tasks.query.topics",
 }
 
 ALIASES = {
     "cmp": "compare",
-    "emb": "embeddings",
     "rec": "recommend",
 }
 

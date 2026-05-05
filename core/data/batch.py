@@ -47,18 +47,9 @@ def collate_align(
     batch: List[Tuple],
     max_seq_len: int,
     vector_dim: int,
-    max_tags: int = 50,
 ):
-    vectors, metadata, tags, attrs, beatmap_ids, targets = zip(*batch)
+    vectors, attrs, beatmap_ids, targets = zip(*batch)
     padded_vec, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
-
-    tag_lens = [min(t.shape[0], max_tags) for t in tags]
-    padded_tags = torch.zeros(
-        len(batch), max(tag_lens) if tag_lens else 1, dtype=torch.long
-    )
-    for i, (t, length) in enumerate(zip(tags, tag_lens)):
-        if length > 0:
-            padded_tags[i, :length] = t[:length]
 
     teacher_dim = 0
     for target in targets:
@@ -94,11 +85,9 @@ def collate_align(
         padded_vec,
         mask,
         cu_seqlens,
-        torch.tensor(beatmap_ids, dtype=torch.long),
         lgcn_teacher,
         has_teacher,
         status_labels,
         positive_weights,
-        padded_tags,
         stack_dicts(attrs),
     )

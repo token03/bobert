@@ -25,37 +25,37 @@ class AlignmentModule(pl.LightningModule):
         self.normalizer = normalizer
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
-        phase_config = config.get("alignment", config.get("align", {}))
+        phase_config = config["alignment"]
         self.batch_size = phase_config.get("batch_size", 1)
-        k_values = phase_config.get("recall_k_values", [1, 5, 10])
-        self.metrics = ContrastiveMetrics(k_values, torch.device("cpu"))
+        self.metrics = ContrastiveMetrics(torch.device("cpu"))
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
-    def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
+    def _unpack_batch(self, batch: Tuple, use_contrastive: bool):
         (
             vectors,
             attention_mask,
             cu_seqlens,
-            beatmap_ids,
             lgcn_teacher,
             has_teacher,
             status_labels,
             positive_weights,
-            _,
             attrs,
         ) = batch
-        predictions = self(vectors, attention_mask, cu_seqlens)
-        labels = {
-            "beatmap_ids": beatmap_ids,
+
+        return vectors, attention_mask, cu_seqlens, {
             "lgcn_teacher": lgcn_teacher,
             "has_teacher": has_teacher,
             "status_labels": status_labels,
             "positive_weights": positive_weights,
             "difficulty": attrs,
-            "use_contrastive": True,
+            "use_contrastive": use_contrastive,
         }
+
+    def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
+        vectors, attention_mask, cu_seqlens, labels = self._unpack_batch(batch, True)
+        predictions = self(vectors, attention_mask, cu_seqlens)
         loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
 
         self.log_dict(
@@ -79,34 +79,12 @@ class AlignmentModule(pl.LightningModule):
         return loss_dict["total_loss"]
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        (
-            vectors,
-            attention_mask,
-            cu_seqlens,
-            beatmap_ids,
-            lgcn_teacher,
-            has_teacher,
-            status_labels,
-            positive_weights,
-            _,
-            attrs,
-        ) = batch
-        predictions = self(vectors, attention_mask, cu_seqlens)
-        labels = {
-            "beatmap_ids": beatmap_ids,
-            "lgcn_teacher": lgcn_teacher,
-            "has_teacher": has_teacher,
-            "status_labels": status_labels,
-            "positive_weights": positive_weights,
-            "difficulty": attrs,
-            "use_contrastive": False,
-        }
-        loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
-        self.metrics.update(
-            predictions["embedding"].detach().cpu(),
-            beatmap_ids.detach().cpu(),
-            loss=float(loss_dict["total_loss"].detach().cpu()),
+        vectors, attention_mask, cu_seqlens, labels = self._unpack_batch(
+            batch, False
         )
+        predictions = self(vectors, attention_mask, cu_seqlens)
+        loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
+        self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
         self.log(
             "val_loss",
             loss_dict["total_loss"],
@@ -160,23 +138,35 @@ def setup_alignment(
 
 def find_pretraining_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
     checkpoint_dir = Path(checkpoint_dir)
-    if not checkpoint_dir.exists():
-        return None
+    search_dirs = [checkpoint_dir]
+    nested_checkpoint_dir = checkpoint_dir / "checkpoints"
+    if nested_checkpoint_dir != checkpoint_dir:
+        search_dirs.append(nested_checkpoint_dir)
 
-    candidates = sorted(
-        checkpoint_dir.glob("last*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
-    candidates = candidates or sorted(
-        checkpoint_dir.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
-    )
-    return candidates[0] if candidates else None
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+
+        candidates = sorted(
+            search_dir.glob("last*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        candidates = candidates or sorted(
+            search_dir.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        if candidates:
+            return candidates[0]
+
+    return None
 
 
 def load_pretraining_weights(
     model: nn.Module,
-    checkpoint_path: str | Path,
+    checkpoint_path: str | Path | None,
     map_location: str | torch.device = "cpu",
 ) -> Dict[str, Any]:
+    if checkpoint_path is None:
+        raise FileNotFoundError("No pretraining checkpoint found.")
+
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(checkpoint_path)

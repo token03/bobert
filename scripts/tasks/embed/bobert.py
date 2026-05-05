@@ -138,9 +138,6 @@ def export_embeddings(
         ids_to_load=ids,
         min_sr=None,
         max_sr=None,
-        include_metadata=False,
-        include_user_tags=False,
-        include_collection_topics=False,
         require_ratings=False,
     )
     if not beatmaps:

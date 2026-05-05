@@ -9,7 +9,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from core.data.mining import build_cache
 from core.data.module import AlignData
-from core.data.vocab import TagTokenizer
 from core.model.bobert import BobertForAlignment
 from core.training.align import (
     find_pretraining_checkpoint,
@@ -27,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--mining-cache-path")
     parser.add_argument("--pretrain-ckpt")
-    parser.add_argument("--pretrain-checkpoint-dir", default="experiments/checkpoints")
+    parser.add_argument("--pretrain-checkpoint-dir")
     parser.add_argument("--resume-ckpt")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--alignment-size", type=int)
@@ -92,10 +91,11 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
     )
 
 
-def resolve_pretrain_checkpoint(args: argparse.Namespace) -> Path | None:
+def resolve_pretrain_checkpoint(args: argparse.Namespace, config: DictConfig) -> Path | None:
     if args.pretrain_ckpt:
         return Path(args.pretrain_ckpt)
-    return find_pretraining_checkpoint(args.pretrain_checkpoint_dir)
+    checkpoint_dir = args.pretrain_checkpoint_dir or config.pretraining.checkpoint_dir
+    return find_pretraining_checkpoint(checkpoint_dir)
 
 
 def main() -> int:
@@ -109,7 +109,7 @@ def main() -> int:
     torch.set_float32_matmul_precision("high")
     maybe_build_cache(config, args.build_cache)
 
-    datamodule = AlignData(config, TagTokenizer())
+    datamodule = AlignData(config)
     datamodule.prepare_data()
     datamodule.setup("fit")
 
@@ -124,7 +124,7 @@ def main() -> int:
     print(f"Number of Heads: {base_model.bert.n_heads}")
     print(f"Number of Layers: {base_model.bert.n_layers}")
 
-    pretrain_checkpoint = resolve_pretrain_checkpoint(args)
+    pretrain_checkpoint = resolve_pretrain_checkpoint(args, config)
     if pretrain_checkpoint is not None:
         stats = load_pretraining_weights(model, pretrain_checkpoint)
         print(

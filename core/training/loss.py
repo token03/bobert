@@ -136,7 +136,7 @@ def contrastive_loss_fn(
     embeddings = predictions["embedding"]
     if not labels.get("use_contrastive", True):
         return {"contrastive_loss": torch.zeros((), device=embeddings.device)}
-    phase_config = config.get("alignment", config.get("align", {}))
+    phase_config = config["alignment"]
     group_size = int(phase_config.get("group_size", 4))
     temperature = float(phase_config.get("temperature", 0.07))
 
@@ -161,8 +161,12 @@ def contrastive_loss_fn(
             batch_size, batch_size, dtype=torch.bool, device=device
         )
         for start in range(0, batch_size, group_size):
-            positive_indices = torch.arange(start, start + min(2, group_size), device=device)
-            group_positive_mask[positive_indices[:, None], positive_indices[None, :]] = True
+            positive_indices = torch.arange(
+                start, start + min(2, group_size), device=device
+            )
+            group_positive_mask[
+                positive_indices[:, None], positive_indices[None, :]
+            ] = True
         group_positive_mask.fill_diagonal_(False)
         positive_weights = group_positive_mask.to(logits.dtype)
 
@@ -184,7 +188,7 @@ def alignment_loss_fn(
     config: DictConfig,
     phase: str = "alignment",
 ) -> Dict[str, torch.Tensor]:
-    phase_config = config.get(phase, config.get("align", {}))
+    phase_config = config[phase]
     losses = contrastive_loss_fn(predictions, labels, config)
     device = predictions["embedding"].device
 
@@ -197,7 +201,9 @@ def alignment_loss_fn(
     if teacher is not None and has_teacher is not None and torch.any(has_teacher):
         pred_teacher = predictions["lgcn_embedding"][has_teacher]
         target_teacher = F.normalize(teacher[has_teacher].to(pred_teacher.dtype), dim=-1)
-        lgcn_loss = 1.0 - F.cosine_similarity(pred_teacher, target_teacher, dim=-1).mean()
+        lgcn_loss = 1.0 - F.cosine_similarity(
+            pred_teacher, target_teacher, dim=-1
+        ).mean()
     else:
         lgcn_loss = torch.zeros((), device=device)
     losses["lgcn_loss"] = lgcn_loss
@@ -214,7 +220,8 @@ def alignment_loss_fn(
     status_labels = labels.get("status_labels")
     if status_labels is not None:
         status_loss = F.binary_cross_entropy_with_logits(
-            predictions["status_logits"], status_labels.to(predictions["status_logits"].dtype)
+            predictions["status_logits"],
+            status_labels.to(predictions["status_logits"].dtype),
         )
     else:
         status_loss = torch.zeros((), device=device)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import time
 from math import isnan
 from pathlib import Path
@@ -305,54 +304,3 @@ def beatmap_map_style(row: dict | None) -> str:
     if "loved" in values or "4" in values:
         return "bright_magenta"
     return "grey70"
-
-
-def format_beatmap_line(beatmap_id: int, row: dict | None):
-    url = f"https://osu.ppy.sh/b/{beatmap_id}"
-    if row is None:
-        return f"{url}\n    ? - ? [?]\n    ?★ · ? BPM"
-
-    artist = clean_value(row.get("artist"))
-    title = clean_value(row.get("title"))
-    version = clean_value(row.get("version"))
-    stars = format_number(row.get("difficulty_rating"), 2)
-    bpm = format_number(row.get("bpm"), 1)
-    return f"{url}\n    {artist} - {title} [{version}]\n    {stars}★ · {bpm} BPM"
-
-
-def load_beatmap_titles(path, columns=("id", "beatmapset_id", "title")) -> pl.DataFrame:
-    return pl.read_parquet(path, columns=list(columns))
-
-
-def unique_beatmapset_results(df: pl.DataFrame, limit: int) -> list[dict]:
-    seen = set()
-    rows = []
-    for row in df.iter_rows(named=True):
-        if row["beatmapset_id"] in seen:
-            continue
-        seen.add(row["beatmapset_id"])
-        rows.append(row)
-        if len(rows) >= limit:
-            break
-    return rows
-
-
-def print_similarity_table(
-    rows: list[dict], *, title: str, max_width: int = 100
-) -> None:
-    terminal_width = shutil.get_terminal_size((80, 20)).columns
-    sim_col_w = 6
-    id_col_w = 10
-    max_title_len = terminal_width - sim_col_w - id_col_w - 2
-
-    print(f"\n{title}:\n")
-    print(f"{'Sim':<{sim_col_w}} {'ID':<{id_col_w}} {'Name'}")
-    print("-" * min(terminal_width, max_width))
-
-    for row in rows:
-        name = str(row["title"])
-        if len(name) > max_title_len:
-            name = name[: max_title_len - 3] + "..."
-        print(
-            f"{row['similarity']:<{sim_col_w}.3f} {int(row['beatmap_id']):<{id_col_w}} {name}"
-        )

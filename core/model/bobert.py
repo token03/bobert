@@ -69,9 +69,13 @@ class BobertModel(nn.Module):
             output_dim=FEATURE_GROUPS["slider"]["output_dim"],
         )
 
+        self.cat_feature_indices = {
+            name: self.feature_info["categorical"][name]["index"]
+            for name in FEATURE_GROUPS["categorical"]["features"]
+        }
         cat_info_subset = {
             name: self.feature_info["categorical"][name]
-            for name in FEATURE_GROUPS["categorical"]["features"]
+            for name in self.cat_feature_indices
         }
         self.categorical_embedder = CategoricalGroupEmbedder(
             cat_info=cat_info_subset,
@@ -139,11 +143,7 @@ class BobertModel(nn.Module):
         rhythm_embed = self.rhythm_embedder(x[:, :, self.rhythm_indices])
         slider_embed = self.slider_embedder(x[:, :, self.slider_indices])
 
-        cat_feature_indices = {
-            name: self.feature_info["categorical"][name]["index"]
-            for name in FEATURE_GROUPS["categorical"]["features"]
-        }
-        cat_embed = self.categorical_embedder(x, cat_feature_indices)
+        cat_embed = self.categorical_embedder(x, self.cat_feature_indices)
 
         x_embed = torch.cat(
             [spatial_embed, rhythm_embed, slider_embed, cat_embed], dim=-1
@@ -478,7 +478,7 @@ class BobertForAlignment(nn.Module):
         cls, config: DictConfig, device: torch.device
     ) -> "BobertForAlignment":
         base_model = BobertModel.from_config(config)
-        alignment_config = config.get("alignment", config.get("align", {}))
+        alignment_config = config.alignment
         pooling_stats = tuple(
             alignment_config.get("pooling_stats", ["mean", "max", "std"])
         )

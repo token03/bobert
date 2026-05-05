@@ -14,7 +14,6 @@ def main():
     parser.add_argument("--candidate-k", type=int, default=defaults.candidate_k)
     parser.add_argument("--block-size", type=int, default=defaults.block_size)
     parser.add_argument("--alignment-size", type=int, default=defaults.alignment_size)
-    parser.add_argument("--workers", type=int, default=defaults.num_workers)
     parser.add_argument("--seed", type=int, default=defaults.random_seed)
     parser.add_argument(
         "--difficulty-candidate-k", type=int, default=defaults.difficulty_candidate_k
@@ -60,7 +59,6 @@ def main():
             candidate_k=args.candidate_k,
             block_size=args.block_size,
             alignment_size=args.alignment_size,
-            num_workers=args.workers,
             difficulty_candidate_k=args.difficulty_candidate_k,
             target_embedding_close_k=args.target_embedding_close_k,
             target_difficulty_close_k=args.target_difficulty_close_k,

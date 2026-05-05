@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import argparse
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -30,114 +33,71 @@ from scripts.common.query import (
 console = Console()
 
 
-def refresh_missing_metadata(results, metadata_lookup: dict[int, dict], metadata_path: Path):
+@dataclass
+class QueryContext:
+    beatmap_ids: np.ndarray
+    embeddings: np.ndarray
+    id_to_index: dict[int, int]
+    metadata_lookup: dict[int, dict]
+    embedder: LazyEmbedder
+    beatmaps_dir: Path
+    metadata_path: Path
+    top_k: int
+    include_same_set: bool
+    allow_download: bool
+    cache: dict[int, tuple[np.ndarray, str]] = field(default_factory=dict)
+
+
+def metadata_set_id(row: dict | None) -> int | None:
+    value = clean_value((row or {}).get("beatmapset_id"), None)
+    return int(value) if value is not None else None
+
+
+def refresh_missing_metadata(
+    results: list[tuple[int, float, dict | None]], ctx: QueryContext
+):
     api = None
     refreshed = []
-    for candidate_id, similarity, row in results:
+    for beatmap_id, similarity, row in results:
         if beatmap_table_values_missing(row):
             try:
                 api = api or osu_api()
-                console.print(f"[dim]Fetching metadata for {candidate_id}...[/dim]")
-                record = fetch_beatmap_metadata(api, candidate_id)
-                upsert_beatmap_metadata(record, metadata_path)
-                metadata_lookup[candidate_id] = record
-                row = record
+                console.print(f"[dim]Fetching metadata for {beatmap_id}...[/dim]")
+                row = fetch_beatmap_metadata(api, beatmap_id)
+                upsert_beatmap_metadata(row, ctx.metadata_path)
+                ctx.metadata_lookup[beatmap_id] = row
             except Exception as exc:
                 console.print(
-                    f"[yellow]Warning:[/yellow] could not refresh {candidate_id}: "
+                    f"[yellow]Warning:[/yellow] could not refresh {beatmap_id}: "
                     f"{escape(str(exc))}"
                 )
-        refreshed.append((candidate_id, similarity, row))
+        refreshed.append((beatmap_id, similarity, row))
     return refreshed
 
 
-def recommend(
-    raw_input: str,
-    beatmap_ids: np.ndarray,
-    embeddings: np.ndarray,
-    id_to_index: dict[int, int],
-    metadata_lookup: dict[int, dict],
-    embedder: LazyEmbedder,
-    beatmaps_dir: Path,
-    metadata_path: Path,
-    top_k: int,
-    include_same_set: bool,
-    allow_download: bool,
-):
+def get_embedding(raw_input: str, ctx: QueryContext):
     beatmap_id = extract_beatmap_id(raw_input)
-    query_row = metadata_lookup.get(beatmap_id)
-    query_row = refresh_missing_metadata(
-        [(beatmap_id, 0.0, query_row)], metadata_lookup, metadata_path
-    )[0][2]
-    query_set_id = get_query_set_id(beatmap_id, raw_input, metadata_lookup)
+    if beatmap_id in ctx.cache:
+        embedding, source = ctx.cache[beatmap_id]
+        return beatmap_id, embedding, source
 
-    if beatmap_id in id_to_index:
-        query_embedding = embeddings[id_to_index[beatmap_id]]
+    if beatmap_id in ctx.id_to_index:
+        embedding = ctx.embeddings[ctx.id_to_index[beatmap_id]]
         source = "stored embedding"
     else:
-        osu_path = ensure_osu_file(beatmap_id, beatmaps_dir, allow_download)
-        query_embedding = embedder.embed_osu(osu_path)
+        osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
+        embedding = ctx.embedder.embed_osu(osu_path)
         source = f"embedded {osu_path}"
 
-    similarities = embeddings @ query_embedding
-    order = np.argsort(-similarities)
-    results = []
+    ctx.cache[beatmap_id] = (embedding, source)
+    return beatmap_id, embedding, source
 
-    for idx in order:
-        candidate_id = int(beatmap_ids[idx])
-        if candidate_id == beatmap_id:
-            continue
 
-        row = metadata_lookup.get(candidate_id)
-        candidate_set_id = None
-        if row:
-            value = clean_value(row.get("beatmapset_id"), None)
-            if value is not None:
-                candidate_set_id = int(value)
-
-        if (
-            not include_same_set
-            and query_set_id is not None
-            and candidate_set_id == query_set_id
-        ):
-            continue
-
-        results.append((candidate_id, float(similarities[idx]), row))
-        if len(results) >= top_k:
-            break
-
-    results = refresh_missing_metadata(results, metadata_lookup, metadata_path)
-
-    query_id, name, creator, version, stars, bpm, length = beatmap_table_values(
-        beatmap_id, query_row
-    )
-    query_table = Table(title="Query", show_header=True, header_style="bold magenta")
-    query_table.add_column("ID", justify="right", style="cyan", no_wrap=True)
-    query_table.add_column("Stars", justify="right", style="magenta", no_wrap=True)
-    query_table.add_column("Map", style="white", overflow="ellipsis")
-    query_table.add_column("Mapper", style="blue", overflow="ellipsis")
-    query_table.add_column("Diff", style="bright_cyan", overflow="ellipsis")
-    query_table.add_column("BPM", justify="right", no_wrap=True)
-    query_table.add_column("Dur", justify="right", no_wrap=True)
-    query_table.add_column("Source", style="dim")
-    query_style = beatmap_map_style(query_row)
-    query_table.add_row(
-        f"[link=https://osu.ppy.sh/b/{query_id}]{query_id}[/link]",
-        stars,
-        f"[{query_style}]{escape(name)}[/{query_style}]",
-        escape(creator),
-        escape(version),
-        bpm,
-        length,
-        escape(source),
-    )
-    console.print()
-    console.print(query_table)
-    if query_set_id is not None and not include_same_set:
-        console.print(f"[dim]Excluding same beatmapset: {query_set_id}[/dim]")
-
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Sim", justify="right", style="green", no_wrap=True)
+def add_map_columns(table: Table, *, similarity: bool = False, side: bool = False):
+    if side:
+        table.add_column("Side", style="cyan", no_wrap=True)
+    if similarity:
+        table.add_column("Sim", justify="right", style="green", no_wrap=True)
     table.add_column("ID", justify="right", style="cyan", no_wrap=True)
     table.add_column("Stars", justify="right", style="magenta", no_wrap=True)
     table.add_column("Map", style="white", overflow="ellipsis")
@@ -145,32 +105,107 @@ def recommend(
     table.add_column("Diff", style="bright_cyan", overflow="ellipsis")
     table.add_column("BPM", justify="right", no_wrap=True)
     table.add_column("Dur", justify="right", no_wrap=True)
-    for candidate_id, similarity, row in results:
-        beatmap_id, name, creator, version, stars, bpm, length = beatmap_table_values(
-            candidate_id, row
-        )
-        map_style = beatmap_map_style(row)
+    table.add_column("Source", style="dim")
+
+
+def map_cells(beatmap_id: int, row: dict | None, source: str = ""):
+    bid, title, creator, version, stars, bpm, length = beatmap_table_values(
+        beatmap_id, row
+    )
+    style = beatmap_map_style(row)
+    return [
+        f"[link=https://osu.ppy.sh/b/{bid}]{bid}[/link]",
+        stars,
+        f"[{style}]{escape(title)}[/{style}]",
+        escape(creator),
+        escape(version),
+        bpm,
+        length,
+        escape(source),
+    ]
+
+
+def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
+    beatmap_id_a, embedding_a, source_a = get_embedding(raw_input_a, ctx)
+    beatmap_id_b, embedding_b, source_b = get_embedding(raw_input_b, ctx)
+    similarity = float(embedding_a @ embedding_b)
+
+    table = Table(show_header=True, header_style="bold magenta")
+    add_map_columns(table, side=True)
+    table.add_row(
+        "A", *map_cells(beatmap_id_a, ctx.metadata_lookup.get(beatmap_id_a), source_a)
+    )
+    table.add_row(
+        "B", *map_cells(beatmap_id_b, ctx.metadata_lookup.get(beatmap_id_b), source_b)
+    )
+
+    console.print()
+    console.print(table)
+    console.print(f"[bold]Similarity:[/bold] [green]{similarity:.6f}[/green]\n")
+
+
+def recommend(raw_input: str, ctx: QueryContext):
+    beatmap_id, query_embedding, source = get_embedding(raw_input, ctx)
+    query_row = refresh_missing_metadata(
+        [(beatmap_id, 0.0, ctx.metadata_lookup.get(beatmap_id))], ctx
+    )[0][2]
+    query_set_id = get_query_set_id(beatmap_id, raw_input, ctx.metadata_lookup)
+
+    similarities = ctx.embeddings @ query_embedding
+    results = []
+    for idx in np.argsort(-similarities):
+        candidate_id = int(ctx.beatmap_ids[idx])
+        if candidate_id == beatmap_id:
+            continue
+
+        row = ctx.metadata_lookup.get(candidate_id)
+        if (
+            not ctx.include_same_set
+            and query_set_id is not None
+            and metadata_set_id(row) == query_set_id
+        ):
+            continue
+
+        results.append((candidate_id, float(similarities[idx]), row))
+        if len(results) >= ctx.top_k:
+            break
+
+    query_table = Table(title="Query", show_header=True, header_style="bold magenta")
+    add_map_columns(query_table)
+    query_table.add_row(*map_cells(beatmap_id, query_row, source))
+
+    console.print()
+    console.print(query_table)
+    if query_set_id is not None and not ctx.include_same_set:
+        console.print(f"[dim]Excluding same beatmapset: {query_set_id}[/dim]")
+
+    table = Table(show_header=True, header_style="bold magenta")
+    add_map_columns(table, similarity=True)
+    for candidate_id, similarity, row in refresh_missing_metadata(results, ctx):
         table.add_row(
-            f"{similarity:.3f}",
-            f"[link=https://osu.ppy.sh/b/{beatmap_id}]{beatmap_id}[/link]",
-            stars,
-            f"[{map_style}]{escape(name)}[/{map_style}]",
-            escape(creator),
-            escape(version),
-            bpm,
-            length,
+            f"{similarity:.3f}", *map_cells(candidate_id, row, "stored embedding")
         )
     console.print(table)
     console.print()
 
 
-def run_interactive(args, loaded):
+def run_query(parts: list[str], ctx: QueryContext):
+    if len(parts) == 1:
+        recommend(parts[0], ctx)
+    elif len(parts) == 2:
+        compare(parts[0], parts[1], ctx)
+    else:
+        raise ValueError("enter one beatmap for recommendations or two for comparison")
+
+
+def run_interactive(ctx: QueryContext):
     console.print(
-        "[dim]Paste a beatmap id or osu! URL. Press Ctrl+C/Ctrl+D, q, quit, or empty input to exit.[/dim]"
+        "[dim]Paste one beatmap id/URL for recommendations, or two for comparison.[/dim]"
     )
+    console.print("[dim]Press Ctrl+C/Ctrl+D, q, quit, or empty input to exit.[/dim]")
     while True:
         try:
-            raw_input = console.input("[bold cyan]beatmap>[/bold cyan] ").strip()
+            raw_input = console.input("[bold cyan]query>[/bold cyan] ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print()
             return
@@ -179,17 +214,19 @@ def run_interactive(args, loaded):
             return
 
         try:
-            recommend(raw_input, *loaded)
+            run_query(raw_input.split(), ctx)
         except Exception as exc:
             console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}\n")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Recommend nearest Bobert embedding neighbors for an osu! beatmap id or URL"
+        description="Recommend similar beatmaps, or compare two beatmaps by embedding similarity"
     )
     parser.add_argument(
-        "beatmap", nargs="?", help="Beatmap id or osu! URL. Omit for interactive mode."
+        "beatmaps",
+        nargs="*",
+        help="One beatmap id/URL recommends; two beatmap ids/URLs compares.",
     )
     parser.add_argument("--embeddings", default=str(DEFAULT_EMBEDDINGS_PATH))
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
@@ -208,38 +245,37 @@ def parse_args():
 
 def main():
     args = parse_args()
-    embeddings_path = resolve_path(args.embeddings)
+    if len(args.beatmaps) > 2:
+        raise SystemExit("Error: provide at most two beatmap ids or URLs")
+
     metadata_path = resolve_path(args.metadata)
-    beatmaps_dir = resolve_path(args.beatmaps_dir)
-    config_path = resolve_path(args.config)
     checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
-
-    beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
-    metadata_df = load_metadata(metadata_path)
-    lookup = metadata_by_id(metadata_df)
-    embedder = LazyEmbedder(config_path, checkpoint_path)
-
-    loaded = (
-        beatmap_ids,
-        embeddings,
-        id_to_index,
-        lookup,
-        embedder,
-        beatmaps_dir,
-        metadata_path,
-        args.top_k,
-        args.include_same_set,
-        not args.no_download,
-    )
-
-    console.print(
-        f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
-        f"[dim]{escape(str(embeddings_path))}[/dim]"
-    )
-    if args.beatmap:
-        recommend(args.beatmap, *loaded)
+    if len(args.beatmaps) == 2:
+        beatmap_ids = np.array([], dtype=np.int64)
+        embeddings = np.empty((0, 0), dtype=np.float32)
+        id_to_index = {}
     else:
-        run_interactive(args, loaded)
+        embeddings_path = resolve_path(args.embeddings)
+        beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
+        console.print(
+            f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
+            f"[dim]{escape(str(embeddings_path))}[/dim]"
+        )
+
+    ctx = QueryContext(
+        beatmap_ids=beatmap_ids,
+        embeddings=embeddings,
+        id_to_index=id_to_index,
+        metadata_lookup=metadata_by_id(load_metadata(metadata_path)),
+        embedder=LazyEmbedder(resolve_path(args.config), checkpoint_path),
+        beatmaps_dir=resolve_path(args.beatmaps_dir),
+        metadata_path=metadata_path,
+        top_k=args.top_k,
+        include_same_set=args.include_same_set,
+        allow_download=not args.no_download,
+    )
+
+    run_query(args.beatmaps, ctx) if args.beatmaps else run_interactive(ctx)
 
 
 if __name__ == "__main__":

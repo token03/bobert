@@ -42,7 +42,6 @@ class MiningConfig:
     block_size: int = 256
     alignment_size: int | None = None
     random_seed: int = 42
-    num_workers: int | None = None
     use_faiss_gpu: bool = True
     difficulty_candidate_k: int = 256
     target_embedding_close_k: int = 64

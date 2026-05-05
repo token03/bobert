@@ -14,7 +14,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        dropout: float = 0.1,
         local_window_size: int = 128,
         is_global: bool = True,
     ):
@@ -27,7 +26,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.wqkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
-        self.dropout = dropout
         self.local_window_size = local_window_size
         self.is_global = is_global
 
@@ -92,7 +90,10 @@ class BobertEncoderLayer(nn.Module):
         self.activation_checkpointing = activation_checkpointing
 
         self.self_attn = MultiHeadAttentionWithRoPE(
-            d_model, n_heads, dropout, local_window_size, is_global=is_global
+            d_model,
+            n_heads,
+            local_window_size=local_window_size,
+            is_global=is_global,
         )
 
         self.ffn = SwiGLU(d_model, dim_feedforward)

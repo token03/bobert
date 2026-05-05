@@ -96,7 +96,6 @@ FEATURE_GROUPS = {
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
     STANDARD = "standard"
-    MINMAX = "minmax"
     NONE = "none"
 
 
