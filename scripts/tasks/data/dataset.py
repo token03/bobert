@@ -4,11 +4,8 @@ import random
 import time
 import shutil
 import multiprocessing as mp
-from pathlib import Path
 from typing import Optional, List, Dict
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
+import polars as pl
 from tqdm import tqdm
 
 from core.data.parser import parse_osu_file, RawBeatmap
@@ -24,55 +21,50 @@ def multiprocessing_context():
     except ValueError:
         return mp.get_context()
 
-BEATMAPS_SCHEMA = pa.schema(
-    [
-        ("beatmap_id", pa.int64()),
-        ("category", pa.string()),
-        ("hp_drain", pa.float32()),
-        ("cs", pa.float32()),
-        ("od", pa.float32()),
-        ("ar", pa.float32()),
-        ("slider_multiplier", pa.float32()),
-        ("slider_tick", pa.float32()),
-        ("difficulty_rating", pa.float32()),
-    ]
-)
 
-HITOBJECTS_SCHEMA = pa.schema(
-    [
-        ("beatmap_id", pa.int64()),
-        ("category", pa.string()),
-        ("x", pa.int32()),
-        ("y", pa.int32()),
-        ("time", pa.int32()),
-        ("object_type", pa.int8()),
-        ("is_new_combo", pa.int8()),
-        ("hit_sound", pa.int32()),
-        ("end_time", pa.int32()),
-        ("pixel_length", pa.float32()),
-        ("bpm", pa.float32()),
-        ("curve_type_char", pa.string()),
-        ("num_anchors", pa.int32()),
-        ("kiai_time", pa.int8()),
-        ("slider_repeats", pa.int32()),
-        ("hard_anchor_ratio", pa.float32()),
-        ("slider_end_x", pa.int32()),
-        ("slider_end_y", pa.int32()),
-        ("beat_in_measure", pa.int32()),
-        ("rhythmic_snap", pa.int32()),
-    ]
-)
+BEATMAPS_SCHEMA = {
+    "beatmap_id": pl.Int64,
+    "category": pl.String,
+    "hp_drain": pl.Float32,
+    "cs": pl.Float32,
+    "od": pl.Float32,
+    "ar": pl.Float32,
+    "slider_multiplier": pl.Float32,
+    "slider_tick": pl.Float32,
+    "difficulty_rating": pl.Float32,
+}
 
-CURVEPOINTS_SCHEMA = pa.schema(
-    [
-        ("beatmap_id", pa.int64()),
-        ("hitobject_time", pa.int32()),
-        ("point_index", pa.int32()),
-        ("x", pa.int32()),
-        ("y", pa.int32()),
-        ("is_hard", pa.int8()),
-    ]
-)
+HITOBJECTS_SCHEMA = {
+    "beatmap_id": pl.Int64,
+    "category": pl.String,
+    "x": pl.Int32,
+    "y": pl.Int32,
+    "time": pl.Int32,
+    "object_type": pl.Int8,
+    "is_new_combo": pl.Int8,
+    "hit_sound": pl.Int32,
+    "end_time": pl.Int32,
+    "pixel_length": pl.Float32,
+    "bpm": pl.Float32,
+    "curve_type_char": pl.String,
+    "num_anchors": pl.Int32,
+    "kiai_time": pl.Int8,
+    "slider_repeats": pl.Int32,
+    "hard_anchor_ratio": pl.Float32,
+    "slider_end_x": pl.Int32,
+    "slider_end_y": pl.Int32,
+    "beat_in_measure": pl.Int32,
+    "rhythmic_snap": pl.Int32,
+}
+
+CURVEPOINTS_SCHEMA = {
+    "beatmap_id": pl.Int64,
+    "hitobject_time": pl.Int32,
+    "point_index": pl.Int32,
+    "x": pl.Int32,
+    "y": pl.Int32,
+    "is_hard": pl.Int8,
+}
 
 
 def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
@@ -201,39 +193,22 @@ def _write_worker_batch(
     curvepoints_data: List[Dict],
 ):
     try:
-        beatmaps_df = pd.DataFrame(beatmaps_data)
-        hitobjects_df = pd.DataFrame(hitobjects_data)
-
-        beatmaps_table = pa.Table.from_pandas(
-            beatmaps_df, schema=BEATMAPS_SCHEMA, preserve_index=False
-        )
-        hitobjects_table = pa.Table.from_pandas(
-            hitobjects_df, schema=HITOBJECTS_SCHEMA, preserve_index=False
-        )
-
-        pq.write_table(
-            beatmaps_table,
+        pl.DataFrame(beatmaps_data, schema=BEATMAPS_SCHEMA).write_parquet(
             os.path.join(
                 temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet"
-            ),
+            )
         )
-        pq.write_table(
-            hitobjects_table,
+        pl.DataFrame(hitobjects_data, schema=HITOBJECTS_SCHEMA).write_parquet(
             os.path.join(
                 temp_dir, "hitobjects", f"worker-{pid}-batch-{batch_num}.parquet"
-            ),
+            )
         )
 
         if curvepoints_data:
-            curvepoints_df = pd.DataFrame(curvepoints_data)
-            curvepoints_table = pa.Table.from_pandas(
-                curvepoints_df, schema=CURVEPOINTS_SCHEMA, preserve_index=False
-            )
-            pq.write_table(
-                curvepoints_table,
+            pl.DataFrame(curvepoints_data, schema=CURVEPOINTS_SCHEMA).write_parquet(
                 os.path.join(
                     temp_dir, "curvepoints", f"worker-{pid}-batch-{batch_num}.parquet"
-                ),
+                )
             )
 
     except Exception as e:
@@ -248,15 +223,17 @@ def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
     if not temp_files:
         return 0
 
-    tables = []
-    for temp_file in tqdm(temp_files, desc=f"Consolidating {table_name}", leave=False):
-        table = pq.read_table(os.path.join(temp_path, temp_file))
-        tables.append(table)
+    frames = [
+        pl.read_parquet(os.path.join(temp_path, temp_file))
+        for temp_file in tqdm(
+            temp_files, desc=f"Consolidating {table_name}", leave=False
+        )
+    ]
+    merged_df = pl.concat(frames, how="vertical")
+    os.makedirs(output_path, exist_ok=True)
+    merged_df.write_parquet(os.path.join(output_path, "part-0.parquet"))
 
-    merged_table = pa.concat_tables(tables)
-    pq.write_to_dataset(merged_table, root_path=output_path)
-
-    return merged_table.num_rows
+    return merged_df.height
 
 
 def consolidate_dataset(temp_dir: str, output_dir: str) -> int:

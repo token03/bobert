@@ -2,7 +2,6 @@ import os
 import argparse
 import importlib
 import yaml
-import pandas as pd
 import concurrent.futures
 import polars as pl
 from typing import Optional, Dict, Tuple, List
@@ -96,29 +95,53 @@ def load_config(config_path: str = "./config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def load_existing_ratings(ratings_path: str) -> pd.DataFrame:
+RATINGS_SCHEMA = {
+    "beatmap_id": pl.Int64,
+    "seq_len": pl.Int64,
+    "stars": pl.Float64,
+    "aim": pl.Float64,
+    "speed": pl.Float64,
+    "slider_factor": pl.Float64,
+}
+
+
+def empty_ratings_df() -> pl.DataFrame:
+    return pl.DataFrame(schema=RATINGS_SCHEMA)
+
+
+def load_existing_ratings(ratings_path: str) -> pl.DataFrame:
     if os.path.exists(ratings_path):
-        return pd.read_parquet(ratings_path)
-    return pd.DataFrame(
-        columns=["beatmap_id", "seq_len", "stars", "aim", "speed", "slider_factor"]
-    )
+        return pl.read_parquet(ratings_path)
+    return empty_ratings_df()
 
 
 def normalize_rating_lengths(
-    ratings_df: pd.DataFrame, beatmap_lengths: Dict[int, int]
-) -> pd.DataFrame:
-    if ratings_df.empty:
+    ratings_df: pl.DataFrame, beatmap_lengths: Dict[int, int]
+) -> pl.DataFrame:
+    if ratings_df.is_empty():
         return ratings_df
 
-    ratings_df = ratings_df.copy()
-    lengths = ratings_df["beatmap_id"].map(beatmap_lengths)
-    known_lengths = lengths.notna()
-    requested_lengths = ratings_df.loc[known_lengths, "seq_len"].astype(int)
-    object_counts = lengths.loc[known_lengths].astype(int)
-    ratings_df.loc[known_lengths, "seq_len"] = requested_lengths.where(
-        requested_lengths > 0, object_counts
-    ).clip(upper=object_counts)
-    return ratings_df
+    lengths_df = pl.DataFrame(
+        {
+            "beatmap_id": list(beatmap_lengths.keys()),
+            "object_count": list(beatmap_lengths.values()),
+        },
+        schema={"beatmap_id": pl.Int64, "object_count": pl.Int64},
+    )
+    return (
+        ratings_df.join(lengths_df, on="beatmap_id", how="left")
+        .with_columns(
+            pl.when(pl.col("object_count").is_not_null())
+            .then(
+                pl.when(pl.col("seq_len") > 0)
+                .then(pl.min_horizontal("seq_len", "object_count"))
+                .otherwise(pl.col("object_count"))
+            )
+            .otherwise(pl.col("seq_len"))
+            .alias("seq_len")
+        )
+        .drop("object_count")
+    )
 
 
 def get_beatmap_lengths(dataset_path: str) -> Dict[int, int]:
@@ -152,16 +175,16 @@ def chunked(values: List[Tuple[int, set[int]]], chunk_size: int):
 def calculate_missing_ratings(
     beatmap_lengths: Dict[int, int],
     seq_len: int,
-    existing_ratings: pd.DataFrame,
+    existing_ratings: pl.DataFrame,
     raw_beatmap_path: str,
     workers: int,
     batch_size: int,
 ) -> Tuple[List[Dict], int, int]:
     existing_by_beatmap = {}
-    if not existing_ratings.empty:
-        for beatmap_id, cached_len in zip(
-            existing_ratings["beatmap_id"], existing_ratings["seq_len"]
-        ):
+    if not existing_ratings.is_empty():
+        for beatmap_id, cached_len in existing_ratings.select(
+            "beatmap_id", "seq_len"
+        ).iter_rows():
             existing_by_beatmap.setdefault(int(beatmap_id), set()).add(int(cached_len))
 
     tasks_to_run = []
@@ -196,7 +219,9 @@ def calculate_missing_ratings(
             for batch in batches
         }
 
-        with tqdm(total=len(tasks_to_run), desc="Calculating difficulty ratings") as pbar:
+        with tqdm(
+            total=len(tasks_to_run), desc="Calculating difficulty ratings"
+        ) as pbar:
             for future in concurrent.futures.as_completed(future_to_task):
                 batch = future_to_task[future]
                 batch_ratings, batch_cached, batch_failed = future.result()
@@ -208,14 +233,14 @@ def calculate_missing_ratings(
     return new_ratings, num_already_cached, num_failed
 
 
-def save_ratings(ratings_df: pd.DataFrame, ratings_path: str):
+def save_ratings(ratings_df: pl.DataFrame, ratings_path: str):
     ratings_dir = os.path.dirname(ratings_path)
     if ratings_dir:
         os.makedirs(ratings_dir, exist_ok=True)
 
     temp_path = ratings_path + ".tmp"
-    ratings_df = ratings_df.drop_duplicates(["beatmap_id", "seq_len"], keep="last")
-    ratings_df.to_parquet(temp_path, index=False)
+    ratings_df = ratings_df.unique(["beatmap_id", "seq_len"], keep="last")
+    ratings_df.write_parquet(temp_path)
     os.replace(temp_path, ratings_path)
 
 
@@ -287,7 +312,7 @@ def main():
     output_path = str(resolve_path(args.output))
     raw_beatmap_path = str(resolve_path(args.raw_beatmaps))
 
-    print(f"Configuration:")
+    print("Configuration:")
     print(f"  Dataset: {dataset_path}")
     print(f"  Sequence length: {seq_len}")
     print(f"  Raw beatmaps: {raw_beatmap_path}")
@@ -317,18 +342,14 @@ def main():
     )
 
     if new_ratings:
-        new_ratings_df = pd.DataFrame(new_ratings)
-        if existing_ratings.empty:
+        new_ratings_df = pl.DataFrame(new_ratings, schema=RATINGS_SCHEMA)
+        if existing_ratings.is_empty():
             combined_ratings = new_ratings_df
         else:
-            combined_ratings = pd.concat(
-                [existing_ratings, new_ratings_df], ignore_index=True
-            )
+            combined_ratings = pl.concat([existing_ratings, new_ratings_df])
     else:
         combined_ratings = existing_ratings
-    combined_ratings = combined_ratings.drop_duplicates(
-        ["beatmap_id", "seq_len"], keep="last"
-    )
+    combined_ratings = combined_ratings.unique(["beatmap_id", "seq_len"], keep="last")
 
     print()
     print("Saving ratings...")

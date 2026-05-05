@@ -4,29 +4,39 @@ from collections import defaultdict
 import math
 import time
 
-import pandas as pd
+import polars as pl
 from tqdm import tqdm
 
 
-def add_collection_key(df: pd.DataFrame) -> pd.DataFrame:
-    df["collection_key"] = list(zip(df["collection_id"], df["source"]))
-    return df
+def add_collection_key(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns(pl.struct("collection_id", "source").alias("collection_key"))
 
 
 def deduplicate_collections(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     threshold: float,
     *,
     probe_items: int = 32,
     min_size: int = 5,
     verbose: bool = False,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
+    input_is_pandas = df.__class__.__module__.startswith("pandas")
+    if input_is_pandas:
+        df = pl.from_pandas(df)
+
     if verbose:
         print("--- Starting Deduplication Process ---")
         start_time = time.time()
 
     df = add_collection_key(df)
-    col_groups = df.groupby("collection_key")["beatmap_id"].apply(set).to_dict()
+    col_groups = {
+        (row["collection_key"]["collection_id"], row["collection_key"]["source"]): set(
+            row["beatmap_id"]
+        )
+        for row in df.group_by("collection_key")
+        .agg(pl.col("beatmap_id"))
+        .iter_rows(named=True)
+    }
 
     content_hashes = {}
     for ckey, beatmaps in col_groups.items():
@@ -96,4 +106,16 @@ def deduplicate_collections(
         )
         print(f"Deduplication took {(time.time() - start_time):.2f}s")
 
-    return df[df["collection_key"].isin(kept_ckeys)].copy()
+    kept_df = pl.DataFrame(
+        kept_ckeys,
+        schema={
+            "collection_id": df.schema["collection_id"],
+            "source": df.schema["source"],
+        },
+        orient="row",
+    )
+    result = df.join(kept_df, on=["collection_id", "source"], how="semi")
+    if input_is_pandas:
+        result = result.to_pandas()
+        result["collection_key"] = list(zip(result["collection_id"], result["source"]))
+    return result
