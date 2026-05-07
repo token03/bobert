@@ -19,8 +19,8 @@ from scripts.common.paths import COLLECTIONS_DIR
 
 load_project_env()
 
-VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
-EDGE_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
+VERTEX_PATH = COLLECTIONS_DIR / "vertices.parquet"
+EDGE_PATH = COLLECTIONS_DIR / "edges.parquet"
 
 SAVE_INTERVAL = 50
 RATE_LIMIT_DELAY = 0.3

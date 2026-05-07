@@ -170,7 +170,15 @@ def contrastive_loss_fn(
         group_positive_mask.fill_diagonal_(False)
         positive_weights = group_positive_mask.to(logits.dtype)
 
-    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+    ignore_contrastive = labels.get("ignore_contrastive")
+    if ignore_contrastive is not None:
+        ignore_contrastive = ignore_contrastive.to(device=device, dtype=torch.bool)
+        denominator_mask = ignore_contrastive & (positive_weights <= 0.0)
+        logits_for_denominator = logits.masked_fill(denominator_mask, -1e9)
+    else:
+        logits_for_denominator = logits
+
+    log_prob = logits - torch.logsumexp(logits_for_denominator, dim=1, keepdim=True)
     positive_sums = positive_weights.sum(dim=1)
     valid = positive_sums > 0.0
     if not torch.any(valid):
@@ -196,18 +204,18 @@ def alignment_loss_fn(
         phase_config.get("contrastive_weight", 1.0)
     )
 
-    teacher = labels.get("lgcn_teacher")
+    teacher = labels.get("graph_teacher")
     has_teacher = labels.get("has_teacher")
     if teacher is not None and has_teacher is not None and torch.any(has_teacher):
-        pred_teacher = predictions["lgcn_embedding"][has_teacher]
+        pred_teacher = predictions["graph_embedding"][has_teacher]
         target_teacher = F.normalize(teacher[has_teacher].to(pred_teacher.dtype), dim=-1)
-        lgcn_loss = 1.0 - F.cosine_similarity(
+        graph_loss = 1.0 - F.cosine_similarity(
             pred_teacher, target_teacher, dim=-1
         ).mean()
     else:
-        lgcn_loss = torch.zeros((), device=device)
-    losses["lgcn_loss"] = lgcn_loss
-    total_loss = total_loss + lgcn_loss * float(phase_config.get("lgcn_weight", 0.3))
+        graph_loss = torch.zeros((), device=device)
+    losses["graph_loss"] = graph_loss
+    total_loss = total_loss + graph_loss * float(phase_config.get("graph_weight", 0.3))
 
     difficulty_labels = labels.get("difficulty")
     if difficulty_labels:

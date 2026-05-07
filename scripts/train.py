@@ -3,7 +3,7 @@ from scripts.common.cli import dispatch
 
 COMMANDS = {
     "align": "scripts.tasks.train.align",
-    "lightgcn": "scripts.tasks.train.graph",
+    "graph": "scripts.tasks.train.graph",
     "pretrain": "scripts.tasks.train.pretrain",
 }
 

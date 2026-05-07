@@ -45,7 +45,7 @@ class QueryContext:
     top_k: int
     include_same_set: bool
     allow_download: bool
-    cache: dict[int, tuple[np.ndarray, str]] = field(default_factory=dict)
+    cache: dict[int, np.ndarray] = field(default_factory=dict)
 
 
 def metadata_set_id(row: dict | None) -> int | None:
@@ -78,19 +78,16 @@ def refresh_missing_metadata(
 def get_embedding(raw_input: str, ctx: QueryContext):
     beatmap_id = extract_beatmap_id(raw_input)
     if beatmap_id in ctx.cache:
-        embedding, source = ctx.cache[beatmap_id]
-        return beatmap_id, embedding, source
+        return beatmap_id, ctx.cache[beatmap_id]
 
     if beatmap_id in ctx.id_to_index:
         embedding = ctx.embeddings[ctx.id_to_index[beatmap_id]]
-        source = "stored embedding"
     else:
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
         embedding = ctx.embedder.embed_osu(osu_path)
-        source = f"embedded {osu_path}"
 
-    ctx.cache[beatmap_id] = (embedding, source)
-    return beatmap_id, embedding, source
+    ctx.cache[beatmap_id] = embedding
+    return beatmap_id, embedding
 
 
 def add_map_columns(table: Table, *, similarity: bool = False, side: bool = False):
@@ -105,10 +102,9 @@ def add_map_columns(table: Table, *, similarity: bool = False, side: bool = Fals
     table.add_column("Diff", style="bright_cyan", overflow="ellipsis")
     table.add_column("BPM", justify="right", no_wrap=True)
     table.add_column("Dur", justify="right", no_wrap=True)
-    table.add_column("Source", style="dim")
 
 
-def map_cells(beatmap_id: int, row: dict | None, source: str = ""):
+def map_cells(beatmap_id: int, row: dict | None):
     bid, title, creator, version, stars, bpm, length = beatmap_table_values(
         beatmap_id, row
     )
@@ -121,23 +117,18 @@ def map_cells(beatmap_id: int, row: dict | None, source: str = ""):
         escape(version),
         bpm,
         length,
-        escape(source),
     ]
 
 
 def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
-    beatmap_id_a, embedding_a, source_a = get_embedding(raw_input_a, ctx)
-    beatmap_id_b, embedding_b, source_b = get_embedding(raw_input_b, ctx)
+    beatmap_id_a, embedding_a = get_embedding(raw_input_a, ctx)
+    beatmap_id_b, embedding_b = get_embedding(raw_input_b, ctx)
     similarity = float(embedding_a @ embedding_b)
 
     table = Table(show_header=True, header_style="bold magenta")
     add_map_columns(table, side=True)
-    table.add_row(
-        "A", *map_cells(beatmap_id_a, ctx.metadata_lookup.get(beatmap_id_a), source_a)
-    )
-    table.add_row(
-        "B", *map_cells(beatmap_id_b, ctx.metadata_lookup.get(beatmap_id_b), source_b)
-    )
+    table.add_row("A", *map_cells(beatmap_id_a, ctx.metadata_lookup.get(beatmap_id_a)))
+    table.add_row("B", *map_cells(beatmap_id_b, ctx.metadata_lookup.get(beatmap_id_b)))
 
     console.print()
     console.print(table)
@@ -145,7 +136,7 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
 
 
 def recommend(raw_input: str, ctx: QueryContext):
-    beatmap_id, query_embedding, source = get_embedding(raw_input, ctx)
+    beatmap_id, query_embedding = get_embedding(raw_input, ctx)
     query_row = refresh_missing_metadata(
         [(beatmap_id, 0.0, ctx.metadata_lookup.get(beatmap_id))], ctx
     )[0][2]
@@ -172,7 +163,7 @@ def recommend(raw_input: str, ctx: QueryContext):
 
     query_table = Table(title="Query", show_header=True, header_style="bold magenta")
     add_map_columns(query_table)
-    query_table.add_row(*map_cells(beatmap_id, query_row, source))
+    query_table.add_row(*map_cells(beatmap_id, query_row))
 
     console.print()
     console.print(query_table)
@@ -182,9 +173,7 @@ def recommend(raw_input: str, ctx: QueryContext):
     table = Table(show_header=True, header_style="bold magenta")
     add_map_columns(table, similarity=True)
     for candidate_id, similarity, row in refresh_missing_metadata(results, ctx):
-        table.add_row(
-            f"{similarity:.3f}", *map_cells(candidate_id, row, "stored embedding")
-        )
+        table.add_row(f"{similarity:.3f}", *map_cells(candidate_id, row))
     console.print(table)
     console.print()
 

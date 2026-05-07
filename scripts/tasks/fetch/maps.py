@@ -17,7 +17,7 @@ from scripts.common.beatmaps import beatmap_to_dict
 from scripts.common.io import atomic_json, atomic_parquet
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
-COLLECTION_BEATMAPS_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
+COLLECTION_BEATMAPS_PATH = COLLECTIONS_DIR / "edges.parquet"
 FAILED_BEATMAPS_PATH = DATA_DIR / ".failed_beatmaps.json"
 
 BATCH_SIZE = 50

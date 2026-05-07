@@ -1,3 +1,4 @@
+import json
 import pandas as pd
 import numpy as np
 import os
@@ -5,10 +6,17 @@ from scipy.sparse import csr_matrix
 from sklearn.decomposition import TruncatedSVD
 from scipy import stats
 
+from scripts.common.collections import deduplicate_collections
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
 
-VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
-EDGE_PATH = COLLECTIONS_DIR / "collection_beatmaps.parquet"
+VERTEX_PATH = COLLECTIONS_DIR / "vertices.parquet"
+EDGE_PATH = COLLECTIONS_DIR / "edges.parquet"
+COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
+
+MIN_MAPS_IN_COLLECTION = 5
+MAX_MAPS_IN_COLLECTION = 3000
+MIN_COLLECTIONS_PER_MAP = 2
+JACCARD_THRESHOLD = 0.9
 
 
 def gini_coefficient(x):
@@ -57,52 +65,62 @@ def perform_eda(vertex_path, edge_path, beatmaps_path):
     print(f"Initial Edge Records: {initial_edges}")
     print(f"Initial Vertices: {len(vertex_df)}")
 
-    # Load beatmap metadata for mode filtering
-    print("--- Loading Beatmap Metadata for Mode Filtering ---")
-    beatmaps_df = pd.read_parquet(beatmaps_path, columns=["id", "mode"])
-    beatmaps_df = beatmaps_df.rename(columns={"id": "beatmap_id"})
+    edge_df["collection_key"] = list(zip(edge_df["collection_id"], edge_df["source"]))
+
+    if os.path.exists(COLLECTION_FILTER_PATH):
+        with open(COLLECTION_FILTER_PATH, "r") as f:
+            filter_data = json.load(f)
+        if "collections" in filter_data:
+            bad_collection_keys = set()
+            for src, ids in filter_data["collections"].items():
+                src_id = int(src)
+                bad_collection_keys.update((cid, src_id) for cid in ids)
+            if bad_collection_keys:
+                key_series = pd.Series(
+                    list(zip(edge_df["collection_id"], edge_df["source"])),
+                    index=edge_df.index,
+                )
+                edge_df = edge_df[~key_series.isin(bad_collection_keys)].copy()
+                edge_df["collection_key"] = list(
+                    zip(edge_df["collection_id"], edge_df["source"])
+                )
+
+    print("--- Loading Beatmap Metadata for Graph Prefiltering ---")
+    beatmaps_df = pd.read_parquet(
+        beatmaps_path,
+        columns=["id", "beatmapset_id", "mode"],
+    ).rename(columns={"id": "beatmap_id"})
     edge_df = edge_df.merge(beatmaps_df, on="beatmap_id", how="left")
 
-    # Filter collections: remove collections with >50% non-osu maps
-    print("--- Filtering by Game Mode ---")
-    collection_mode_stats = edge_df.groupby(["collection_id", "source"]).apply(
-        lambda x: (x["mode"] != "osu").sum() / len(x) if len(x) > 0 else 0,
-        include_groups=False,
-    )
-    collections_to_keep = collection_mode_stats[collection_mode_stats <= 0.5].index
-    edge_df = edge_df[
-        edge_df.set_index(["collection_id", "source"]).index.isin(collections_to_keep)
-    ].copy()
-
-    # Remove all non-osu beatmaps
+    print("--- Applying Graph Training Prefiltering ---")
     edge_df = edge_df[edge_df["mode"] == "osu"].copy()
-    print(f"After mode filtering: {len(edge_df)} edges")
+    edge_df = edge_df.dropna(subset=["beatmapset_id"]).copy()
 
-    # Filter edges: collections with 5-99th percentile beatmaps
-    col_counts = edge_df.groupby(["collection_id", "source"]).size()
-    upper_bound = col_counts.quantile(0.99)
+    col_counts = edge_df.groupby("collection_key")["beatmap_id"].count()
     valid_collections = col_counts[
-        (col_counts >= 5) & (col_counts <= upper_bound)
+        (col_counts >= MIN_MAPS_IN_COLLECTION)
+        & (col_counts <= MAX_MAPS_IN_COLLECTION)
     ].index
-    edge_df = (
-        edge_df.set_index(["collection_id", "source"])
-        .loc[valid_collections]
-        .reset_index()
-    )
+    edge_df = edge_df[edge_df["collection_key"].isin(valid_collections)].copy()
 
-    # NO LONGER filtering beatmaps by occurrence - we keep all beatmaps that appear in valid collections
+    edge_df = deduplicate_collections(edge_df, JACCARD_THRESHOLD, verbose=True)
+    edge_df = edge_df.drop_duplicates(["collection_key", "beatmap_id"]).copy()
+
+    bm_counts = edge_df["beatmap_id"].value_counts()
+    valid_maps = bm_counts[bm_counts >= MIN_COLLECTIONS_PER_MAP].index
+    edge_df = edge_df[edge_df["beatmap_id"].isin(valid_maps)].copy()
 
     # Filter vertices: only keep collections with valid edges
-    valid_col_sources = set(
-        edge_df[["collection_id", "source"]].itertuples(index=False, name=None)
-    )
+    valid_col_sources = set(edge_df["collection_key"])
     vertex_df = vertex_df[
         vertex_df[["collection_id", "source"]]
         .apply(tuple, axis=1)
         .isin(valid_col_sources)
     ]
 
-    print(f"Edges after pruning (<5 items, >99% size): {len(edge_df)}")
+    print(
+        f"Edges after pruning (<{MIN_MAPS_IN_COLLECTION} items, >{MAX_MAPS_IN_COLLECTION} items, duplicates, <{MIN_COLLECTIONS_PER_MAP} collections/map): {len(edge_df)}"
+    )
     print(f"Edge retention: {len(edge_df) / initial_edges:.2%}")
     print(f"Vertices after pruning: {len(vertex_df)}")
 
@@ -128,7 +146,7 @@ def perform_eda(vertex_path, edge_path, beatmaps_path):
     get_distribution_stats(maps_per_collection, "Beatmaps per Collection")
 
     collections_per_map = edge_df.groupby("beatmap_id", observed=True)[
-        "collection_id"
+        "collection_key"
     ].nunique()
     get_distribution_stats(collections_per_map, "Collections per Beatmap (Prominence)")
 

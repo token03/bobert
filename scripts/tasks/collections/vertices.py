@@ -17,7 +17,7 @@ from rich.progress import (
 from scripts.common.io import append_dedup_parquet
 from scripts.common.paths import COLLECTIONS_DIR
 
-VERTEX_PATH = COLLECTIONS_DIR / "collections.parquet"
+VERTEX_PATH = COLLECTIONS_DIR / "vertices.parquet"
 
 SAVE_INTERVAL = 100
 RATE_LIMIT_DELAY = 0.5

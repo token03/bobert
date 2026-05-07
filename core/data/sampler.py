@@ -60,10 +60,20 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             anchor_id = self.beatmap_ids[anchor_idx]
             mining = self.mining_lookup.get(anchor_id, {})
 
-            positive_ids = mining.get("positive_ids", [])
-            positive_weights = mining.get("positive_weights", [])
-            cross_ids = mining.get("cross_status_positive_ids", [])
-            cross_weights = mining.get("cross_status_positive_weights", [])
+            positive_ids = mining.get(
+                "target_positive_ids", mining.get("positive_ids", [])
+            )
+            positive_weights = mining.get(
+                "target_positive_weights", mining.get("positive_weights", [])
+            )
+            cross_ids = mining.get(
+                "target_cross_status_positive_ids",
+                mining.get("cross_status_positive_ids", []),
+            )
+            cross_weights = mining.get(
+                "target_cross_status_positive_weights",
+                mining.get("cross_status_positive_weights", []),
+            )
             negative_ids = mining.get("hard_negative_ids", [])
             negative_weights = mining.get("hard_negative_weights", [])
 

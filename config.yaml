@@ -14,18 +14,7 @@ model:
   dropout: 0.1
   local_attention_window: 128
   global_attention_layers: [2, 5, 8]
-  long_context:
-    enabled: true
-    chunk_len: 2048
-    stride: 1536
-    max_chunks: 4
-  aggregator:
-    input_dim: 768
-    hidden_dim: 256
-    n_layers: 2
-    n_heads: 4
-    dim_feedforward: 512
-    dropout: 0.1
+
 
   
 components:
@@ -78,7 +67,7 @@ alignment:
   num_epochs: 4
 
   embedding_dim: 256
-  teacher_dim: 64
+  teacher_dim: 96
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
   group_size: 4
@@ -102,10 +91,10 @@ alignment:
   temperature: 0.15
 
   difficulty_loss_weight: 0.4
-  aim_loss_weight: 0.1
-  speed_loss_weight: 0.1
+  aim_loss_weight: 0.2
+  speed_loss_weight: 0.2
   contrastive_weight: 1.0
-  lgcn_weight: 0.3
+  graph_weight: 0.3
   status_weight: 0.05
 
   difficulty_decay_scale: 0.3

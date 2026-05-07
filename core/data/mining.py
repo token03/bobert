@@ -18,20 +18,21 @@ DIFFICULTY_WEIGHTS = np.array(
         0.45,
         0.40,
         0.40,
-        0.25,
-        0.20,
-        0.20,
     ],
     dtype=np.float32,
 )
 CACHE_LIST_COLUMNS = [
     "positive_ids",
     "positive_weights",
+    "target_positive_ids",
+    "target_positive_weights",
     "cross_status_positive_ids",
     "cross_status_positive_weights",
+    "target_cross_status_positive_ids",
+    "target_cross_status_positive_weights",
     "hard_negative_ids",
     "hard_negative_weights",
-    "lgcn_embedding",
+    "graph_embedding",
 ]
 
 
@@ -48,6 +49,8 @@ class MiningConfig:
     target_difficulty_close_k: int = 64
     target_positives_per_anchor: int = 4
     min_positives_per_anchor: int = 2
+    positive_max_star_delta: float = 0.75
+    trivial_duplicate_star_delta: float = 0.01
     hard_negative_far_difficulty_quantile: float = 0.80
     hard_negative_far_embedding_quantile: float = 0.30
 
@@ -61,7 +64,7 @@ class MiningTable:
     speed: np.ndarray
     slider_factor: np.ndarray
     status_groups: np.ndarray
-    lgcn: np.ndarray
+    graph: np.ndarray
     difficulty: np.ndarray
 
     @property
@@ -139,18 +142,18 @@ def build_cache(
     table = _load_table(data_path, dataset_path, cfg, rng)
     query_indices = np.arange(table.size, dtype=np.int64)
 
-    lgcn_idx, lgcn_scores = _topk_faiss(
-        table.lgcn,
+    graph_idx, graph_scores = _topk_faiss(
+        table.graph,
         query_indices,
         candidate_k=cfg.candidate_k,
         block_size=cfg.block_size,
-        desc="LGCN neighbors",
+        desc="Graph neighbors",
         metric="ip",
         use_gpu=cfg.use_faiss_gpu,
     )
 
     row_index = _build_row_candidate_index(table, cfg)
-    rows = _build_rows(table, lgcn_idx, lgcn_scores, cfg, row_index)
+    rows = _build_rows(table, graph_idx, graph_scores, cfg, row_index)
 
     cache = pl.DataFrame(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +169,7 @@ def _load_table(
 ) -> MiningTable:
     allowed_ids = _read_dataset_ids(dataset_dir)
 
-    lgcn = pl.read_parquet(data_dir / "collections" / "beatmap_embeddings_v1.parquet")
+    graph = pl.read_parquet(data_dir / "graph.parquet")
     ratings = pl.read_parquet(data_dir / "ratings.parquet")
     beatmaps = pl.read_parquet(
         data_dir / "beatmaps.parquet",
@@ -175,18 +178,15 @@ def _load_table(
             "beatmapset_id",
             "mode",
             "ranked",
-            "cs",
-            "ar",
-            "accuracy",
             "drain",
             "bpm",
             "total_length",
             "user_id",
         ],
-    ).rename({"id": "beatmap_id", "accuracy": "od", "drain": "hp"})
+    ).rename({"id": "beatmap_id", "drain": "hp"})
 
     meta = (
-        lgcn.select(["beatmap_id", "embedding"])
+        graph.select(["beatmap_id", "embedding"])
         .join(beatmaps, on="beatmap_id", how="inner")
         .join(ratings, on="beatmap_id", how="inner")
         .filter(pl.col("mode") == "osu")
@@ -196,9 +196,6 @@ def _load_table(
                 "aim",
                 "speed",
                 "slider_factor",
-                "ar",
-                "cs",
-                "od",
                 "beatmapset_id",
             ]
         )
@@ -231,7 +228,7 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         speed=meta["speed"].to_numpy().astype(np.float32),
         slider_factor=meta["slider_factor"].to_numpy().astype(np.float32),
         status_groups=meta["status_group"].to_numpy(),
-        lgcn=_normalize_rows(np.stack(meta["embedding"].to_list()).astype(np.float32)),
+        graph=_normalize_rows(np.stack(meta["embedding"].to_list()).astype(np.float32)),
         difficulty=_difficulty_matrix(meta),
     )
 
@@ -272,17 +269,11 @@ def _difficulty_matrix(meta: pl.DataFrame) -> np.ndarray:
     aim = meta["aim"].to_numpy().astype(np.float32)
     speed = meta["speed"].to_numpy().astype(np.float32)
     slider_factor = meta["slider_factor"].to_numpy().astype(np.float32)
-    ar = meta["ar"].to_numpy().astype(np.float32)
-    cs = meta["cs"].to_numpy().astype(np.float32)
-    od = meta["od"].to_numpy().astype(np.float32)
 
     stars = np.nan_to_num(stars, nan=0.0, posinf=0.0, neginf=0.0)
     aim = np.nan_to_num(aim, nan=0.0, posinf=0.0, neginf=0.0)
     speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
     slider_factor = np.nan_to_num(slider_factor, nan=1.0, posinf=1.0, neginf=1.0)
-    ar = np.nan_to_num(ar, nan=0.0, posinf=0.0, neginf=0.0)
-    cs = np.nan_to_num(cs, nan=0.0, posinf=0.0, neginf=0.0)
-    od = np.nan_to_num(od, nan=0.0, posinf=0.0, neginf=0.0)
 
     denom = np.clip(aim + speed, 1e-6, None)
     aim_share = aim / denom
@@ -290,7 +281,7 @@ def _difficulty_matrix(meta: pl.DataFrame) -> np.ndarray:
     slider_nerf = np.clip(1.0 - slider_factor, 0.0, 1.0)
 
     raw = np.column_stack(
-        [stars, aim, speed, slider_nerf, aim_share, speed_share, ar, cs, od]
+        [stars, aim, speed, slider_nerf, aim_share, speed_share]
     ).astype(np.float32)
     return _robust_zscore(raw) * np.sqrt(DIFFICULTY_WEIGHTS)
 
@@ -357,8 +348,8 @@ def _build_row_candidate_index(
 
 def _build_rows(
     table: MiningTable,
-    lgcn_idx: np.ndarray,
-    lgcn_scores: np.ndarray,
+    graph_idx: np.ndarray,
+    graph_scores: np.ndarray,
     cfg: MiningConfig,
     row_index: RowCandidateIndex,
 ) -> list[dict]:
@@ -373,16 +364,18 @@ def _build_rows(
         anch_diff = table.difficulty[start:end, None, :]
         anch_set = table.beatmapset_ids[start:end, None]
         anch_status = table.status_groups[start:end, None]
-        anch_lgcn = table.lgcn[start:end, None, :]
+        anch_graph = table.graph[start:end, None, :]
+        anch_stars = table.stars[start:end, None]
 
         def process_candidates(
             cand_idx: np.ndarray, cand_scores: np.ndarray, multiplier: float
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             valid = (cand_idx >= 0) & (cand_idx != anchor_idx)
             safe_idx = np.where(valid, cand_idx, 0)
 
             delta = table.difficulty[safe_idx] - anch_diff
             diff_deltas = np.sqrt(np.mean(delta * delta, axis=2))
+            star_deltas = np.abs(table.stars[safe_idx] - anch_stars)
 
             rank = max(cfg.target_positives_per_anchor, cfg.min_positives_per_anchor)
             safe_diff = np.where(valid, diff_deltas, np.inf)
@@ -397,30 +390,48 @@ def _build_rows(
             )
 
             same_set = anch_set == table.beatmapset_ids[safe_idx]
+            trivial_duplicate = same_set & (
+                star_deltas <= cfg.trivial_duplicate_star_delta
+            )
 
             mask = valid & (diff_deltas <= positive_radius[:, None])
+            mask &= star_deltas <= cfg.positive_max_star_delta
             mask &= ~(same_set & (diff_deltas > positive_radius[:, None] * 0.75))
             mask &= ~((same_set & mask).cumsum(axis=1) > 1)
+            target_mask = mask & ~trivial_duplicate
 
             radius_safe = np.maximum(positive_radius, 1e-6)[:, None]
             diff_w = np.exp(-0.5 * (diff_deltas / radius_safe) ** 2)
             score = np.maximum(cand_scores, 0.0) * diff_w * multiplier
 
             cross_mask = mask & (anch_status != table.status_groups[safe_idx])
+            target_cross_mask = target_mask & (
+                anch_status != table.status_groups[safe_idx]
+            )
 
             return (
                 safe_idx,
                 np.where(mask, score, -1.0),
+                np.where(target_mask, score, -1.0),
                 np.where(cross_mask, score, -1.0),
+                np.where(target_cross_mask, score, -1.0),
             )
 
-        lgcn_c_idx, lgcn_pos_w, lgcn_cross_w = process_candidates(
-            lgcn_idx[start:end], lgcn_scores[start:end], 1.0
-        )
+        (
+            graph_c_idx,
+            graph_pos_w,
+            graph_target_pos_w,
+            graph_cross_w,
+            graph_target_cross_w,
+        ) = process_candidates(graph_idx[start:end], graph_scores[start:end], 1.0)
 
-        all_c_idx, all_pos_w, all_cross_w = lgcn_c_idx, lgcn_pos_w, lgcn_cross_w
+        all_c_idx = graph_c_idx
+        all_pos_w = graph_pos_w
+        all_target_pos_w = graph_target_pos_w
+        all_cross_w = graph_cross_w
+        all_target_cross_w = graph_target_cross_w
 
-        emb_pool = lgcn_idx[start:end]
+        emb_pool = graph_idx[start:end]
         valid_emb = (emb_pool >= 0) & (emb_pool != anchor_idx)
         safe_emb = np.where(valid_emb, emb_pool, 0)
 
@@ -429,7 +440,11 @@ def _build_rows(
 
         delta_e = table.difficulty[safe_emb] - anch_diff
         emb_diff_dist = np.sqrt(np.mean(delta_e * delta_e, axis=2))
-        emb_sim = np.sum(anch_lgcn * table.lgcn[safe_emb], axis=2)
+        emb_sim = np.sum(anch_graph * table.graph[safe_emb], axis=2)
+        emb_star_deltas = np.abs(table.stars[safe_emb] - anch_stars)
+        emb_trivial_duplicate = (
+            anch_set == table.beatmapset_ids[safe_emb]
+        ) & (emb_star_deltas <= cfg.trivial_duplicate_star_delta)
 
         safe_sim = np.where(valid_emb, emb_sim, -np.inf)
         k_emb = min(cfg.target_embedding_close_k, safe_sim.shape[1])
@@ -455,6 +470,7 @@ def _build_rows(
             & emb_not_same_set
             & embedding_close
             & (emb_diff_dist >= diff_far_radius[:, None])
+            & ~emb_trivial_duplicate
         )
         masked_diffs = np.where(mask_emb, emb_diff_dist, -np.inf)
         max_far_dist = np.maximum(
@@ -481,7 +497,11 @@ def _build_rows(
 
         delta_d = table.difficulty[safe_diff] - anch_diff
         diff_dist = np.sqrt(np.mean(delta_d * delta_d, axis=2))
-        diff_sim = np.sum(anch_lgcn * table.lgcn[safe_diff], axis=2)
+        diff_sim = np.sum(anch_graph * table.graph[safe_diff], axis=2)
+        diff_star_deltas = np.abs(table.stars[safe_diff] - anch_stars)
+        diff_trivial_duplicate = (
+            anch_set == table.beatmapset_ids[safe_diff]
+        ) & (diff_star_deltas <= cfg.trivial_duplicate_star_delta)
 
         safe_dist = np.where(valid_diff, diff_dist, np.inf)
         k_diff = min(cfg.target_difficulty_close_k, safe_dist.shape[1])
@@ -509,6 +529,7 @@ def _build_rows(
             & diff_not_same_set
             & difficulty_close
             & (diff_sim <= emb_far_sim[:, None])
+            & ~diff_trivial_duplicate
         )
         masked_sims = np.where(mask_diff, diff_sim, np.inf)
         min_far_sim = np.minimum(
@@ -531,27 +552,52 @@ def _build_rows(
         speed = table.speed[start:end]
         s_factor = table.slider_factor[start:end]
         bs_ids = table.beatmapset_ids[start:end]
-        lgcn_embs = table.lgcn[start:end]
+        graph_embs = table.graph[start:end]
 
         for i in range(end - start):
             pos_dict = {}
+            target_pos_dict = {}
             cross_dict = {}
-            for cid, w_pos, w_cross in zip(all_c_idx[i], all_pos_w[i], all_cross_w[i]):
+            target_cross_dict = {}
+            for cid, w_pos, w_target_pos, w_cross, w_target_cross in zip(
+                all_c_idx[i],
+                all_pos_w[i],
+                all_target_pos_w[i],
+                all_cross_w[i],
+                all_target_cross_w[i],
+            ):
                 if w_pos >= 0:
                     bid = int(table.beatmap_ids[cid])
                     if bid not in pos_dict or w_pos > pos_dict[bid]:
                         pos_dict[bid] = float(w_pos)
+                if w_target_pos >= 0:
+                    bid = int(table.beatmap_ids[cid])
+                    if bid not in target_pos_dict or w_target_pos > target_pos_dict[bid]:
+                        target_pos_dict[bid] = float(w_target_pos)
                 if w_cross >= 0:
                     bid = int(table.beatmap_ids[cid])
                     if bid not in cross_dict or w_cross > cross_dict[bid]:
                         cross_dict[bid] = float(w_cross)
+                if w_target_cross >= 0:
+                    bid = int(table.beatmap_ids[cid])
+                    if (
+                        bid not in target_cross_dict
+                        or w_target_cross > target_cross_dict[bid]
+                    ):
+                        target_cross_dict[bid] = float(w_target_cross)
 
             pos_sorted = sorted(pos_dict.items(), key=lambda x: x[1], reverse=True)[
                 : cfg.top_k
             ]
+            target_pos_sorted = sorted(
+                target_pos_dict.items(), key=lambda x: x[1], reverse=True
+            )[: cfg.top_k]
             cross_sorted = sorted(cross_dict.items(), key=lambda x: x[1], reverse=True)[
                 : cfg.top_k
             ]
+            target_cross_sorted = sorted(
+                target_cross_dict.items(), key=lambda x: x[1], reverse=True
+            )[: cfg.top_k]
 
             neg_dict = {}
             for cid, w in zip(safe_emb[i], emb_scores[i]):
@@ -580,11 +626,19 @@ def _build_rows(
                     "beatmapset_id": int(bs_ids[i]),
                     "positive_ids": [k for k, _ in pos_sorted],
                     "positive_weights": [v for _, v in pos_sorted],
+                    "target_positive_ids": [k for k, _ in target_pos_sorted],
+                    "target_positive_weights": [v for _, v in target_pos_sorted],
                     "cross_status_positive_ids": [k for k, _ in cross_sorted],
                     "cross_status_positive_weights": [v for _, v in cross_sorted],
+                    "target_cross_status_positive_ids": [
+                        k for k, _ in target_cross_sorted
+                    ],
+                    "target_cross_status_positive_weights": [
+                        v for _, v in target_cross_sorted
+                    ],
                     "hard_negative_ids": [k for k, _ in neg_sorted],
                     "hard_negative_weights": [v for _, v in neg_sorted],
-                    "lgcn_embedding": lgcn_embs[i].tolist(),
+                    "graph_embedding": graph_embs[i].tolist(),
                 }
             )
 

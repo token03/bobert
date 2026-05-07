@@ -53,22 +53,42 @@ def collate_align(
 
     teacher_dim = 0
     for target in targets:
-        teacher_dim = max(teacher_dim, len(target.get("lgcn_embedding", [])))
-    teacher_dim = teacher_dim or 64
+        teacher_dim = max(teacher_dim, len(target.get("graph_embedding", [])))
+    teacher_dim = teacher_dim or 128
 
-    lgcn_teacher = torch.zeros(len(batch), teacher_dim, dtype=torch.float32)
+    graph_teacher = torch.zeros(len(batch), teacher_dim, dtype=torch.float32)
     status_labels = torch.zeros(len(batch), dtype=torch.float32)
     has_teacher = torch.zeros(len(batch), dtype=torch.bool)
     for i, target in enumerate(targets):
-        teacher = target.get("lgcn_embedding", [])
+        teacher = target.get("graph_embedding", [])
         if teacher:
             teacher_tensor = torch.tensor(teacher[:teacher_dim], dtype=torch.float32)
-            lgcn_teacher[i, : teacher_tensor.shape[0]] = teacher_tensor
+            graph_teacher[i, : teacher_tensor.shape[0]] = teacher_tensor
             has_teacher[i] = True
         status_labels[i] = 1.0 if target.get("status_group") == "ranked" else 0.0
 
     id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
     positive_weights = torch.zeros(len(batch), len(batch), dtype=torch.float32)
+    beatmapset_ids = torch.tensor(
+        [int(target.get("beatmapset_id", -1)) for target in targets], dtype=torch.long
+    )
+    stars = torch.tensor(
+        [float(target.get("stars", float("nan"))) for target in targets],
+        dtype=torch.float32,
+    )
+    valid_sets = beatmapset_ids >= 0
+    valid_stars = ~torch.isnan(stars)
+    same_set = beatmapset_ids[:, None] == beatmapset_ids[None, :]
+    near_star = torch.abs(stars[:, None] - stars[None, :]) <= 0.01
+    ignore_contrastive = (
+        same_set
+        & near_star
+        & valid_sets[:, None]
+        & valid_sets[None, :]
+        & valid_stars[:, None]
+        & valid_stars[None, :]
+    )
+    ignore_contrastive.fill_diagonal_(False)
     for i, target in enumerate(targets):
         for ids_key, weights_key in (
             ("positive_ids", "positive_weights"),
@@ -85,9 +105,10 @@ def collate_align(
         padded_vec,
         mask,
         cu_seqlens,
-        lgcn_teacher,
+        graph_teacher,
         has_teacher,
         status_labels,
         positive_weights,
+        ignore_contrastive,
         stack_dicts(attrs),
     )

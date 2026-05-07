@@ -440,7 +440,7 @@ class BobertForAlignment(nn.Module):
         bert_model: BobertModel,
         pooler: nn.Module,
         embedding_dim: int = 128,
-        teacher_dim: int = 64,
+        teacher_dim: int = 128,
     ):
         super().__init__()
         self.bert = bert_model
@@ -453,7 +453,7 @@ class BobertForAlignment(nn.Module):
             nn.GELU(),
             nn.Linear(bert_model.d_model, embedding_dim),
         )
-        self.lgcn_head = nn.Linear(pooled_dim, teacher_dim)
+        self.graph_head = nn.Linear(pooled_dim, teacher_dim)
         self.difficulty_head = nn.Linear(pooled_dim, len(DIFFICULTY_ATTRIBUTES))
         self.status_head = nn.Linear(pooled_dim, 1)
         self.is_compiled = False
@@ -492,7 +492,7 @@ class BobertForAlignment(nn.Module):
             base_model,
             pooler,
             embedding_dim=alignment_config.get("embedding_dim", 128),
-            teacher_dim=alignment_config.get("teacher_dim", 64),
+            teacher_dim=alignment_config.get("teacher_dim", 128),
         )
         trainable_layers = alignment_config.get("trainable_layers")
         if trainable_layers is not None:
@@ -528,12 +528,12 @@ class BobertForAlignment(nn.Module):
 
         pooled_output = self.pooler(packed_output, cu_seqlens)
         retrieval_embedding = F.normalize(self.retrieval_head(pooled_output), dim=-1)
-        lgcn_embedding = F.normalize(self.lgcn_head(pooled_output), dim=-1)
+        graph_embedding = F.normalize(self.graph_head(pooled_output), dim=-1)
         difficulty_raw = self.difficulty_head(pooled_output)
 
         return {
             "embedding": retrieval_embedding,
-            "lgcn_embedding": lgcn_embedding,
+            "graph_embedding": graph_embedding,
             "sequence_representation": pooled_output,
             "status_logits": self.status_head(pooled_output).squeeze(-1),
             "difficulty": {
