@@ -70,6 +70,13 @@ alignment:
   teacher_dim: 96
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
+  contrastive_pooler: "query_attention"
+  query_pool_num_queries: 8
+  query_pool_heads: 8
+  query_pool_head_dim: 32
+  query_pool_output_dim: 512
+  query_pool_dropout: 0.0
+  query_pool_use_flash: true
   group_size: 4
   mining_cache_path: './data/mining_cache.parquet'
   alignment_size: 100000

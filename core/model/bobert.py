@@ -8,6 +8,11 @@ from typing import Tuple, Dict, Any, Type, TypeVar, Optional, Sequence, cast
 from rotary_embedding_torch import RotaryEmbedding
 from flash_attn.ops.triton.layer_norm import RMSNorm
 
+try:
+    from flash_attn import flash_attn_varlen_func
+except ImportError:
+    flash_attn_varlen_func = None
+
 from ..data.beatmap import DIFFICULTY_ATTRIBUTES
 
 from .components import (
@@ -251,7 +256,10 @@ class BobertProjectedStatsPooler(nn.Module):
         )
 
     def forward(
-        self, packed_output: torch.Tensor, cu_seqlens: torch.Tensor
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         batch_size = seqlens.numel()
@@ -295,6 +303,176 @@ class BobertProjectedStatsPooler(nn.Module):
 
         projected = [self.projections[name](pooled[name]) for name in self.stats]
         return torch.cat(projected, dim=-1).to(packed_output.dtype)
+
+
+class BobertQueryAttentionPooler(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        num_queries: int = 8,
+        head_dim: Optional[int] = None,
+        output_dim: Optional[int] = None,
+        dropout: float = 0.0,
+        use_flash: bool = True,
+    ):
+        super().__init__()
+        if num_queries <= 0:
+            raise ValueError("num_queries must be positive")
+        if n_heads <= 0:
+            raise ValueError("n_heads must be positive")
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.num_queries = num_queries
+        self.head_dim = head_dim or (d_model // n_heads)
+        self.inner_dim = self.n_heads * self.head_dim
+        self.output_dim = output_dim or self.inner_dim * self.num_queries
+        self.dropout = dropout
+        self.use_flash = use_flash
+
+        self.norm = nn.LayerNorm(d_model)
+        self.query = nn.Parameter(torch.empty(num_queries, n_heads, self.head_dim))
+        self.kv = nn.Linear(d_model, 2 * self.inner_dim, bias=False)
+        self.out = nn.Sequential(
+            nn.LayerNorm(self.num_queries * self.inner_dim),
+            nn.Linear(self.num_queries * self.inner_dim, self.output_dim),
+            nn.GELU(),
+        )
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.query, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.kv.weight)
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: Optional[int] = None,
+    ) -> torch.Tensor:
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        batch_size = seqlens.numel()
+
+        if batch_size == 0:
+            return packed_output.new_zeros((0, self.output_dim))
+
+        x = self.norm(packed_output)
+        k, v = self.kv(x).view(
+            packed_output.shape[0], 2, self.n_heads, self.head_dim
+        ).unbind(dim=1)
+
+        can_use_flash = (
+            self.use_flash
+            and flash_attn_varlen_func is not None
+            and packed_output.device.type == "cuda"
+            and k.dtype in (torch.float16, torch.bfloat16)
+            and not torch.any(seqlens == 0)
+        )
+
+        if can_use_flash:
+            pooled = self._forward_flash(k, v, cu_seqlens, batch_size, max_seqlen)
+        else:
+            pooled = self._forward_torch(k, v, seqlens, batch_size)
+
+        pooled = pooled.reshape(batch_size, self.num_queries * self.inner_dim)
+        return self.out(pooled).to(packed_output.dtype)
+
+    def _forward_flash(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        batch_size: int,
+        max_seqlen: Optional[int],
+    ) -> torch.Tensor:
+        q = (
+            self.query.to(dtype=k.dtype, device=k.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1, -1, -1)
+            .reshape(batch_size * self.num_queries, self.n_heads, self.head_dim)
+            .contiguous()
+        )
+
+        cu_seqlens_q = (
+            torch.arange(batch_size + 1, device=k.device, dtype=torch.int32)
+            * self.num_queries
+        )
+
+        if max_seqlen is None:
+            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+
+        out = flash_attn_varlen_func(
+            q,
+            k.contiguous(),
+            v.contiguous(),
+            cu_seqlens_q,
+            cu_seqlens,
+            self.num_queries,
+            max_seqlen,
+            dropout_p=self.dropout if self.training else 0.0,
+            causal=False,
+        )
+
+        return out.reshape(batch_size, self.num_queries, self.n_heads, self.head_dim)
+
+    def _forward_torch(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        seqlens: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        device = k.device
+        total_tokens = k.shape[0]
+        batch_idx = torch.repeat_interleave(
+            torch.arange(batch_size, device=device),
+            seqlens,
+        )
+
+        k_float = k.float()
+        v_float = v.float()
+        q_float = self.query.to(device=device).float()
+        scale = self.head_dim**-0.5
+        pooled_queries = []
+
+        for query_idx in range(self.num_queries):
+            logits = (k_float * q_float[query_idx].unsqueeze(0)).sum(dim=-1) * scale
+            max_logits = torch.full(
+                (batch_size, self.n_heads),
+                -torch.inf,
+                device=device,
+                dtype=torch.float32,
+            )
+            if total_tokens > 0:
+                max_logits.scatter_reduce_(
+                    0,
+                    batch_idx[:, None].expand(-1, self.n_heads),
+                    logits,
+                    reduce="amax",
+                    include_self=True,
+                )
+
+            weights = torch.exp(logits - max_logits[batch_idx])
+            denom = torch.zeros(
+                (batch_size, self.n_heads), device=device, dtype=torch.float32
+            )
+            if total_tokens > 0:
+                denom.index_add_(0, batch_idx, weights)
+
+            weights = weights / denom[batch_idx].clamp_min(1e-9)
+            pooled = torch.zeros(
+                (batch_size, self.n_heads, self.head_dim),
+                device=device,
+                dtype=torch.float32,
+            )
+            if total_tokens > 0:
+                pooled.index_add_(0, batch_idx, weights.unsqueeze(-1) * v_float)
+
+            pooled_queries.append(pooled)
+
+        return torch.stack(pooled_queries, dim=1).to(v.dtype)
 
 
 class BobertMaskedLMHead(nn.Module):
@@ -438,24 +616,29 @@ class BobertForAlignment(nn.Module):
     def __init__(
         self,
         bert_model: BobertModel,
-        pooler: nn.Module,
+        contrastive_pooler: nn.Module,
+        aux_pooler: nn.Module,
         embedding_dim: int = 128,
         teacher_dim: int = 128,
     ):
         super().__init__()
         self.bert = bert_model
-        self.pooler = pooler
+        self.pooler = aux_pooler
+        self.contrastive_pooler = contrastive_pooler
         self.embedding_dim = embedding_dim
         self.teacher_dim = teacher_dim
-        pooled_dim = getattr(pooler, "output_dim", bert_model.d_model)
+
+        contrastive_dim = getattr(contrastive_pooler, "output_dim", bert_model.d_model)
+        aux_dim = getattr(aux_pooler, "output_dim", bert_model.d_model)
+
         self.retrieval_head = nn.Sequential(
-            nn.Linear(pooled_dim, bert_model.d_model),
+            nn.Linear(contrastive_dim, bert_model.d_model),
             nn.GELU(),
             nn.Linear(bert_model.d_model, embedding_dim),
         )
-        self.graph_head = nn.Linear(pooled_dim, teacher_dim)
-        self.difficulty_head = nn.Linear(pooled_dim, len(DIFFICULTY_ATTRIBUTES))
-        self.status_head = nn.Linear(pooled_dim, 1)
+        self.graph_head = nn.Linear(contrastive_dim, teacher_dim)
+        self.difficulty_head = nn.Linear(aux_dim, len(DIFFICULTY_ATTRIBUTES))
+        self.status_head = nn.Linear(aux_dim, 1)
         self.is_compiled = False
 
     def freeze_bert_except_top_layers(self, trainable_layers: int) -> None:
@@ -479,18 +662,49 @@ class BobertForAlignment(nn.Module):
     ) -> "BobertForAlignment":
         base_model = BobertModel.from_config(config)
         alignment_config = config.alignment
+
         pooling_stats = tuple(
             alignment_config.get("pooling_stats", ["mean", "max", "std"])
         )
-        pooler = BobertProjectedStatsPooler(
+        pooling_stat_dim = alignment_config.get("pooling_stat_dim", 256)
+        stats_output_dim = pooling_stat_dim * len(pooling_stats)
+
+        aux_pooler = BobertProjectedStatsPooler(
             base_model.d_model,
-            stat_dim=alignment_config.get("pooling_stat_dim", 256),
+            stat_dim=pooling_stat_dim,
             stats=pooling_stats,
         )
 
+        contrastive_pooler_type = alignment_config.get(
+            "contrastive_pooler", "query_attention"
+        )
+
+        if contrastive_pooler_type == "query_attention":
+            contrastive_pooler = BobertQueryAttentionPooler(
+                d_model=base_model.d_model,
+                n_heads=alignment_config.get("query_pool_heads", base_model.n_heads),
+                num_queries=alignment_config.get("query_pool_num_queries", 8),
+                head_dim=alignment_config.get(
+                    "query_pool_head_dim",
+                    base_model.d_model // base_model.n_heads,
+                ),
+                output_dim=alignment_config.get(
+                    "query_pool_output_dim", stats_output_dim
+                ),
+                dropout=alignment_config.get("query_pool_dropout", 0.0),
+                use_flash=alignment_config.get("query_pool_use_flash", True),
+            )
+        elif contrastive_pooler_type == "stats":
+            contrastive_pooler = aux_pooler
+        else:
+            raise ValueError(
+                f"unknown alignment.contrastive_pooler={contrastive_pooler_type!r}"
+            )
+
         model = cls(
             base_model,
-            pooler,
+            contrastive_pooler=contrastive_pooler,
+            aux_pooler=aux_pooler,
             embedding_dim=alignment_config.get("embedding_dim", 128),
             teacher_dim=alignment_config.get("teacher_dim", 128),
         )
@@ -526,16 +740,29 @@ class BobertForAlignment(nn.Module):
             packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
 
-        pooled_output = self.pooler(packed_output, cu_seqlens)
-        retrieval_embedding = F.normalize(self.retrieval_head(pooled_output), dim=-1)
-        graph_embedding = F.normalize(self.graph_head(pooled_output), dim=-1)
-        difficulty_raw = self.difficulty_head(pooled_output)
+        contrastive_pooled = self.contrastive_pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        aux_pooled = self.pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+
+        retrieval_embedding = F.normalize(
+            self.retrieval_head(contrastive_pooled), dim=-1
+        )
+        graph_embedding = F.normalize(self.graph_head(contrastive_pooled), dim=-1)
+        difficulty_raw = self.difficulty_head(aux_pooled)
 
         return {
             "embedding": retrieval_embedding,
             "graph_embedding": graph_embedding,
-            "sequence_representation": pooled_output,
-            "status_logits": self.status_head(pooled_output).squeeze(-1),
+            "sequence_representation": contrastive_pooled,
+            "aux_sequence_representation": aux_pooled,
+            "status_logits": self.status_head(aux_pooled).squeeze(-1),
             "difficulty": {
                 name: difficulty_raw[:, i]
                 for i, name in enumerate(DIFFICULTY_ATTRIBUTES)

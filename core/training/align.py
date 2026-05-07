@@ -32,6 +32,34 @@ class AlignmentModule(pl.LightningModule):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
+    def on_fit_start(self):
+        if self.global_rank == 0:
+            print("Running warmup pass to initialize RoPE cache to max_seq_len...")
+
+        max_seq_len = self.config["data"]["max_seq_len"]
+        target_dtype = torch.float32
+
+        precision_str = str(self.trainer.precision)
+        if "bf16" in precision_str:
+            target_dtype = torch.bfloat16
+        elif "16" in precision_str:
+            target_dtype = torch.float16
+
+        model_to_run = self.model
+        if hasattr(model_to_run, "_orig_mod"):
+            model_to_run = model_to_run._orig_mod
+
+        with torch.no_grad():
+            with torch.autocast(device_type=self.device.type, dtype=target_dtype):
+                model_to_run.bert.rotary_emb(
+                    torch.arange(max_seq_len, device=self.device), seq_len=max_seq_len
+                )
+
+        if self.global_rank == 0:
+            print(
+                f"Warmup complete. RoPE cache initialized for L={max_seq_len} using {target_dtype}."
+            )
+
     def _unpack_batch(self, batch: Tuple, use_contrastive: bool):
         (
             vectors,
@@ -182,6 +210,8 @@ def load_pretraining_weights(
             if key.startswith(prefix):
                 key = key[len(prefix) :]
                 break
+        if key.startswith("difficulty_head.pooler."):
+            key = key.replace("difficulty_head.pooler.", "pooler.", 1)
         if key.startswith("difficulty_head.head."):
             key = key.replace("difficulty_head.head.", "difficulty_head.", 1)
         state[key] = value
