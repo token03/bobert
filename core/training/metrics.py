@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
-from torchmetrics.classification import Accuracy, Precision, Recall
+from torchmetrics.classification import FBetaScore
 
 from core.data.beatmap import DIFFICULTY_ATTRIBUTES
 
@@ -30,21 +30,7 @@ class MLMMetrics(nn.Module):
         for name, info in feature_info["categorical"].items():
             num_classes = info["cardinality"]
             self.cat_metrics[name] = MetricCollection(
-                {
-                    "accuracy": Accuracy(task="multiclass", num_classes=num_classes),
-                    "precision": Precision(
-                        task="multiclass",
-                        num_classes=num_classes,
-                        average="weighted",
-                        zero_division=0,
-                    ),
-                    "recall": Recall(
-                        task="multiclass",
-                        num_classes=num_classes,
-                        average="weighted",
-                        zero_division=0,
-                    ),
-                }
+                {"f2": FBetaScore(task="multiclass", num_classes=num_classes, beta=2.0, average="weighted", zero_division=0)}
             ).to(device)
 
         self.loss_metric = MeanMetric().to(device)
@@ -89,9 +75,7 @@ class MLMMetrics(nn.Module):
             pred_logits = predictions["categorical"][name]
             pred_classes = torch.argmax(pred_logits, dim=-1)
             target_classes = masked_targets[:, info["index"]].long()
-            self.cat_metrics[name]["accuracy"].update(pred_classes, target_classes)
-            self.cat_metrics[name]["precision"].update(pred_classes, target_classes)
-            self.cat_metrics[name]["recall"].update(pred_classes, target_classes)
+            self.cat_metrics[name]["f2"].update(pred_classes, target_classes)
 
     def compute(self) -> Dict[str, Any]:
         results = {}
