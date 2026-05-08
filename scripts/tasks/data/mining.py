@@ -9,7 +9,7 @@ def main():
     parser = argparse.ArgumentParser(description="Build Bobert mining cache")
     parser.add_argument("--data-dir", default=str(DATA_DIR))
     parser.add_argument("--dataset-dir", default=str(DATA_DIR / "dataset"))
-    parser.add_argument("--output", default=str(DATA_DIR / "mining_cache.parquet"))
+    parser.add_argument("--output", default=str(DATA_DIR / "candidates.parquet"))
     parser.add_argument("--top-k", type=int, default=defaults.top_k)
     parser.add_argument("--candidate-k", type=int, default=defaults.candidate_k)
     parser.add_argument("--block-size", type=int, default=defaults.block_size)

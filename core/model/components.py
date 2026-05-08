@@ -8,6 +8,8 @@ from flash_attn import flash_attn_varlen_qkvpacked_func
 from flash_attn.ops.triton.layer_norm import RMSNorm
 from torch.utils.checkpoint import checkpoint
 
+from ..data.hitobject import OBJECT_TYPE_SLIDER_HEAD
+
 
 class MultiHeadAttentionWithRoPE(nn.Module):
     def __init__(
@@ -130,40 +132,133 @@ class BobertEncoderLayer(nn.Module):
         return src
 
 
-class NumericalGroupEmbedder(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int):
+class HitObjectFeatureTokenizer(nn.Module):
+    def __init__(
+        self,
+        feature_info: Dict[str, Dict],
+        d_feat: int,
+        d_model: int,
+        mixer_layers: int = 1,
+        pooling: str = "gated_sum",
+    ):
         super().__init__()
-        self.proj = nn.Linear(input_dim, output_dim)
-        self.act = nn.GELU()
+        if pooling != "gated_sum":
+            raise ValueError(f"unsupported feature pooling: {pooling!r}")
+        if d_feat <= 0:
+            raise ValueError("d_feat must be positive")
+        if mixer_layers < 0:
+            raise ValueError("mixer_layers must be non-negative")
+
+        self.feature_info = feature_info
+        self.continuous = feature_info["continuous"]
+        self.categorical = feature_info["categorical"]
+        self.num_tokens = 13
+
+        self.position = self._numeric_token(2, d_feat)
+        self.delta = self._numeric_token(2, d_feat)
+        self.timing = self._numeric_token(1, d_feat)
+        self.density = self._numeric_token(1, d_feat)
+        self.velocity = self._numeric_token(1, d_feat)
+        self.angle = self._numeric_token(2, d_feat)
+        self.rhythm_change = self._numeric_token(1, d_feat)
+        self.slider = self._numeric_token(3, d_feat)
+
+        self.object_type = self._categorical_token("object_type", d_feat)
+        self.combo = self._categorical_token("is_new_combo", d_feat)
+        self.measure = self._categorical_token("beat_in_measure", d_feat)
+        self.time_bin = self._categorical_token("time_diff_bin", d_feat)
+        self.snap = self._categorical_token("rhythmic_snap", d_feat)
+
+        self.feature_bias = nn.Parameter(torch.zeros(self.num_tokens, d_feat))
+        self.mixer = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "token": nn.Sequential(
+                            nn.Linear(self.num_tokens, self.num_tokens),
+                            nn.GELU(),
+                            nn.Linear(self.num_tokens, self.num_tokens),
+                        ),
+                        "channel": nn.Sequential(
+                            nn.Linear(d_feat, d_feat * 2),
+                            nn.GELU(),
+                            nn.Linear(d_feat * 2, d_feat),
+                        ),
+                    }
+                )
+                for _ in range(mixer_layers)
+            ]
+        )
+        self.gate = nn.Linear(d_feat, 1)
+        self.out = nn.Linear(d_feat, d_model, bias=False)
+
+        nn.init.constant_(self.gate.bias, 2.0)
+
+    def _numeric_token(self, input_dim: int, d_feat: int) -> nn.Sequential:
+        return nn.Sequential(nn.Linear(input_dim, d_feat), nn.GELU())
+
+    def _categorical_token(self, name: str, d_feat: int) -> nn.Embedding:
+        return nn.Embedding(self.categorical[name]["cardinality"], d_feat)
+
+    def _continuous_features(
+        self, x: torch.Tensor, names: Tuple[str, ...]
+    ) -> torch.Tensor:
+        indices = [self.continuous[name] for name in names]
+        return x[..., indices]
+
+    def _categorical_feature(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        info = self.categorical[name]
+        return x[..., info["index"]].long().clamp(0, info["cardinality"] - 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.act(self.proj(x))
+        object_type = self._categorical_feature(x, "object_type")
 
+        tokens = torch.stack(
+            [
+                self.position(self._continuous_features(x, ("norm_x", "norm_y"))),
+                self.delta(self._continuous_features(x, ("delta_x", "delta_y"))),
+                self.timing(self._continuous_features(x, ("log_time_diff_ms",))),
+                self.density(self._continuous_features(x, ("notes_per_second",))),
+                self.velocity(self._continuous_features(x, ("velocity",))),
+                self.angle(
+                    self._continuous_features(x, ("relative_cos", "relative_sin"))
+                ),
+                self.rhythm_change(self._continuous_features(x, ("rhythm_change",))),
+                self.slider(
+                    self._continuous_features(
+                        x,
+                        (
+                            "log_slider_pixel_length",
+                            "log_slider_repeats",
+                            "slider_tortuosity",
+                        ),
+                    )
+                ),
+                self.object_type(object_type),
+                self.combo(self._categorical_feature(x, "is_new_combo")),
+                self.measure(self._categorical_feature(x, "beat_in_measure")),
+                self.time_bin(self._categorical_feature(x, "time_diff_bin")),
+                self.snap(self._categorical_feature(x, "rhythmic_snap")),
+            ],
+            dim=-2,
+        )
 
-class CategoricalGroupEmbedder(nn.Module):
-    def __init__(self, cat_info: Dict[str, Dict[str, int]], total_output_dim: int):
-        super().__init__()
-        self.embeds = nn.ModuleDict()
-
-        self.dim_per_feat = total_output_dim // len(cat_info)
-
-        for name, info in cat_info.items():
-            self.embeds[name] = nn.Embedding(info["cardinality"], self.dim_per_feat)
-
-        self.remainder = total_output_dim % len(cat_info)
-        if self.remainder > 0:
-            last_feat = list(cat_info.keys())[-1]
-            self.embeds[last_feat] = nn.Embedding(
-                cat_info[last_feat]["cardinality"], self.dim_per_feat + self.remainder
+        tokens = tokens + self.feature_bias.to(dtype=tokens.dtype)
+        for layer in self.mixer:
+            tokens = tokens + layer["token"](tokens.transpose(-1, -2)).transpose(
+                -1, -2
             )
+            tokens = tokens + layer["channel"](tokens)
 
-    def forward(self, x: torch.Tensor, feature_indices: Dict[str, int]) -> torch.Tensor:
-        outputs = []
-        for name, embed in self.embeds.items():
-            idx = feature_indices[name]
-            feat_x = x[:, :, idx].long()
-            outputs.append(embed(feat_x))
-        return torch.cat(outputs, dim=-1)
+        hard_gate = torch.ones(tokens.shape[:-1], device=x.device, dtype=tokens.dtype)
+        hard_gate[..., 7] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
+        soft_gate = torch.sigmoid(self.gate(tokens)).squeeze(-1)
+        gate = hard_gate * soft_gate
+
+        pooled = (tokens * gate.unsqueeze(-1)).sum(dim=-2) / gate.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-4)
+        return self.out(pooled)
 
 
 class SpanMasker(nn.Module):
@@ -242,27 +337,27 @@ class SpanMasker(nn.Module):
         return final_mask
 
     def forward(
-        self, x_embed: torch.Tensor, attention_mask: torch.Tensor
+        self, packed_embed: torch.Tensor, attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        is_masked = self._generate_mask(attention_mask)
+        is_masked = self._generate_mask(attention_mask)[attention_mask]
 
-        rand_for_split = torch.rand(x_embed.shape[:2], device=x_embed.device)
+        rand_for_split = torch.rand(packed_embed.shape[0], device=packed_embed.device)
         mask_replace = is_masked & (rand_for_split < 0.8)
         mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
 
-        encoder_input = x_embed.clone()
+        encoder_input = packed_embed.clone()
 
-        batch_size, seq_len = mask_random.shape
-        valid_lengths = attention_mask.sum(dim=1).clamp_min(1)
-        rand_batch = torch.randint(batch_size, (batch_size, seq_len), device=x_embed.device)
-        rand_pos = torch.randint(seq_len, (batch_size, seq_len), device=x_embed.device)
-        rand_pos = rand_pos % valid_lengths[rand_batch]
-        random_embeds = x_embed[rand_batch, rand_pos]
-        encoder_input = torch.where(mask_random.unsqueeze(-1), random_embeds, encoder_input)
+        random_indices = torch.randint(
+            packed_embed.shape[0], (packed_embed.shape[0],), device=packed_embed.device
+        )
+        random_embeds = packed_embed[random_indices]
+        encoder_input = torch.where(
+            mask_random.unsqueeze(-1), random_embeds, encoder_input
+        )
 
         encoder_input = torch.where(
             mask_replace.unsqueeze(-1),
-            self.mask_token_embed.to(x_embed.dtype),
+            self.mask_token_embed.to(packed_embed.dtype).view(1, -1),
             encoder_input,
         )
 

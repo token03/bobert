@@ -57,7 +57,6 @@ def collate_align(
     teacher_dim = teacher_dim or 128
 
     graph_teacher = torch.zeros(len(batch), teacher_dim, dtype=torch.float32)
-    status_labels = torch.zeros(len(batch), dtype=torch.float32)
     has_teacher = torch.zeros(len(batch), dtype=torch.bool)
     for i, target in enumerate(targets):
         teacher = target.get("graph_embedding", [])
@@ -65,7 +64,6 @@ def collate_align(
             teacher_tensor = torch.tensor(teacher[:teacher_dim], dtype=torch.float32)
             graph_teacher[i, : teacher_tensor.shape[0]] = teacher_tensor
             has_teacher[i] = True
-        status_labels[i] = 1.0 if target.get("status_group") == "ranked" else 0.0
 
     id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
     positive_weights = torch.zeros(len(batch), len(batch), dtype=torch.float32)
@@ -107,7 +105,6 @@ def collate_align(
         cu_seqlens,
         graph_teacher,
         has_teacher,
-        status_labels,
         positive_weights,
         ignore_contrastive,
         stack_dicts(attrs),

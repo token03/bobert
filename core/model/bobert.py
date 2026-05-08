@@ -18,10 +18,9 @@ from ..data.beatmap import DIFFICULTY_ATTRIBUTES
 from .components import (
     SpanMasker,
     BobertEncoderLayer,
-    NumericalGroupEmbedder,
-    CategoricalGroupEmbedder,
+    HitObjectFeatureTokenizer,
 )
-from ..data.hitobject import HitObject, FEATURE_GROUPS
+from ..data.hitobject import HitObject
 
 T = TypeVar("T", bound="BobertModel")
 
@@ -38,8 +37,15 @@ class BobertModel(nn.Module):
         dropout: float = 0.1,
         max_seq_len: int = 2048,
         activation_checkpointing: bool = False,
+        input_tokenizer: str = "feature_mixer",
+        feature_token_dim: int = 32,
+        feature_mixer_layers: int = 1,
+        feature_pooling: str = "gated_sum",
     ):
         super().__init__()
+        if input_tokenizer != "feature_mixer":
+            raise ValueError(f"unsupported input_tokenizer={input_tokenizer!r}")
+
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
@@ -47,44 +53,12 @@ class BobertModel(nn.Module):
         self.global_attention_layers = set(global_attention_layers)
 
         self.feature_info = HitObject.get_feature_info()
-
-        self.spatial_indices = [
-            self.feature_info["continuous"][name]
-            for name in FEATURE_GROUPS["spatial"]["features"]
-        ]
-        self.rhythm_indices = [
-            self.feature_info["continuous"][name]
-            for name in FEATURE_GROUPS["rhythm"]["features"]
-        ]
-        self.slider_indices = [
-            self.feature_info["continuous"][name]
-            for name in FEATURE_GROUPS["slider"]["features"]
-        ]
-
-        self.spatial_embedder = NumericalGroupEmbedder(
-            input_dim=len(self.spatial_indices),
-            output_dim=FEATURE_GROUPS["spatial"]["output_dim"],
-        )
-        self.rhythm_embedder = NumericalGroupEmbedder(
-            input_dim=len(self.rhythm_indices),
-            output_dim=FEATURE_GROUPS["rhythm"]["output_dim"],
-        )
-        self.slider_embedder = NumericalGroupEmbedder(
-            input_dim=len(self.slider_indices),
-            output_dim=FEATURE_GROUPS["slider"]["output_dim"],
-        )
-
-        self.cat_feature_indices = {
-            name: self.feature_info["categorical"][name]["index"]
-            for name in FEATURE_GROUPS["categorical"]["features"]
-        }
-        cat_info_subset = {
-            name: self.feature_info["categorical"][name]
-            for name in self.cat_feature_indices
-        }
-        self.categorical_embedder = CategoricalGroupEmbedder(
-            cat_info=cat_info_subset,
-            total_output_dim=FEATURE_GROUPS["categorical"]["output_dim"],
+        self.feature_tokenizer = HitObjectFeatureTokenizer(
+            feature_info=self.feature_info,
+            d_feat=feature_token_dim,
+            d_model=d_model,
+            mixer_layers=feature_mixer_layers,
+            pooling=feature_pooling,
         )
 
         self.layers = nn.ModuleList(
@@ -128,6 +102,10 @@ class BobertModel(nn.Module):
             activation_checkpointing=components_config.get(
                 "activation_checkpointing", False
             ),
+            input_tokenizer=model_config.get("input_tokenizer", "feature_mixer"),
+            feature_token_dim=model_config.get("feature_token_dim", 32),
+            feature_mixer_layers=model_config.get("feature_mixer_layers", 1),
+            feature_pooling=model_config.get("feature_pooling", "gated_sum"),
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -144,17 +122,7 @@ class BobertModel(nn.Module):
         }
 
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
-        spatial_embed = self.spatial_embedder(x[:, :, self.spatial_indices])
-        rhythm_embed = self.rhythm_embedder(x[:, :, self.rhythm_indices])
-        slider_embed = self.slider_embedder(x[:, :, self.slider_indices])
-
-        cat_embed = self.categorical_embedder(x, self.cat_feature_indices)
-
-        x_embed = torch.cat(
-            [spatial_embed, rhythm_embed, slider_embed, cat_embed], dim=-1
-        )
-
-        return x_embed
+        return self.feature_tokenizer(x)
 
     def _embed(
         self,
@@ -162,13 +130,11 @@ class BobertModel(nn.Module):
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x_embed = self.embed_sequences(x)
-
         if cu_seqlens is None:
             seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
             cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
 
-        packed_embed = x_embed[attention_mask]
+        packed_embed = self.embed_sequences(x[attention_mask])
 
         return packed_embed, attention_mask, cu_seqlens
 
@@ -493,10 +459,8 @@ class BobertMaskedLMHead(nn.Module):
         self,
         packed_output: torch.Tensor,
         is_masked: torch.Tensor,
-        attention_mask: torch.Tensor,
     ) -> Dict[str, Any]:
-        masked_in_packed = is_masked.flatten()[attention_mask.flatten()]
-        masked_packed_indices = torch.nonzero(masked_in_packed, as_tuple=True)[0]
+        masked_packed_indices = torch.nonzero(is_masked, as_tuple=True)[0]
         masked_output = packed_output[masked_packed_indices]
 
         continuous_preds = self.continuous_head(masked_output)
@@ -573,8 +537,9 @@ class BobertForPretraining(nn.Module):
         if config.components.get("compile_model", False):
             print("Compiling BERT pre-training model with torch.compile...")
             compile_mode = config.components.get("compile_mode", "default")
+            compile_dynamic = config.components.get("compile_dynamic", True)
             model.is_compiled = True
-            model = torch.compile(model, mode=compile_mode, dynamic=True)
+            model = torch.compile(model, mode=compile_mode, dynamic=compile_dynamic)
             model = cast(BobertForPretraining, model)
 
         return model
@@ -588,28 +553,29 @@ class BobertForPretraining(nn.Module):
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        x_embed = self.bert.embed_sequences(x)
-
-        encoder_x_input, is_masked = self.masker(x_embed, attention_mask)
-
         if cu_seqlens is None:
             seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
             cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
 
-        packed_input = encoder_x_input[attention_mask]
+        packed_targets = x[attention_mask]
+        packed_embed = self.bert.embed_sequences(packed_targets)
+        packed_input, is_masked = self.masker(
+            packed_embed,
+            attention_mask,
+        )
         max_seqlen = x.shape[1]
 
         packed_output = self.bert.encode(
             packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
 
-        mlm_predictions = self.mlm_head(packed_output, is_masked, attention_mask)
+        mlm_predictions = self.mlm_head(packed_output, is_masked)
 
         difficulty_predictions = self.difficulty_head(packed_output, cu_seqlens)
 
         predictions = {"mlm": mlm_predictions, "difficulty": difficulty_predictions}
 
-        return predictions, x, is_masked
+        return predictions, packed_targets, is_masked
 
 
 class BobertForAlignment(nn.Module):
@@ -638,8 +604,10 @@ class BobertForAlignment(nn.Module):
         )
         self.graph_head = nn.Linear(contrastive_dim, teacher_dim)
         self.difficulty_head = nn.Linear(aux_dim, len(DIFFICULTY_ATTRIBUTES))
-        self.status_head = nn.Linear(aux_dim, 1)
         self.is_compiled = False
+
+        for parameter in self.bert.feature_tokenizer.parameters():
+            parameter.requires_grad = False
 
     def freeze_bert_except_top_layers(self, trainable_layers: int) -> None:
         if trainable_layers < 0 or trainable_layers > self.bert.n_layers:
@@ -716,8 +684,9 @@ class BobertForAlignment(nn.Module):
         if config.components.get("compile_model", False):
             print("Compiling BERT alignment model with torch.compile...")
             compile_mode = config.components.get("compile_mode", "default")
+            compile_dynamic = config.components.get("compile_dynamic", True)
             model.is_compiled = True
-            model = torch.compile(model, mode=compile_mode, dynamic=True)
+            model = torch.compile(model, mode=compile_mode, dynamic=compile_dynamic)
             model = cast(BobertForAlignment, model)
 
         return model
@@ -762,7 +731,6 @@ class BobertForAlignment(nn.Module):
             "graph_embedding": graph_embedding,
             "sequence_representation": contrastive_pooled,
             "aux_sequence_representation": aux_pooled,
-            "status_logits": self.status_head(aux_pooled).squeeze(-1),
             "difficulty": {
                 name: difficulty_raw[:, i]
                 for i, name in enumerate(DIFFICULTY_ATTRIBUTES)

@@ -53,8 +53,6 @@ HITOBJECTS_SCHEMA = {
     "hard_anchor_ratio": pl.Float32,
     "slider_end_x": pl.Int32,
     "slider_end_y": pl.Int32,
-    "beat_in_measure": pl.Int32,
-    "rhythmic_snap": pl.Int32,
 }
 
 CURVEPOINTS_SCHEMA = {
@@ -112,8 +110,6 @@ def extract_hitobject_records(beatmap: RawBeatmap) -> List[Dict]:
                 "hard_anchor_ratio": ho.hard_anchor_ratio,
                 "slider_end_x": ho.slider_end_x,
                 "slider_end_y": ho.slider_end_y,
-                "beat_in_measure": ho.beat_in_measure,
-                "rhythmic_snap": ho.rhythmic_snap,
             }
         )
     return records

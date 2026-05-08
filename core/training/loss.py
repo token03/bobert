@@ -225,16 +225,5 @@ def alignment_loss_fn(
         losses.update(diff_losses)
         total_loss = total_loss + diff_losses["difficulty_loss"]
 
-    status_labels = labels.get("status_labels")
-    if status_labels is not None:
-        status_loss = F.binary_cross_entropy_with_logits(
-            predictions["status_logits"],
-            status_labels.to(predictions["status_logits"].dtype),
-        )
-    else:
-        status_loss = torch.zeros((), device=device)
-    losses["status_loss"] = status_loss
-    total_loss = total_loss + status_loss * float(phase_config.get("status_weight", 0.05))
-
     losses["total_loss"] = total_loss
     return losses

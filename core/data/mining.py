@@ -39,7 +39,7 @@ CACHE_LIST_COLUMNS = [
 @dataclass(frozen=True)
 class MiningConfig:
     top_k: int = 32
-    candidate_k: int = 256
+    candidate_k: int = 512
     block_size: int = 256
     alignment_size: int | None = None
     random_seed: int = 42
@@ -49,7 +49,7 @@ class MiningConfig:
     target_difficulty_close_k: int = 64
     target_positives_per_anchor: int = 4
     min_positives_per_anchor: int = 2
-    positive_max_star_delta: float = 0.75
+    positive_max_star_delta: float = 0.3
     trivial_duplicate_star_delta: float = 0.01
     hard_negative_far_difficulty_quantile: float = 0.80
     hard_negative_far_embedding_quantile: float = 0.30
@@ -128,7 +128,7 @@ def load_cache(
 def build_cache(
     data_dir: str | Path = "data",
     dataset_dir: str | Path | None = None,
-    output_path: str | Path = "data/mining_cache.parquet",
+    output_path: str | Path = "data/candidates.parquet",
     config: MiningConfig | None = None,
 ) -> pl.DataFrame:
     cfg = config or MiningConfig()
@@ -141,15 +141,35 @@ def build_cache(
 
     table = _load_table(data_path, dataset_path, cfg, rng)
     query_indices = np.arange(table.size, dtype=np.int64)
+    ranked_indices = np.flatnonzero(table.status_groups == "ranked").astype(np.int64)
+    unranked_indices = np.flatnonzero(table.status_groups == "unranked").astype(np.int64)
 
-    graph_idx, graph_scores = _topk_faiss(
+    ranked_graph_idx, ranked_graph_scores = _topk_faiss(
         table.graph,
         query_indices,
+        index_indices=ranked_indices,
         candidate_k=cfg.candidate_k,
         block_size=cfg.block_size,
-        desc="Graph neighbors",
+        desc="Ranked graph neighbors",
         metric="ip",
         use_gpu=cfg.use_faiss_gpu,
+    )
+    unranked_graph_idx, unranked_graph_scores = _topk_faiss(
+        table.graph,
+        query_indices,
+        index_indices=unranked_indices,
+        candidate_k=cfg.candidate_k,
+        block_size=cfg.block_size,
+        desc="Unranked graph neighbors",
+        metric="ip",
+        use_gpu=cfg.use_faiss_gpu,
+    )
+    graph_idx, graph_scores = _merge_status_graph_candidates(
+        table,
+        ranked_graph_idx,
+        ranked_graph_scores,
+        unranked_graph_idx,
+        unranked_graph_scores,
     )
 
     row_index = _build_row_candidate_index(table, cfg)
@@ -292,13 +312,20 @@ def _topk_faiss(
     candidate_k: int,
     block_size: int,
     desc: str,
+    index_indices: np.ndarray | None = None,
     metric: str = "ip",
     use_gpu: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     import faiss
 
     matrix = np.ascontiguousarray(matrix.astype(np.float32, copy=False))
-    n, dim = matrix.shape
+    index_matrix = matrix if index_indices is None else matrix[index_indices]
+    n, dim = index_matrix.shape
+    if n == 0:
+        return (
+            np.empty((len(query_indices), 0), dtype=np.int32),
+            np.empty((len(query_indices), 0), dtype=np.float32),
+        )
     k = min(candidate_k + 1, n)
 
     if metric == "ip":
@@ -313,7 +340,7 @@ def _topk_faiss(
         gpu_resources = faiss.StandardGpuResources()
         index = faiss.index_cpu_to_gpu(gpu_resources, 0, index)
 
-    index.add(matrix)
+    index.add(index_matrix)
     all_indices: list[np.ndarray] = []
     all_scores: list[np.ndarray] = []
 
@@ -321,10 +348,50 @@ def _topk_faiss(
     for start in tqdm(starts, total=len(starts), desc=desc, unit="blocks"):
         qidx = query_indices[start : start + block_size]
         scores, idx = index.search(matrix[qidx], k)
+        if index_indices is not None:
+            mapped_idx = np.full_like(idx, -1)
+            valid = idx >= 0
+            mapped_idx[valid] = index_indices[idx[valid]]
+            idx = mapped_idx
         all_indices.append(idx.astype(np.int32, copy=False))
         all_scores.append(scores.astype(np.float32, copy=False))
 
     return np.vstack(all_indices), np.vstack(all_scores)
+
+
+def _merge_status_graph_candidates(
+    table: MiningTable,
+    ranked_idx: np.ndarray,
+    ranked_scores: np.ndarray,
+    unranked_idx: np.ndarray,
+    unranked_scores: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    width = max(ranked_idx.shape[1], unranked_idx.shape[1])
+    ranked_idx, ranked_scores = _pad_topk(ranked_idx, ranked_scores, width)
+    unranked_idx, unranked_scores = _pad_topk(unranked_idx, unranked_scores, width)
+
+    ranked_anchor = (table.status_groups == "ranked")[:, None]
+    same_idx = np.where(ranked_anchor, ranked_idx, unranked_idx)
+    same_scores = np.where(ranked_anchor, ranked_scores, unranked_scores)
+    cross_idx = np.where(ranked_anchor, unranked_idx, ranked_idx)
+    cross_scores = np.where(ranked_anchor, unranked_scores, ranked_scores)
+    return (
+        np.concatenate([same_idx, cross_idx], axis=1),
+        np.concatenate([same_scores, cross_scores], axis=1),
+    )
+
+
+def _pad_topk(
+    indices: np.ndarray, scores: np.ndarray, width: int
+) -> tuple[np.ndarray, np.ndarray]:
+    if indices.shape[1] == width:
+        return indices, scores
+
+    padded_indices = np.full((indices.shape[0], width), -1, dtype=indices.dtype)
+    padded_scores = np.full((scores.shape[0], width), -np.inf, dtype=scores.dtype)
+    padded_indices[:, : indices.shape[1]] = indices
+    padded_scores[:, : scores.shape[1]] = scores
+    return padded_indices, padded_scores
 
 
 def _build_row_candidate_index(
@@ -368,7 +435,7 @@ def _build_rows(
         anch_stars = table.stars[start:end, None]
 
         def process_candidates(
-            cand_idx: np.ndarray, cand_scores: np.ndarray, multiplier: float
+            cand_idx: np.ndarray, _cand_scores: np.ndarray, multiplier: float
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             valid = (cand_idx >= 0) & (cand_idx != anchor_idx)
             safe_idx = np.where(valid, cand_idx, 0)
@@ -402,12 +469,21 @@ def _build_rows(
 
             radius_safe = np.maximum(positive_radius, 1e-6)[:, None]
             diff_w = np.exp(-0.5 * (diff_deltas / radius_safe) ** 2)
-            score = np.maximum(cand_scores, 0.0) * diff_w * multiplier
 
-            cross_mask = mask & (anch_status != table.status_groups[safe_idx])
-            target_cross_mask = target_mask & (
-                anch_status != table.status_groups[safe_idx]
+            same_status = anch_status == table.status_groups[safe_idx]
+            same_pool = valid & same_status
+            cross_pool = valid & ~same_status
+            same_rank = np.cumsum(same_pool, axis=1)
+            cross_rank = np.cumsum(cross_pool, axis=1)
+            local_rank_w = np.where(
+                same_pool,
+                1.0 / np.maximum(same_rank, 1),
+                np.where(cross_pool, 1.0 / np.maximum(cross_rank, 1), 0.0),
             )
+            score = local_rank_w * diff_w * multiplier
+
+            cross_mask = mask & cross_pool
+            target_cross_mask = target_mask & cross_pool
 
             return (
                 safe_idx,
@@ -435,7 +511,6 @@ def _build_rows(
         valid_emb = (emb_pool >= 0) & (emb_pool != anchor_idx)
         safe_emb = np.where(valid_emb, emb_pool, 0)
 
-        emb_same_status = anch_status == table.status_groups[safe_emb]
         emb_not_same_set = anch_set != table.beatmapset_ids[safe_emb]
 
         delta_e = table.difficulty[safe_emb] - anch_diff
@@ -466,8 +541,7 @@ def _build_rows(
         diff_far_radius = np.nan_to_num(diff_far_radius, nan=np.inf)
 
         mask_emb = (
-            emb_same_status
-            & emb_not_same_set
+            emb_not_same_set
             & embedding_close
             & (emb_diff_dist >= diff_far_radius[:, None])
             & ~emb_trivial_duplicate
@@ -492,7 +566,6 @@ def _build_rows(
         valid_diff = (diff_pool >= 0) & (diff_pool != anchor_idx)
         safe_diff = np.where(valid_diff, diff_pool, 0)
 
-        diff_same_status = anch_status == table.status_groups[safe_diff]
         diff_not_same_set = anch_set != table.beatmapset_ids[safe_diff]
 
         delta_d = table.difficulty[safe_diff] - anch_diff
@@ -525,8 +598,7 @@ def _build_rows(
         emb_far_sim = np.nan_to_num(emb_far_sim, nan=-np.inf)
 
         mask_diff = (
-            diff_same_status
-            & diff_not_same_set
+            diff_not_same_set
             & difficulty_close
             & (diff_sim <= emb_far_sim[:, None])
             & ~diff_trivial_duplicate

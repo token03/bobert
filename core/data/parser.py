@@ -6,7 +6,6 @@ OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
 OBJECT_TYPE_SPINNER = 2
 
-EPSILON = 1e-4
 MAX_TIME_MS = 36000000
 
 
@@ -32,8 +31,6 @@ class RawHitObject(NamedTuple):
     hit_sound: int
     bpm: float
     kiai_time: int
-    beat_in_measure: int
-    rhythmic_snap: int
     num_anchors: int
     hard_anchor_ratio: float
     slider_end_x: int
@@ -58,27 +55,6 @@ class TimingSection(NamedTuple):
     start_time: int
     uninherited: RawTimingPoint
     effective: RawTimingPoint
-
-
-def _get_rhythmic_snap(beat_fraction: float) -> int:
-    f = beat_fraction % 1.0
-    if f < EPSILON or f > 1.0 - EPSILON:
-        return 0
-    if abs(f - 0.5) < EPSILON:
-        return 1
-    if any(abs(f - target) < EPSILON for target in [0.25, 0.75]):
-        return 2
-    if any(abs(f - target) < EPSILON for target in [1 / 3, 2 / 3, 1 / 6, 5 / 6]):
-        return 3
-    targets_1_8 = [1 / 8, 3 / 8, 5 / 8, 7 / 8]
-    targets_1_12 = [1 / 12, 5 / 12, 7 / 12, 11 / 12]
-    targets_1_16 = [1 / 16, 3 / 16, 5 / 16, 7 / 16, 9 / 16, 11 / 16, 13 / 16, 15 / 16]
-    if any(
-        abs(f - target) < EPSILON
-        for target in targets_1_8 + targets_1_12 + targets_1_16
-    ):
-        return 4
-    return 5
 
 
 def _preprocess_timing_points(
@@ -228,29 +204,16 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
 
             bpm = 120.0
             kiai = 0
-            beat_in_measure = 0
-            rhythmic_snap = 0
 
             idx = bisect.bisect_right(section_start_times, time) - 1
             if idx >= 0:
                 section = timing_sections[idx]
                 beat_length = section.uninherited.beat_length
-                meter = section.uninherited.meter
 
                 if beat_length > 0:
                     bpm = 60000.0 / beat_length
                 if section.effective.effects & 1:
                     kiai = 1
-
-                if beat_length > 0 and meter > 0:
-                    time_in_section_ms = time - section.start_time
-                    beats_in_section = time_in_section_ms / beat_length
-                    beats_in_measure_float = beats_in_section % meter
-                    beat_in_measure = min(int(beats_in_measure_float), 7)
-                    beat_fraction = beats_in_section - int(beats_in_section)
-                    if beat_fraction > 1.0 - EPSILON:
-                        beat_fraction = 0.0
-                    rhythmic_snap = _get_rhythmic_snap(beat_fraction)
 
             curve_type = None
             curve_points = None
@@ -342,8 +305,6 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                     hit_sound=hit_sound,
                     bpm=bpm,
                     kiai_time=kiai,
-                    beat_in_measure=beat_in_measure,
-                    rhythmic_snap=rhythmic_snap,
                     num_anchors=num_anchors,
                     hard_anchor_ratio=hard_anchor_ratio,
                     slider_end_x=slider_end_x,

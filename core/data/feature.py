@@ -33,7 +33,7 @@ def _calculate_nps_vectorized(
         return np.array([], dtype=np.float32)
         
     times_64 = times.astype(np.float64)
-    
+
     map_indices = np.zeros(len(times_64), dtype=np.int32)
     if len(split_indices) > 0:
         map_indices[split_indices] = 1
@@ -161,6 +161,11 @@ def _apply_geometric_features(
     if len(split_indices) > 0:
         is_new_map[split_indices] = True
 
+    is_last_in_map = np.zeros(len(df), dtype=bool)
+    is_last_in_map[-1] = True
+    if len(split_indices) > 0:
+        is_last_in_map[split_indices - 1] = True
+
     norm_x = np.clip((x - CENTER_X) / CENTER_X, -1.0, 1.0)
     norm_y = np.clip((y - CENTER_Y) / CENTER_Y, -1.0, 1.0)
 
@@ -174,6 +179,8 @@ def _apply_geometric_features(
 
     next_x = np.roll(x, -1)
     next_y = np.roll(y, -1)
+    next_x[is_last_in_map] = x[is_last_in_map]
+    next_y[is_last_in_map] = y[is_last_in_map]
 
     v1_x, v1_y = delta_x, delta_y
     v2_x, v2_y = next_x - x, next_y - y
@@ -182,11 +189,12 @@ def _apply_geometric_features(
     norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
 
     dot = v1_x * v2_x + v1_y * v2_y
+    cross = v1_x * v2_y - v1_y * v2_x
     denom = norm_v1 * norm_v2
-    cos_theta = np.divide(dot, denom, out=np.zeros_like(dot), where=denom != 0)
-
-    angle = np.arccos(np.clip(cos_theta, -1.0, 1.0))
-    angle = np.nan_to_num(angle, nan=np.pi)
+    relative_cos = np.divide(dot, denom, out=np.zeros_like(dot), where=denom != 0)
+    relative_sin = np.divide(cross, denom, out=np.zeros_like(cross), where=denom != 0)
+    relative_cos = np.clip(relative_cos, -1.0, 1.0)
+    relative_sin = np.clip(relative_sin, -1.0, 1.0)
 
     df = df.with_columns(
         pl.Series("norm_x", norm_x),
@@ -194,7 +202,8 @@ def _apply_geometric_features(
         pl.Series("delta_x", delta_x),
         pl.Series("delta_y", delta_y),
         pl.Series("dist", dist),
-        pl.Series("relative_angle", angle),
+        pl.Series("relative_cos", relative_cos),
+        pl.Series("relative_sin", relative_sin),
     )
 
     return df

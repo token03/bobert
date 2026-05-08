@@ -58,41 +58,6 @@ def canonicalize_bpm_array(bpm: np.ndarray) -> np.ndarray:
 
     return canonical
 
-FEATURE_GROUPS = {
-    "spatial": {
-        "features": ["norm_x", "norm_y", "delta_x", "delta_y", "relative_angle"],
-        "output_dim": 144,  # 192 * 0.75
-    },
-    "rhythm": {
-        "features": [
-            "log_time_diff_ms",
-            "notes_per_second",
-            "velocity",
-            "rhythm_change",
-        ],
-        "output_dim": 120,  # 160 * 0.75
-    },
-    "slider": {
-        "features": [
-            "log_slider_pixel_length",
-            "log_slider_repeats",
-            "slider_tortuosity",
-        ],
-        "output_dim": 48,   # 64 * 0.75
-    },
-    "categorical": {
-        "features": [
-            "object_type",
-            "is_new_combo",
-            "beat_in_measure",
-            "time_diff_bin",
-            "rhythmic_snap",
-        ],
-        "output_dim": 72,   # 96 * 0.75
-    },
-}
-
-
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
     STANDARD = "standard"
@@ -125,7 +90,8 @@ class HitObject(NamedTuple):
     log_time_diff_ms: float
     notes_per_second: float
     velocity: float
-    relative_angle: float
+    relative_cos: float
+    relative_sin: float
     rhythm_change: float
 
     log_slider_pixel_length: float
@@ -211,7 +177,8 @@ class HitObject(NamedTuple):
             "log_time_diff_ms": NormalizationType.STANDARD,
             "notes_per_second": NormalizationType.STANDARD,
             "velocity": NormalizationType.STANDARD,
-            "relative_angle": NormalizationType.NONE,
+            "relative_cos": NormalizationType.NONE,
+            "relative_sin": NormalizationType.NONE,
             "rhythm_change": NormalizationType.STANDARD,
             "log_slider_pixel_length": NormalizationType.STANDARD,
             "log_slider_repeats": NormalizationType.STANDARD,

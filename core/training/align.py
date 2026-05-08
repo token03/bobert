@@ -67,7 +67,6 @@ class AlignmentModule(pl.LightningModule):
             cu_seqlens,
             graph_teacher,
             has_teacher,
-            status_labels,
             positive_weights,
             ignore_contrastive,
             attrs,
@@ -76,7 +75,6 @@ class AlignmentModule(pl.LightningModule):
         return vectors, attention_mask, cu_seqlens, {
             "graph_teacher": graph_teacher,
             "has_teacher": has_teacher,
-            "status_labels": status_labels,
             "positive_weights": positive_weights,
             "ignore_contrastive": ignore_contrastive,
             "difficulty": attrs,
@@ -93,7 +91,6 @@ class AlignmentModule(pl.LightningModule):
                 "train_loss": loss_dict["total_loss"],
                 "train_contrastive_loss": loss_dict["contrastive_loss"],
                 "train_graph_loss": loss_dict["graph_loss"],
-                "train_status_loss": loss_dict["status_loss"],
             },
             prog_bar=True,
             batch_size=self.batch_size,
@@ -225,6 +222,15 @@ def load_pretraining_weights(
     }
     missing, unexpected = target.load_state_dict(compatible_state, strict=False)
     skipped = sorted(set(state) - set(compatible_state))
+    tokenizer_keys = {
+        key for key in model_state if key.startswith("bert.feature_tokenizer.")
+    }
+    missing_tokenizer_keys = sorted(tokenizer_keys - set(compatible_state))
+    if missing_tokenizer_keys:
+        raise RuntimeError(
+            "Pretraining checkpoint does not contain compatible feature tokenizer weights; "
+            "alignment requires a pretrained tokenizer."
+        )
 
     return {
         "checkpoint_path": checkpoint_path,
@@ -232,6 +238,7 @@ def load_pretraining_weights(
         "skipped": len(skipped),
         "missing": len(missing),
         "unexpected": len(unexpected),
+        "loaded_tokenizer": len(tokenizer_keys),
         "loaded_difficulty_head": "difficulty_head.weight" in compatible_state
         and "difficulty_head.bias" in compatible_state,
     }

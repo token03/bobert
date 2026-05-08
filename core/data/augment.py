@@ -10,6 +10,7 @@ class BeatmapAugmenter:
         self.norm_y_idx = feature_info["continuous"]["norm_y"]
         self.delta_x_idx = feature_info["continuous"]["delta_x"]
         self.delta_y_idx = feature_info["continuous"]["delta_y"]
+        self.relative_sin_idx = feature_info["continuous"]["relative_sin"]
         self.flip_prob = flip_prob
 
     def __call__(self, vectors: torch.Tensor) -> torch.Tensor:
@@ -33,5 +34,7 @@ class BeatmapAugmenter:
         if flip_y:
             aug_vectors[:, self.norm_y_idx] *= -1
             aug_vectors[:, self.delta_y_idx] *= -1
+        if flip_x != flip_y:
+            aug_vectors[:, self.relative_sin_idx] *= -1
 
         return aug_vectors
