@@ -3,7 +3,11 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 
-def pad_batch(vectors: List[torch.Tensor], max_seq_len: int, vector_dim: int):
+def pad_batch(
+    vectors: List[torch.Tensor],
+    max_seq_len: int,
+    vector_dim: int,
+):
     lengths = [min(v.shape[0], max_seq_len) for v in vectors]
     max_len = max(lengths) if lengths else 0
     batch_size = len(vectors)

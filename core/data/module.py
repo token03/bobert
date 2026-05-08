@@ -10,7 +10,7 @@ from .batch import collate_align, collate_pretrain
 from .dataset import BeatmapDataset
 from .mining import load_cache
 from .normalizer import BeatmapNormalizer
-from .sampler import AlignmentBatchSampler
+from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .source import load_beatmap_dataset, setup_dataset
 from .split import random_split_aligned
 
@@ -101,6 +101,46 @@ class BeatmapData(pl.LightningDataModule):
             persistent_workers=num_workers > 0,
         )
 
+    def _length_buckets(self) -> Optional[List[int]]:
+        buckets = self.data_config.get("length_buckets")
+        if not buckets:
+            return None
+        return [int(bucket) for bucket in buckets]
+
+    def _lengths(self, dataset) -> List[int]:
+        max_seq_len = int(self.data_config["max_seq_len"])
+        return [min(int(vec.shape[0]), max_seq_len) for vec in dataset.beatmap_data]
+
+    def _token_budget(self, lengths: List[int], buckets: List[int]) -> int:
+        if not lengths:
+            return self.batch_size * int(self.data_config["max_seq_len"])
+        mean_len = int(round(sum(lengths) / len(lengths)))
+        return self.batch_size * length_bucket(mean_len, buckets)
+
+    def _get_bucketed_train_dataloader(self, dataset, collate_fn, sampler=None):
+        buckets = self._length_buckets()
+        if not buckets:
+            return self._get_dataloader(dataset, True, collate_fn, sampler)
+
+        num_workers = os.cpu_count() or 1
+        lengths = self._lengths(dataset)
+        batch_sampler = LengthBucketBatchSampler(
+            lengths,
+            self.batch_size,
+            buckets,
+            sampler=sampler,
+            max_tokens=self._token_budget(lengths, buckets),
+            seed=self.data_config.get("dataset_seed", 42),
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
+
 
 class PretrainData(BeatmapData):
     def __init__(self, config, dataset_path=None, sampler_fn=None):
@@ -131,7 +171,9 @@ class PretrainData(BeatmapData):
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
         )
-        return self._get_dataloader(self.train_dataset, True, collate, self._sampler)
+        return self._get_bucketed_train_dataloader(
+            self.train_dataset, collate, self._sampler
+        )
 
     def val_dataloader(self):
         collate = partial(
@@ -219,12 +261,17 @@ class AlignData(BeatmapData):
             vector_dim=self.vector_dim,
         )
         if self.train_mining_lookup:
+            buckets = self._length_buckets()
+            lengths = self._lengths(self.train_dataset)
             sampler = AlignmentBatchSampler(
                 self.train_dataset.beatmap_ids,
                 self.train_mining_lookup,
                 self.batch_size,
                 group_size=self._alignment_config().get("group_size", 4),
                 seed=self._alignment_config().get("seed", 42),
+                lengths=lengths if buckets else None,
+                buckets=buckets,
+                max_tokens=self._token_budget(lengths, buckets) if buckets else None,
             )
             return DataLoader(
                 self.train_dataset,

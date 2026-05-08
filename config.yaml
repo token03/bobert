@@ -2,6 +2,7 @@ data:
   dataset_path: './data/dataset'
   dataset_seed: 42
   max_seq_len: 4096
+  length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
   min_sr: 2.0
   max_sr: 14.0
@@ -12,7 +13,7 @@ model:
   n_layers: 9
   dim_feedforward: 960
   dropout: 0.1
-  local_attention_window: 128
+  local_attention_window: 256
   global_attention_layers: [2, 5, 8]
   input_tokenizer: "feature_mixer"
   feature_token_dim: 32
@@ -26,12 +27,12 @@ components:
   activation_checkpointing: true
     
 pretraining:
-  pretrain_size: 80000
-  batch_size: 32
+  pretrain_size: 100000
+  batch_size: 64
   num_epochs: 10
 
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
 
   muon_lr: 0.02
   muon_wd: 0.01

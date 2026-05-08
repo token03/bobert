@@ -1,7 +1,95 @@
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Sized
 
 from torch.utils.data import Sampler
+
+
+def length_bucket(length: int, buckets: Sequence[int]) -> int:
+    for bucket in buckets:
+        if length <= bucket:
+            return int(bucket)
+    return int(buckets[-1])
+
+
+class LengthBucketBatchSampler(Sampler[List[int]]):
+    def __init__(
+        self,
+        lengths: Sequence[int],
+        batch_size: int,
+        buckets: Sequence[int],
+        sampler: Optional[Iterable[int]] = None,
+        max_tokens: Optional[int] = None,
+        seed: Optional[int] = None,
+        drop_last: bool = False,
+    ):
+        if not buckets:
+            raise ValueError("length buckets must not be empty")
+        if sorted(buckets) != list(buckets):
+            raise ValueError("length buckets must be sorted in ascending order")
+
+        self.lengths = [int(length) for length in lengths]
+        self.batch_size = int(batch_size)
+        self.buckets = [int(bucket) for bucket in buckets]
+        self.sampler = sampler
+        self.max_tokens = int(max_tokens) if max_tokens else None
+        self.seed = seed
+        self.drop_last = drop_last
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        counts = {bucket: 0 for bucket in self.buckets}
+        for length in self.lengths:
+            counts[length_bucket(length, self.buckets)] += 1
+
+        sample_count = len(self.lengths)
+        if isinstance(self.sampler, Sized):
+            sample_count = len(self.sampler)
+        scale = sample_count / max(1, len(self.lengths))
+
+        total = 0
+        for bucket, count in counts.items():
+            count = int(round(count * scale))
+            limit = self._bucket_batch_size(bucket)
+            if self.drop_last:
+                total += count // limit
+            else:
+                total += (count + limit - 1) // limit
+        return max(1, total)
+
+    def _bucket_batch_size(self, bucket: int) -> int:
+        if self.max_tokens is None:
+            return self.batch_size
+        return max(1, min(self.batch_size, self.max_tokens // bucket))
+
+    def _indices(self) -> Iterator[int]:
+        if self.sampler is not None:
+            for idx in self.sampler:
+                yield int(idx)
+            return
+
+        indices = list(range(len(self.lengths)))
+        rng = random.Random(None if self.seed is None else self.seed + self.epoch)
+        rng.shuffle(indices)
+        self.epoch += 1
+        for idx in indices:
+            yield idx
+
+    def __iter__(self):
+        pending: Dict[int, List[int]] = {bucket: [] for bucket in self.buckets}
+
+        for idx in self._indices():
+            bucket = length_bucket(self.lengths[idx], self.buckets)
+            batch = pending[bucket]
+            batch.append(idx)
+            if len(batch) == self._bucket_batch_size(bucket):
+                yield batch.copy()
+                batch.clear()
+
+        if not self.drop_last:
+            for bucket in self.buckets:
+                batch = pending[bucket]
+                if batch:
+                    yield batch.copy()
 
 
 class AlignmentBatchSampler(Sampler[List[int]]):
@@ -12,6 +100,9 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         batch_size: int,
         group_size: int = 4,
         seed: int = 42,
+        lengths: Optional[Sequence[int]] = None,
+        buckets: Optional[Sequence[int]] = None,
+        max_tokens: Optional[int] = None,
     ):
         if batch_size % group_size != 0:
             raise ValueError("alignment batch_size must be divisible by group_size")
@@ -23,9 +114,25 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         self.seed = seed
         self.id_to_idx = {bid: i for i, bid in enumerate(self.beatmap_ids)}
         self.groups_per_batch = batch_size // group_size
+        self.lengths = (
+            [int(length) for length in lengths] if lengths is not None else None
+        )
+        self.buckets = [int(bucket) for bucket in buckets] if buckets else None
+        self.max_tokens = int(max_tokens) if max_tokens else None
 
     def __len__(self) -> int:
-        return max(1, len(self.beatmap_ids) // self.batch_size)
+        if self.lengths is None or self.buckets is None:
+            return max(1, len(self.beatmap_ids) // self.batch_size)
+
+        counts = {bucket: 0 for bucket in self.buckets}
+        for length in self.lengths:
+            counts[length_bucket(length, self.buckets)] += 1
+
+        total = 0
+        for bucket, count in counts.items():
+            limit = self._bucket_batch_size(bucket)
+            total += (count + limit - 1) // limit
+        return max(1, total)
 
     def _choose_id(
         self,
@@ -50,11 +157,24 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             return rng.choice(available)
         return rng.choices(available, weights=available_weights, k=1)[0]
 
+    def _bucket_batch_size(self, bucket: int) -> int:
+        if self.max_tokens is None:
+            return self.batch_size
+
+        groups = max(
+            1,
+            min(self.groups_per_batch, self.max_tokens // (bucket * self.group_size)),
+        )
+        return groups * self.group_size
+
     def __iter__(self):
         rng = random.Random(self.seed)
         anchor_indices = list(range(len(self.beatmap_ids)))
         rng.shuffle(anchor_indices)
 
+        batches: Dict[int, List[int]] = (
+            {bucket: [] for bucket in self.buckets} if self.buckets else {}
+        )
         batch: List[int] = []
         for anchor_idx in anchor_indices:
             anchor_id = self.beatmap_ids[anchor_idx]
@@ -104,7 +224,23 @@ class AlignmentBatchSampler(Sampler[List[int]]):
                 group.append(random_idx)
                 group_ids.add(random_id)
 
-            batch.extend(group[: self.group_size])
-            if len(batch) == self.batch_size:
-                yield batch
-                batch = []
+            group = group[: self.group_size]
+            if self.lengths is not None and self.buckets is not None:
+                group_len = max(self.lengths[idx] for idx in group)
+                bucket = length_bucket(group_len, self.buckets)
+                bucket_batch = batches[bucket]
+                bucket_batch.extend(group)
+                if len(bucket_batch) == self._bucket_batch_size(bucket):
+                    yield bucket_batch.copy()
+                    bucket_batch.clear()
+            else:
+                batch.extend(group)
+                if len(batch) == self.batch_size:
+                    yield batch
+                    batch = []
+
+        if self.lengths is not None and self.buckets is not None:
+            for bucket in self.buckets:
+                bucket_batch = batches[bucket]
+                if bucket_batch:
+                    yield bucket_batch.copy()
