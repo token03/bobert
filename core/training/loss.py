@@ -91,11 +91,12 @@ def difficulty_loss_fn(
 
     device = next(iter(predictions.values())).device
     unscaled_sum = torch.zeros((), device=device)
+    beta = float(phase_config.get("difficulty_huber_beta", 1.0))
 
     for key in DIFFICULTY_ATTRIBUTES:
         if key in predictions and key in labels:
             weight = per_attr_weights.get(key, 1.0)
-            loss = F.mse_loss(predictions[key], labels[key])
+            loss = F.smooth_l1_loss(predictions[key], labels[key], beta=beta)
             losses[f"{key}_loss"] = loss
             unscaled_sum = unscaled_sum + weight * loss
 

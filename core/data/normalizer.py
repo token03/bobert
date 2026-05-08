@@ -29,6 +29,25 @@ class BeatmapNormalizer:
                 normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
         return normalized_vectors
 
+    def normalize_attribute(self, key: str, value: float) -> float:
+        if key not in self.attribute_stats:
+            return value
+
+        mean, std = self.attribute_stats[key]
+        normalized = (torch.as_tensor(value, dtype=torch.float32) - mean) / (
+            std + self.epsilon
+        )
+        return float(normalized)
+
+    def denormalize_attribute(self, key: str, value: torch.Tensor) -> torch.Tensor:
+        if key not in self.attribute_stats:
+            return value
+
+        mean, std = self.attribute_stats[key]
+        return value * (std.to(device=value.device, dtype=value.dtype) + self.epsilon) + (
+            mean.to(device=value.device, dtype=value.dtype)
+        )
+
     @classmethod
     def from_data(
         cls,

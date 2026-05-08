@@ -158,10 +158,18 @@ class PretrainData(BeatmapData):
     def _create_datasets(self, train_s, val_s):
         return (
             BeatmapDataset(
-                train_s["data"], self.normalizer, train_s["attrs"], is_training=True
+                train_s["data"],
+                self.normalizer,
+                train_s["attrs"],
+                is_training=True,
+                max_seq_len=self.data_config["max_seq_len"],
             ),
             BeatmapDataset(
-                val_s["data"], self.normalizer, val_s["attrs"], is_training=False
+                val_s["data"],
+                self.normalizer,
+                val_s["attrs"],
+                is_training=False,
+                max_seq_len=self.data_config["max_seq_len"],
             ),
         )
 
@@ -231,6 +239,7 @@ class AlignData(BeatmapData):
             is_training=True,
             beatmap_ids=train_s["ids"],
             alignment_targets=mining_targets,
+            max_seq_len=self.data_config["max_seq_len"],
         )
         self.val_dataset = BeatmapDataset(
             val_s["data"],
@@ -239,6 +248,7 @@ class AlignData(BeatmapData):
             is_training=False,
             beatmap_ids=val_s["ids"],
             alignment_targets=mining_targets,
+            max_seq_len=self.data_config["max_seq_len"],
         )
         self.train_mining_lookup = {
             int(bid): mining_targets[int(bid)]

@@ -170,13 +170,12 @@ def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
 
     beatmaps_df = pl.DataFrame([extract_beatmap_record(raw_beatmap)])
     hitobjects_df = pl.DataFrame(extract_hitobject_records(raw_beatmap))
-    vectors, ids, original_counts = build_feature_tensors(beatmaps_df, hitobjects_df)
+    vectors, _ids, _ = build_feature_tensors(beatmaps_df, hitobjects_df)
     if not vectors:
         raise ValueError(f"Could not engineer hitobject features for {path}")
 
-    beatmap_id = int(ids[0])
-    original_count = original_counts.get(beatmap_id, vectors[0].shape[0])
-    truncate_len = min(original_count, max_seq_len)
+    expanded_count = vectors[0].shape[0]
+    truncate_len = min(expanded_count, max_seq_len or expanded_count)
     return vectors[0][:truncate_len]
 
 

@@ -45,6 +45,8 @@ class PretrainingModule(pl.LightningModule):
         return predictions, targets, mask, difficulty_labels, loss_dict
 
     def on_fit_start(self):
+        self.difficulty_metrics.normalizer = self.datamodule.normalizer
+
         if self.global_rank == 0:
             print("Running warmup pass to initialize RoPE cache to max_seq_len...")
 

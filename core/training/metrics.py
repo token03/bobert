@@ -7,6 +7,7 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import FBetaScore
 
 from core.data.beatmap import DIFFICULTY_ATTRIBUTES
+from core.data.normalizer import BeatmapNormalizer
 
 
 class MLMMetrics(nn.Module):
@@ -111,9 +112,12 @@ class MLMMetrics(nn.Module):
 
 
 class DifficultyMetrics(nn.Module):
-    def __init__(self, device: torch.device):
+    def __init__(
+        self, device: torch.device, normalizer: Optional[BeatmapNormalizer] = None
+    ):
         super().__init__()
         self._device = device
+        self.normalizer = normalizer
 
         self.attr_metrics = MetricCollection(
             {f"{name}_mae": MeanMetric() for name in DIFFICULTY_ATTRIBUTES}
@@ -132,7 +136,11 @@ class DifficultyMetrics(nn.Module):
 
         for key, preds in predictions.items():
             if key in labels:
-                mae = torch.abs(preds - labels[key])
+                label = labels[key]
+                if self.normalizer is not None:
+                    preds = self.normalizer.denormalize_attribute(key, preds)
+                    label = self.normalizer.denormalize_attribute(key, label)
+                mae = torch.abs(preds - label)
                 self.attr_metrics[f"{key}_mae"].update(mae)
 
     def compute(self) -> Dict[str, Any]:

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from core.training.metrics import ContrastiveMetrics
+from core.training.metrics import ContrastiveMetrics, DifficultyMetrics
 
 from .setup import create_optimizer, create_scheduler, create_trainer
 from .loss import alignment_loss_fn
@@ -28,6 +28,7 @@ class AlignmentModule(pl.LightningModule):
         phase_config = config["alignment"]
         self.batch_size = phase_config.get("batch_size", 1)
         self.metrics = ContrastiveMetrics(torch.device("cpu"))
+        self.difficulty_metrics = DifficultyMetrics(torch.device("cpu"), normalizer)
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -112,6 +113,12 @@ class AlignmentModule(pl.LightningModule):
         predictions = self(vectors, attention_mask, cu_seqlens)
         loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
+        if "difficulty_loss" in loss_dict:
+            self.difficulty_metrics.update(
+                predictions["difficulty"],
+                labels["difficulty"],
+                loss=float(loss_dict["difficulty_loss"].detach().cpu()),
+            )
         self.log(
             "val_loss",
             loss_dict["total_loss"],
@@ -125,7 +132,22 @@ class AlignmentModule(pl.LightningModule):
         results = self.metrics.compute()
         for key, value in results.items():
             self.log(f"val_{key}", value)
+        diff_results = self.difficulty_metrics.compute()
+        for key, value in self._flatten_metrics(diff_results, prefix="val_diff").items():
+            self.log(key, value)
         self.metrics.reset()
+        self.difficulty_metrics.reset()
+
+    @staticmethod
+    def _flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
+        flat = {}
+        for key, value in metrics.items():
+            new_key = f"{prefix}_{key}" if prefix else key
+            if isinstance(value, dict):
+                flat.update(AlignmentModule._flatten_metrics(value, new_key))
+            else:
+                flat[new_key] = value
+        return flat
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         if self.normalizer:

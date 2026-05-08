@@ -91,12 +91,14 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
     muon_params = []
 
     for p in model.bert.layers.parameters():
-        if p.ndim >= 2:
+        if p.requires_grad and p.ndim >= 2:
             muon_params.append(p)
 
     muon_param_ids = {id(p) for p in muon_params}
 
-    adam_params = [p for p in model.parameters() if id(p) not in muon_param_ids]
+    adam_params = [
+        p for p in model.parameters() if p.requires_grad and id(p) not in muon_param_ids
+    ]
 
     param_groups = [
         dict(params=muon_params, use_muon=True, lr=muon_lr, weight_decay=muon_wd),
