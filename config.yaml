@@ -28,11 +28,11 @@ components:
     
 pretraining:
   pretrain_size: 100000
-  batch_size: 32
+  batch_size: 64
   num_epochs: 10
 
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
 
   muon_lr: 0.02
   muon_wd: 0.01
@@ -67,8 +67,8 @@ alignment:
   checkpoint_dir: "./experiments/align"
   model_name: "model"
   trainable_layers: 3
-  batch_size: 96
-  num_epochs: 3
+  batch_size: 128
+  num_epochs: 2
   alignment_size: 100000
 
   embedding_dim: 256

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import cast
 
 import torch
@@ -10,7 +11,7 @@ from core.data.module import PretrainData
 from core.model.bobert import BobertForPretraining
 from core.training import create_kde_sampler
 from core.training.pretrain import setup_pretraining, train
-from core.training.setup import setup_device
+from core.training.setup import find_latest_checkpoint, find_latest_logger_version, setup_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +63,19 @@ def load_config(args: argparse.Namespace) -> DictConfig:
     return config
 
 
+def resolve_resume_checkpoint(args: argparse.Namespace, config: DictConfig) -> Path | None:
+    if not args.resume_ckpt:
+        return None
+    if args.resume_ckpt == "latest":
+        checkpoint = find_latest_checkpoint(config.pretraining.checkpoint_dir)
+        if checkpoint is None:
+            raise FileNotFoundError(
+                f"No checkpoint found in {config.pretraining.checkpoint_dir}"
+            )
+        return checkpoint
+    return Path(args.resume_ckpt)
+
+
 def main() -> int:
     args = parse_args()
     config = load_config(args)
@@ -94,17 +108,32 @@ def main() -> int:
     print(f"Number of Heads: {base_model.bert.n_heads}")
     print(f"Number of Layers: {base_model.bert.n_layers}")
 
-    module, trainer = setup_pretraining(config, datamodule, model)
+    resume_checkpoint = resolve_resume_checkpoint(args, config)
+    logger_version = (
+        find_latest_logger_version(config.pretraining.checkpoint_dir)
+        if resume_checkpoint is not None
+        else None
+    )
+    module, trainer = setup_pretraining(
+        config, datamodule, model, logger_version=logger_version
+    )
 
     print("\nPretraining setup complete.")
     print(f"Total epochs: {config.pretraining.num_epochs}")
     print(f"Training samples: {len(datamodule.train_dataset)}")
     print(f"Validation samples: {len(datamodule.val_dataset)}")
 
-    if args.resume_ckpt:
-        trainer.fit(module, datamodule=datamodule, ckpt_path=args.resume_ckpt)
-    else:
-        train(module, trainer, datamodule)
+    if resume_checkpoint is not None:
+        print(f"Resuming from checkpoint: {resume_checkpoint}")
+        if logger_version is not None:
+            print(f"Appending logs to: logs/version_{logger_version}")
+
+    train(
+        module,
+        trainer,
+        datamodule,
+        ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
+    )
 
     print("\nBoBERT pretraining completed!")
     return 0

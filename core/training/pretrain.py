@@ -1,4 +1,4 @@
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Optional, Tuple
 
 from omegaconf import DictConfig
 import torch
@@ -169,9 +169,10 @@ def setup_pretraining(
     config: DictConfig,
     datamodule: PretrainData,
     model: nn.Module,
+    logger_version: Optional[int] = None,
 ) -> Tuple[PretrainingModule, pl.Trainer]:
     module = PretrainingModule(model, config, datamodule)
-    trainer = create_trainer(config, "pretraining")
+    trainer = create_trainer(config, "pretraining", logger_version=logger_version)
 
     return module, trainer
     
@@ -179,5 +180,11 @@ def train(
     module: PretrainingModule,
     trainer: pl.Trainer,
     datamodule: pl.LightningDataModule,
+    ckpt_path: Optional[str] = None,
 ) -> None:
-    trainer.fit(module, datamodule=datamodule)
+    trainer.fit(
+        module,
+        datamodule=datamodule,
+        ckpt_path=ckpt_path,
+        weights_only=False if ckpt_path is not None else None,
+    )

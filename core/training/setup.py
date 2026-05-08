@@ -1,4 +1,6 @@
+import csv
 import os
+from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
@@ -6,6 +8,7 @@ from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
+from pytorch_lightning.loggers.csv_logs import ExperimentWriter
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -20,6 +23,61 @@ from muon import SingleDeviceMuonWithAuxAdam
 
 def setup_device() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
+
+
+def find_latest_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
+    checkpoint_dir = Path(checkpoint_dir)
+    search_dirs = [checkpoint_dir / "checkpoints", checkpoint_dir]
+
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+
+        candidates = sorted(
+            search_dir.glob("last*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        candidates = candidates or sorted(
+            search_dir.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
+        if candidates:
+            return candidates[0]
+
+    return None
+
+
+def find_latest_logger_version(checkpoint_dir: str | Path) -> Optional[int]:
+    logs_dir = Path(checkpoint_dir) / "logs"
+    if not logs_dir.exists():
+        return None
+
+    versions = []
+    for path in logs_dir.glob("version_*"):
+        if path.is_dir() and path.name.removeprefix("version_").isdigit():
+            versions.append(int(path.name.removeprefix("version_")))
+
+    return max(versions) if versions else None
+
+
+class AppendExperimentWriter(ExperimentWriter):
+    def _check_log_dir_exists(self) -> None:
+        return
+
+    def __init__(self, log_dir: str) -> None:
+        super().__init__(log_dir=log_dir)
+        if self._fs.isfile(self.metrics_file_path):
+            with self._fs.open(self.metrics_file_path, "r", newline="") as file:
+                self.metrics_keys = csv.DictReader(file).fieldnames or []
+
+
+class AppendCSVLogger(CSVLogger):
+    @property
+    def experiment(self):
+        if self._experiment is not None:
+            return self._experiment
+
+        self._fs.makedirs(self.root_dir, exist_ok=True)
+        self._experiment = AppendExperimentWriter(log_dir=self.log_dir)
+        return self._experiment
 
 def create_kde_sampler(
     difficulty_ratings: np.ndarray,
@@ -166,6 +224,7 @@ def create_trainer(
     config: DictConfig,
     phase: str,
     extra_callbacks: Optional[List[pl.Callback]] = None,
+    logger_version: Optional[int] = None,
 ) -> pl.Trainer:
     phase_config = config[phase]
     base_dir = phase_config["checkpoint_dir"]
@@ -193,7 +252,8 @@ def create_trainer(
     use_amp = phase_config.get("use_amp", False)
     precision = "bf16-mixed" if use_amp else 32
 
-    csv_logger = CSVLogger(save_dir=logs_path, name="logs")
+    csv_logger_cls = AppendCSVLogger if logger_version is not None else CSVLogger
+    csv_logger = csv_logger_cls(save_dir=logs_path, name="logs", version=logger_version)
     loggers = [
         csv_logger,
         TensorBoardLogger(save_dir=logs_path, name="logs", version=csv_logger.version),
