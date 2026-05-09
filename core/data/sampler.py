@@ -22,6 +22,7 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
         drop_last: bool = False,
+        shuffle: bool = True,
     ):
         if not buckets:
             raise ValueError("length buckets must not be empty")
@@ -35,6 +36,7 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         self.max_tokens = int(max_tokens) if max_tokens else None
         self.seed = seed
         self.drop_last = drop_last
+        self.shuffle = shuffle
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -70,7 +72,8 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
 
         indices = list(range(len(self.lengths)))
         rng = random.Random(None if self.seed is None else self.seed + self.epoch)
-        rng.shuffle(indices)
+        if self.shuffle:
+            rng.shuffle(indices)
         self.epoch += 1
         for idx in indices:
             yield idx

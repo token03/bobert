@@ -1,6 +1,7 @@
 data:
   dataset_path: './data/dataset'
   dataset_seed: 42
+  num_workers: 4
   max_seq_len: 4096
   length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
@@ -28,6 +29,7 @@ components:
     
 pretraining:
   pretrain_size: 100000
+  use_length_buckets: true
   batch_size: 64
   num_epochs: 10
 
@@ -66,7 +68,8 @@ pretraining:
 alignment:
   checkpoint_dir: "./experiments/align"
   model_name: "model"
-  trainable_layers: 3
+  trainable_layers: 1
+  use_length_buckets: false
   batch_size: 128
   num_epochs: 2
   alignment_size: 100000
@@ -107,16 +110,3 @@ alignment:
   speed_loss_weight: 0.2
   contrastive_weight: 1.0
   graph_weight: 0.3
-
-  difficulty_decay_scale: 0.3
-  cross_label_similarity_factor: 0.2
-  same_label_base_similarity: 0.4 
-
-  sampler:
-    max_ease_factor: 1.0
-    use_kde_anchor_sampling: true
-    kde_bandwidth: 0.2
-    kde_bins: 100
-
-  recall_k_values: [1, 3, 5]
-  recall_difficulty_threshold: 0.20

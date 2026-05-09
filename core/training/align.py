@@ -154,6 +154,22 @@ class AlignmentModule(pl.LightningModule):
             checkpoint["vector_stats"] = self.normalizer.get_vector_stats()
             checkpoint["attribute_stats"] = self.normalizer.get_attribute_stats()
 
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
+        state_dict = checkpoint.get("state_dict")
+        if not state_dict:
+            return
+
+        model_is_compiled = hasattr(self.model, "_orig_mod")
+        normalized_state = {}
+        for key, value in state_dict.items():
+            if model_is_compiled:
+                if key.startswith("model.") and not key.startswith("model._orig_mod."):
+                    key = "model._orig_mod." + key[len("model.") :]
+            elif key.startswith("model._orig_mod."):
+                key = "model." + key[len("model._orig_mod.") :]
+            normalized_state[key] = value
+        checkpoint["state_dict"] = normalized_state
+
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config, "alignment")
         total_steps = self.trainer.estimated_stepping_batches

@@ -89,7 +89,7 @@ class BeatmapData(pl.LightningDataModule):
         )
 
     def _get_dataloader(self, dataset, shuffle, collate_fn, sampler=None):
-        num_workers = os.cpu_count() or 1
+        num_workers = self._num_workers()
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -102,27 +102,36 @@ class BeatmapData(pl.LightningDataModule):
         )
 
     def _length_buckets(self) -> Optional[List[int]]:
+        if not self.phase_config.get("use_length_buckets", True):
+            return None
+
         buckets = self.data_config.get("length_buckets")
         if not buckets:
             return None
         return [int(bucket) for bucket in buckets]
 
+    def _num_workers(self) -> int:
+        return int(self.data_config.get("num_workers", 4))
+
     def _lengths(self, dataset) -> List[int]:
         max_seq_len = int(self.data_config["max_seq_len"])
         return [min(int(vec.shape[0]), max_seq_len) for vec in dataset.beatmap_data]
 
-    def _token_budget(self, lengths: List[int], buckets: List[int]) -> int:
+    def _token_budget(
+        self, lengths: List[int], buckets: List[int], batch_size: Optional[int] = None
+    ) -> int:
+        batch_size = int(batch_size or self.batch_size)
         if not lengths:
-            return self.batch_size * int(self.data_config["max_seq_len"])
+            return batch_size * int(self.data_config["max_seq_len"])
         mean_len = int(round(sum(lengths) / len(lengths)))
-        return self.batch_size * length_bucket(mean_len, buckets)
+        return batch_size * length_bucket(mean_len, buckets)
 
     def _get_bucketed_train_dataloader(self, dataset, collate_fn, sampler=None):
         buckets = self._length_buckets()
         if not buckets:
             return self._get_dataloader(dataset, True, collate_fn, sampler)
 
-        num_workers = os.cpu_count() or 1
+        num_workers = self._num_workers()
         lengths = self._lengths(dataset)
         batch_sampler = LengthBucketBatchSampler(
             lengths,
@@ -131,6 +140,30 @@ class BeatmapData(pl.LightningDataModule):
             sampler=sampler,
             max_tokens=self._token_budget(lengths, buckets),
             seed=self.data_config.get("dataset_seed", 42),
+        )
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
+
+    def _get_bucketed_val_dataloader(self, dataset, collate_fn):
+        buckets = self._length_buckets()
+        if not buckets:
+            return self._get_dataloader(dataset, False, collate_fn)
+
+        num_workers = self._num_workers()
+        lengths = self._lengths(dataset)
+        batch_sampler = LengthBucketBatchSampler(
+            lengths,
+            self.batch_size,
+            buckets,
+            max_tokens=self._token_budget(lengths, buckets),
+            seed=self.data_config.get("dataset_seed", 42),
+            shuffle=False,
         )
         return DataLoader(
             dataset,
@@ -189,7 +222,7 @@ class PretrainData(BeatmapData):
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
         )
-        return self._get_dataloader(self.val_dataset, False, collate)
+        return self._get_bucketed_val_dataloader(self.val_dataset, collate)
 
 
 class AlignData(BeatmapData):
@@ -287,8 +320,9 @@ class AlignData(BeatmapData):
                 self.train_dataset,
                 batch_sampler=sampler,
                 collate_fn=collate,
-                num_workers=os.cpu_count() or 1,
+                num_workers=self._num_workers(),
                 pin_memory=True,
+                persistent_workers=self._num_workers() > 0,
             )
         return self._get_dataloader(self.train_dataset, True, collate)
 
@@ -298,4 +332,4 @@ class AlignData(BeatmapData):
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
         )
-        return self._get_dataloader(self.val_dataset, False, collate)
+        return self._get_bucketed_val_dataloader(self.val_dataset, collate)
