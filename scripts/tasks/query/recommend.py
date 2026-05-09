@@ -191,13 +191,20 @@ def run_interactive(ctx: QueryContext):
     console.print(
         "[dim]Paste one beatmap id/URL for recommendations, or two for comparison.[/dim]"
     )
-    console.print("[dim]Press Ctrl+C/Ctrl+D, q, quit, or empty input to exit.[/dim]")
+    console.print("[dim]Press Ctrl+C to clear, or Ctrl+D, q, quit, or empty input to exit.[/dim]")
     while True:
         try:
             raw_input = console.input("[bold cyan]query>[/bold cyan] ").strip()
-        except (KeyboardInterrupt, EOFError):
+        except KeyboardInterrupt:
+            console.print()
+            continue
+        except EOFError:
             console.print()
             return
+
+        if "\x03" in raw_input:
+            console.print()
+            continue
 
         if raw_input.lower() in {"", "q", "quit", "exit"}:
             return

@@ -49,7 +49,7 @@ class MiningConfig:
     target_difficulty_close_k: int = 64
     target_positives_per_anchor: int = 4
     min_positives_per_anchor: int = 2
-    positive_max_star_delta: float = 0.3
+    positive_max_star_delta: float = 0.5
     trivial_duplicate_star_delta: float = 0.01
     hard_negative_far_difficulty_quantile: float = 0.80
     hard_negative_far_embedding_quantile: float = 0.30

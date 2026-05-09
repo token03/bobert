@@ -177,11 +177,12 @@ def setup_alignment(
     model: nn.Module,
     normalizer: Optional[BeatmapNormalizer] = None,
     checkpoint_dir: Optional[str] = None,
+    logger_version: Optional[int] = None,
 ) -> Tuple[AlignmentModule, pl.Trainer]:
     module = AlignmentModule(model, config, normalizer)
     if checkpoint_dir is not None:
         config["alignment"]["checkpoint_dir"] = checkpoint_dir
-    trainer = create_trainer(config, "alignment")
+    trainer = create_trainer(config, "alignment", logger_version=logger_version)
     return module, trainer
 
 
@@ -272,4 +273,9 @@ def train(
     datamodule: pl.LightningDataModule,
     ckpt_path: Optional[str] = None,
 ):
-    trainer.fit(module, datamodule, ckpt_path=ckpt_path)
+    trainer.fit(
+        module,
+        datamodule,
+        ckpt_path=ckpt_path,
+        weights_only=False if ckpt_path is not None else None,
+    )

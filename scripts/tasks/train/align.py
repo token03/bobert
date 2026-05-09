@@ -16,7 +16,7 @@ from core.training.align import (
     setup_alignment,
     train,
 )
-from core.training.setup import setup_device
+from core.training.setup import find_latest_checkpoint, find_latest_logger_version, setup_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -98,6 +98,19 @@ def resolve_pretrain_checkpoint(args: argparse.Namespace, config: DictConfig) ->
     return find_pretraining_checkpoint(checkpoint_dir)
 
 
+def resolve_resume_checkpoint(args: argparse.Namespace, config: DictConfig) -> Path | None:
+    if not args.resume_ckpt:
+        return None
+    if args.resume_ckpt == "latest":
+        checkpoint = find_latest_checkpoint(config.alignment.checkpoint_dir)
+        if checkpoint is None:
+            raise FileNotFoundError(
+                f"No checkpoint found in {config.alignment.checkpoint_dir}"
+            )
+        return checkpoint
+    return Path(args.resume_ckpt)
+
+
 def main() -> int:
     args = parse_args()
     config = load_config(args)
@@ -137,14 +150,32 @@ def main() -> int:
     else:
         print("No pretraining checkpoint found; training alignment from scratch.")
 
-    module, trainer = setup_alignment(config, model, datamodule.normalizer)
+    resume_checkpoint = resolve_resume_checkpoint(args, config)
+    logger_version = (
+        find_latest_logger_version(config.alignment.checkpoint_dir)
+        if resume_checkpoint is not None
+        else None
+    )
+    module, trainer = setup_alignment(
+        config, model, datamodule.normalizer, logger_version=logger_version
+    )
 
     print("\nAlignment setup complete.")
     print(f"Total epochs: {config.alignment.num_epochs}")
     print(f"Training samples: {len(datamodule.train_dataset)}")
     print(f"Validation samples: {len(datamodule.val_dataset)}")
 
-    train(module, trainer, datamodule, ckpt_path=args.resume_ckpt)
+    if resume_checkpoint is not None:
+        print(f"Resuming from checkpoint: {resume_checkpoint}")
+        if logger_version is not None:
+            print(f"Appending logs to: logs/version_{logger_version}")
+
+    train(
+        module,
+        trainer,
+        datamodule,
+        ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
+    )
 
     print("\nBoBERT alignment completed!")
     return 0
