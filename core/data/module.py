@@ -6,7 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-from .batch import collate_align, collate_pretrain
+from .batch import collate_align, collate_align_chunked, collate_pretrain
 from .dataset import BeatmapDataset
 from .mining import load_cache
 from .normalizer import BeatmapNormalizer
@@ -298,10 +298,15 @@ class AlignData(BeatmapData):
         )
 
     def train_dataloader(self):
+        align_config = self._alignment_config()
         collate = partial(
-            collate_align,
+            collate_align_chunked,
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
+            group_size=align_config.get("group_size", 4),
+            forward_length_buckets=align_config.get(
+                "forward_length_buckets", [512, 1024, 2048, 4096]
+            ),
         )
         if self.train_mining_lookup:
             buckets = self._length_buckets()
@@ -310,8 +315,8 @@ class AlignData(BeatmapData):
                 self.train_dataset.beatmap_ids,
                 self.train_mining_lookup,
                 self.batch_size,
-                group_size=self._alignment_config().get("group_size", 4),
-                seed=self._alignment_config().get("seed", 42),
+                group_size=align_config.get("group_size", 4),
+                seed=align_config.get("seed", 42),
                 lengths=lengths if buckets else None,
                 buckets=buckets,
                 max_tokens=self._token_budget(lengths, buckets) if buckets else None,

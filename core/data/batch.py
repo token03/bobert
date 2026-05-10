@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 
@@ -37,31 +37,25 @@ def stack_dicts(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     }
 
 
-def collate_pretrain(
-    batch: List[Tuple[torch.Tensor, Dict[str, float]]],
-    max_seq_len: int,
-    vector_dim: int,
+def _length_bucket(length: int, buckets: Sequence[int]) -> int:
+    for bucket in buckets:
+        if length <= bucket:
+            return int(bucket)
+    return int(buckets[-1])
+
+
+def _alignment_labels(
+    attrs: Tuple[Dict[str, Any], ...],
+    beatmap_ids: Tuple[int, ...],
+    targets: Tuple[Dict[str, Any], ...],
 ):
-    vectors, attrs = zip(*batch)
-    padded, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
-    return padded, mask, stack_dicts(attrs), cu_seqlens
-
-
-def collate_align(
-    batch: List[Tuple],
-    max_seq_len: int,
-    vector_dim: int,
-):
-    vectors, attrs, beatmap_ids, targets = zip(*batch)
-    padded_vec, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
-
     teacher_dim = 0
     for target in targets:
         teacher_dim = max(teacher_dim, len(target.get("graph_embedding", [])))
     teacher_dim = teacher_dim or 128
 
-    graph_teacher = torch.zeros(len(batch), teacher_dim, dtype=torch.float32)
-    has_teacher = torch.zeros(len(batch), dtype=torch.bool)
+    graph_teacher = torch.zeros(len(targets), teacher_dim, dtype=torch.float32)
+    has_teacher = torch.zeros(len(targets), dtype=torch.bool)
     for i, target in enumerate(targets):
         teacher = target.get("graph_embedding", [])
         if teacher:
@@ -70,7 +64,7 @@ def collate_align(
             has_teacher[i] = True
 
     id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
-    positive_weights = torch.zeros(len(batch), len(batch), dtype=torch.float32)
+    positive_weights = torch.zeros(len(targets), len(targets), dtype=torch.float32)
     beatmapset_ids = torch.tensor(
         [int(target.get("beatmapset_id", -1)) for target in targets], dtype=torch.long
     )
@@ -103,13 +97,88 @@ def collate_align(
                         float(positive_weights[i, j]), float(weight)
                     )
 
+    return {
+        "graph_teacher": graph_teacher,
+        "has_teacher": has_teacher,
+        "positive_weights": positive_weights,
+        "ignore_contrastive": ignore_contrastive,
+        "difficulty": stack_dicts(list(attrs)),
+    }
+
+
+def collate_pretrain(
+    batch: List[Tuple[torch.Tensor, Dict[str, float]]],
+    max_seq_len: int,
+    vector_dim: int,
+):
+    vectors, attrs = zip(*batch)
+    padded, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
+    return padded, mask, stack_dicts(attrs), cu_seqlens
+
+
+def collate_align(
+    batch: List[Tuple],
+    max_seq_len: int,
+    vector_dim: int,
+):
+    vectors, attrs, beatmap_ids, targets = zip(*batch)
+    padded_vec, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
+    labels = _alignment_labels(attrs, beatmap_ids, targets)
+
     return (
         padded_vec,
         mask,
         cu_seqlens,
-        graph_teacher,
-        has_teacher,
-        positive_weights,
-        ignore_contrastive,
-        stack_dicts(attrs),
+        labels["graph_teacher"],
+        labels["has_teacher"],
+        labels["positive_weights"],
+        labels["ignore_contrastive"],
+        labels["difficulty"],
     )
+
+
+def collate_align_chunked(
+    batch: List[Tuple],
+    max_seq_len: int,
+    vector_dim: int,
+    group_size: int,
+    forward_length_buckets: Sequence[int],
+):
+    vectors, attrs, beatmap_ids, targets = zip(*batch)
+    labels = _alignment_labels(attrs, beatmap_ids, targets)
+
+    buckets = sorted(int(bucket) for bucket in forward_length_buckets)
+    if not buckets:
+        raise ValueError("forward_length_buckets must not be empty")
+
+    chunk_groups: Dict[int, List[int]] = {bucket: [] for bucket in buckets}
+    for start in range(0, len(vectors), group_size):
+        positions = list(range(start, min(start + group_size, len(vectors))))
+        group_max_len = max(min(vectors[pos].shape[0], max_seq_len) for pos in positions)
+        bucket = _length_bucket(group_max_len, buckets)
+        chunk_groups[bucket].extend(positions)
+
+    chunks = []
+    for bucket in buckets:
+        positions = chunk_groups[bucket]
+        if not positions:
+            continue
+
+        chunk_vectors = [vectors[pos] for pos in positions]
+        padded_vec, mask, cu_seqlens = pad_batch(chunk_vectors, max_seq_len, vector_dim)
+        chunks.append(
+            {
+                "vectors": padded_vec,
+                "attention_mask": mask,
+                "cu_seqlens": cu_seqlens,
+                "positions": torch.tensor(positions, dtype=torch.long),
+                "bucket": torch.tensor(bucket, dtype=torch.long),
+            }
+        )
+
+    labels["use_contrastive"] = True
+    return {
+        "chunks": chunks,
+        "labels": labels,
+        "batch_size": len(batch),
+    }

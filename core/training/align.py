@@ -82,9 +82,48 @@ class AlignmentModule(pl.LightningModule):
             "use_contrastive": use_contrastive,
         }
 
+    def _scatter_chunked_predictions(self, parts, positions):
+        order = torch.cat(positions, dim=0)
+        inverse = torch.empty_like(order)
+        inverse[order] = torch.arange(order.shape[0], device=order.device)
+
+        def scatter_value(values):
+            first = values[0]
+            if isinstance(first, torch.Tensor):
+                return torch.cat(values, dim=0)[inverse]
+            if isinstance(first, dict):
+                return {
+                    key: scatter_value([value[key] for value in values])
+                    for key in first
+                }
+            return first
+
+        return {
+            key: scatter_value([part[key] for part in parts])
+            for key in parts[0]
+        }
+
+    def _forward_chunked_batch(self, batch: Dict[str, Any]):
+        pred_parts = []
+        positions = []
+
+        for chunk in batch["chunks"]:
+            pred_parts.append(
+                self(chunk["vectors"], chunk["attention_mask"], chunk["cu_seqlens"])
+            )
+            positions.append(chunk["positions"])
+
+        predictions = self._scatter_chunked_predictions(pred_parts, positions)
+        return predictions, batch["labels"]
+
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        vectors, attention_mask, cu_seqlens, labels = self._unpack_batch(batch, True)
-        predictions = self(vectors, attention_mask, cu_seqlens)
+        if isinstance(batch, dict) and "chunks" in batch:
+            predictions, labels = self._forward_chunked_batch(batch)
+            labels["use_contrastive"] = True
+        else:
+            vectors, attention_mask, cu_seqlens, labels = self._unpack_batch(batch, True)
+            predictions = self(vectors, attention_mask, cu_seqlens)
+
         loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
 
         self.log_dict(
