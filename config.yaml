@@ -68,10 +68,10 @@ pretraining:
 alignment:
   checkpoint_dir: "./experiments/align"
   model_name: "model"
-  trainable_layers: 3
+  trainable_layers: 1
   use_length_buckets: false
   forward_length_buckets: [512, 1024, 2048, 4096]
-  batch_size: 64
+  batch_size: 128
   num_epochs: 2
   alignment_size: 100000
 
