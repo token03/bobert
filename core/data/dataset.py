@@ -13,6 +13,7 @@ class BeatmapDataset(Dataset):
         beatmap_data: List[torch.Tensor],
         normalizer: BeatmapNormalizer,
         difficulty_attributes: Optional[Dict[str, list]] = None,
+        map_features: Optional[Dict[str, list]] = None,
         is_training: bool = False,
         beatmap_ids: Optional[List[int]] = None,
         alignment_targets: Optional[Dict[int, Dict[str, Any]]] = None,
@@ -21,6 +22,7 @@ class BeatmapDataset(Dataset):
         self.beatmap_data = beatmap_data
         self.normalizer = normalizer
         self.diff_attrs = difficulty_attributes
+        self.map_features = map_features
         self.beatmap_ids = beatmap_ids
         self.alignment_targets = alignment_targets or {}
         self.is_training = is_training
@@ -53,9 +55,17 @@ class BeatmapDataset(Dataset):
             if self.diff_attrs
             else {}
         )
+        map_features = (
+            {
+                k: self.normalizer.normalize_attribute(k, v[idx])
+                for k, v in self.map_features.items()
+            }
+            if self.map_features
+            else {}
+        )
 
         if self.beatmap_ids is None:
             return vec, attrs
 
         bid = int(self.beatmap_ids[idx])
-        return vec, attrs, bid, self.alignment_targets.get(bid, {})
+        return vec, attrs, map_features, bid, self.alignment_targets.get(bid, {})

@@ -104,12 +104,16 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         batch_size: int,
         group_size: int = 4,
         seed: int = 42,
+        anchor_indices: Optional[Sequence[int]] = None,
+        epoch_size: Optional[int] = None,
         lengths: Optional[Sequence[int]] = None,
         buckets: Optional[Sequence[int]] = None,
         max_tokens: Optional[int] = None,
     ):
         if batch_size % group_size != 0:
             raise ValueError("alignment batch_size must be divisible by group_size")
+        if epoch_size is not None and epoch_size <= 0:
+            raise ValueError("alignment epoch_size must be positive when provided")
 
         self.beatmap_ids = [int(x) for x in beatmap_ids]
         self.mining_lookup = mining_lookup
@@ -117,6 +121,12 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         self.group_size = group_size
         self.seed = seed
         self.id_to_idx = {bid: i for i, bid in enumerate(self.beatmap_ids)}
+        self.anchor_indices = (
+            [int(idx) for idx in anchor_indices]
+            if anchor_indices is not None
+            else list(range(len(self.beatmap_ids)))
+        )
+        self.epoch_size = int(epoch_size) if epoch_size is not None else None
         self.groups_per_batch = batch_size // group_size
         self.epoch = 0
         self.lengths = (
@@ -126,12 +136,19 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         self.max_tokens = int(max_tokens) if max_tokens else None
 
     def __len__(self) -> int:
+        anchor_count = self._anchor_count()
         if self.lengths is None or self.buckets is None:
-            return max(1, math.ceil(len(self.beatmap_ids) / self.groups_per_batch))
+            return max(1, math.ceil(anchor_count / self.groups_per_batch))
 
         counts = {bucket: 0 for bucket in self.buckets}
-        for length in self.lengths:
-            counts[length_bucket(length, self.buckets)] += 1
+        for idx in self.anchor_indices:
+            counts[length_bucket(self.lengths[idx], self.buckets)] += 1
+        if anchor_count < len(self.anchor_indices):
+            scale = anchor_count / max(1, len(self.anchor_indices))
+            counts = {
+                bucket: int(round(count * scale))
+                for bucket, count in counts.items()
+            }
 
         total = 0
         for bucket, count in counts.items():
@@ -143,6 +160,11 @@ class AlignmentBatchSampler(Sampler[List[int]]):
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
+
+    def _anchor_count(self) -> int:
+        if self.epoch_size is None:
+            return len(self.anchor_indices)
+        return min(self.epoch_size, len(self.anchor_indices))
 
     def _choose_id(
         self,
@@ -180,8 +202,9 @@ class AlignmentBatchSampler(Sampler[List[int]]):
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
         self.epoch += 1
-        anchor_indices = list(range(len(self.beatmap_ids)))
+        anchor_indices = self.anchor_indices.copy()
         rng.shuffle(anchor_indices)
+        anchor_indices = anchor_indices[: self._anchor_count()]
 
         batches: Dict[int, List[int]] = (
             {bucket: [] for bucket in self.buckets} if self.buckets else {}
@@ -255,3 +278,5 @@ class AlignmentBatchSampler(Sampler[List[int]]):
                 bucket_batch = batches[bucket]
                 if bucket_batch:
                     yield bucket_batch.copy()
+        elif batch:
+            yield batch

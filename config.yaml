@@ -22,7 +22,7 @@ model:
   feature_pooling: "gated_sum"
 
 components:
-  compile_model: true
+  compile_model: false
   compile_mode: "default" 
   compile_dynamic: true
   activation_checkpointing: true
@@ -77,6 +77,8 @@ alignment:
 
   embedding_dim: 256
   teacher_dim: 96
+  map_feature_names: ["ar", "cs", "od", "hp_drain", "drain_time", "slider_multiplier"]
+  map_feature_dim: 32
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
   contrastive_pooler: "query_attention"

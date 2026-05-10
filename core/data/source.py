@@ -7,8 +7,8 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from .beatmap import DIFFICULTY_ATTRIBUTES
-from .feature import build_feature_tensors
+from .beatmap import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
+from .feature import build_feature_tensors, calculate_drain_times
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -91,11 +91,25 @@ def _selected_beatmaps_lf(
     require_ratings: bool,
 ) -> pl.LazyFrame:
     beatmaps_lf = _scan_parquet(beatmaps_path)
-    wanted_cols = ["beatmap_id", "cs", "ar", "slider_multiplier"]
+    wanted_cols = ["beatmap_id", "cs", "ar", "od", "hp_drain", "slider_multiplier"]
     available_cols = [
         col for col in wanted_cols if col in beatmaps_lf.collect_schema().names()
     ]
     beatmaps_lf = beatmaps_lf.select(available_cols).unique("beatmap_id")
+    defaults = {
+        "cs": 4.0,
+        "ar": 10.0,
+        "od": 5.0,
+        "hp_drain": 5.0,
+        "slider_multiplier": 1.4,
+    }
+    beatmaps_lf = beatmaps_lf.with_columns(
+        [
+            pl.lit(value).cast(pl.Float32).alias(name)
+            for name, value in defaults.items()
+            if name not in available_cols
+        ]
+    )
 
     if ids_to_load:
         beatmaps_lf = beatmaps_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
@@ -220,6 +234,17 @@ def load_beatmap_dataset(
         if hitobjects_chunk.is_empty():
             continue
 
+        drain_times = calculate_drain_times(beatmaps_chunk, hitobjects_chunk)
+        beatmaps_chunk = beatmaps_chunk.join(drain_times, on="beatmap_id", how="left")
+        if "drain_time" not in beatmaps_chunk.columns:
+            beatmaps_chunk = beatmaps_chunk.with_columns(
+                pl.lit(0.0).cast(pl.Float32).alias("drain_time")
+            )
+        else:
+            beatmaps_chunk = beatmaps_chunk.with_columns(
+                pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
+            )
+
         hitobject_data, ids, _ = build_feature_tensors(
             beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
             hitobjects_chunk,
@@ -254,9 +279,12 @@ def load_beatmap_dataset(
             beatmap_attrs = {
                 "cs": beatmap_row.get("cs", 4.0),
                 "ar": beatmap_row.get("ar", 10.0),
+                "od": beatmap_row.get("od", 5.0),
+                "hp_drain": beatmap_row.get("hp_drain", 5.0),
+                "drain_time": beatmap_row.get("drain_time", 0.0),
                 "slider_multiplier": beatmap_row.get("slider_multiplier", 1.4),
             }
-            attrs = {**(ratings or {}), **beatmap_attrs}
+            attrs = ratings or {}
 
             if ratings:
                 sr = attrs.get("stars", 0.0)
@@ -271,6 +299,10 @@ def load_beatmap_dataset(
                     "hitobjects": vectors.clone(),
                     "difficulty": {
                         k: attrs.get(k, 0.0) for k in DIFFICULTY_ATTRIBUTES
+                    },
+                    "map_features": {
+                        k: float(beatmap_attrs.get(k, 0.0))
+                        for k in MAP_FEATURE_ATTRIBUTES
                     },
                 }
             )

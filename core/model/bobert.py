@@ -13,7 +13,7 @@ try:
 except ImportError:
     flash_attn_varlen_func = None
 
-from ..data.beatmap import DIFFICULTY_ATTRIBUTES
+from ..data.beatmap import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
 
 from .components import (
     SpanMasker,
@@ -491,6 +491,27 @@ class BobertDifficultyHead(nn.Module):
         }
 
 
+class BobertMapFeatureProjector(nn.Module):
+    def __init__(self, num_features: int, output_dim: int = 32):
+        super().__init__()
+        if num_features <= 0:
+            raise ValueError("num_features must be positive")
+        if output_dim <= 0:
+            raise ValueError("output_dim must be positive")
+
+        self.output_dim = output_dim
+        self.net = nn.Sequential(
+            nn.LayerNorm(num_features),
+            nn.Linear(num_features, output_dim),
+            nn.GELU(),
+            nn.Linear(output_dim, output_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features)
+
+
 class BobertForPretraining(nn.Module):
     def __init__(
         self,
@@ -586,6 +607,8 @@ class BobertForAlignment(nn.Module):
         aux_pooler: nn.Module,
         embedding_dim: int = 128,
         teacher_dim: int = 128,
+        map_feature_dim: int = 32,
+        num_map_features: int = len(MAP_FEATURE_ATTRIBUTES),
     ):
         super().__init__()
         self.bert = bert_model
@@ -593,17 +616,25 @@ class BobertForAlignment(nn.Module):
         self.contrastive_pooler = contrastive_pooler
         self.embedding_dim = embedding_dim
         self.teacher_dim = teacher_dim
+        self.map_projector = (
+            BobertMapFeatureProjector(num_map_features, map_feature_dim)
+            if map_feature_dim > 0 and num_map_features > 0
+            else None
+        )
 
         contrastive_dim = getattr(contrastive_pooler, "output_dim", bert_model.d_model)
         aux_dim = getattr(aux_pooler, "output_dim", bert_model.d_model)
+        map_dim = getattr(self.map_projector, "output_dim", 0)
+        contrastive_head_dim = contrastive_dim + map_dim
+        aux_head_dim = aux_dim + map_dim
 
         self.retrieval_head = nn.Sequential(
-            nn.Linear(contrastive_dim, bert_model.d_model),
+            nn.Linear(contrastive_head_dim, bert_model.d_model),
             nn.GELU(),
             nn.Linear(bert_model.d_model, embedding_dim),
         )
-        self.graph_head = nn.Linear(contrastive_dim, teacher_dim)
-        self.difficulty_head = nn.Linear(aux_dim, len(DIFFICULTY_ATTRIBUTES))
+        self.graph_head = nn.Linear(contrastive_head_dim, teacher_dim)
+        self.difficulty_head = nn.Linear(aux_head_dim, len(DIFFICULTY_ATTRIBUTES))
         self.is_compiled = False
 
         for parameter in self.bert.feature_tokenizer.parameters():
@@ -675,6 +706,10 @@ class BobertForAlignment(nn.Module):
             aux_pooler=aux_pooler,
             embedding_dim=alignment_config.get("embedding_dim", 128),
             teacher_dim=alignment_config.get("teacher_dim", 128),
+            map_feature_dim=alignment_config.get("map_feature_dim", 32),
+            num_map_features=len(
+                alignment_config.get("map_feature_names", MAP_FEATURE_ATTRIBUTES)
+            ),
         )
         trainable_layers = alignment_config.get("trainable_layers")
         if trainable_layers is not None:
@@ -699,6 +734,7 @@ class BobertForAlignment(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
+        map_features: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         packed_input, attention_mask, cu_seqlens = self.bert._embed(
             x, attention_mask, cu_seqlens
@@ -719,6 +755,21 @@ class BobertForAlignment(nn.Module):
             cu_seqlens,
             max_seqlen=max_seqlen,
         )
+
+        if self.map_projector is not None:
+            if map_features is None:
+                map_projected = contrastive_pooled.new_zeros(
+                    (contrastive_pooled.shape[0], self.map_projector.output_dim)
+                )
+            else:
+                map_projected = self.map_projector(
+                    map_features.to(
+                        device=contrastive_pooled.device,
+                        dtype=contrastive_pooled.dtype,
+                    )
+                )
+            contrastive_pooled = torch.cat([contrastive_pooled, map_projected], dim=-1)
+            aux_pooled = torch.cat([aux_pooled, map_projected], dim=-1)
 
         retrieval_embedding = F.normalize(
             self.retrieval_head(contrastive_pooled), dim=-1

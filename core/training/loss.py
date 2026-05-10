@@ -84,9 +84,6 @@ def difficulty_loss_fn(
         "aim": phase_config.get("aim_loss_weight", 1.0),
         "speed": phase_config.get("speed_loss_weight", 1.0),
         "slider_factor": phase_config.get("slider_factor_loss_weight", 1.0),
-        "ar": phase_config.get("ar_loss_weight", 0.3),
-        "cs": phase_config.get("cs_loss_weight", 0.2),
-        "slider_multiplier": phase_config.get("slider_multiplier_loss_weight", 0.2),
     }
 
     device = next(iter(predictions.values())).device

@@ -82,9 +82,18 @@ class BeatmapData(pl.LightningDataModule):
             k: [b["difficulty"][k] for b in beatmap_data]
             for k in beatmap_data[0]["difficulty"].keys()
         }
+        map_features = {
+            k: [b["map_features"][k] for b in beatmap_data]
+            for k in beatmap_data[0].get("map_features", {}).keys()
+        }
         all_ids = [b["beatmap_id"] for b in beatmap_data]
         return random_split_aligned(
-            {"data": all_data, "attrs": diff_attrs, "ids": all_ids},
+            {
+                "data": all_data,
+                "attrs": diff_attrs,
+                "map_features": map_features,
+                "ids": all_ids,
+            },
             self.data_config["val_split"],
         )
 
@@ -231,6 +240,7 @@ class AlignData(BeatmapData):
         self.mining_cache = None
         self.train_mining_lookup: Dict[int, Dict[str, Any]] = {}
         self.val_mining_lookup: Dict[int, Dict[str, Any]] = {}
+        self.train_anchor_indices: List[int] = []
 
     def _alignment_config(self):
         return self.config["alignment"]
@@ -241,10 +251,7 @@ class AlignData(BeatmapData):
         if not cache_path or not os.path.exists(cache_path):
             return {}
 
-        cache = load_cache(
-            cache_path,
-            alignment_size=align_config.get("alignment_size"),
-        )
+        cache = load_cache(cache_path)
         self.mining_cache = cache
         return {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
 
@@ -261,16 +268,33 @@ class AlignData(BeatmapData):
             raise RuntimeError("No beatmaps from the mining cache were found in the dataset.")
 
         train_s, val_s = self._split_loaded_data(all_beatmap_data)
-        train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
+        train_attrs_np = {
+            k: np.array(v)
+            for attrs in (train_s["attrs"], train_s.get("map_features", {}))
+            for k, v in attrs.items()
+        }
         self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
         self.vector_dim = train_s["data"][0].shape[1]
 
+        all_data = [b["hitobjects"] for b in all_beatmap_data]
+        all_attrs = {
+            k: [b["difficulty"][k] for b in all_beatmap_data]
+            for k in all_beatmap_data[0]["difficulty"].keys()
+        }
+        all_map_features = {
+            k: [b["map_features"][k] for b in all_beatmap_data]
+            for k in all_beatmap_data[0].get("map_features", {}).keys()
+        }
+        all_ids = [b["beatmap_id"] for b in all_beatmap_data]
+        train_anchor_indices = list(range(len(all_ids)))
+
         self.train_dataset = BeatmapDataset(
-            train_s["data"],
+            all_data,
             self.normalizer,
-            train_s["attrs"],
+            all_attrs,
+            all_map_features,
             is_training=True,
-            beatmap_ids=train_s["ids"],
+            beatmap_ids=all_ids,
             alignment_targets=mining_targets,
             max_seq_len=self.data_config["max_seq_len"],
         )
@@ -278,6 +302,7 @@ class AlignData(BeatmapData):
             val_s["data"],
             self.normalizer,
             val_s["attrs"],
+            val_s.get("map_features"),
             is_training=False,
             beatmap_ids=val_s["ids"],
             alignment_targets=mining_targets,
@@ -285,16 +310,24 @@ class AlignData(BeatmapData):
         )
         self.train_mining_lookup = {
             int(bid): mining_targets[int(bid)]
-            for bid in train_s["ids"]
+            for bid in all_ids
             if int(bid) in mining_targets
         }
+        self.train_anchor_indices = train_anchor_indices
         self.val_mining_lookup = {
             int(bid): mining_targets[int(bid)]
             for bid in val_s["ids"]
             if int(bid) in mining_targets
         }
+        anchors_per_epoch = min(
+            int(self._alignment_config().get("alignment_size") or len(train_anchor_indices)),
+            len(train_anchor_indices),
+        )
         print(
-            f"Data split: {len(self.train_dataset)} training, {len(self.val_dataset)} validation"
+            f"Data split: {len(train_anchor_indices)} training anchor pool, "
+            f"{anchors_per_epoch} anchors/epoch, "
+            f"{len(self.train_dataset)} training candidates, "
+            f"{len(self.val_dataset)} validation"
         )
 
     def train_dataloader(self):
@@ -317,6 +350,8 @@ class AlignData(BeatmapData):
                 self.batch_size,
                 group_size=align_config.get("group_size", 4),
                 seed=align_config.get("seed", 42),
+                anchor_indices=self.train_anchor_indices,
+                epoch_size=align_config.get("alignment_size"),
                 lengths=lengths if buckets else None,
                 buckets=buckets,
                 max_tokens=self._token_budget(lengths, buckets) if buckets else None,

@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 
+from .beatmap import MAP_FEATURE_ATTRIBUTES
+
 
 def pad_batch(
     vectors: List[torch.Tensor],
@@ -37,6 +39,18 @@ def stack_dicts(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     }
 
 
+def stack_map_features(dict_list: List[Dict[str, Any]]) -> torch.Tensor:
+    if not dict_list:
+        return torch.empty(0, len(MAP_FEATURE_ATTRIBUTES), dtype=torch.float32)
+    return torch.tensor(
+        [
+            [float(features.get(name, 0.0)) for name in MAP_FEATURE_ATTRIBUTES]
+            for features in dict_list
+        ],
+        dtype=torch.float32,
+    )
+
+
 def _length_bucket(length: int, buckets: Sequence[int]) -> int:
     for bucket in buckets:
         if length <= bucket:
@@ -46,6 +60,7 @@ def _length_bucket(length: int, buckets: Sequence[int]) -> int:
 
 def _alignment_labels(
     attrs: Tuple[Dict[str, Any], ...],
+    map_features: Tuple[Dict[str, Any], ...],
     beatmap_ids: Tuple[int, ...],
     targets: Tuple[Dict[str, Any], ...],
 ):
@@ -103,6 +118,7 @@ def _alignment_labels(
         "positive_weights": positive_weights,
         "ignore_contrastive": ignore_contrastive,
         "difficulty": stack_dicts(list(attrs)),
+        "map_features": stack_map_features(list(map_features)),
     }
 
 
@@ -121,9 +137,9 @@ def collate_align(
     max_seq_len: int,
     vector_dim: int,
 ):
-    vectors, attrs, beatmap_ids, targets = zip(*batch)
+    vectors, attrs, map_features, beatmap_ids, targets = zip(*batch)
     padded_vec, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
-    labels = _alignment_labels(attrs, beatmap_ids, targets)
+    labels = _alignment_labels(attrs, map_features, beatmap_ids, targets)
 
     return (
         padded_vec,
@@ -134,6 +150,7 @@ def collate_align(
         labels["positive_weights"],
         labels["ignore_contrastive"],
         labels["difficulty"],
+        labels["map_features"],
     )
 
 
@@ -144,8 +161,8 @@ def collate_align_chunked(
     group_size: int,
     forward_length_buckets: Sequence[int],
 ):
-    vectors, attrs, beatmap_ids, targets = zip(*batch)
-    labels = _alignment_labels(attrs, beatmap_ids, targets)
+    vectors, attrs, map_features, beatmap_ids, targets = zip(*batch)
+    labels = _alignment_labels(attrs, map_features, beatmap_ids, targets)
 
     buckets = sorted(int(bucket) for bucket in forward_length_buckets)
     if not buckets:

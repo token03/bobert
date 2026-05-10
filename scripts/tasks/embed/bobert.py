@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from core.data.batch import pad_batch
+from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
 from core.model.bobert import BobertForAlignment
@@ -25,15 +26,32 @@ class ExportDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.beatmaps[idx]
-        return int(item["beatmap_id"]), self.normalizer.normalize_vectors(
-            item["hitobjects"]
+        map_features = torch.tensor(
+            [
+                self.normalizer.normalize_attribute(
+                    name, item.get("map_features", {}).get(name, 0.0)
+                )
+                for name in MAP_FEATURE_ATTRIBUTES
+            ],
+            dtype=torch.float32,
+        )
+        return (
+            int(item["beatmap_id"]),
+            self.normalizer.normalize_vectors(item["hitobjects"]),
+            map_features,
         )
 
 
 def collate_export(batch, max_seq_len: int, vector_dim: int):
-    beatmap_ids, vectors = zip(*batch)
+    beatmap_ids, vectors, map_features = zip(*batch)
     padded, mask, cu_seqlens = pad_batch(list(vectors), max_seq_len, vector_dim)
-    return torch.tensor(beatmap_ids, dtype=torch.long), padded, mask, cu_seqlens
+    return (
+        torch.tensor(beatmap_ids, dtype=torch.long),
+        padded,
+        mask,
+        cu_seqlens,
+        torch.stack(list(map_features), dim=0),
+    )
 
 
 def find_checkpoint(path: str | Path | None) -> Path:
@@ -158,18 +176,21 @@ def export_embeddings(
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     rows = []
     with torch.no_grad():
-        for beatmap_ids, vectors, attention_mask, cu_seqlens in tqdm(
+        for beatmap_ids, vectors, attention_mask, cu_seqlens, map_features in tqdm(
             loader, desc="Embedding"
         ):
             vectors = vectors.to(device)
             attention_mask = attention_mask.to(device)
             cu_seqlens = cu_seqlens.to(device)
+            map_features = map_features.to(device)
             with torch.autocast(
                 device_type=device.type,
                 dtype=amp_dtype,
                 enabled=device.type == "cuda",
             ):
-                embeddings = model(vectors, attention_mask, cu_seqlens)["embedding"]
+                embeddings = model(vectors, attention_mask, cu_seqlens, map_features)[
+                    "embedding"
+                ]
             embeddings = embeddings.float().cpu().numpy()
             for bid, embedding in zip(beatmap_ids.tolist(), embeddings):
                 rows.append({"beatmap_id": int(bid), "embedding": embedding.tolist()})

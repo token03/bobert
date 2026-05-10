@@ -71,9 +71,10 @@ class AlignmentModule(pl.LightningModule):
             positive_weights,
             ignore_contrastive,
             attrs,
+            map_features,
         ) = batch
 
-        return vectors, attention_mask, cu_seqlens, {
+        return vectors, attention_mask, cu_seqlens, map_features, {
             "graph_teacher": graph_teacher,
             "has_teacher": has_teacher,
             "positive_weights": positive_weights,
@@ -106,10 +107,16 @@ class AlignmentModule(pl.LightningModule):
     def _forward_chunked_batch(self, batch: Dict[str, Any]):
         pred_parts = []
         positions = []
+        map_features = batch["labels"].get("map_features")
 
         for chunk in batch["chunks"]:
             pred_parts.append(
-                self(chunk["vectors"], chunk["attention_mask"], chunk["cu_seqlens"])
+                self(
+                    chunk["vectors"],
+                    chunk["attention_mask"],
+                    chunk["cu_seqlens"],
+                    map_features[chunk["positions"]] if map_features is not None else None,
+                )
             )
             positions.append(chunk["positions"])
 
@@ -121,8 +128,10 @@ class AlignmentModule(pl.LightningModule):
             predictions, labels = self._forward_chunked_batch(batch)
             labels["use_contrastive"] = True
         else:
-            vectors, attention_mask, cu_seqlens, labels = self._unpack_batch(batch, True)
-            predictions = self(vectors, attention_mask, cu_seqlens)
+            vectors, attention_mask, cu_seqlens, map_features, labels = self._unpack_batch(
+                batch, True
+            )
+            predictions = self(vectors, attention_mask, cu_seqlens, map_features)
 
         loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
 
@@ -146,10 +155,10 @@ class AlignmentModule(pl.LightningModule):
         return loss_dict["total_loss"]
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        vectors, attention_mask, cu_seqlens, labels = self._unpack_batch(
+        vectors, attention_mask, cu_seqlens, map_features, labels = self._unpack_batch(
             batch, False
         )
-        predictions = self(vectors, attention_mask, cu_seqlens)
+        predictions = self(vectors, attention_mask, cu_seqlens, map_features)
         loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
         if "difficulty_loss" in loss_dict:

@@ -3,7 +3,13 @@ DIFFICULTY_ATTRIBUTES = [
     "aim",
     "speed",
     "slider_factor",
-    "cs",
+]
+
+MAP_FEATURE_ATTRIBUTES = [
     "ar",
+    "cs",
+    "od",
+    "hp_drain",
+    "drain_time",
     "slider_multiplier",
 ]
