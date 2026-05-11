@@ -108,7 +108,6 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         epoch_size: Optional[int] = None,
         lengths: Optional[Sequence[int]] = None,
         buckets: Optional[Sequence[int]] = None,
-        max_tokens: Optional[int] = None,
     ):
         if batch_size % group_size != 0:
             raise ValueError("alignment batch_size must be divisible by group_size")
@@ -133,7 +132,6 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             [int(length) for length in lengths] if lengths is not None else None
         )
         self.buckets = [int(bucket) for bucket in buckets] if buckets else None
-        self.max_tokens = int(max_tokens) if max_tokens else None
 
     def __len__(self) -> int:
         anchor_count = self._anchor_count()
@@ -152,10 +150,7 @@ class AlignmentBatchSampler(Sampler[List[int]]):
 
         total = 0
         for bucket, count in counts.items():
-            groups_per_bucket_batch = max(
-                1, self._bucket_batch_size(bucket) // self.group_size
-            )
-            total += math.ceil(count / groups_per_bucket_batch)
+            total += math.ceil(count / self.groups_per_batch)
         return max(1, total)
 
     def set_epoch(self, epoch: int):
@@ -222,16 +217,6 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             group_ids.add(random_id)
             return True
         return False
-
-    def _bucket_batch_size(self, bucket: int) -> int:
-        if self.max_tokens is None:
-            return self.batch_size
-
-        groups = max(
-            1,
-            min(self.groups_per_batch, self.max_tokens // (bucket * self.group_size)),
-        )
-        return groups * self.group_size
 
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
@@ -350,7 +335,7 @@ class AlignmentBatchSampler(Sampler[List[int]]):
                 bucket = length_bucket(group_len, self.buckets)
                 bucket_batch = batches[bucket]
                 bucket_batch.extend(group)
-                if len(bucket_batch) == self._bucket_batch_size(bucket):
+                if len(bucket_batch) == self.batch_size:
                     yield bucket_batch.copy()
                     bucket_batch.clear()
             else:

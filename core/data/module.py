@@ -396,7 +396,6 @@ class AlignData(BeatmapData):
                 "forward_length_buckets",
                 [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
             ),
-            max_forward_tokens=align_config.get("max_forward_tokens", 1024 * 32),
             ignore_near_star_delta=self._mining_config().ignore_near_star_delta,
         )
         if self.train_mining_lookup:
@@ -412,7 +411,6 @@ class AlignData(BeatmapData):
                 epoch_size=align_config.get("alignment_size"),
                 lengths=lengths if buckets else None,
                 buckets=buckets,
-                max_tokens=self._token_budget(lengths, buckets) if buckets else None,
             )
             return DataLoader(
                 self.train_dataset,

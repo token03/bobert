@@ -8,7 +8,6 @@ from .parser import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 from .hitobject import (
     HitObject,
     DURATION_BINS,
-    quantize_to_bins,
     OBJECT_TYPE_SLIDER_HEAD,
     OBJECT_TYPE_SLIDER_END,
     OBJECT_TYPE_SPINNER_START,
@@ -18,7 +17,7 @@ from .hitobject import (
     CENTER_X,
     CENTER_Y,
     DEFAULT_PRE_START_MS,
-    canonicalize_bpm_array,
+    CANONICAL_BPM_MIN,
 )
 
 
@@ -111,33 +110,51 @@ def _calculate_nps_vectorized(
     return (current_indices - start_indices + 1).astype(np.float32)
 
 
-def _shift_within_group(
-    arr: np.ndarray, is_new_group: np.ndarray, fill_values
-) -> np.ndarray:
-    shifted = np.roll(arr, 1)
-    shifted[is_new_group] = fill_values
-    return shifted
+def _canonical_bpm_expr(bpm: pl.Expr) -> pl.Expr:
+    bpm = bpm.cast(pl.Float64)
+    octave = ((bpm / CANONICAL_BPM_MIN).log() / pl.lit(2.0).log()).floor()
+    canonical = bpm / pl.lit(2.0).pow(octave)
+
+    return (
+        pl.when(bpm.is_finite() & (bpm > 0))
+        .then(canonical)
+        .otherwise(None)
+        .cast(pl.Float32)
+    )
 
 
-def _canonical_rhythmic_snap(beat_fraction: np.ndarray) -> np.ndarray:
-    snap = np.full(len(beat_fraction), 5, dtype=np.int32)
+def _duration_bin_expr(values: pl.Expr) -> pl.Expr:
+    result = pl.lit(0, dtype=pl.Int32)
+    for index in range(1, len(DURATION_BINS)):
+        midpoint = (DURATION_BINS[index - 1] + DURATION_BINS[index]) / 2.0
+        result = pl.when(values > midpoint).then(index).otherwise(result)
+    return pl.when(values <= 0).then(0).otherwise(result).cast(pl.Int32)
 
-    scaled = np.round(beat_fraction * 48.0).astype(np.int32)
-    error = np.abs(beat_fraction - scaled / 48.0)
 
-    valid = error < RHYTHM_EPSILON
+def _rhythmic_snap_expr(beat_fraction: pl.Expr) -> pl.Expr:
+    scaled = (beat_fraction * 48.0).round().cast(pl.Int32)
+    valid = (beat_fraction - (scaled.cast(pl.Float64) / 48.0)).abs() < RHYTHM_EPSILON
 
-    mapping = np.full(49, 5, dtype=np.int32)
-    mapping[[0, 48]] = 0
-    mapping[24] = 1
-    mapping[[12, 36]] = 2
-    mapping[[8, 16, 32, 40]] = 3
-    mapping[[3, 4, 6, 9, 15, 18, 20, 21, 27, 28, 30, 33, 39, 42, 44, 45]] = 4
-
-    scaled_valid = scaled[valid]
-    snap[valid] = mapping[scaled_valid]
-    
-    return snap
+    return (
+        pl.when(~valid)
+        .then(5)
+        .when(scaled.is_in([0, 48]))
+        .then(0)
+        .when(scaled == 24)
+        .then(1)
+        .when(scaled.is_in([12, 36]))
+        .then(2)
+        .when(scaled.is_in([8, 16, 32, 40]))
+        .then(3)
+        .when(
+            scaled.is_in(
+                [3, 4, 6, 9, 15, 18, 20, 21, 27, 28, 30, 33, 39, 42, 44, 45]
+            )
+        )
+        .then(4)
+        .otherwise(5)
+        .cast(pl.Int32)
+    )
 
 
 def _expand_sliders_and_spinners(
@@ -212,176 +229,173 @@ def _filter_invalid_maps(
     return beatmaps_df, hitobjects_df
 
 
-def _apply_geometric_features(
-    df: pl.DataFrame, split_indices: np.ndarray
-) -> pl.DataFrame:
-    x = df["x"].to_numpy().astype(np.float32)
-    y = df["y"].to_numpy().astype(np.float32)
-
-    is_new_map = np.zeros(len(df), dtype=bool)
-    is_new_map[0] = True
-    if len(split_indices) > 0:
-        is_new_map[split_indices] = True
-
-    is_last_in_map = np.zeros(len(df), dtype=bool)
-    is_last_in_map[-1] = True
-    if len(split_indices) > 0:
-        is_last_in_map[split_indices - 1] = True
-
-    norm_x = np.clip((x - CENTER_X) / CENTER_X, -1.0, 1.0)
-    norm_y = np.clip((y - CENTER_Y) / CENTER_Y, -1.0, 1.0)
-
-    prev_x = _shift_within_group(x, is_new_map, CENTER_X)
-    prev_y = _shift_within_group(y, is_new_map, CENTER_Y)
-
-    delta_x = np.clip(x - prev_x, -OSU_STAGE_WIDTH, OSU_STAGE_WIDTH)
-    delta_y = np.clip(y - prev_y, -OSU_STAGE_HEIGHT, OSU_STAGE_HEIGHT)
-
-    dist = np.sqrt(delta_x**2 + delta_y**2)
-
-    next_x = np.roll(x, -1)
-    next_y = np.roll(y, -1)
-    next_x[is_last_in_map] = x[is_last_in_map]
-    next_y[is_last_in_map] = y[is_last_in_map]
-
-    v1_x, v1_y = delta_x, delta_y
-    v2_x, v2_y = next_x - x, next_y - y
-
-    norm_v1 = dist
-    norm_v2 = np.sqrt(v2_x**2 + v2_y**2)
-
-    dot = v1_x * v2_x + v1_y * v2_y
-    cross = v1_x * v2_y - v1_y * v2_x
-    denom = norm_v1 * norm_v2
-    relative_cos = np.divide(dot, denom, out=np.zeros_like(dot), where=denom != 0)
-    relative_sin = np.divide(cross, denom, out=np.zeros_like(cross), where=denom != 0)
-    relative_cos = np.clip(relative_cos, -1.0, 1.0)
-    relative_sin = np.clip(relative_sin, -1.0, 1.0)
-
+def _apply_geometric_features(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(
-        pl.Series("norm_x", norm_x),
-        pl.Series("norm_y", norm_y),
-        pl.Series("delta_x", delta_x),
-        pl.Series("delta_y", delta_y),
-        pl.Series("dist", dist),
-        pl.Series("relative_cos", relative_cos),
-        pl.Series("relative_sin", relative_sin),
+        (((pl.col("x") - CENTER_X) / CENTER_X).clip(-1.0, 1.0)).alias("norm_x"),
+        (((pl.col("y") - CENTER_Y) / CENTER_Y).clip(-1.0, 1.0)).alias("norm_y"),
+        pl.col("x").shift(1).over("beatmap_id").fill_null(CENTER_X).alias("_prev_x"),
+        pl.col("y").shift(1).over("beatmap_id").fill_null(CENTER_Y).alias("_prev_y"),
+        pl.col("x").shift(-1).over("beatmap_id").fill_null(pl.col("x")).alias("_next_x"),
+        pl.col("y").shift(-1).over("beatmap_id").fill_null(pl.col("y")).alias("_next_y"),
+    ).with_columns(
+        (pl.col("x") - pl.col("_prev_x"))
+        .clip(-OSU_STAGE_WIDTH, OSU_STAGE_WIDTH)
+        .alias("delta_x"),
+        (pl.col("y") - pl.col("_prev_y"))
+        .clip(-OSU_STAGE_HEIGHT, OSU_STAGE_HEIGHT)
+        .alias("delta_y"),
+        (pl.col("_next_x") - pl.col("x")).alias("_next_delta_x"),
+        (pl.col("_next_y") - pl.col("y")).alias("_next_delta_y"),
+    ).with_columns(
+        ((pl.col("delta_x") ** 2 + pl.col("delta_y") ** 2).sqrt()).alias("dist"),
+        ((pl.col("_next_delta_x") ** 2 + pl.col("_next_delta_y") ** 2).sqrt())
+        .alias("_next_dist"),
+    ).with_columns(
+        (
+            pl.col("delta_x") * pl.col("_next_delta_x")
+            + pl.col("delta_y") * pl.col("_next_delta_y")
+        ).alias("_dot"),
+        (
+            pl.col("delta_x") * pl.col("_next_delta_y")
+            - pl.col("delta_y") * pl.col("_next_delta_x")
+        ).alias("_cross"),
+        (pl.col("dist") * pl.col("_next_dist")).alias("_denom"),
+    ).with_columns(
+        pl.when(pl.col("_denom") != 0)
+        .then(pl.col("_dot") / pl.col("_denom"))
+        .otherwise(0.0)
+        .clip(-1.0, 1.0)
+        .alias("relative_cos"),
+        pl.when(pl.col("_denom") != 0)
+        .then(pl.col("_cross") / pl.col("_denom"))
+        .otherwise(0.0)
+        .clip(-1.0, 1.0)
+        .alias("relative_sin"),
     )
 
-    return df
+    return df.drop(
+        "_prev_x",
+        "_prev_y",
+        "_next_x",
+        "_next_y",
+        "_next_delta_x",
+        "_next_delta_y",
+        "_next_dist",
+        "_dot",
+        "_cross",
+        "_denom",
+    )
 
 
 def _apply_temporal_features(
     df: pl.DataFrame, split_indices: np.ndarray
 ) -> pl.DataFrame:
     time = df["time"].to_numpy().astype(np.float32)
-    is_new_map = np.zeros(len(df), dtype=bool)
-    is_new_map[0] = True
-    if len(split_indices) > 0:
-        is_new_map[split_indices] = True
-
-    prev_time = _shift_within_group(
-        time, is_new_map, time[is_new_map] - DEFAULT_PRE_START_MS
-    )
-
-    time_diff_ms = np.maximum(time - prev_time, 0)
-    log_time_diff_ms = np.log1p(np.maximum(time_diff_ms, 0))
-
-    bpm = canonicalize_bpm_array(df["bpm"].to_numpy().astype(np.float32))
-    beat_length_ms = np.divide(
-        60000.0,
-        bpm,
-        out=np.full_like(bpm, np.nan, dtype=np.float32),
-        where=bpm != 0,
-    )
-    time_diff_beats = time_diff_ms / beat_length_ms
-    time_diff_bin = quantize_to_bins(
-        np.nan_to_num(time_diff_beats, nan=0.0), DURATION_BINS
-    )
-
-    tdb_values = np.nan_to_num(time_diff_beats, nan=0.0)
-    cum_beats_arr = np.cumsum(tdb_values)
-    
-    if len(split_indices) > 0:
-        offsets = np.zeros_like(cum_beats_arr)
-        offsets[split_indices] = cum_beats_arr[split_indices - 1]
-        cum_beats_arr -= np.maximum.accumulate(offsets)
-
-    beat_id = np.floor(cum_beats_arr + 1e-4)
-    absolute_beats = time / beat_length_ms
-    absolute_beats = np.nan_to_num(absolute_beats, nan=0.0, posinf=0.0, neginf=0.0)
-    beat_fraction = absolute_beats - np.floor(absolute_beats)
-    beat_fraction[beat_fraction > 1.0 - RHYTHM_EPSILON] = 0.0
-    beat_in_measure = (
-        np.floor(absolute_beats + RHYTHM_EPSILON).astype(np.int32) % CANONICAL_METER
-    )
-    rhythmic_snap = _canonical_rhythmic_snap(beat_fraction)
-
-    dist = df["dist"].to_numpy().astype(np.float32)
-    velocity = np.divide(
-        dist,
-        time_diff_ms,
-        out=np.zeros_like(dist),
-        where=time_diff_ms != 0,
-    )
-
-    prev_time_diff = np.roll(time_diff_ms, 1)
-    prev_time_diff[is_new_map] = 0
-    rhythm_change = np.divide(
-        time_diff_ms,
-        prev_time_diff,
-        out=np.ones_like(time_diff_ms),
-        where=prev_time_diff != 0,
-    )
 
     df = df.with_columns(
-        pl.Series("time_diff_ms", time_diff_ms),
-        pl.Series("log_time_diff_ms", log_time_diff_ms),
-        pl.Series("time_diff_beats", time_diff_beats),
-        pl.Series("time_diff_bin", time_diff_bin),
-        pl.Series("cum_beats", cum_beats_arr),
-        pl.Series("beat_id", beat_id),
-        pl.Series("beat_in_measure", beat_in_measure),
-        pl.Series("rhythmic_snap", rhythmic_snap),
-        pl.Series("velocity", velocity),
-        pl.Series("rhythm_change", rhythm_change),
+        pl.col("time")
+        .shift(1)
+        .over("beatmap_id")
+        .fill_null(pl.col("time") - DEFAULT_PRE_START_MS)
+        .alias("_prev_time"),
+        _canonical_bpm_expr(pl.col("bpm")).alias("_canonical_bpm"),
+    ).with_columns(
+        (pl.col("time") - pl.col("_prev_time"))
+        .clip(lower_bound=0)
+        .alias("time_diff_ms"),
+        (60000.0 / pl.col("_canonical_bpm")).alias("_beat_length_ms"),
+    ).with_columns(
+        pl.col("time_diff_ms").log1p().alias("log_time_diff_ms"),
+        (pl.col("time_diff_ms") / pl.col("_beat_length_ms")).alias("time_diff_beats"),
+        (pl.col("time") / pl.col("_beat_length_ms"))
+        .fill_nan(0.0)
+        .fill_null(0.0)
+        .alias("_absolute_beats"),
+        pl.col("time_diff_ms")
+        .shift(1)
+        .over("beatmap_id")
+        .fill_null(0)
+        .alias("_prev_time_diff_ms"),
+    ).with_columns(
+        pl.col("time_diff_beats")
+        .fill_nan(0.0)
+        .fill_null(0.0)
+        .alias("_time_diff_beats_safe"),
+    ).with_columns(
+        pl.col("_time_diff_beats_safe").cum_sum().over("beatmap_id").alias("cum_beats"),
+        _duration_bin_expr(pl.col("_time_diff_beats_safe")).alias("time_diff_bin"),
+        (
+            pl.col("_absolute_beats")
+            - pl.col("_absolute_beats").floor()
+        ).alias("_beat_fraction"),
+    ).with_columns(
+        pl.when(pl.col("_beat_fraction") > 1.0 - RHYTHM_EPSILON)
+        .then(0.0)
+        .otherwise(pl.col("_beat_fraction"))
+        .alias("_beat_fraction"),
+        (pl.col("cum_beats") + 1e-4).floor().alias("beat_id"),
+        ((pl.col("_absolute_beats") + RHYTHM_EPSILON).floor() % CANONICAL_METER)
+        .cast(pl.Int32)
+        .alias("beat_in_measure"),
+        pl.when(pl.col("time_diff_ms") != 0)
+        .then(pl.col("dist") / pl.col("time_diff_ms"))
+        .otherwise(0.0)
+        .alias("velocity"),
+        pl.when(pl.col("_prev_time_diff_ms") != 0)
+        .then(pl.col("time_diff_ms") / pl.col("_prev_time_diff_ms"))
+        .otherwise(1.0)
+        .alias("rhythm_change"),
+    ).with_columns(
+        _rhythmic_snap_expr(pl.col("_beat_fraction")).alias("rhythmic_snap"),
         pl.Series("notes_per_second", _calculate_nps_vectorized(time, split_indices)),
     )
-    return df
+
+    return df.drop(
+        "_prev_time",
+        "_canonical_bpm",
+        "_beat_length_ms",
+        "_absolute_beats",
+        "_prev_time_diff_ms",
+        "_time_diff_beats_safe",
+        "_beat_fraction",
+    )
 
 
 def _apply_object_specific_features(df: pl.DataFrame) -> pl.DataFrame:
-    slider_repeats = np.nan_to_num(
-        df["slider_repeats"].fill_null(0).to_numpy().astype(np.float32), nan=0.0
-    )
-    pixel_length = np.nan_to_num(
-        df["pixel_length"].fill_null(0.0).to_numpy().astype(np.float32), nan=0.0
-    )
-    x = df["x"].to_numpy().astype(np.float32)
-    y = df["y"].to_numpy().astype(np.float32)
-    raw_end_x = df["slider_end_x"].fill_null(df["x"]).to_numpy().astype(np.float32)
-    raw_end_y = df["slider_end_y"].fill_null(df["y"]).to_numpy().astype(np.float32)
-
-    with np.errstate(invalid="ignore"):
-        slider_euc_dist = np.sqrt((raw_end_x - x) ** 2 + (raw_end_y - y) ** 2)
-
-    slider_euc_dist = np.nan_to_num(slider_euc_dist, nan=0.0)
-
-    slider_tortuosity = np.divide(
-        pixel_length,
-        slider_euc_dist,
-        out=np.ones_like(slider_euc_dist),
-        where=slider_euc_dist != 0,
-    )
-
     df = df.with_columns(
-        pl.Series("slider_repeats", slider_repeats),
-        pl.Series("pixel_length", pixel_length),
-        pl.Series("log_slider_pixel_length", np.log1p(np.maximum(pixel_length, 0))),
-        pl.Series("log_slider_repeats", np.log1p(np.maximum(slider_repeats, 0))),
-        pl.Series("slider_tortuosity", slider_tortuosity),
+        pl.col("slider_repeats")
+        .cast(pl.Float32)
+        .fill_null(0)
+        .fill_nan(0)
+        .alias("slider_repeats"),
+        pl.col("pixel_length")
+        .cast(pl.Float32)
+        .fill_null(0.0)
+        .fill_nan(0.0)
+        .alias("pixel_length"),
+        pl.col("slider_end_x").fill_null(pl.col("x")).alias("_slider_end_x"),
+        pl.col("slider_end_y").fill_null(pl.col("y")).alias("_slider_end_y"),
+    ).with_columns(
+        (
+            (pl.col("_slider_end_x") - pl.col("x")) ** 2
+            + (pl.col("_slider_end_y") - pl.col("y")) ** 2
+        )
+        .sqrt()
+        .fill_nan(0.0)
+        .alias("_slider_euc_dist"),
+    ).with_columns(
+        pl.col("pixel_length")
+        .clip(lower_bound=0)
+        .log1p()
+        .alias("log_slider_pixel_length"),
+        pl.col("slider_repeats").clip(lower_bound=0).log1p().alias("log_slider_repeats"),
+        pl.when(pl.col("_slider_euc_dist") != 0)
+        .then(pl.col("pixel_length") / pl.col("_slider_euc_dist"))
+        .otherwise(1.0)
+        .alias("slider_tortuosity"),
     )
-    return df
+
+    return df.drop("_slider_end_x", "_slider_end_y", "_slider_euc_dist")
 
 
 def _finalize_vectors(
@@ -413,7 +427,7 @@ def build_feature_tensors(
     id_diff = ids[:-1] != ids[1:]
     split_indices = np.where(id_diff)[0] + 1
 
-    df = _apply_geometric_features(df, split_indices)
+    df = _apply_geometric_features(df)
     df = _apply_temporal_features(df, split_indices)
     df = _apply_object_specific_features(df)
 
