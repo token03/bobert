@@ -8,11 +8,19 @@ from torch.utils.data import DataLoader
 
 from .batch import collate_align, collate_align_chunked, collate_pretrain
 from .dataset import BeatmapDataset
-from .mining import load_cache
+from .mining import MiningConfig, load_cache
 from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .source import load_beatmap_dataset, setup_dataset
 from .split import random_split_aligned
+
+
+ALIGNMENT_POSITIVE_LIST_PAIRS = (
+    ("graph_positive_ids", "graph_positive_weights"),
+    ("song_positive_ids", "song_positive_weights"),
+    ("creator_positive_ids", "creator_positive_weights"),
+    ("cross_status_positive_ids", "cross_status_positive_weights"),
+)
 
 
 class BeatmapData(pl.LightningDataModule):
@@ -241,9 +249,13 @@ class AlignData(BeatmapData):
         self.train_mining_lookup: Dict[int, Dict[str, Any]] = {}
         self.val_mining_lookup: Dict[int, Dict[str, Any]] = {}
         self.train_anchor_indices: List[int] = []
+        self.train_anchor_ids: set[int] = set()
 
     def _alignment_config(self):
         return self.config["alignment"]
+
+    def _mining_config(self):
+        return MiningConfig.from_mapping(self.config["mining"])
 
     def _load_mining_targets(self) -> Dict[int, Dict[str, Any]]:
         align_config = self._alignment_config()
@@ -251,9 +263,48 @@ class AlignData(BeatmapData):
         if not cache_path or not os.path.exists(cache_path):
             return {}
 
-        cache = load_cache(cache_path)
-        self.mining_cache = cache
-        return {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
+        alignment_size = align_config.get("alignment_size")
+        anchor_cache = load_cache(
+            cache_path,
+            alignment_size=alignment_size,
+            random_seed=align_config.get("seed", self.data_config.get("dataset_seed", 42)),
+            min_sr=self.data_config.get("min_sr"),
+            max_sr=self.data_config.get("max_sr"),
+        )
+        anchor_ids = {int(bid) for bid in anchor_cache["beatmap_id"].to_list()}
+        if not anchor_ids:
+            return {}
+
+        needed_ids = set(anchor_ids)
+        for row in anchor_cache.iter_rows(named=True):
+            for ids_key, _ in ALIGNMENT_POSITIVE_LIST_PAIRS:
+                needed_ids.update(int(bid) for bid in row.get(ids_key, []))
+
+        cache = load_cache(
+            cache_path,
+            ids_to_load=sorted(needed_ids),
+            min_sr=self.data_config.get("min_sr"),
+            max_sr=self.data_config.get("max_sr"),
+        )
+        targets = {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
+        available_ids = set(targets)
+        max_positive_ids = align_config.get("max_positive_ids_per_type")
+        max_positive_ids = int(max_positive_ids) if max_positive_ids else None
+
+        for target in targets.values():
+            for ids_key, weights_key in ALIGNMENT_POSITIVE_LIST_PAIRS:
+                filtered = [
+                    (int(bid), float(weight))
+                    for bid, weight in zip(target.get(ids_key, []), target.get(weights_key, []))
+                    if int(bid) in available_ids
+                ]
+                if max_positive_ids is not None:
+                    filtered = filtered[:max_positive_ids]
+                target[ids_key] = [bid for bid, _ in filtered]
+                target[weights_key] = [weight for _, weight in filtered]
+
+        self.train_anchor_ids = anchor_ids & available_ids
+        return targets
 
     def setup(self, stage=None):
         if self.train_dataset is not None:
@@ -286,7 +337,11 @@ class AlignData(BeatmapData):
             for k in all_beatmap_data[0].get("map_features", {}).keys()
         }
         all_ids = [b["beatmap_id"] for b in all_beatmap_data]
-        train_anchor_indices = list(range(len(all_ids)))
+        train_anchor_indices = [
+            idx for idx, bid in enumerate(all_ids) if int(bid) in self.train_anchor_ids
+        ]
+        if not train_anchor_indices:
+            raise RuntimeError("No sampled alignment anchors were found in the dataset.")
 
         self.train_dataset = BeatmapDataset(
             all_data,
@@ -338,8 +393,11 @@ class AlignData(BeatmapData):
             vector_dim=self.vector_dim,
             group_size=align_config.get("group_size", 4),
             forward_length_buckets=align_config.get(
-                "forward_length_buckets", [512, 1024, 2048, 4096]
+                "forward_length_buckets",
+                [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
             ),
+            max_forward_tokens=align_config.get("max_forward_tokens", 1024 * 32),
+            ignore_near_star_delta=self._mining_config().ignore_near_star_delta,
         )
         if self.train_mining_lookup:
             buckets = self._length_buckets()
@@ -371,5 +429,6 @@ class AlignData(BeatmapData):
             collate_align,
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
+            ignore_near_star_delta=self._mining_config().ignore_near_star_delta,
         )
         return self._get_bucketed_val_dataloader(self.val_dataset, collate)

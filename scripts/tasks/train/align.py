@@ -7,7 +7,7 @@ from typing import cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from core.data.mining import build_cache
+from core.data.mining import MiningConfig, build_cache
 from core.data.module import AlignData
 from core.model.bobert import BobertForAlignment
 from core.training.align import (
@@ -84,10 +84,14 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
         return
 
     print(f"Building mining cache: {cache_path}")
+    mining_config = OmegaConf.to_container(config.mining, resolve=True)
+    mining_config["min_sr"] = config.data.get("min_sr")
+    mining_config["max_sr"] = config.data.get("max_sr")
     build_cache(
         data_dir=Path("data"),
         dataset_dir=Path(config.data.dataset_path),
         output_path=cache_path,
+        config=MiningConfig.from_mapping(mining_config),
     )
 
 

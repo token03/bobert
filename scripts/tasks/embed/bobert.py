@@ -1,7 +1,10 @@
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import polars as pl
 import torch
 from omegaconf import OmegaConf
@@ -127,6 +130,41 @@ def sample_ids(dataset_dir: Path, limit: int | None, seed: int):
     return [int(x) for x in ids]
 
 
+def chunked(values: list[int], chunk_size: int):
+    for start in range(0, len(values), chunk_size):
+        yield values[start : start + chunk_size]
+
+
+def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+    values = pa.array(embeddings.reshape(-1), type=pa.float32())
+    embedding_column = pa.FixedSizeListArray.from_arrays(values, embeddings.shape[1])
+    return pa.Table.from_arrays(
+        [pa.array(beatmap_ids, type=pa.int64()), embedding_column],
+        names=["beatmap_id", "embedding"],
+    )
+
+
+def flush_embeddings(
+    writer: pq.ParquetWriter | None,
+    output_path: Path,
+    beatmap_ids: list[int],
+    embedding_batches: list[np.ndarray],
+) -> tuple[pq.ParquetWriter | None, int]:
+    if not beatmap_ids:
+        return writer, 0
+
+    row_count = len(beatmap_ids)
+    table = embedding_table(beatmap_ids, np.concatenate(embedding_batches, axis=0))
+    if writer is None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = pq.ParquetWriter(output_path, table.schema)
+    writer.write_table(table)
+    beatmap_ids.clear()
+    embedding_batches.clear()
+    return writer, row_count
+
+
 def export_embeddings(
     config_path: Path,
     checkpoint_path: Path | None,
@@ -134,9 +172,16 @@ def export_embeddings(
     output_path: Path,
     limit: int | None,
     batch_size: int,
+    load_chunk_size: int,
+    flush_size: int,
     seed: int,
 ):
     config = OmegaConf.load(config_path)
+    if load_chunk_size <= 0:
+        raise ValueError("load_chunk_size must be positive")
+    if flush_size <= 0:
+        raise ValueError("flush_size must be positive")
+
     dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
     dataset_dir = resolve_path(dataset_dir)
     ckpt_path = find_checkpoint(checkpoint_path)
@@ -149,55 +194,82 @@ def export_embeddings(
     )
 
     ids = sample_ids(dataset_dir, limit, seed)
-    print(f"Loading {len(ids):,} beatmaps from {dataset_dir}")
-    beatmaps = load_beatmap_dataset(
-        str(dataset_dir),
-        max_seq_len=config.data.max_seq_len,
-        ids_to_load=ids,
-        min_sr=None,
-        max_sr=None,
-        require_ratings=False,
-    )
-    if not beatmaps:
-        raise RuntimeError("No beatmaps loaded for export")
-
-    vector_dim = beatmaps[0]["hitobjects"].shape[1]
-    dataset = ExportDataset(beatmaps, normalizer)
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        collate_fn=lambda batch: collate_export(
-            batch, config.data.max_seq_len, vector_dim
-        ),
-    )
+    print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
 
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    rows = []
-    with torch.no_grad():
-        for beatmap_ids, vectors, attention_mask, cu_seqlens, map_features in tqdm(
-            loader, desc="Embedding"
-        ):
-            vectors = vectors.to(device)
-            attention_mask = attention_mask.to(device)
-            cu_seqlens = cu_seqlens.to(device)
-            map_features = map_features.to(device)
-            with torch.autocast(
-                device_type=device.type,
-                dtype=amp_dtype,
-                enabled=device.type == "cuda",
-            ):
-                embeddings = model(vectors, attention_mask, cu_seqlens, map_features)[
-                    "embedding"
-                ]
-            embeddings = embeddings.float().cpu().numpy()
-            for bid, embedding in zip(beatmap_ids.tolist(), embeddings):
-                rows.append({"beatmap_id": int(bid), "embedding": embedding.tolist()})
+    writer = None
+    buffered_ids: list[int] = []
+    buffered_embeddings: list[np.ndarray] = []
+    saved_count = 0
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame(rows).write_parquet(output_path)
-    print(f"Saved {len(rows):,} embeddings to {output_path}")
+    try:
+        with torch.inference_mode():
+            chunk_count = math.ceil(len(ids) / load_chunk_size)
+            for id_chunk in tqdm(
+                chunked(ids, load_chunk_size), total=chunk_count, desc="Loading chunks"
+            ):
+                beatmaps = load_beatmap_dataset(
+                    str(dataset_dir),
+                    max_seq_len=config.data.max_seq_len,
+                    ids_to_load=id_chunk,
+                    min_sr=None,
+                    max_sr=None,
+                    require_ratings=False,
+                )
+                if not beatmaps:
+                    continue
+
+                vector_dim = beatmaps[0]["hitobjects"].shape[1]
+                dataset = ExportDataset(beatmaps, normalizer)
+                loader = DataLoader(
+                    dataset,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    num_workers=0,
+                    pin_memory=device.type == "cuda",
+                    collate_fn=lambda batch: collate_export(
+                        batch, config.data.max_seq_len, vector_dim
+                    ),
+                )
+
+                for beatmap_ids, vectors, attention_mask, cu_seqlens, map_features in tqdm(
+                    loader, desc="Embedding", leave=False
+                ):
+                    vectors = vectors.to(device, non_blocking=True)
+                    attention_mask = attention_mask.to(device, non_blocking=True)
+                    cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+                    map_features = map_features.to(device, non_blocking=True)
+                    with torch.autocast(
+                        device_type=device.type,
+                        dtype=amp_dtype,
+                        enabled=device.type == "cuda",
+                    ):
+                        embeddings = model(
+                            vectors, attention_mask, cu_seqlens, map_features
+                        )["embedding"]
+
+                    embeddings_np = embeddings.float().cpu().numpy()
+                    buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
+                    buffered_embeddings.append(embeddings_np)
+
+                    if len(buffered_ids) >= flush_size:
+                        writer, flushed_count = flush_embeddings(
+                            writer, output_path, buffered_ids, buffered_embeddings
+                        )
+                        saved_count += flushed_count
+
+            writer, flushed_count = flush_embeddings(
+                writer, output_path, buffered_ids, buffered_embeddings
+            )
+            saved_count += flushed_count
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if saved_count == 0:
+        raise RuntimeError("No beatmaps loaded for export")
+
+    print(f"Saved {saved_count:,} embeddings to {output_path}")
 
 
 def main():
@@ -218,6 +290,8 @@ def main():
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--load-chunk-size", type=int, default=20000)
+    parser.add_argument("--flush-size", type=int, default=20000)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -228,6 +302,8 @@ def main():
         output_path=resolve_path(args.output),
         limit=args.limit,
         batch_size=args.batch_size,
+        load_chunk_size=args.load_chunk_size,
+        flush_size=args.flush_size,
         seed=args.seed,
     )
 

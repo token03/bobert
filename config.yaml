@@ -1,7 +1,7 @@
 data:
   dataset_path: './data/dataset'
   dataset_seed: 42
-  num_workers: 4
+  num_workers: 0
   max_seq_len: 4096
   length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
@@ -22,15 +22,15 @@ model:
   feature_pooling: "gated_sum"
 
 components:
-  compile_model: false
+  compile_model: true
   compile_mode: "default" 
   compile_dynamic: true
-  activation_checkpointing: true
+  activation_checkpointing: false
     
 pretraining:
   pretrain_size: 100000
   use_length_buckets: true
-  batch_size: 64
+  batch_size: 128
   num_epochs: 10
 
   grad_clip_norm: 1.0
@@ -65,12 +65,34 @@ pretraining:
     num_bins: 100
     strength: 0.5
 
+mining:
+  top_k: 32
+  candidate_k: 512
+  block_size: 256
+  alignment_size: null
+  random_seed: 42
+  use_faiss_gpu: true
+
+  positive_max_star_delta: 0.25
+  trivial_duplicate_star_delta: 0.01
+  graph_difficulty_rank: 8
+  same_set_radius_factor: 1.0
+  ignore_near_star_delta: 0.25
+
+  same_set_strength: 1.0
+  same_song_strength: 0.9
+  same_artist_mapper_strength: 1.0
+  same_mapper_strength: 0.7
+  same_artist_strength: 0.6
+  song_difficulty_distance_scale: 0.125
+
 alignment:
   checkpoint_dir: "./experiments/align"
   model_name: "model"
   trainable_layers: 1
   use_length_buckets: false
-  forward_length_buckets: [512, 1024, 2048, 4096]
+  forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
+  max_forward_tokens: 32768
   batch_size: 128
   num_epochs: 2
   alignment_size: 100000
