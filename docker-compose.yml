@@ -12,19 +12,26 @@ services:
       retries: 20
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     restart: unless-stopped
-    command: uvicorn backend.api:app --host 0.0.0.0 --port 8000
-    ports:
-      - "80:8000"
+    command: uvicorn backend.api:app --host 0.0.0.0 --port 8000 --proxy-headers
+    expose:
+      - "8000"
     volumes:
       - ./data:/app/data:ro
     environment:
+      APP_ENV: production
+      PUBLIC_BASE_URL: https://api.yourdomain.com
+      FRONTEND_ORIGIN: https://your-frontend-domain.com
       REDIS_URL: redis://redis:6379/0
-      BOBERT_CONFIG: /app/config.yaml
+      RQ_QUEUE: queue
       BOBERT_DATA_DIR: /app/data
+      BOBERT_MODEL_PATH: /app/data/bobert.pt
+      OSU_CLIENT_ID: ${OSU_CLIENT_ID}
+      OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET}
+      OSU_REDIRECT_URI: https://api.yourdomain.com/auth/osu/callback
+      SESSION_SECRET: ${SESSION_SECRET}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY}
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
       TORCH_NUM_THREADS: "1"
@@ -33,23 +40,28 @@ services:
         condition: service_healthy
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     restart: unless-stopped
     command: rq worker queue --url redis://redis:6379/0
     volumes:
       - ./data:/app/data
     environment:
       REDIS_URL: redis://redis:6379/0
-      BOBERT_CONFIG: /app/config.yaml
       BOBERT_DATA_DIR: /app/data
+      BOBERT_MODEL_PATH: /app/data/bobert.pt
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
       TORCH_NUM_THREADS: "1"
     depends_on:
       redis:
         condition: service_healthy
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - api
 
 volumes:
   redis-data:
