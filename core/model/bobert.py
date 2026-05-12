@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, Any, Type, TypeVar, Optional, Sequence, cast
 
 from rotary_embedding_torch import RotaryEmbedding
-from flash_attn.ops.triton.layer_norm import RMSNorm
 
 try:
     from flash_attn import flash_attn_varlen_func
@@ -19,6 +18,7 @@ from .components import (
     SpanMasker,
     BobertEncoderLayer,
     HitObjectFeatureTokenizer,
+    RMSNorm,
 )
 from ..data.hitobject import HitObject
 

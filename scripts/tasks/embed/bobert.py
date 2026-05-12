@@ -97,6 +97,8 @@ def apply_checkpoint_model_shape(config, state: dict[str, torch.Tensor]):
 
 def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
     config.components.compile_model = False
+    if device.type == "cpu":
+        config.alignment.query_pool_use_flash = False
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
     apply_checkpoint_model_shape(config, state)
@@ -116,7 +118,7 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
         f"missing={len(missing)} unexpected={len(unexpected)}"
     )
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
-    model.to(device).eval()
+    model.to(device).float().eval()
     return model, checkpoint
 
 
@@ -175,6 +177,7 @@ def export_embeddings(
     load_chunk_size: int,
     flush_size: int,
     seed: int,
+    device_name: str | None,
 ):
     config = OmegaConf.load(config_path)
     if load_chunk_size <= 0:
@@ -185,7 +188,9 @@ def export_embeddings(
     dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
     dataset_dir = resolve_path(dataset_dir)
     ckpt_path = find_checkpoint(checkpoint_path)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        device_name or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
 
     model, checkpoint = load_alignment_model(config, ckpt_path, device)
     normalizer = BeatmapNormalizer(
@@ -293,6 +298,7 @@ def main():
     parser.add_argument("--load-chunk-size", type=int, default=20000)
     parser.add_argument("--flush-size", type=int, default=20000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
     args = parser.parse_args()
 
     export_embeddings(
@@ -305,6 +311,7 @@ def main():
         load_chunk_size=args.load_chunk_size,
         flush_size=args.flush_size,
         seed=args.seed,
+        device_name=args.device,
     )
 
 

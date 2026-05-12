@@ -4,9 +4,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import apply_rotary_emb
-from flash_attn import flash_attn_varlen_qkvpacked_func
-from flash_attn.ops.triton.layer_norm import RMSNorm
 from torch.utils.checkpoint import checkpoint
+
+try:
+    from flash_attn import flash_attn_varlen_qkvpacked_func
+except ImportError:
+    flash_attn_varlen_qkvpacked_func = None
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = x.float() * torch.rsqrt(
+            x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps
+        )
+        return (output * self.weight.to(device=x.device, dtype=output.dtype)).to(x.dtype)
 
 from ..data.hitobject import OBJECT_TYPE_SLIDER_HEAD
 
@@ -46,22 +62,48 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
             k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
 
-        qkv = torch.stack([q, k, v], dim=1)
-
         window_size = (
             (-1, -1)
             if self.is_global
             else (self.local_window_size, self.local_window_size)
         )
-        out = flash_attn_varlen_qkvpacked_func(
-            qkv,
-            cu_seqlens,
-            max_seqlen,
-            dropout_p=0.0,
-            causal=False,
-            window_size=window_size,
+        can_use_flash = (
+            flash_attn_varlen_qkvpacked_func is not None and x.device.type == "cuda"
         )
+        if can_use_flash:
+            qkv = torch.stack([q, k, v], dim=1)
+            out = flash_attn_varlen_qkvpacked_func(
+                qkv,
+                cu_seqlens,
+                max_seqlen,
+                dropout_p=0.0,
+                causal=False,
+                window_size=window_size,
+            )
+        else:
+            out = self._forward_torch(q, k, v, cu_seqlens)
         return self.wo(out.view(total_tokens, self.d_model))
+
+    def _forward_torch(self, q, k, v, cu_seqlens):
+        outputs = []
+        scale = self.d_head**-0.5
+        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist()):
+            q_i = q[start:end].transpose(0, 1).float()
+            k_i = k[start:end].transpose(0, 1).float()
+            v_i = v[start:end].transpose(0, 1).float()
+            scores = torch.matmul(q_i, k_i.transpose(-1, -2)) * scale
+            if not self.is_global:
+                length = end - start
+                idx = torch.arange(length, device=q.device)
+                mask = (idx[:, None] - idx[None, :]).abs() > self.local_window_size
+                scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
+            weights = torch.softmax(scores, dim=-1)
+            outputs.append(torch.matmul(weights, v_i).transpose(0, 1).to(v.dtype))
+        return (
+            torch.cat(outputs, dim=0)
+            if outputs
+            else v.new_empty((0, self.n_heads, self.d_head))
+        )
 
 
 class SwiGLU(nn.Module):

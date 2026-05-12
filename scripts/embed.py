@@ -3,6 +3,7 @@ from scripts.common.cli import dispatch
 
 COMMANDS = {
     "bobert": "scripts.tasks.embed.bobert",
+    "cpu-parity": "scripts.tasks.embed.cpu_parity",
 }
 
 
