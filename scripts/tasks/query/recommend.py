@@ -236,8 +236,8 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument(
         "--checkpoint",
-        default=None,
-        help="Defaults to newest experiments/**/checkpoints/last.ckpt",
+        default="data/bobert.pt",
+        help="Defaults to data/bobert.pt",
     )
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--include-same-set", action="store_true")

@@ -5,6 +5,7 @@ COMMANDS = {
     "align": "scripts.tasks.train.align",
     "graph": "scripts.tasks.train.graph",
     "pretrain": "scripts.tasks.train.pretrain",
+    "strip": "scripts.tasks.train.strip",
 }
 
 
