@@ -12,17 +12,6 @@ from tqdm import tqdm
 
 
 RANKED_VALUES = {1, 2, 3}
-DIFFICULTY_WEIGHTS = np.array(
-    [
-        1.00,
-        0.80,
-        0.80,
-        0.45,
-        0.40,
-        0.40,
-    ],
-    dtype=np.float32,
-)
 CACHE_LIST_COLUMNS = [
     "graph_positive_ids",
     "graph_positive_weights",
@@ -59,14 +48,6 @@ class MiningConfig:
     max_sr: float | None
     positive_max_star_delta: float
     trivial_duplicate_star_delta: float
-    graph_difficulty_rank: int
-    same_set_radius_factor: float
-    same_set_strength: float
-    same_song_strength: float
-    same_artist_mapper_strength: float
-    same_mapper_strength: float
-    same_artist_strength: float
-    song_difficulty_distance_scale: float
     ignore_near_star_delta: float
 
     @classmethod
@@ -98,16 +79,6 @@ class MiningConfig:
             ),
             positive_max_star_delta=float(config["positive_max_star_delta"]),
             trivial_duplicate_star_delta=float(config["trivial_duplicate_star_delta"]),
-            graph_difficulty_rank=int(config["graph_difficulty_rank"]),
-            same_set_radius_factor=float(config["same_set_radius_factor"]),
-            same_set_strength=float(config["same_set_strength"]),
-            same_song_strength=float(config["same_song_strength"]),
-            same_artist_mapper_strength=float(config["same_artist_mapper_strength"]),
-            same_mapper_strength=float(config["same_mapper_strength"]),
-            same_artist_strength=float(config["same_artist_strength"]),
-            song_difficulty_distance_scale=float(
-                config["song_difficulty_distance_scale"]
-            ),
             ignore_near_star_delta=float(config["ignore_near_star_delta"]),
         )
 
@@ -128,7 +99,7 @@ class MiningTable:
     mapper_ids: np.ndarray
     status_groups: np.ndarray
     graph: np.ndarray
-    difficulty: np.ndarray
+    difficulty_composition: np.ndarray
 
     @property
     def size(self) -> int:
@@ -367,7 +338,7 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         mapper_ids=_mapper_id_sets(meta),
         status_groups=meta["status_group"].to_numpy(),
         graph=_normalize_rows(np.stack(meta["embedding"].to_list()).astype(np.float32)),
-        difficulty=_difficulty_matrix(meta),
+        difficulty_composition=_difficulty_composition(meta),
     )
 
 
@@ -467,35 +438,18 @@ def _normalize_rows(x: np.ndarray) -> np.ndarray:
     return x / np.clip(norm, 1e-9, None)
 
 
-def _robust_zscore(x: np.ndarray) -> np.ndarray:
-    x = x.astype(np.float32, copy=False)
-    median = np.nanmedian(x, axis=0, keepdims=True)
-    mad = np.nanmedian(np.abs(x - median), axis=0, keepdims=True)
-    scale = 1.4826 * mad
-    z = (x - median) / np.clip(scale, 1e-6, None)
-    return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
-
-
-def _difficulty_matrix(meta: pl.DataFrame) -> np.ndarray:
-    stars = meta["stars"].to_numpy().astype(np.float32)
+def _difficulty_composition(meta: pl.DataFrame) -> np.ndarray:
     aim = meta["aim"].to_numpy().astype(np.float32)
     speed = meta["speed"].to_numpy().astype(np.float32)
     slider_factor = meta["slider_factor"].to_numpy().astype(np.float32)
 
-    stars = np.nan_to_num(stars, nan=0.0, posinf=0.0, neginf=0.0)
     aim = np.nan_to_num(aim, nan=0.0, posinf=0.0, neginf=0.0)
     speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
     slider_factor = np.nan_to_num(slider_factor, nan=1.0, posinf=1.0, neginf=1.0)
 
     denom = np.clip(aim + speed, 1e-6, None)
     aim_share = aim / denom
-    speed_share = speed / denom
-    slider_nerf = np.clip(1.0 - slider_factor, 0.0, 1.0)
-
-    raw = np.column_stack(
-        [stars, aim, speed, slider_nerf, aim_share, speed_share]
-    ).astype(np.float32)
-    return _robust_zscore(raw) * np.sqrt(DIFFICULTY_WEIGHTS)
+    return np.column_stack([aim_share, slider_factor]).astype(np.float32)
 
 
 def _topk_faiss(
@@ -591,19 +545,34 @@ def _build_row_candidate_index(
 ) -> RowCandidateIndex:
     set_members: dict[int, list[int]] = {}
     song_members: dict[str, list[int]] = {}
+    artist_members: dict[str, list[int]] = {}
+    mapper_members: dict[int, list[int]] = {}
     for idx, beatmapset_id in enumerate(table.beatmapset_ids):
         set_members.setdefault(int(beatmapset_id), []).append(idx)
         for key in table.song_lookup_keys[idx]:
             song_members.setdefault(key, []).append(idx)
+        for key in table.artist_key_sets[idx]:
+            artist_members.setdefault(key, []).append(idx)
+        for mapper_id in table.mapper_ids[idx]:
+            mapper_members.setdefault(int(mapper_id), []).append(idx)
 
     set_arrays = {k: np.array(v, dtype=np.int64) for k, v in set_members.items()}
     song_arrays = {k: np.array(v, dtype=np.int64) for k, v in song_members.items()}
+    artist_arrays = {k: np.array(v, dtype=np.int64) for k, v in artist_members.items()}
+    mapper_arrays = {k: np.array(v, dtype=np.int64) for k, v in mapper_members.items()}
     empty = np.array([], dtype=np.int64)
     metadata_candidates = []
     for idx, beatmapset_id in enumerate(table.beatmapset_ids):
         metadata_indices = [set_arrays.get(int(beatmapset_id), empty)]
         metadata_indices.extend(
             song_arrays.get(key, empty) for key in table.song_lookup_keys[idx]
+        )
+        metadata_indices.extend(
+            artist_arrays.get(key, empty) for key in table.artist_key_sets[idx]
+        )
+        metadata_indices.extend(
+            mapper_arrays.get(int(mapper_id), empty)
+            for mapper_id in table.mapper_ids[idx]
         )
         if metadata_indices:
             metadata_candidates.append(np.unique(np.concatenate(metadata_indices)))
@@ -625,14 +594,6 @@ def _song_lookup_keys(song_key: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(keys))
 
 
-def _same_song(a: object, b: object) -> bool:
-    return bool(set(_song_lookup_keys(a)) & set(_song_lookup_keys(b)))
-
-
-def _same_artist(a: object, b: object) -> bool:
-    return bool(set(x for x in a if x) & set(x for x in b if x))
-
-
 def _has_overlap(a: frozenset, b: frozenset) -> bool:
     return bool(a and b and a & b)
 
@@ -641,8 +602,30 @@ def _same_mapper(a: frozenset[int], b: frozenset[int]) -> bool:
     return bool(a and b and a & b)
 
 
-def _union_weight(a: float, b: float) -> float:
-    return 1.0 - (1.0 - a) * (1.0 - b)
+def _plateau_weights(scores: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    scores = np.asarray(scores, dtype=np.float32)
+    if scores.size == 0:
+        return scores
+    if scores.size == 1:
+        return np.ones_like(scores)
+
+    best = float(np.max(scores))
+    gaps = best - scores
+    positive_gaps = gaps[gaps > eps]
+    if positive_gaps.size == 0:
+        return np.ones_like(scores)
+
+    scale = float(positive_gaps.mean()) + eps
+    return np.exp(-0.5 * (gaps / scale) ** 2).astype(np.float32)
+
+
+def _plateau_rescale_items(items: list[tuple[int, float]]) -> list[tuple[int, float]]:
+    if not items:
+        return items
+
+    scores = np.array([score for _, score in items], dtype=np.float32)
+    weights = _plateau_weights(scores)
+    return [(bid, float(weight)) for (bid, _), weight in zip(items, weights)]
 
 
 def _top_items(values: dict[int, float], k: int) -> list[tuple[int, float]]:
@@ -658,7 +641,6 @@ def _build_rows(
     cfg: MiningConfig,
     row_index: RowCandidateIndex,
 ) -> dict[str, list]:
-    del graph_scores
     batch_size = 10000
     columns: dict[str, list] = {
         "beatmap_id": [],
@@ -684,50 +666,22 @@ def _build_rows(
     for start in tqdm(starts, desc="Building mining rows", unit="batch"):
         end = min(table.size, start + batch_size)
         anchor_idx = np.arange(start, end)[:, None]
-        anch_diff = table.difficulty[start:end, None, :]
         anch_set = table.beatmapset_ids[start:end, None]
         anch_status = table.status_groups[start:end, None]
         anch_stars = table.stars[start:end, None]
 
         valid = (graph_idx[start:end] >= 0) & (graph_idx[start:end] != anchor_idx)
         safe_idx = np.where(valid, graph_idx[start:end], 0)
-        delta = table.difficulty[safe_idx] - anch_diff
-        diff_deltas = np.sqrt(np.mean(delta * delta, axis=2))
         star_deltas = np.abs(table.stars[safe_idx] - anch_stars)
         same_set = anch_set == table.beatmapset_ids[safe_idx]
-        graph_candidate = valid & ~same_set
-        safe_diff = np.where(graph_candidate, diff_deltas, np.inf)
-        k_idx = min(cfg.graph_difficulty_rank - 1, safe_diff.shape[1] - 1)
-        if k_idx >= 0:
-            positive_radius = np.partition(safe_diff, k_idx, axis=1)[:, k_idx]
-        else:
-            positive_radius = np.full(safe_diff.shape[0], np.inf)
-
         trivial_duplicate = same_set & (star_deltas <= cfg.trivial_duplicate_star_delta)
-        graph_mask = graph_candidate & (diff_deltas <= positive_radius[:, None])
+        graph_mask = valid & ~same_set
         graph_mask &= star_deltas <= cfg.positive_max_star_delta
-        graph_mask &= ~(
-            same_set
-            & (diff_deltas > positive_radius[:, None] * cfg.same_set_radius_factor)
-        )
-        graph_mask &= ~((same_set & graph_mask).cumsum(axis=1) > 1)
         graph_mask &= ~trivial_duplicate
-
-        radius_safe = np.maximum(positive_radius, 1e-6)[:, None]
-        diff_w = np.exp(-0.5 * (diff_deltas / radius_safe) ** 2)
         same_status = anch_status == table.status_groups[safe_idx]
-        same_pool = graph_candidate & same_status
-        cross_pool = graph_candidate & ~same_status
-        same_rank = np.cumsum(same_pool, axis=1)
-        cross_rank = np.cumsum(cross_pool, axis=1)
-        graph_rank_w = np.where(
-            same_pool,
-            1.0 / np.sqrt(np.maximum(same_rank, 1)),
-            np.where(cross_pool, 1.0 / np.sqrt(np.maximum(cross_rank, 1)), 0.0),
-        )
-        graph_w = graph_rank_w * diff_w
-        cross_w = np.where(graph_mask & cross_pool, graph_w, -1.0)
-        graph_w = np.where(graph_mask, graph_w, -1.0)
+        same_pool = graph_mask & same_status
+        cross_pool = graph_mask & ~same_status
+        graph_score_values = graph_scores[start:end]
 
         for i in range(end - start):
             row_idx = start + i
@@ -735,50 +689,23 @@ def _build_rows(
             song_dict: dict[int, float] = {}
             creator_dict: dict[int, float] = {}
             cross_dict: dict[int, float] = {}
-            graph_weight_by_idx: dict[int, float] = {}
 
-            for cid, keep, gw, cw, grw, dw in zip(
+            for cid, score, same_keep, cross_keep in zip(
                 safe_idx[i],
-                graph_mask[i],
-                graph_w[i],
-                cross_w[i],
-                graph_rank_w[i],
-                diff_w[i],
+                graph_score_values[i],
+                same_pool[i],
+                cross_pool[i],
             ):
                 cid = int(cid)
-                if cid == row_idx:
-                    continue
-                if grw > 0:
-                    graph_weight_by_idx[cid] = float(grw)
-                if keep and gw >= 0:
-                    bid = int(table.beatmap_ids[cid])
-                    graph_dict[bid] = max(graph_dict.get(bid, 0.0), float(gw))
-                if cw >= 0:
-                    bid = int(table.beatmap_ids[cid])
-                    cross_dict[bid] = max(cross_dict.get(bid, 0.0), float(cw))
-
-                same_artist = _has_overlap(
-                    table.artist_key_sets[row_idx], table.artist_key_sets[cid]
-                )
-                same_mapper = _same_mapper(
-                    table.mapper_ids[row_idx], table.mapper_ids[cid]
-                )
-                if keep and (same_artist or same_mapper):
-                    if same_artist and same_mapper:
-                        creator_strength = cfg.same_artist_mapper_strength
-                    elif same_mapper:
-                        creator_strength = cfg.same_mapper_strength
-                    else:
-                        creator_strength = cfg.same_artist_strength
-                    creator_score = float(dw) * creator_strength * float(grw)
-                    if creator_score > 0:
-                        bid = int(table.beatmap_ids[cid])
-                        creator_dict[bid] = max(
-                            creator_dict.get(bid, 0.0), creator_score
-                        )
+                bid = int(table.beatmap_ids[cid])
+                if same_keep:
+                    graph_dict[bid] = max(graph_dict.get(bid, -np.inf), float(score))
+                if cross_keep:
+                    cross_dict[bid] = max(cross_dict.get(bid, -np.inf), float(score))
 
             row_song_keys = table.song_lookup_keys[row_idx]
             row_song_key_set = table.song_lookup_key_sets[row_idx]
+            sams_candidates: list[tuple[int, int, float, bool, bool]] = []
             for cid in row_index.metadata_candidates[row_idx]:
                 cid = int(cid)
                 if cid == row_idx:
@@ -789,39 +716,72 @@ def _build_rows(
                 same_song_candidate = _has_overlap(
                     row_song_key_set, table.song_lookup_key_sets[cid]
                 )
-                if not same_set_candidate and not same_song_candidate:
+                same_artist_candidate = _has_overlap(
+                    table.artist_key_sets[row_idx], table.artist_key_sets[cid]
+                )
+                same_mapper_candidate = _same_mapper(
+                    table.mapper_ids[row_idx], table.mapper_ids[cid]
+                )
+                if not (
+                    same_set_candidate
+                    or same_song_candidate
+                    or same_artist_candidate
+                    or same_mapper_candidate
+                ):
                     continue
                 star_delta = abs(float(table.stars[row_idx] - table.stars[cid]))
                 if star_delta > cfg.positive_max_star_delta:
                     continue
                 if same_set_candidate and star_delta <= cfg.trivial_duplicate_star_delta:
                     continue
-                song_strength = (
-                    cfg.same_set_strength
-                    if same_set_candidate
-                    else cfg.same_song_strength
-                )
-                diff_delta = table.difficulty[cid] - table.difficulty[row_idx]
-                diff_dist = float(np.sqrt(np.mean(diff_delta * diff_delta)))
-                difficulty_weight = float(
-                    np.exp(
-                        -0.5
-                        * (star_delta / max(cfg.positive_max_star_delta, 1e-6)) ** 2
+                if same_set_candidate:
+                    base = 3
+                elif same_song_candidate:
+                    base = 2
+                elif same_artist_candidate:
+                    base = 1
+                else:
+                    base = 0
+                mapper_bonus = 1 if same_mapper_candidate else 0
+                comp_dist = float(
+                    np.linalg.norm(
+                        table.difficulty_composition[row_idx]
+                        - table.difficulty_composition[cid]
                     )
                 )
-                difficulty_weight *= float(
-                    np.exp(-cfg.song_difficulty_distance_scale * diff_dist * diff_dist)
+                sams_candidates.append(
+                    (
+                        cid,
+                        base + mapper_bonus,
+                        comp_dist,
+                        same_set_candidate or same_song_candidate,
+                        same_artist_candidate or same_mapper_candidate,
+                    )
                 )
-                score = difficulty_weight * _union_weight(
-                    song_strength, graph_weight_by_idx.get(cid, 0.0)
-                )
-                bid = int(table.beatmap_ids[cid])
-                song_dict[bid] = max(song_dict.get(bid, 0.0), score)
 
-            graph_sorted = _top_items(graph_dict, cfg.top_k)
-            song_sorted = _top_items(song_dict, cfg.top_k)
-            creator_sorted = _top_items(creator_dict, cfg.top_k)
-            cross_sorted = _top_items(cross_dict, cfg.top_k)
+            if sams_candidates:
+                comp_scores = -np.array(
+                    [comp_dist for _, _, comp_dist, _, _ in sams_candidates],
+                    dtype=np.float32,
+                )
+                comp_support = _plateau_weights(comp_scores)
+            else:
+                comp_support = np.empty(0, dtype=np.float32)
+
+            for (cid, relation_score, _, song_lane, creator_lane), support in zip(
+                sams_candidates, comp_support
+            ):
+                score = float(relation_score) + float(support)
+                bid = int(table.beatmap_ids[cid])
+                if song_lane:
+                    song_dict[bid] = max(song_dict.get(bid, -np.inf), score)
+                elif creator_lane:
+                    creator_dict[bid] = max(creator_dict.get(bid, -np.inf), score)
+
+            graph_sorted = _plateau_rescale_items(_top_items(graph_dict, cfg.top_k))
+            song_sorted = _plateau_rescale_items(_top_items(song_dict, cfg.top_k))
+            creator_sorted = _plateau_rescale_items(_top_items(creator_dict, cfg.top_k))
+            cross_sorted = _plateau_rescale_items(_top_items(cross_dict, cfg.top_k))
 
             columns["beatmap_id"].append(int(table.beatmap_ids[row_idx]))
             columns["status_group"].append(str(table.status_groups[row_idx]))

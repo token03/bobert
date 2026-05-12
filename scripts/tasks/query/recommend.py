@@ -144,20 +144,26 @@ def recommend(raw_input: str, ctx: QueryContext):
 
     similarities = ctx.embeddings @ query_embedding
     results = []
+    seen_set_ids = set()
     for idx in np.argsort(-similarities):
         candidate_id = int(ctx.beatmap_ids[idx])
         if candidate_id == beatmap_id:
             continue
 
         row = ctx.metadata_lookup.get(candidate_id)
+        candidate_set_id = metadata_set_id(row)
         if (
             not ctx.include_same_set
             and query_set_id is not None
-            and metadata_set_id(row) == query_set_id
+            and candidate_set_id == query_set_id
         ):
+            continue
+        if candidate_set_id is not None and candidate_set_id in seen_set_ids:
             continue
 
         results.append((candidate_id, float(similarities[idx]), row))
+        if candidate_set_id is not None:
+            seen_set_ids.add(candidate_set_id)
         if len(results) >= ctx.top_k:
             break
 

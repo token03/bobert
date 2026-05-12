@@ -75,16 +75,7 @@ mining:
 
   positive_max_star_delta: 0.25
   trivial_duplicate_star_delta: 0.01
-  graph_difficulty_rank: 8
-  same_set_radius_factor: 1.0
   ignore_near_star_delta: 0.25
-
-  same_set_strength: 1.0
-  same_song_strength: 0.9
-  same_artist_mapper_strength: 1.0
-  same_mapper_strength: 0.7
-  same_artist_strength: 0.6
-  song_difficulty_distance_scale: 0.125
 
 alignment:
   checkpoint_dir: "./experiments/align"
