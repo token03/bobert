@@ -1,0 +1,55 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: uvicorn backend.api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "80:8000"
+    volumes:
+      - ./data:/app/data:ro
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      BOBERT_CONFIG: /app/config.yaml
+      BOBERT_DATA_DIR: /app/data
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      TORCH_NUM_THREADS: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: rq worker queue --url redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      BOBERT_CONFIG: /app/config.yaml
+      BOBERT_DATA_DIR: /app/data
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      TORCH_NUM_THREADS: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:
