@@ -27,7 +27,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: tunnel --no-autoupdate --protocol http2 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate --protocol http2 --edge-ip-version 6 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - api
     security_opt:
