@@ -13,7 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 COPY requirements.txt ./
 
-RUN uv pip install --system --no-cache -r requirements.txt
+RUN uv pip install --system --no-cache --torch-backend=cpu -r requirements.txt
 
 COPY core ./core
 COPY config.yaml ./

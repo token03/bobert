@@ -1,7 +1,7 @@
 --index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://pypi.org/simple
 
-torch==2.11.0
+torch==2.11.0+cpu
 
 fastapi>=0.115
 uvicorn[standard]>=0.34

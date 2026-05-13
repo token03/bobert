@@ -2,8 +2,6 @@ services:
   api:
     build: .
     restart: unless-stopped
-    expose:
-      - "8000"
     volumes:
       - ./data:/app/data:ro
       - ./cache:/app/cache
@@ -19,10 +17,18 @@ services:
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
       TORCH_NUM_THREADS: "1"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate --protocol http2 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - api
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
