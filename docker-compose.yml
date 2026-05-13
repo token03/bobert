@@ -1,6 +1,8 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      network: host
     restart: unless-stopped
     volumes:
       - ./data:/app/data:ro
