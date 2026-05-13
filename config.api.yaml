@@ -1,0 +1,14 @@
+components:
+  compile_model: false
+  compile_dynamic: false
+  activation_checkpointing: false
+
+pretraining:
+  use_amp: false
+
+mining:
+  use_faiss_gpu: false
+
+alignment:
+  query_pool_use_flash: false
+  use_amp: false

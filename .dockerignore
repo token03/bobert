@@ -9,15 +9,27 @@ __pycache__/
 .pyrightcache/
 
 data/
+cache/
+.cache/
 experiments/
 visualizer/
 node_modules/
+tests/
+notebooks/
 
 *.ckpt
 *.safetensors
 *.pt
 *.parquet
 *.csv
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.ipynb
 
 .DS_Store
 .env
+.env.*
+!.env.example
+README.md

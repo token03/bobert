@@ -5,9 +5,7 @@ torch==2.11.0
 
 fastapi>=0.115
 uvicorn[standard]>=0.34
-redis>=5.2
-rq>=2.0
-python-multipart>=0.0.20
+httpx>=0.28.1
 
 numpy>=2.2,<2.3
 polars>=1.35

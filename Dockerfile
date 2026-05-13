@@ -17,7 +17,8 @@ RUN uv pip install --system --no-cache -r requirements.txt
 
 COPY core ./core
 COPY config.yaml ./
+COPY config.api.yaml ./
 
 COPY backend ./backend
 
-CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
