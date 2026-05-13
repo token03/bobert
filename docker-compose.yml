@@ -9,8 +9,7 @@ services:
       - ./cache:/app/cache
     environment:
       APP_ENV: production
-      PUBLIC_BASE_URL: https://api.yourdomain.com
-      FRONTEND_ORIGIN: https://your-frontend-domain.com
+      FRONTEND_ORIGIN: https://bobert-web.pages.dev
       BOBERT_DATA_DIR: /app/data
       BOBERT_CACHE_DB: /app/cache/runtime.sqlite
       BOBERT_MODEL_PATH: /app/data/bobert.pt

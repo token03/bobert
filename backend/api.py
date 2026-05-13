@@ -78,7 +78,7 @@ app.add_middleware(
     allowed_hosts=[
         "localhost",
         "127.0.0.1",
-        "api.yourdomain.com",
+        "bobert.jessiezhong.com",
         "*.trycloudflare.com",
     ],
 )
