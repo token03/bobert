@@ -37,6 +37,14 @@ torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
 class RecommendFilters(BaseModel):
     min_sr: float | None = Field(default=None, ge=0)
     max_sr: float | None = Field(default=None, ge=0)
+    min_ar: float | None = Field(default=None, ge=0)
+    max_ar: float | None = Field(default=None, ge=0)
+    min_cs: float | None = Field(default=None, ge=0)
+    max_cs: float | None = Field(default=None, ge=0)
+    min_accuracy: float | None = Field(default=None, ge=0)
+    max_accuracy: float | None = Field(default=None, ge=0)
+    min_drain: float | None = Field(default=None, ge=0)
+    max_drain: float | None = Field(default=None, ge=0)
     status: str | None = Field(default=None, max_length=32)
     exclude_same_set: bool = True
 
@@ -295,6 +303,10 @@ def public_metadata(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]
         "version": json_value(metadata.get("version")),
         "status": json_value(metadata.get("status")),
         "stars": json_value(metadata.get("difficulty_rating", metadata.get("stars"))),
+        "ar": json_value(metadata.get("ar")),
+        "cs": json_value(metadata.get("cs")),
+        "accuracy": json_value(metadata.get("accuracy")),
+        "drain": json_value(metadata.get("drain")),
         "bpm": json_value(metadata.get("bpm")),
         "total_length": json_value(metadata.get("total_length")),
         "url": json_value(metadata.get("url")) or f"https://osu.ppy.sh/b/{int(beatmap_id)}",
@@ -317,6 +329,16 @@ def passes_filters(metadata: dict[str, Any], filters: RecommendFilters) -> bool:
         return False
     if filters.max_sr is not None and (stars is None or float(stars) > filters.max_sr):
         return False
+    if not passes_range(metadata.get("ar"), filters.min_ar, filters.max_ar):
+        return False
+    if not passes_range(metadata.get("cs"), filters.min_cs, filters.max_cs):
+        return False
+    if not passes_range(
+        metadata.get("accuracy"), filters.min_accuracy, filters.max_accuracy
+    ):
+        return False
+    if not passes_range(metadata.get("drain"), filters.min_drain, filters.max_drain):
+        return False
     if filters.status:
         status_values = {
             str(metadata.get("status", "")).lower(),
@@ -324,6 +346,21 @@ def passes_filters(metadata: dict[str, Any], filters: RecommendFilters) -> bool:
         }
         if filters.status.lower() not in status_values:
             return False
+    return True
+
+
+def passes_range(value: Any, minimum: float | None, maximum: float | None) -> bool:
+    if minimum is None and maximum is None:
+        return True
+    if value is None:
+        return False
+    value = float(value)
+    if isnan(value):
+        return False
+    if minimum is not None and value < minimum:
+        return False
+    if maximum is not None and value > maximum:
+        return False
     return True
 
 

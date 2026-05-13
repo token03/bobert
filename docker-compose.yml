@@ -27,6 +27,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
+    # IPV6 CAUSE IM CHEAP AND DONT WANNA PAY FOR IPV4 ON HETZNER
     command: tunnel --no-autoupdate --protocol http2 --edge-ip-version 6 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
       - api
@@ -35,6 +36,7 @@ services:
     cap_drop:
       - ALL
 
+# IPV6 CAUSE IM CHEAP AND DONT WANNA PAY FOR IPV4 ON HETZNER
 networks:
   default:
     enable_ipv6: true

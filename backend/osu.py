@@ -72,10 +72,8 @@ def parse_osu_metadata(content: bytes, fallback_beatmap_id: int) -> dict[str, An
                 metadata["cs"] = _float_or_none(value)
             elif key_lower == "overalldifficulty":
                 metadata["accuracy"] = _float_or_none(value)
-                metadata["od"] = _float_or_none(value)
             elif key_lower == "hpdrainrate":
                 metadata["drain"] = _float_or_none(value)
-                metadata["hp_drain"] = _float_or_none(value)
             elif key_lower == "slidermultiplier":
                 metadata["slider_multiplier"] = _float_or_none(value)
             elif key_lower == "difficultyrating":
