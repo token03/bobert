@@ -12,3 +12,9 @@ mining:
 alignment:
   query_pool_use_flash: false
   use_amp: false
+
+api:
+  rate_limits:
+    global_recommend_per_hour: 1200
+    server_recommend_per_hour: 600
+    ip_recommend_per_hour: 120

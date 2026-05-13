@@ -12,6 +12,7 @@ import httpx
 import numpy as np
 import polars as pl
 import torch
+import yaml
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -30,6 +31,12 @@ CONFIG_PATH = Path(os.getenv("BOBERT_CONFIG_PATH", "/app/config.api.yaml"))
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 API_SHARED_SECRET = os.getenv("API_SHARED_SECRET", "")
+
+DEFAULT_RATE_LIMITS = {
+    "global_recommend_per_hour": 600,
+    "server_recommend_per_hour": 300,
+    "ip_recommend_per_hour": 10,
+}
 
 torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
 
@@ -71,6 +78,23 @@ _RUNTIME_LOCK = threading.Lock()
 _RATE_LIMITS: dict[str, tuple[int, int]] = {}
 
 
+def load_rate_limit_config() -> dict[str, int]:
+    if not CONFIG_PATH.exists():
+        return DEFAULT_RATE_LIMITS.copy()
+
+    with CONFIG_PATH.open() as f:
+        config = yaml.safe_load(f) or {}
+
+    configured = config.get("api", {}).get("rate_limits", {}) or {}
+    return {
+        key: int(configured.get(key, default))
+        for key, default in DEFAULT_RATE_LIMITS.items()
+    }
+
+
+RATE_LIMIT_CONFIG = load_rate_limit_config()
+
+
 app = FastAPI(title="bobert-api")
 
 app.add_middleware(
@@ -107,11 +131,23 @@ async def recommend(
     ip = client_ip(request)
     trusted_server = bool(API_SHARED_SECRET) and x_api_key == API_SHARED_SECRET
 
-    rate_limit("global:recommend", limit=600, window_seconds=3600)
+    rate_limit(
+        "global:recommend",
+        limit=RATE_LIMIT_CONFIG["global_recommend_per_hour"],
+        window_seconds=3600,
+    )
     if trusted_server:
-        rate_limit("server:recommend", limit=300, window_seconds=3600)
+        rate_limit(
+            "server:recommend",
+            limit=RATE_LIMIT_CONFIG["server_recommend_per_hour"],
+            window_seconds=3600,
+        )
     else:
-        rate_limit(f"ip:{ip}:recommend", limit=10, window_seconds=3600)
+        rate_limit(
+            f"ip:{ip}:recommend",
+            limit=RATE_LIMIT_CONFIG["ip_recommend_per_hour"],
+            window_seconds=3600,
+        )
         await verify_turnstile(x_turnstile_token, ip)
 
     rt = get_runtime()
