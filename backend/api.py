@@ -37,6 +37,23 @@ DEFAULT_RATE_LIMITS = {
     "server_recommend_per_hour": 300,
     "ip_recommend_per_hour": 10,
 }
+DEFAULT_MAX_RECOMMEND_TOP_K = 200
+
+
+def load_api_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+
+    with CONFIG_PATH.open() as f:
+        config = yaml.safe_load(f) or {}
+
+    return config.get("api", {}) or {}
+
+
+API_CONFIG = load_api_config()
+MAX_RECOMMEND_TOP_K = int(
+    API_CONFIG.get("max_recommend_top_k", DEFAULT_MAX_RECOMMEND_TOP_K)
+)
 
 torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
 
@@ -58,7 +75,7 @@ class RecommendFilters(BaseModel):
 
 class RecommendRequest(BaseModel):
     beatmap_id: int = Field(gt=0)
-    top_k: int = Field(default=20, ge=1, le=50)
+    top_k: int = Field(default=20, ge=1, le=MAX_RECOMMEND_TOP_K)
     filters: RecommendFilters = Field(default_factory=RecommendFilters)
 
 
@@ -79,13 +96,7 @@ _RATE_LIMITS: dict[str, tuple[int, int]] = {}
 
 
 def load_rate_limit_config() -> dict[str, int]:
-    if not CONFIG_PATH.exists():
-        return DEFAULT_RATE_LIMITS.copy()
-
-    with CONFIG_PATH.open() as f:
-        config = yaml.safe_load(f) or {}
-
-    configured = config.get("api", {}).get("rate_limits", {}) or {}
+    configured = API_CONFIG.get("rate_limits", {}) or {}
     return {
         key: int(configured.get(key, default))
         for key, default in DEFAULT_RATE_LIMITS.items()

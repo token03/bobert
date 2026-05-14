@@ -14,6 +14,7 @@ alignment:
   use_amp: false
 
 api:
+  max_recommend_top_k: 200
   rate_limits:
     global_recommend_per_hour: 1200
     server_recommend_per_hour: 600
