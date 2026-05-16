@@ -38,6 +38,7 @@ DEFAULT_RATE_LIMITS = {
     "ip_recommend_per_hour": 10,
 }
 DEFAULT_MAX_RECOMMEND_TOP_K = 200
+DEFAULT_RECOMMEND_BEATMAP_IDS: list[int] = []
 
 
 def load_api_config() -> dict[str, Any]:
@@ -54,6 +55,12 @@ API_CONFIG = load_api_config()
 MAX_RECOMMEND_TOP_K = int(
     API_CONFIG.get("max_recommend_top_k", DEFAULT_MAX_RECOMMEND_TOP_K)
 )
+DEFAULT_RECOMMEND_IDS = [
+    int(beatmap_id)
+    for beatmap_id in API_CONFIG.get(
+        "default_recommend_beatmap_ids", DEFAULT_RECOMMEND_BEATMAP_IDS
+    )
+]
 
 torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
 
@@ -130,6 +137,16 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"ok": "true"}
+
+
+@app.get("/recommend")
+def default_recommend() -> dict[str, Any]:
+    rt = get_runtime()
+    results = [
+        public_metadata(beatmap_id, rt.metadata_by_id.get(beatmap_id, {}))
+        for beatmap_id in DEFAULT_RECOMMEND_IDS
+    ]
+    return {"count": len(results), "results": results}
 
 
 @app.post("/recommend")
