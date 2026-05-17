@@ -42,6 +42,15 @@ class RuntimeCache:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS unavailable_beatmaps (
+                    beatmap_id INTEGER PRIMARY KEY,
+                    reason TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
 
     def load_all(self) -> list[CachedEmbedding]:
         with self._connect() as conn:
@@ -107,4 +116,30 @@ class RuntimeCache:
                     json.dumps(metadata, separators=(",", ":")),
                     int(time.time()),
                 ),
+            )
+
+    def delete(self, beatmap_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM embeddings WHERE beatmap_id = ?",
+                (int(beatmap_id),),
+            )
+
+    def is_unavailable(self, beatmap_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM unavailable_beatmaps WHERE beatmap_id = ?",
+                (int(beatmap_id),),
+            ).fetchone()
+        return row is not None
+
+    def mark_unavailable(self, beatmap_id: int, reason: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO unavailable_beatmaps
+                    (beatmap_id, reason, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (int(beatmap_id), str(reason), int(time.time())),
             )

@@ -3,13 +3,17 @@ from __future__ import annotations
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from math import isnan
 from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
+from ossapi import Ossapi
 import polars as pl
 import torch
 import yaml
@@ -21,7 +25,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.cache import RuntimeCache
 from backend.inference import CpuInferencer
-from backend.osu import fetch_osu_file, parse_osu_metadata
+from backend.osu import fetch_osu_file
 
 
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
@@ -100,6 +104,12 @@ class Runtime:
 _RUNTIME: Runtime | None = None
 _RUNTIME_LOCK = threading.Lock()
 _RATE_LIMITS: dict[str, tuple[int, int]] = {}
+_OSU_API: Ossapi | None = None
+_OSU_API_LOCK = threading.Lock()
+
+
+class BeatmapUnavailableError(ValueError):
+    pass
 
 
 def load_rate_limit_config() -> dict[str, int]:
@@ -113,7 +123,14 @@ def load_rate_limit_config() -> dict[str, int]:
 RATE_LIMIT_CONFIG = load_rate_limit_config()
 
 
-app = FastAPI(title="bobert-api")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    rt = await run_in_threadpool(get_runtime)
+    await run_in_threadpool(rt.inferencer.load)
+    yield
+
+
+app = FastAPI(title="bobert-api", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -179,9 +196,12 @@ async def recommend(
         await verify_turnstile(x_turnstile_token, ip)
 
     rt = get_runtime()
-    query_embedding, cache_status, query_metadata = await get_query_embedding(
-        rt, payload.beatmap_id
-    )
+    try:
+        query_embedding, cache_status, query_metadata = await get_query_embedding(
+            rt, payload.beatmap_id
+        )
+    except BeatmapUnavailableError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     results = await run_in_threadpool(
         search,
         rt,
@@ -238,7 +258,14 @@ def get_runtime() -> Runtime:
         metadata_by_id = load_metadata_lookup(beatmaps)
         cache = RuntimeCache(CACHE_DB, embedding_dim=embeddings.shape[1])
 
-        cached = [item for item in cache.load_all() if item.beatmap_id not in id_to_index]
+        cached = []
+        for item in cache.load_all():
+            if item.beatmap_id in id_to_index:
+                continue
+            if not metadata_complete(item.metadata):
+                cache.delete(item.beatmap_id)
+                continue
+            cached.append(item)
         if cached:
             start = len(embedding_ids)
             embedding_ids.extend(item.beatmap_id for item in cached)
@@ -272,12 +299,30 @@ async def get_query_embedding(
 
     cached = rt.cache.get(beatmap_id)
     if cached is not None:
-        with rt.lock:
-            append_embedding(rt, cached.beatmap_id, cached.embedding, cached.metadata)
-        return cached.embedding, "hit", cached.metadata
+        if not metadata_complete(cached.metadata):
+            rt.cache.delete(beatmap_id)
+        else:
+            with rt.lock:
+                append_embedding(rt, cached.beatmap_id, cached.embedding, cached.metadata)
+            return cached.embedding, "hit", cached.metadata
 
-    osu_bytes = await fetch_osu_file(beatmap_id)
-    metadata = parse_osu_metadata(osu_bytes, beatmap_id)
+    if rt.cache.is_unavailable(beatmap_id):
+        raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
+
+    try:
+        metadata = await run_in_threadpool(fetch_full_beatmap_metadata, beatmap_id)
+    except BeatmapUnavailableError:
+        rt.cache.mark_unavailable(beatmap_id, "osu api metadata unavailable")
+        raise
+    if not metadata_complete(metadata):
+        rt.cache.mark_unavailable(beatmap_id, "incomplete osu api metadata")
+        raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
+
+    try:
+        osu_bytes = await fetch_osu_file(beatmap_id)
+    except ValueError as exc:
+        rt.cache.mark_unavailable(beatmap_id, str(exc))
+        raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable") from exc
     embedding = await run_in_threadpool(rt.inferencer.embed_osu_bytes, osu_bytes)
 
     rt.cache.upsert(beatmap_id, embedding, metadata)
@@ -298,6 +343,105 @@ def append_embedding(
         np.float32
     )
     rt.metadata_by_id[beatmap_id] = metadata
+
+
+def get_osu_api() -> Ossapi:
+    global _OSU_API
+    if _OSU_API is not None:
+        return _OSU_API
+
+    client_id = os.getenv("OSU_CLIENT_ID") or os.getenv("client_id")
+    client_secret = os.getenv("OSU_CLIENT_SECRET") or os.getenv("client_secret")
+    if not client_id or not client_secret:
+        raise RuntimeError("osu API credentials are required for cache-miss metadata")
+
+    with _OSU_API_LOCK:
+        if _OSU_API is None:
+            _OSU_API = Ossapi(int(client_id), client_secret)
+        return _OSU_API
+
+
+def fetch_full_beatmap_metadata(beatmap_id: int) -> dict[str, Any]:
+    beatmaps = get_osu_api().beatmaps([int(beatmap_id)])
+    if not beatmaps:
+        raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
+
+    metadata = beatmap_metadata(beatmaps[0])
+    if metadata.get("deleted_at"):
+        raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
+    return metadata
+
+
+def beatmap_metadata(bm: Any) -> dict[str, Any]:
+    metadata = ossapi_model_data(bm)
+    bs = metadata.pop("beatmapset", None) or ossapi_model_data(
+        getattr(bm, "_beatmapset", None) or getattr(bm, "beatmapset", None)
+    )
+    if bs is not None:
+        metadata.update(
+            {
+                key: bs.get(key)
+                for key in (
+                    "artist",
+                    "artist_unicode",
+                    "title",
+                    "title_unicode",
+                    "creator",
+                    "source",
+                    "tags",
+                    "nsfw",
+                    "video",
+                    "storyboard",
+                    "favourite_count",
+                    "play_count",
+                    "ranked_date",
+                    "submitted_date",
+                )
+            }
+        )
+
+    ranked = getattr(bm, "ranked", None)
+    owners = getattr(bm, "owners", None)
+    if ranked is not None:
+        metadata["ranked"] = getattr(ranked, "value", ranked)
+    if owners:
+        metadata["owners"] = " ".join(str(owner.id) for owner in owners)
+    return metadata
+
+
+def ossapi_model_data(value: Any) -> Any:
+    if value is None:
+        return None
+    data = getattr(value, "_ossapi_data", None)
+    if isinstance(data, dict):
+        return {key.lstrip("_"): ossapi_model_data(item) for key, item in data.items()}
+    if isinstance(value, dict):
+        return {key.lstrip("_"): ossapi_model_data(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [ossapi_model_data(item) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return str(value)
+    return value
+
+
+def metadata_complete(metadata: dict[str, Any] | None) -> bool:
+    if not metadata:
+        return False
+    required = [
+        metadata.get("title"),
+        metadata.get("creator"),
+        metadata.get("version"),
+        metadata.get("difficulty_rating", metadata.get("stars")),
+        metadata.get("bpm"),
+        metadata.get("total_length", metadata.get("hit_length")),
+    ]
+    if any(json_value(value) is None for value in required):
+        return False
+    return json_value(metadata.get("status")) is not None or json_value(
+        metadata.get("ranked")
+    ) is not None
 
 
 def search(

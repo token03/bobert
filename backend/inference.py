@@ -18,7 +18,6 @@ from core.model.bobert import BobertForAlignment
 
 
 MIN_OBJECTS_PER_MAP = 1
-MAX_OBJECTS_PER_MAP = 4000
 
 
 class CpuInferencer:
@@ -166,7 +165,7 @@ def _validate_beatmap(beatmap: RawBeatmap | None) -> bool:
     return (
         beatmap is not None
         and len(beatmap.hit_objects) > 0
-        and MIN_OBJECTS_PER_MAP < len(beatmap.hit_objects) <= MAX_OBJECTS_PER_MAP
+        and MIN_OBJECTS_PER_MAP < len(beatmap.hit_objects)
     )
 
 

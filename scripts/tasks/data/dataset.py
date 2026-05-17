@@ -12,7 +12,6 @@ from core.data.parser import parse_osu_file, RawBeatmap
 
 BATCH_SIZE = 1024
 MIN_OBJECTS_PER_MAP = 1
-MAX_OBJECTS_PER_MAP = 4000
 
 
 def multiprocessing_context():
@@ -69,7 +68,7 @@ def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
     return (
         beatmap is not None
         and len(beatmap.hit_objects) > 0
-        and MIN_OBJECTS_PER_MAP < len(beatmap.hit_objects) <= MAX_OBJECTS_PER_MAP
+        and MIN_OBJECTS_PER_MAP < len(beatmap.hit_objects)
     )
 
 
