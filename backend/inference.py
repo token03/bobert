@@ -99,12 +99,12 @@ class CpuInferencer:
         )
 
         with torch.inference_mode():
-            embedding = self.model(
+            embedding = self.model.embed(
                 padded.to(self.device),
                 mask.to(self.device),
                 cu_seqlens.to(self.device),
                 map_features.to(self.device),
-            )["embedding"]
+            )
 
         vector = embedding.float().cpu().numpy()[0]
         norm = np.linalg.norm(vector)

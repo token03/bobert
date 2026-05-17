@@ -787,3 +787,40 @@ class BobertForAlignment(nn.Module):
                 for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
             },
         }
+
+    def embed(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        map_features: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        packed_input, attention_mask, cu_seqlens = self.bert._embed(
+            x, attention_mask, cu_seqlens
+        )
+        max_seqlen = x.shape[1]
+
+        packed_output = self.bert.encode(
+            packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        )
+        contrastive_pooled = self.contrastive_pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+
+        if self.map_projector is not None:
+            if map_features is None:
+                map_projected = contrastive_pooled.new_zeros(
+                    (contrastive_pooled.shape[0], self.map_projector.output_dim)
+                )
+            else:
+                map_projected = self.map_projector(
+                    map_features.to(
+                        device=contrastive_pooled.device,
+                        dtype=contrastive_pooled.dtype,
+                    )
+                )
+            contrastive_pooled = torch.cat([contrastive_pooled, map_projected], dim=-1)
+
+        return F.normalize(self.retrieval_head(contrastive_pooled), dim=-1)

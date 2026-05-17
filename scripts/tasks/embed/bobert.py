@@ -14,6 +14,7 @@ from tqdm import tqdm
 from core.data.batch import pad_batch
 from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
+from core.data.sampler import LengthBucketBatchSampler, length_bucket
 from core.data.source import load_beatmap_dataset
 from core.model.bobert import BobertForAlignment
 from scripts.common.paths import PROJECT_ROOT, resolve_path
@@ -137,6 +138,27 @@ def chunked(values: list[int], chunk_size: int):
         yield values[start : start + chunk_size]
 
 
+def bucket_batch_sampler(
+    beatmaps: list[dict], batch_size: int, max_seq_len: int, buckets: list[int] | None
+):
+    if not buckets:
+        return None
+
+    lengths = [min(int(item["hitobjects"].shape[0]), max_seq_len) for item in beatmaps]
+    if not lengths:
+        return None
+
+    mean_len = int(round(sum(lengths) / len(lengths)))
+    max_tokens = batch_size * length_bucket(mean_len, buckets)
+    return LengthBucketBatchSampler(
+        lengths,
+        batch_size,
+        buckets,
+        max_tokens=max_tokens,
+        shuffle=False,
+    )
+
+
 def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
     embeddings = np.asarray(embeddings, dtype=np.float32)
     values = pa.array(embeddings.reshape(-1), type=pa.float32())
@@ -226,16 +248,25 @@ def export_embeddings(
 
                 vector_dim = beatmaps[0]["hitobjects"].shape[1]
                 dataset = ExportDataset(beatmaps, normalizer)
-                loader = DataLoader(
-                    dataset,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    num_workers=0,
-                    pin_memory=device.type == "cuda",
-                    collate_fn=lambda batch: collate_export(
+                batch_sampler = bucket_batch_sampler(
+                    beatmaps,
+                    batch_size,
+                    config.data.max_seq_len,
+                    [int(bucket) for bucket in config.data.get("length_buckets", [])],
+                )
+                loader_kwargs = {
+                    "shuffle": False,
+                    "num_workers": 0,
+                    "pin_memory": device.type == "cuda",
+                    "collate_fn": lambda batch: collate_export(
                         batch, config.data.max_seq_len, vector_dim
                     ),
-                )
+                }
+                if batch_sampler is None:
+                    loader_kwargs["batch_size"] = batch_size
+                else:
+                    loader_kwargs["batch_sampler"] = batch_sampler
+                loader = DataLoader(dataset, **loader_kwargs)
 
                 for beatmap_ids, vectors, attention_mask, cu_seqlens, map_features in tqdm(
                     loader, desc="Embedding", leave=False
@@ -249,9 +280,9 @@ def export_embeddings(
                         dtype=amp_dtype,
                         enabled=device.type == "cuda",
                     ):
-                        embeddings = model(
+                        embeddings = model.embed(
                             vectors, attention_mask, cu_seqlens, map_features
-                        )["embedding"]
+                        )
 
                     embeddings_np = embeddings.float().cpu().numpy()
                     buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
