@@ -414,9 +414,17 @@ def ossapi_model_data(value: Any) -> Any:
         return None
     data = getattr(value, "_ossapi_data", None)
     if isinstance(data, dict):
-        return {key.lstrip("_"): ossapi_model_data(item) for key, item in data.items()}
+        return {
+            key: ossapi_model_data(item)
+            for key, item in data.items()
+            if not key.startswith("_")
+        }
     if isinstance(value, dict):
-        return {key.lstrip("_"): ossapi_model_data(item) for key, item in value.items()}
+        return {
+            key: ossapi_model_data(item)
+            for key, item in value.items()
+            if not str(key).startswith("_")
+        }
     if isinstance(value, (list, tuple)):
         return [ossapi_model_data(item) for item in value]
     if isinstance(value, Enum):
