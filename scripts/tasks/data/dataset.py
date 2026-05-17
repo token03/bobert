@@ -231,7 +231,49 @@ def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
     return merged_df.height
 
 
-def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
+def next_part_path(output_path: str) -> str:
+    os.makedirs(output_path, exist_ok=True)
+    existing = [
+        f
+        for f in os.listdir(output_path)
+        if f.startswith("part-") and f.endswith(".parquet")
+    ]
+    indices = []
+    for filename in existing:
+        try:
+            indices.append(int(filename.removeprefix("part-").removesuffix(".parquet")))
+        except ValueError:
+            continue
+    next_index = (max(indices) + 1) if indices else 0
+    return os.path.join(output_path, f"part-{next_index}.parquet")
+
+
+def beatmap_id_from_path(file_path: str) -> int | None:
+    try:
+        return int(os.path.splitext(os.path.basename(file_path))[0])
+    except ValueError:
+        return None
+
+
+def append_table(temp_path: str, output_path: str, table_name: str) -> int:
+    if not os.path.exists(temp_path):
+        return 0
+
+    temp_files = sorted([f for f in os.listdir(temp_path) if f.endswith(".parquet")])
+    if not temp_files:
+        return 0
+
+    frames = [
+        pl.read_parquet(os.path.join(temp_path, temp_file))
+        for temp_file in tqdm(temp_files, desc=f"Appending {table_name}", leave=False)
+    ]
+    merged_df = pl.concat(frames, how="vertical")
+    merged_df.write_parquet(next_part_path(output_path))
+
+    return merged_df.height
+
+
+def consolidate_dataset(temp_dir: str, output_dir: str, append: bool = False) -> int:
     print("\nPhase 2: Consolidating temporary files...")
 
     consolidation_args = [
@@ -252,7 +294,8 @@ def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
         ),
     ]
 
-    results = [consolidate_table(*args) for args in consolidation_args]
+    write_table = append_table if append else consolidate_table
+    results = [write_table(*args) for args in consolidation_args]
 
     beatmap_count, hitobject_count, curvepoint_count = results
     print(f"Consolidated {beatmap_count} beatmap records.")
@@ -262,16 +305,31 @@ def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
     return beatmap_count
 
 
+def existing_dataset_ids(output_dir: str) -> set[int]:
+    beatmaps_dir = os.path.join(output_dir, "beatmaps")
+    if not os.path.exists(beatmaps_dir):
+        return set()
+    try:
+        ids = pl.scan_parquet(os.path.join(beatmaps_dir, "**", "*.parquet")).select(
+            "beatmap_id"
+        ).collect()["beatmap_id"]
+        return {int(bid) for bid in ids.to_list()}
+    except Exception:
+        return set()
+
+
 def create_dataset(
     root_dir: str,
     output_dir: str,
     sample_size: Optional[int] = None,
     sample_seed: int = 42,
+    append: bool = False,
+    force_existing: bool = False,
 ) -> str:
     temp_dir = output_dir + "_temp_processing"
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
-    if os.path.exists(output_dir):
+    if os.path.exists(output_dir) and not append:
         shutil.rmtree(output_dir)
     os.makedirs(os.path.join(temp_dir, "beatmaps"))
     os.makedirs(os.path.join(temp_dir, "hitobjects"))
@@ -287,6 +345,19 @@ def create_dataset(
         if file.endswith(".osu")
     ]
     print(f"Found {len(all_files)} total .osu files.")
+
+    if append and not force_existing:
+        existing_ids = existing_dataset_ids(output_dir)
+        before_count = len(all_files)
+        all_files = [
+            file_path
+            for file_path in all_files
+            if beatmap_id_from_path(file_path) not in existing_ids
+        ]
+        print(
+            f"Append mode: skipping {before_count - len(all_files)} existing beatmaps; "
+            f"{len(all_files)} missing beatmaps remain."
+        )
 
     if sample_size and len(all_files) > sample_size:
         rng = random.Random(sample_seed)
@@ -331,7 +402,7 @@ def create_dataset(
     maps_per_sec = len(files_to_process) / elapsed if elapsed > 0 else 0
     print(f"Phase 1 complete in {elapsed:.2f} seconds ({maps_per_sec:.2f} maps/sec).")
 
-    consolidate_dataset(temp_dir, output_dir)
+    consolidate_dataset(temp_dir, output_dir, append=append)
 
     print("Cleaning up temporary directory...")
     shutil.rmtree(temp_dir)
@@ -369,11 +440,26 @@ def main():
         default=42,
         help="Random seed used with --sample-size.",
     )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append missing parsed beatmaps to an existing dataset instead of rebuilding it.",
+    )
+    parser.add_argument(
+        "--force-existing",
+        action="store_true",
+        help="With --append, process files even when their beatmap ID already exists.",
+    )
     args = parser.parse_args()
 
     total_start_time = time.time()
     final_dir = create_dataset(
-        args.directory, args.output_dir, args.sample_size, args.sample_seed
+        args.directory,
+        args.output_dir,
+        args.sample_size,
+        args.sample_seed,
+        append=args.append,
+        force_existing=args.force_existing,
     )
     print(f"Total time taken: {time.time() - total_start_time:.2f} seconds.")
     print(f"Output directory: {final_dir}")

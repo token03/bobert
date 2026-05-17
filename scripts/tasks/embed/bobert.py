@@ -132,6 +132,13 @@ def sample_ids(dataset_dir: Path, limit: int | None, seed: int):
     return [int(x) for x in ids]
 
 
+def existing_embedding_ids(output_path: Path) -> set[int]:
+    if not output_path.exists():
+        return set()
+    ids = pl.scan_parquet(output_path).select("beatmap_id").collect()["beatmap_id"]
+    return {int(bid) for bid in ids.to_list()}
+
+
 def chunked(values: list[int], chunk_size: int):
     for start in range(0, len(values), chunk_size):
         yield values[start : start + chunk_size]
@@ -178,6 +185,7 @@ def export_embeddings(
     flush_size: int,
     seed: int,
     device_name: str | None,
+    append: bool,
 ):
     config = OmegaConf.load(config_path)
     if load_chunk_size <= 0:
@@ -187,6 +195,26 @@ def export_embeddings(
 
     dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
     dataset_dir = resolve_path(dataset_dir)
+    ids = sample_ids(dataset_dir, limit, seed)
+    existing_table = None
+    write_path = output_path
+    if append and output_path.exists():
+        existing_ids = existing_embedding_ids(output_path)
+        before_count = len(ids)
+        ids = [bid for bid in ids if bid not in existing_ids]
+        print(
+            f"Append mode: skipping {before_count - len(ids):,} existing embeddings; "
+            f"{len(ids):,} missing embeddings remain."
+        )
+        if not ids:
+            print(f"No missing embeddings to append to {output_path}")
+            return
+        existing_table = pq.read_table(output_path)
+        write_path = output_path.with_name(f".{output_path.name}.tmp")
+        if write_path.exists():
+            write_path.unlink()
+    print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
+
     ckpt_path = find_checkpoint(checkpoint_path)
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -198,9 +226,6 @@ def export_embeddings(
         attribute_stats=checkpoint.get("attribute_stats", {}),
     )
 
-    ids = sample_ids(dataset_dir, limit, seed)
-    print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
-
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     writer = None
     buffered_ids: list[int] = []
@@ -208,6 +233,9 @@ def export_embeddings(
     saved_count = 0
 
     try:
+        if existing_table is not None:
+            writer = pq.ParquetWriter(write_path, existing_table.schema)
+            writer.write_table(existing_table)
         with torch.inference_mode():
             chunk_count = math.ceil(len(ids) / load_chunk_size)
             for id_chunk in tqdm(
@@ -259,12 +287,12 @@ def export_embeddings(
 
                     if len(buffered_ids) >= flush_size:
                         writer, flushed_count = flush_embeddings(
-                            writer, output_path, buffered_ids, buffered_embeddings
+                            writer, write_path, buffered_ids, buffered_embeddings
                         )
                         saved_count += flushed_count
 
             writer, flushed_count = flush_embeddings(
-                writer, output_path, buffered_ids, buffered_embeddings
+                writer, write_path, buffered_ids, buffered_embeddings
             )
             saved_count += flushed_count
     finally:
@@ -274,7 +302,11 @@ def export_embeddings(
     if saved_count == 0:
         raise RuntimeError("No beatmaps loaded for export")
 
-    print(f"Saved {saved_count:,} embeddings to {output_path}")
+    if write_path != output_path:
+        write_path.replace(output_path)
+
+    action = "Appended" if append else "Saved"
+    print(f"{action} {saved_count:,} embeddings to {output_path}")
 
 
 def main():
@@ -299,6 +331,11 @@ def main():
     parser.add_argument("--flush-size", type=int, default=20000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Only embed dataset IDs missing from an existing output parquet.",
+    )
     args = parser.parse_args()
 
     export_embeddings(
@@ -312,6 +349,7 @@ def main():
         flush_size=args.flush_size,
         seed=args.seed,
         device_name=args.device,
+        append=args.append,
     )
 
 
