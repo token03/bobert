@@ -4,7 +4,7 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from math import isnan
@@ -99,6 +99,8 @@ class Runtime:
     cache: RuntimeCache
     inferencer: CpuInferencer
     lock: threading.Lock
+    dynamic_embeddings: list[np.ndarray] = field(default_factory=list)
+    dynamic_embedding_ids: list[int] = field(default_factory=list)
 
 
 _RUNTIME: Runtime | None = None
@@ -295,7 +297,11 @@ async def get_query_embedding(
     with rt.lock:
         idx = rt.id_to_index.get(int(beatmap_id))
         if idx is not None:
-            return rt.embeddings[idx], "hit", rt.metadata_by_id.get(int(beatmap_id), {})
+            if idx < len(rt.embedding_ids):
+                embedding = rt.embeddings[idx]
+            else:
+                embedding = rt.dynamic_embeddings[idx - len(rt.embedding_ids)]
+            return embedding, "hit", rt.metadata_by_id.get(int(beatmap_id), {})
 
     cached = rt.cache.get(beatmap_id)
     if cached is not None:
@@ -337,11 +343,9 @@ def append_embedding(
     if beatmap_id in rt.id_to_index:
         rt.metadata_by_id.setdefault(beatmap_id, metadata)
         return
-    rt.id_to_index[beatmap_id] = len(rt.embedding_ids)
-    rt.embedding_ids.append(beatmap_id)
-    rt.embeddings = np.vstack([rt.embeddings, normalize_rows(embedding[None, :])]).astype(
-        np.float32
-    )
+    rt.id_to_index[beatmap_id] = len(rt.embedding_ids) + len(rt.dynamic_embedding_ids)
+    rt.dynamic_embedding_ids.append(beatmap_id)
+    rt.dynamic_embeddings.append(normalize_rows(embedding[None, :]).astype(np.float32)[0])
     rt.metadata_by_id[beatmap_id] = metadata
 
 
@@ -461,11 +465,15 @@ def search(
     filters: RecommendFilters,
 ) -> list[dict[str, Any]]:
     with rt.lock:
-        embedding_ids = list(rt.embedding_ids)
-        embeddings = rt.embeddings.copy()
-        metadata_by_id = dict(rt.metadata_by_id)
+        embedding_ids = list(rt.embedding_ids) + list(rt.dynamic_embedding_ids)
+        embeddings = rt.embeddings
+        dynamic_embeddings = list(rt.dynamic_embeddings)
+        metadata_by_id = rt.metadata_by_id
 
     scores = embeddings @ query_embedding
+    if dynamic_embeddings:
+        dynamic_scores = np.asarray(dynamic_embeddings, dtype=np.float32) @ query_embedding
+        scores = np.concatenate([scores, dynamic_scores])
     query_set_id = metadata_set_id(query_metadata)
     seen_set_ids: set[int] = set()
     results = []

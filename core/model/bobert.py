@@ -391,54 +391,39 @@ class BobertQueryAttentionPooler(nn.Module):
         batch_size: int,
     ) -> torch.Tensor:
         device = k.device
-        total_tokens = k.shape[0]
-        batch_idx = torch.repeat_interleave(
-            torch.arange(batch_size, device=device),
-            seqlens,
-        )
-
-        k_float = k.float()
-        v_float = v.float()
-        q_float = self.query.to(device=device).float()
+        q = self.query.to(device=device, dtype=k.dtype)
         scale = self.head_dim**-0.5
-        pooled_queries = []
 
-        for query_idx in range(self.num_queries):
-            logits = (k_float * q_float[query_idx].unsqueeze(0)).sum(dim=-1) * scale
-            max_logits = torch.full(
-                (batch_size, self.n_heads),
-                -torch.inf,
-                device=device,
-                dtype=torch.float32,
-            )
-            if total_tokens > 0:
-                max_logits.scatter_reduce_(
-                    0,
-                    batch_idx[:, None].expand(-1, self.n_heads),
-                    logits,
-                    reduce="amax",
-                    include_self=True,
+        outputs = []
+        start = 0
+        for seqlen in seqlens.tolist():
+            end = start + seqlen
+            if seqlen == 0:
+                outputs.append(
+                    torch.zeros(
+                        (self.num_queries, self.n_heads, self.head_dim),
+                        device=device,
+                        dtype=k.dtype,
+                    )
                 )
+                continue
 
-            weights = torch.exp(logits - max_logits[batch_idx])
-            denom = torch.zeros(
-                (batch_size, self.n_heads), device=device, dtype=torch.float32
+            k_i = k[start:end].float()
+            v_i = v[start:end].float()
+
+            scores = torch.einsum("qhd,shd->qhs", q.float(), k_i) * scale
+            weights = torch.softmax(scores, dim=-1)
+            out = torch.einsum("qhs,shd->qhd", weights, v_i)
+            outputs.append(out.to(k.dtype))
+            start = end
+
+        return (
+            torch.stack(outputs, dim=0)
+            if outputs
+            else k.new_empty(
+                (0, self.num_queries, self.n_heads, self.head_dim)
             )
-            if total_tokens > 0:
-                denom.index_add_(0, batch_idx, weights)
-
-            weights = weights / denom[batch_idx].clamp_min(1e-9)
-            pooled = torch.zeros(
-                (batch_size, self.n_heads, self.head_dim),
-                device=device,
-                dtype=torch.float32,
-            )
-            if total_tokens > 0:
-                pooled.index_add_(0, batch_idx, weights.unsqueeze(-1) * v_float)
-
-            pooled_queries.append(pooled)
-
-        return torch.stack(pooled_queries, dim=1).to(v.dtype)
+        )
 
 
 class BobertMaskedLMHead(nn.Module):
