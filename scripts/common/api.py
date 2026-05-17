@@ -12,8 +12,8 @@ from scripts.common.paths import PROJECT_ROOT
 
 def osu_api() -> Ossapi:
     load_dotenv(PROJECT_ROOT / ".env")
-    client_id = os.getenv("client_id")
-    client_secret = os.getenv("client_secret")
+    client_id = os.getenv("OSU_CLIENT_ID")
+    client_secret = os.getenv("OSU_CLIENT_SECRET")
     if not all([client_id, client_secret]):
         print("[red]Error: API credentials missing in .env[/red]")
         raise SystemExit(1)
