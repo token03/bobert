@@ -1,6 +1,8 @@
 import os
 import argparse
+import json
 import random
+import signal
 import time
 import shutil
 import multiprocessing as mp
@@ -12,6 +14,13 @@ from core.data.parser import parse_osu_file, RawBeatmap
 
 BATCH_SIZE = 1024
 MIN_OBJECTS_PER_MAP = 1
+MAX_OBJECTS_PER_MAP = 16_384
+MAX_CURVE_POINTS_PER_MAP = 32_768
+PARSE_TIMEOUT_SECONDS = 30
+
+
+class ParseTimeoutError(BaseException):
+    pass
 
 
 def multiprocessing_context():
@@ -69,7 +78,19 @@ def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
         beatmap is not None
         and len(beatmap.hit_objects) > 0
         and MIN_OBJECTS_PER_MAP < len(beatmap.hit_objects)
+        and len(beatmap.hit_objects) <= MAX_OBJECTS_PER_MAP
     )
+
+
+def log_worker_failure(temp_dir: str, pid: int, file_path: str, reason: str, detail: str):
+    log_path = os.path.join(temp_dir, f"failures-worker-{pid}.jsonl")
+    record = {
+        "file_path": file_path,
+        "reason": reason,
+        "detail": detail,
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
 def extract_beatmap_record(beatmap: RawBeatmap) -> Dict:
@@ -139,19 +160,39 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
     curvepoints_buffer = []
     file_counter = 0
 
+    def handle_timeout(signum, frame):
+        raise ParseTimeoutError()
+
+    signal.signal(signal.SIGALRM, handle_timeout)
+
     while True:
         file_path = tasks_queue.get()
         if file_path is None:
             break
 
         try:
-            raw_beatmap = parse_osu_file(file_path)
+            signal.alarm(PARSE_TIMEOUT_SECONDS)
+            raw_beatmap = parse_osu_file(
+                file_path,
+                max_hitobject_lines=MAX_OBJECTS_PER_MAP,
+                max_curve_points=MAX_CURVE_POINTS_PER_MAP,
+            )
             if raw_beatmap and validate_beatmap(raw_beatmap):
                 beatmaps_buffer.append(extract_beatmap_record(raw_beatmap))
                 hitobjects_buffer.extend(extract_hitobject_records(raw_beatmap))
                 curvepoints_buffer.extend(extract_curvepoint_records(raw_beatmap))
-        except Exception:
-            pass
+        except ParseTimeoutError:
+            log_worker_failure(
+                temp_dir,
+                pid,
+                file_path,
+                "timeout",
+                f"exceeded {PARSE_TIMEOUT_SECONDS}s",
+            )
+        except Exception as e:
+            log_worker_failure(temp_dir, pid, file_path, "error", repr(e))
+        finally:
+            signal.alarm(0)
 
         with progress_counter.get_lock():
             progress_counter.value += 1
@@ -231,49 +272,7 @@ def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
     return merged_df.height
 
 
-def next_part_path(output_path: str) -> str:
-    os.makedirs(output_path, exist_ok=True)
-    existing = [
-        f
-        for f in os.listdir(output_path)
-        if f.startswith("part-") and f.endswith(".parquet")
-    ]
-    indices = []
-    for filename in existing:
-        try:
-            indices.append(int(filename.removeprefix("part-").removesuffix(".parquet")))
-        except ValueError:
-            continue
-    next_index = (max(indices) + 1) if indices else 0
-    return os.path.join(output_path, f"part-{next_index}.parquet")
-
-
-def beatmap_id_from_path(file_path: str) -> int | None:
-    try:
-        return int(os.path.splitext(os.path.basename(file_path))[0])
-    except ValueError:
-        return None
-
-
-def append_table(temp_path: str, output_path: str, table_name: str) -> int:
-    if not os.path.exists(temp_path):
-        return 0
-
-    temp_files = sorted([f for f in os.listdir(temp_path) if f.endswith(".parquet")])
-    if not temp_files:
-        return 0
-
-    frames = [
-        pl.read_parquet(os.path.join(temp_path, temp_file))
-        for temp_file in tqdm(temp_files, desc=f"Appending {table_name}", leave=False)
-    ]
-    merged_df = pl.concat(frames, how="vertical")
-    merged_df.write_parquet(next_part_path(output_path))
-
-    return merged_df.height
-
-
-def consolidate_dataset(temp_dir: str, output_dir: str, append: bool = False) -> int:
+def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
     print("\nPhase 2: Consolidating temporary files...")
 
     consolidation_args = [
@@ -294,8 +293,7 @@ def consolidate_dataset(temp_dir: str, output_dir: str, append: bool = False) ->
         ),
     ]
 
-    write_table = append_table if append else consolidate_table
-    results = [write_table(*args) for args in consolidation_args]
+    results = [consolidate_table(*args) for args in consolidation_args]
 
     beatmap_count, hitobject_count, curvepoint_count = results
     print(f"Consolidated {beatmap_count} beatmap records.")
@@ -305,17 +303,17 @@ def consolidate_dataset(temp_dir: str, output_dir: str, append: bool = False) ->
     return beatmap_count
 
 
-def existing_dataset_ids(output_dir: str) -> set[int]:
-    beatmaps_dir = os.path.join(output_dir, "beatmaps")
-    if not os.path.exists(beatmaps_dir):
-        return set()
-    try:
-        ids = pl.scan_parquet(os.path.join(beatmaps_dir, "**", "*.parquet")).select(
-            "beatmap_id"
-        ).collect()["beatmap_id"]
-        return {int(bid) for bid in ids.to_list()}
-    except Exception:
-        return set()
+def terminate_processes(processes: List[mp.Process]):
+    for p in processes:
+        if p.is_alive():
+            p.terminate()
+    for p in processes:
+        p.join(timeout=5)
+    for p in processes:
+        if p.is_alive():
+            p.kill()
+    for p in processes:
+        p.join()
 
 
 def create_dataset(
@@ -323,13 +321,11 @@ def create_dataset(
     output_dir: str,
     sample_size: Optional[int] = None,
     sample_seed: int = 42,
-    append: bool = False,
-    force_existing: bool = False,
 ) -> str:
     temp_dir = output_dir + "_temp_processing"
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
-    if os.path.exists(output_dir) and not append:
+    if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(os.path.join(temp_dir, "beatmaps"))
     os.makedirs(os.path.join(temp_dir, "hitobjects"))
@@ -345,19 +341,6 @@ def create_dataset(
         if file.endswith(".osu")
     ]
     print(f"Found {len(all_files)} total .osu files.")
-
-    if append and not force_existing:
-        existing_ids = existing_dataset_ids(output_dir)
-        before_count = len(all_files)
-        all_files = [
-            file_path
-            for file_path in all_files
-            if beatmap_id_from_path(file_path) not in existing_ids
-        ]
-        print(
-            f"Append mode: skipping {before_count - len(all_files)} existing beatmaps; "
-            f"{len(all_files)} missing beatmaps remain."
-        )
 
     if sample_size and len(all_files) > sample_size:
         rng = random.Random(sample_seed)
@@ -384,25 +367,47 @@ def create_dataset(
     for p in processes:
         p.start()
 
-    with tqdm(total=len(files_to_process), desc="Parsing files", unit="files") as pbar:
-        last_value = 0
-        while any(p.is_alive() for p in processes):
+    try:
+        with tqdm(total=len(files_to_process), desc="Parsing files", unit="files") as pbar:
+            last_value = 0
+            reported_flush = False
+            while any(p.is_alive() for p in processes):
+                for p in processes:
+                    if p.exitcode is not None and p.exitcode != 0:
+                        raise RuntimeError(
+                            f"Worker process {p.pid} exited with code {p.exitcode}"
+                        )
+
+                current = progress_counter.value
+                pbar.update(current - last_value)
+                last_value = current
+                if current >= len(files_to_process) and not reported_flush:
+                    pbar.write(
+                        "All files parsed; waiting for workers to flush parquet batches..."
+                    )
+                    reported_flush = True
+                time.sleep(0.1)
+
             current = progress_counter.value
             pbar.update(current - last_value)
-            last_value = current
-            time.sleep(0.1)
 
-        current = progress_counter.value
-        pbar.update(current - last_value)
-
-    for p in processes:
-        p.join()
+        for p in processes:
+            p.join()
+            if p.exitcode != 0:
+                raise RuntimeError(f"Worker process {p.pid} exited with code {p.exitcode}")
+    except KeyboardInterrupt:
+        print("Interrupted; terminating worker processes...")
+        terminate_processes(processes)
+        raise
+    except Exception:
+        terminate_processes(processes)
+        raise
 
     elapsed = time.time() - start_time
     maps_per_sec = len(files_to_process) / elapsed if elapsed > 0 else 0
     print(f"Phase 1 complete in {elapsed:.2f} seconds ({maps_per_sec:.2f} maps/sec).")
 
-    consolidate_dataset(temp_dir, output_dir, append=append)
+    consolidate_dataset(temp_dir, output_dir)
 
     print("Cleaning up temporary directory...")
     shutil.rmtree(temp_dir)
@@ -440,16 +445,6 @@ def main():
         default=42,
         help="Random seed used with --sample-size.",
     )
-    parser.add_argument(
-        "--append",
-        action="store_true",
-        help="Append missing parsed beatmaps to an existing dataset instead of rebuilding it.",
-    )
-    parser.add_argument(
-        "--force-existing",
-        action="store_true",
-        help="With --append, process files even when their beatmap ID already exists.",
-    )
     args = parser.parse_args()
 
     total_start_time = time.time()
@@ -458,8 +453,6 @@ def main():
         args.output_dir,
         args.sample_size,
         args.sample_seed,
-        append=args.append,
-        force_existing=args.force_existing,
     )
     print(f"Total time taken: {time.time() - total_start_time:.2f} seconds.")
     print(f"Output directory: {final_dir}")

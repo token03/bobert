@@ -280,11 +280,10 @@ def main():
 
     tier_queues[0].join()
 
-    tier2_pending = tier_queues[1].qsize()
-    tier3_pending = tier_queues[2].qsize()
-    if tier2_pending > 0 or tier3_pending > 0:
+    fallback_pending = sum(tier_queue.qsize() for tier_queue in tier_queues[1:])
+    if fallback_pending > 0:
         print(
-            f"\nTier 2/3 still processing {tier2_pending + tier3_pending:,} failed items in background..."
+            f"\nFallback tiers still processing {fallback_pending:,} failed items in background..."
         )
 
     if failed_downloads:

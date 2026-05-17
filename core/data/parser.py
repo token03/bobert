@@ -79,9 +79,18 @@ def _preprocess_timing_points(
     return sections
 
 
-def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
+def parse_osu_file(
+    file_path: str,
+    max_hitobject_lines: int | None = None,
+    max_curve_points: int | None = None,
+) -> Optional[RawBeatmap]:
+    try:
+        filename_beatmap_id = int(os.path.splitext(os.path.basename(file_path))[0])
+    except ValueError:
+        filename_beatmap_id = None
+
     data = {
-        "beatmap_id": None,
+        "beatmap_id": filename_beatmap_id,
         "hp_drain": 5.0,
         "cs": 5.0,
         "od": 5.0,
@@ -94,6 +103,7 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
 
     timing_lines = []
     hitobject_lines = []
+    curve_point_count = 0
 
     try:
         data["category"] = os.path.basename(os.path.dirname(file_path))
@@ -115,7 +125,8 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
 
             if section == "metadata":
                 if line.lower().startswith("beatmapid:"):
-                    data["beatmap_id"] = int(line.split(":", 1)[1])
+                    if filename_beatmap_id is None:
+                        data["beatmap_id"] = int(line.split(":", 1)[1])
             elif section == "difficulty":
                 parts = line.split(":", 1)
                 if len(parts) == 2:
@@ -142,6 +153,21 @@ def parse_osu_file(file_path: str) -> Optional[RawBeatmap]:
                 timing_lines.append(line)
             elif section == "hitobjects":
                 hitobject_lines.append(line)
+                if (
+                    max_hitobject_lines is not None
+                    and len(hitobject_lines) > max_hitobject_lines
+                ):
+                    return None
+                if max_curve_points is not None:
+                    parts = line.split(",")
+                    try:
+                        is_slider = int(parts[3]) & 2
+                    except (ValueError, IndexError):
+                        is_slider = False
+                    if is_slider and len(parts) > 5:
+                        curve_point_count += parts[5].count("|")
+                        if curve_point_count > max_curve_points:
+                            return None
 
         if data["beatmap_id"] is None or not hitobject_lines:
             return None
