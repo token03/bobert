@@ -15,6 +15,7 @@ def is_valid_osu_file(content: bytes) -> bool:
     if len(content) < 100:
         return False
     first_line = content.decode("utf-8", errors="ignore").split("\n", 1)[0]
+    first_line = first_line.lstrip("\ufeff")
     return first_line.strip().startswith("osu file format v")
 
 
