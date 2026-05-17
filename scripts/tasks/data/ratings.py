@@ -3,8 +3,9 @@ import argparse
 import importlib
 import yaml
 import concurrent.futures
+import multiprocessing
 import polars as pl
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
 from tqdm import tqdm
 import itertools
 import rosu_pp_py as rosu
@@ -66,27 +67,91 @@ def _calculate_difficulty_attributes_worker(
         return None, False
 
 
+def _calculate_difficulty_attributes_timeout_worker(
+    result_queue: Any,
+    beatmap_id: int,
+    requested_seq_len: int,
+    existing_seq_lens: set[int],
+    raw_beatmap_path: str,
+) -> None:
+    result_queue.put(
+        _calculate_difficulty_attributes_worker(
+            beatmap_id,
+            requested_seq_len,
+            existing_seq_lens,
+            raw_beatmap_path,
+        )
+    )
+
+
+def _calculate_difficulty_attributes_with_timeout(
+    beatmap_id: int,
+    requested_seq_len: int,
+    existing_seq_lens: set[int],
+    raw_beatmap_path: str,
+    timeout_seconds: float,
+) -> Tuple[Optional[Dict[str, float]], bool, bool]:
+    if timeout_seconds <= 0:
+        result, cached = _calculate_difficulty_attributes_worker(
+            beatmap_id, requested_seq_len, existing_seq_lens, raw_beatmap_path
+        )
+        return result, cached, False
+
+    context = multiprocessing.get_context()
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_calculate_difficulty_attributes_timeout_worker,
+        args=(
+            result_queue,
+            beatmap_id,
+            requested_seq_len,
+            existing_seq_lens,
+            raw_beatmap_path,
+        ),
+    )
+    process.start()
+    process.join(timeout_seconds)
+
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        return None, False, True
+
+    if result_queue.empty():
+        return None, False, False
+
+    result, cached = result_queue.get()
+    return result, cached, False
+
+
 def _calculate_difficulty_attributes_batch_worker(
     tasks: List[Tuple[int, set[int]]],
     seq_len: int,
     raw_beatmap_path: str,
-) -> Tuple[List[Dict[str, float]], int, int]:
+    map_timeout: float,
+) -> Tuple[List[Dict[str, float]], int, int, int]:
     new_ratings = []
     num_cached = 0
     num_failed = 0
+    num_timed_out = 0
 
     for beatmap_id, existing_seq_lens in tasks:
-        result, cached = _calculate_difficulty_attributes_worker(
-            beatmap_id, seq_len, existing_seq_lens, raw_beatmap_path
+        result, cached, timed_out = _calculate_difficulty_attributes_with_timeout(
+            beatmap_id, seq_len, existing_seq_lens, raw_beatmap_path, map_timeout
         )
         if cached:
             num_cached += 1
         elif result is not None:
             new_ratings.append(result)
+        elif timed_out:
+            num_timed_out += 1
         else:
             num_failed += 1
 
-    return new_ratings, num_cached, num_failed
+    return new_ratings, num_cached, num_failed, num_timed_out
 
 
 def load_config(config_path: str = "./config.yaml") -> dict:
@@ -179,7 +244,8 @@ def calculate_missing_ratings(
     raw_beatmap_path: str,
     workers: int,
     batch_size: int,
-) -> Tuple[List[Dict], int, int]:
+    map_timeout: float,
+) -> Tuple[List[Dict], int, int, int]:
     existing_by_beatmap = {}
     if not existing_ratings.is_empty():
         for beatmap_id, cached_len in existing_ratings.select(
@@ -197,12 +263,13 @@ def calculate_missing_ratings(
             tasks_to_run.append((int(bid), existing_by_beatmap.get(int(bid), set())))
 
     if not tasks_to_run:
-        return [], num_already_cached, 0
+        return [], num_already_cached, 0, 0
 
     print(f"Scheduling {len(tasks_to_run)} missing ratings across {workers} workers")
 
     new_ratings = []
     num_failed = 0
+    num_timed_out = 0
 
     batches = list(chunked(tasks_to_run, batch_size))
     worker_fn = importlib.import_module(
@@ -215,6 +282,7 @@ def calculate_missing_ratings(
                 batch,
                 seq_len,
                 raw_beatmap_path,
+                map_timeout,
             ): batch
             for batch in batches
         }
@@ -224,13 +292,14 @@ def calculate_missing_ratings(
         ) as pbar:
             for future in concurrent.futures.as_completed(future_to_task):
                 batch = future_to_task[future]
-                batch_ratings, batch_cached, batch_failed = future.result()
+                batch_ratings, batch_cached, batch_failed, batch_timed_out = future.result()
                 new_ratings.extend(batch_ratings)
                 num_already_cached += batch_cached
                 num_failed += batch_failed
+                num_timed_out += batch_timed_out
                 pbar.update(len(batch))
 
-    return new_ratings, num_already_cached, num_failed
+    return new_ratings, num_already_cached, num_failed, num_timed_out
 
 
 def save_ratings(ratings_df: pl.DataFrame, ratings_path: str):
@@ -294,6 +363,12 @@ def main():
         default=64,
         help="Beatmaps per process task batch (default: 64)",
     )
+    parser.add_argument(
+        "--map-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds before skipping one beatmap rating calculation (default: 30, 0 disables)",
+    )
 
     args = parser.parse_args()
 
@@ -304,6 +379,8 @@ def main():
         raise ValueError("--workers must be at least 1")
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
+    if args.map_timeout < 0:
+        raise ValueError("--map-timeout must be non-negative; use 0 to disable")
 
     dataset_path = args.dataset
     if dataset_path is None:
@@ -319,6 +396,7 @@ def main():
     print(f"  Output: {output_path}")
     print(f"  Workers: {args.workers}")
     print(f"  Batch size: {args.batch_size}")
+    print(f"  Map timeout: {args.map_timeout}s")
     print()
 
     print("Loading beatmap IDs from dataset...")
@@ -332,13 +410,14 @@ def main():
     print(f"Found {len(existing_ratings)} existing ratings")
     print()
 
-    new_ratings, num_cached, num_failed = calculate_missing_ratings(
+    new_ratings, num_cached, num_failed, num_timed_out = calculate_missing_ratings(
         beatmap_lengths,
         seq_len,
         existing_ratings,
         raw_beatmap_path,
         args.workers,
         args.batch_size,
+        args.map_timeout,
     )
 
     if new_ratings:
@@ -362,6 +441,7 @@ def main():
     print(f"  Already cached: {num_cached}")
     print(f"  Newly calculated: {len(new_ratings)}")
     print(f"  Failed: {num_failed}")
+    print(f"  Timed out: {num_timed_out}")
     print(f"  Total ratings in file: {len(combined_ratings)}")
     print("=" * 60)
 

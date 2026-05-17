@@ -85,7 +85,7 @@ alignment:
   forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
   batch_size: 128
   num_epochs: 2
-  alignment_size: 100000
+  alignment_size: 150000
 
   embedding_dim: 256
   teacher_dim: 96
