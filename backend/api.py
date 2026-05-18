@@ -160,6 +160,7 @@ async def lifespan(app: FastAPI):
     try:
         rt = await run_in_threadpool(get_runtime)
         await run_in_threadpool(rt.inferencer.load)
+        await run_in_threadpool(get_osu_api)
         yield
     finally:
         if _HTTP_CLIENT is not None:
