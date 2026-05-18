@@ -6,6 +6,7 @@ torch==2.11.0+cpu
 fastapi>=0.115
 uvicorn[standard]>=0.34
 httpx>=0.28.1
+structlog>=25.0
 
 numpy>=2.2,<2.3
 polars>=1.35

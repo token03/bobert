@@ -32,8 +32,17 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from backend.cache import RuntimeCache
+from backend.cache import CachedEmbedding, RuntimeCache
 from backend.inference import CpuInferencer
+from backend.logging import (
+    RequestLoggingMiddleware,
+    async_timed,
+    configure_logging,
+    get_logger,
+    request_client_ip,
+    timed,
+    timed_call,
+)
 from backend.osu import close_osu_http_client, fetch_osu_file, open_osu_http_client
 
 
@@ -76,6 +85,8 @@ DEFAULT_RECOMMEND_IDS = [
 ]
 
 torch.set_num_threads(THREAD_COUNT)
+configure_logging()
+log = get_logger("bobert.api")
 
 
 class RecommendFilters(BaseModel):
@@ -159,12 +170,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="bobert-api", lifespan=lifespan)
 
+app.add_middleware(RequestLoggingMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_ORIGIN],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Turnstile-Token", "X-API-Key"],
+    allow_headers=["Content-Type", "X-Turnstile-Token", "X-API-Key", "X-Request-ID"],
+    expose_headers=["X-Request-ID", "X-Process-Time-Ms"],
 )
 
 app.add_middleware(
@@ -200,44 +214,59 @@ async def recommend(
     x_turnstile_token: str | None = Header(default=None, alias="X-Turnstile-Token"),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
-    ip = client_ip(request)
+    ip = request_client_ip(request)
     trusted_server = bool(API_SHARED_SECRET) and x_api_key == API_SHARED_SECRET
 
-    rate_limit(
-        "global:recommend",
-        limit=RATE_LIMIT_CONFIG["global_recommend_per_hour"],
-        window_seconds=3600,
-    )
-    if trusted_server:
+    with timed(
+        "recommend.rate_limit",
+        beatmap_id=payload.beatmap_id,
+        trusted_server=trusted_server,
+    ):
         rate_limit(
-            "server:recommend",
-            limit=RATE_LIMIT_CONFIG["server_recommend_per_hour"],
+            "global:recommend",
+            limit=RATE_LIMIT_CONFIG["global_recommend_per_hour"],
             window_seconds=3600,
         )
-    else:
-        rate_limit(
-            f"ip:{ip}:recommend",
-            limit=RATE_LIMIT_CONFIG["ip_recommend_per_hour"],
-            window_seconds=3600,
-        )
-        await verify_turnstile(x_turnstile_token, ip)
+        if trusted_server:
+            rate_limit(
+                "server:recommend",
+                limit=RATE_LIMIT_CONFIG["server_recommend_per_hour"],
+                window_seconds=3600,
+            )
+        else:
+            rate_limit(
+                f"ip:{ip}:recommend",
+                limit=RATE_LIMIT_CONFIG["ip_recommend_per_hour"],
+                window_seconds=3600,
+            )
+    if not trusted_server:
+        async with async_timed("recommend.turnstile", beatmap_id=payload.beatmap_id):
+            await verify_turnstile(x_turnstile_token, ip)
 
-    rt = get_runtime()
+    with timed("recommend.runtime", beatmap_id=payload.beatmap_id):
+        rt = get_runtime()
     try:
-        query_embedding, cache_status, query_metadata = await get_query_embedding(
-            rt, payload.beatmap_id
-        )
+        async with async_timed("recommend.query_embedding", beatmap_id=payload.beatmap_id):
+            query_embedding, cache_status, query_metadata = await get_query_embedding(
+                rt, payload.beatmap_id
+            )
     except BeatmapUnavailableError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    results = await run_in_threadpool(
-        search,
-        rt,
-        payload.beatmap_id,
-        query_embedding,
-        query_metadata,
-        payload.top_k,
-        payload.filters,
-    )
+    async with async_timed(
+        "recommend.search",
+        beatmap_id=payload.beatmap_id,
+        top_k=payload.top_k,
+        cache=cache_status,
+    ):
+        results = await run_in_threadpool(
+            search,
+            rt,
+            payload.beatmap_id,
+            query_embedding,
+            query_metadata,
+            payload.top_k,
+            payload.filters,
+        )
     return {
         "query": {
             "beatmap_id": payload.beatmap_id,
@@ -319,47 +348,117 @@ def get_runtime() -> Runtime:
 async def get_query_embedding(
     rt: Runtime, beatmap_id: int
 ) -> tuple[np.ndarray, str, dict[str, Any]]:
-    with rt.lock:
-        idx = rt.id_to_index.get(int(beatmap_id))
-        if idx is not None:
-            if idx < len(rt.embedding_ids):
-                embedding = rt.embeddings[idx]
-            else:
-                embedding = rt.dynamic_embeddings[idx - len(rt.embedding_ids)]
-            return embedding, "hit", rt.metadata_by_id.get(int(beatmap_id), {})
+    memory = lookup_memory_embedding(rt, beatmap_id)
+    if memory is not None:
+        embedding, metadata = memory
+        log.info("embedding.cache_hit", beatmap_id=beatmap_id, cache="memory")
+        return embedding, "hit", metadata
 
-    cached = rt.cache.get(beatmap_id)
+    cached = lookup_cached_embedding(rt, beatmap_id)
     if cached is not None:
         if not metadata_complete(cached.metadata):
-            rt.cache.delete(beatmap_id)
+            delete_stale_cached_embedding(rt, beatmap_id)
         else:
-            with rt.lock:
-                append_embedding(rt, cached.beatmap_id, cached.embedding, cached.metadata)
+            append_query_embedding(
+                rt, cached.beatmap_id, cached.embedding, cached.metadata, "sqlite"
+            )
+            log.info("embedding.cache_hit", beatmap_id=beatmap_id, cache="sqlite")
             return cached.embedding, "hit", cached.metadata
 
-    if rt.cache.is_unavailable(beatmap_id):
+    if is_unavailable_embedding(rt, beatmap_id):
+        log.info("embedding.unavailable", beatmap_id=beatmap_id)
         raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
 
     try:
-        metadata = await run_in_threadpool(fetch_full_beatmap_metadata, beatmap_id)
+        metadata = await fetch_query_metadata(beatmap_id)
     except BeatmapUnavailableError:
-        rt.cache.mark_unavailable(beatmap_id, "osu api metadata unavailable")
+        mark_unavailable_embedding(rt, beatmap_id, "osu api metadata unavailable")
         raise
     if not metadata_complete(metadata):
-        rt.cache.mark_unavailable(beatmap_id, "incomplete osu api metadata")
+        mark_unavailable_embedding(rt, beatmap_id, "incomplete osu api metadata")
         raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
 
     try:
-        osu_bytes = await fetch_osu_file(beatmap_id)
+        osu_bytes = await download_query_osu(beatmap_id)
     except ValueError as exc:
-        rt.cache.mark_unavailable(beatmap_id, str(exc))
+        mark_unavailable_embedding(rt, beatmap_id, str(exc))
         raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable") from exc
-    embedding = await run_in_threadpool(embed_osu_bytes_serialized, rt, osu_bytes)
+    embedding = await infer_query_embedding(rt, beatmap_id, osu_bytes)
 
+    upsert_query_embedding(rt, beatmap_id, embedding, metadata)
+    append_query_embedding(rt, beatmap_id, embedding, metadata, "miss")
+    return embedding, "miss", metadata
+
+
+@timed_call("embedding.memory_lookup", fields=("beatmap_id",))
+def lookup_memory_embedding(
+    rt: Runtime, beatmap_id: int
+) -> tuple[np.ndarray, dict[str, Any]] | None:
+    with rt.lock:
+        idx = rt.id_to_index.get(int(beatmap_id))
+        if idx is None:
+            return None
+        if idx < len(rt.embedding_ids):
+            embedding = rt.embeddings[idx]
+        else:
+            embedding = rt.dynamic_embeddings[idx - len(rt.embedding_ids)]
+        return embedding, rt.metadata_by_id.get(int(beatmap_id), {})
+
+
+@timed_call("embedding.sqlite_lookup", fields=("beatmap_id",))
+def lookup_cached_embedding(rt: Runtime, beatmap_id: int) -> CachedEmbedding | None:
+    return rt.cache.get(beatmap_id)
+
+
+@timed_call("embedding.sqlite_delete_stale", fields=("beatmap_id",))
+def delete_stale_cached_embedding(rt: Runtime, beatmap_id: int) -> None:
+    rt.cache.delete(beatmap_id)
+
+
+@timed_call("embedding.unavailable_lookup", fields=("beatmap_id",))
+def is_unavailable_embedding(rt: Runtime, beatmap_id: int) -> bool:
+    return rt.cache.is_unavailable(beatmap_id)
+
+
+@timed_call("embedding.mark_unavailable", fields=("beatmap_id",))
+def mark_unavailable_embedding(rt: Runtime, beatmap_id: int, reason: str) -> None:
+    rt.cache.mark_unavailable(beatmap_id, reason)
+
+
+@timed_call("embedding.osu_metadata", fields=("beatmap_id",))
+async def fetch_query_metadata(beatmap_id: int) -> dict[str, Any]:
+    return await run_in_threadpool(fetch_full_beatmap_metadata, beatmap_id)
+
+
+@timed_call("embedding.osu_download", fields=("beatmap_id",))
+async def download_query_osu(beatmap_id: int) -> bytes:
+    return await fetch_osu_file(beatmap_id)
+
+
+@timed_call("embedding.cpu_inference", fields=("beatmap_id",))
+async def infer_query_embedding(
+    rt: Runtime, beatmap_id: int, osu_bytes: bytes
+) -> np.ndarray:
+    return await run_in_threadpool(embed_osu_bytes_serialized, rt, osu_bytes)
+
+
+@timed_call("embedding.cache_upsert", fields=("beatmap_id",))
+def upsert_query_embedding(
+    rt: Runtime, beatmap_id: int, embedding: np.ndarray, metadata: dict[str, Any]
+) -> None:
     rt.cache.upsert(beatmap_id, embedding, metadata)
+
+
+@timed_call("embedding.runtime_append", fields=("beatmap_id", "cache"))
+def append_query_embedding(
+    rt: Runtime,
+    beatmap_id: int,
+    embedding: np.ndarray,
+    metadata: dict[str, Any],
+    cache: str,
+) -> None:
     with rt.lock:
         append_embedding(rt, beatmap_id, embedding, metadata)
-    return embedding, "miss", metadata
 
 
 def append_embedding(
@@ -657,16 +756,6 @@ def metadata_set_id(metadata: dict[str, Any] | None) -> int | None:
 def normalize_rows(x: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(x, axis=1, keepdims=True)
     return x / np.clip(norm, 1e-9, None)
-
-
-def client_ip(request: Request) -> str:
-    cf_ip = request.headers.get("CF-Connecting-IP")
-    if cf_ip:
-        return cf_ip
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
 
 
 def rate_limit(key: str, limit: int, window_seconds: int) -> None:
