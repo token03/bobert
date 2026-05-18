@@ -18,9 +18,11 @@ services:
       API_SHARED_SECRET: ${API_SHARED_SECRET}
       OSU_CLIENT_ID: ${OSU_CLIENT_ID}
       OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET}
-      OMP_NUM_THREADS: "1"
-      MKL_NUM_THREADS: "1"
-      TORCH_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+      POLARS_MAX_THREADS: "2"
+      TORCH_NUM_THREADS: "2"
     security_opt:
       - no-new-privileges:true
     cap_drop:

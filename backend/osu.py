@@ -10,6 +10,25 @@ DOWNLOAD_HEADERS = {
     "Accept": "text/plain,*/*;q=0.8",
 }
 
+_OSU_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def open_osu_http_client() -> None:
+    global _OSU_HTTP_CLIENT
+    if _OSU_HTTP_CLIENT is None:
+        _OSU_HTTP_CLIENT = httpx.AsyncClient(
+            timeout=20.0,
+            headers=DOWNLOAD_HEADERS,
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+        )
+
+
+async def close_osu_http_client() -> None:
+    global _OSU_HTTP_CLIENT
+    if _OSU_HTTP_CLIENT is not None:
+        await _OSU_HTTP_CLIENT.aclose()
+        _OSU_HTTP_CLIENT = None
+
 
 def is_valid_osu_file(content: bytes) -> bool:
     if len(content) < 100:
@@ -20,9 +39,12 @@ def is_valid_osu_file(content: bytes) -> bool:
 
 
 async def fetch_osu_file(beatmap_id: int) -> bytes:
+    if _OSU_HTTP_CLIENT is None:
+        open_osu_http_client()
+
+    assert _OSU_HTTP_CLIENT is not None
     url = f"https://osu.ppy.sh/osu/{int(beatmap_id)}"
-    async with httpx.AsyncClient(timeout=20.0, headers=DOWNLOAD_HEADERS) as client:
-        response = await client.get(url)
+    response = await _OSU_HTTP_CLIENT.get(url)
 
     if response.status_code != 200 or not is_valid_osu_file(response.content):
         raise ValueError(f"could not download a valid .osu file for {beatmap_id}")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
 import threading
 import time
@@ -10,6 +11,14 @@ from enum import Enum
 from math import isnan
 from pathlib import Path
 from typing import Any
+
+CPU_COUNT = multiprocessing.cpu_count() or 1
+DEFAULT_THREAD_COUNT = min(2, CPU_COUNT)
+THREAD_COUNT = int(os.getenv("TORCH_NUM_THREADS", str(DEFAULT_THREAD_COUNT)))
+os.environ.setdefault("OMP_NUM_THREADS", str(THREAD_COUNT))
+os.environ.setdefault("OPENBLAS_NUM_THREADS", str(THREAD_COUNT))
+os.environ.setdefault("MKL_NUM_THREADS", str(THREAD_COUNT))
+os.environ.setdefault("POLARS_MAX_THREADS", str(THREAD_COUNT))
 
 import httpx
 import numpy as np
@@ -25,7 +34,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.cache import RuntimeCache
 from backend.inference import CpuInferencer
-from backend.osu import fetch_osu_file
+from backend.osu import close_osu_http_client, fetch_osu_file, open_osu_http_client
 
 
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
@@ -66,7 +75,7 @@ DEFAULT_RECOMMEND_IDS = [
     )
 ]
 
-torch.set_num_threads(int(os.getenv("TORCH_NUM_THREADS", "1")))
+torch.set_num_threads(THREAD_COUNT)
 
 
 class RecommendFilters(BaseModel):
@@ -108,6 +117,10 @@ _RUNTIME_LOCK = threading.Lock()
 _RATE_LIMITS: dict[str, tuple[int, int]] = {}
 _OSU_API: Ossapi | None = None
 _OSU_API_LOCK = threading.Lock()
+_HTTP_CLIENT: httpx.AsyncClient | None = None
+_INFERENCE_SEMAPHORE = threading.Semaphore(1)
+
+SEARCH_CANDIDATE_FACTORS = (10, 25, 100)
 
 
 class BeatmapUnavailableError(ValueError):
@@ -127,9 +140,21 @@ RATE_LIMIT_CONFIG = load_rate_limit_config()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    rt = await run_in_threadpool(get_runtime)
-    await run_in_threadpool(rt.inferencer.load)
-    yield
+    global _HTTP_CLIENT
+    _HTTP_CLIENT = httpx.AsyncClient(
+        timeout=5.0,
+        limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
+    )
+    open_osu_http_client()
+    try:
+        rt = await run_in_threadpool(get_runtime)
+        await run_in_threadpool(rt.inferencer.load)
+        yield
+    finally:
+        if _HTTP_CLIENT is not None:
+            await _HTTP_CLIENT.aclose()
+            _HTTP_CLIENT = None
+        await close_osu_http_client()
 
 
 app = FastAPI(title="bobert-api", lifespan=lifespan)
@@ -329,7 +354,7 @@ async def get_query_embedding(
     except ValueError as exc:
         rt.cache.mark_unavailable(beatmap_id, str(exc))
         raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable") from exc
-    embedding = await run_in_threadpool(rt.inferencer.embed_osu_bytes, osu_bytes)
+    embedding = await run_in_threadpool(embed_osu_bytes_serialized, rt, osu_bytes)
 
     rt.cache.upsert(beatmap_id, embedding, metadata)
     with rt.lock:
@@ -347,6 +372,11 @@ def append_embedding(
     rt.dynamic_embedding_ids.append(beatmap_id)
     rt.dynamic_embeddings.append(normalize_rows(embedding[None, :]).astype(np.float32)[0])
     rt.metadata_by_id[beatmap_id] = metadata
+
+
+def embed_osu_bytes_serialized(rt: Runtime, osu_bytes: bytes) -> np.ndarray:
+    with _INFERENCE_SEMAPHORE:
+        return rt.inferencer.embed_osu_bytes(osu_bytes)
 
 
 def get_osu_api() -> Ossapi:
@@ -478,33 +508,59 @@ def search(
     seen_set_ids: set[int] = set()
     results = []
 
-    for idx in np.argsort(-scores):
-        beatmap_id = int(embedding_ids[int(idx)])
-        if beatmap_id == query_beatmap_id:
-            continue
+    evaluated: set[int] = set()
+    for candidate_indices in candidate_index_batches(scores, top_k):
+        for idx in candidate_indices:
+            idx = int(idx)
+            if idx in evaluated:
+                continue
+            evaluated.add(idx)
 
-        metadata = metadata_by_id.get(beatmap_id, {})
-        candidate_set_id = metadata_set_id(metadata)
-        if not passes_filters(metadata, filters):
-            continue
-        if (
-            filters.exclude_same_set
-            and query_set_id is not None
-            and candidate_set_id == query_set_id
-        ):
-            continue
-        if candidate_set_id is not None and candidate_set_id in seen_set_ids:
-            continue
+            beatmap_id = int(embedding_ids[idx])
+            if beatmap_id == query_beatmap_id:
+                continue
 
-        result = public_metadata(beatmap_id, metadata)
-        result["score"] = float(scores[int(idx)])
-        results.append(result)
-        if candidate_set_id is not None:
-            seen_set_ids.add(candidate_set_id)
+            metadata = metadata_by_id.get(beatmap_id, {})
+            candidate_set_id = metadata_set_id(metadata)
+            if not passes_filters(metadata, filters):
+                continue
+            if (
+                filters.exclude_same_set
+                and query_set_id is not None
+                and candidate_set_id == query_set_id
+            ):
+                continue
+            if candidate_set_id is not None and candidate_set_id in seen_set_ids:
+                continue
+
+            result = public_metadata(beatmap_id, metadata)
+            result["score"] = float(scores[idx])
+            results.append(result)
+            if candidate_set_id is not None:
+                seen_set_ids.add(candidate_set_id)
+            if len(results) >= top_k:
+                break
         if len(results) >= top_k:
             break
 
     return results
+
+
+def candidate_index_batches(scores: np.ndarray, top_k: int):
+    count = len(scores)
+    last_candidate_count = 0
+    for factor in SEARCH_CANDIDATE_FACTORS:
+        candidate_count = min(count, max(top_k * factor, top_k))
+        if candidate_count <= last_candidate_count:
+            continue
+        last_candidate_count = candidate_count
+        if candidate_count >= count:
+            yield np.argsort(-scores)
+            return
+        partition_indices = np.argpartition(-scores, candidate_count - 1)[:candidate_count]
+        yield partition_indices[np.argsort(-scores[partition_indices])]
+
+    yield np.argsort(-scores)
 
 
 def load_metadata_lookup(beatmaps: pl.DataFrame) -> dict[int, dict[str, Any]]:
@@ -637,16 +693,22 @@ async def verify_turnstile(token: str | None, remote_ip: str) -> None:
     if not token:
         raise HTTPException(status_code=401, detail="Missing Turnstile token")
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-            data={
-                "secret": TURNSTILE_SECRET_KEY,
-                "response": token,
-                "remoteip": remote_ip,
-            },
-        )
+    client = get_http_client()
+    response = await client.post(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        data={
+            "secret": TURNSTILE_SECRET_KEY,
+            "response": token,
+            "remoteip": remote_ip,
+        },
+    )
 
     data = response.json()
     if not data.get("success"):
         raise HTTPException(status_code=401, detail="Turnstile verification failed")
+
+
+def get_http_client() -> httpx.AsyncClient:
+    if _HTTP_CLIENT is None:
+        raise RuntimeError("HTTP client is not initialized")
+    return _HTTP_CLIENT
