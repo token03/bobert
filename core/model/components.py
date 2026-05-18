@@ -86,7 +86,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
     def _forward_torch(self, q, k, v, cu_seqlens):
         outputs = []
-        scale = self.d_head**-0.5
         for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist()):
             q_i = q[start:end].transpose(0, 1).float()
             k_i = k[start:end].transpose(0, 1).float()
@@ -94,13 +93,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
             seq_len = end - start
             if self.is_global or seq_len <= self.local_window_size:
-                scores = torch.matmul(q_i, k_i.transpose(-1, -2)) * scale
-                if not self.is_global:
-                    idx = torch.arange(seq_len, device=q.device)
-                    mask = (idx[:, None] - idx[None, :]).abs() > self.local_window_size
-                    scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
-                weights = torch.softmax(scores, dim=-1)
-                outputs.append(torch.matmul(weights, v_i).transpose(0, 1).to(v.dtype))
+                out = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
+                outputs.append(out.transpose(0, 1).to(v.dtype))
                 continue
 
             out_i = []
@@ -114,13 +108,18 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 k_c = k_i[:, k_start:k_end, :]
                 v_c = v_i[:, k_start:k_end, :]
 
-                scores = torch.matmul(q_c, k_c.transpose(-1, -2)) * scale
                 idx_q = torch.arange(c_start, c_end, device=q.device).unsqueeze(1)
                 idx_k = torch.arange(k_start, k_end, device=q.device).unsqueeze(0)
-                mask = (idx_q - idx_k).abs() > self.local_window_size
-                scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
-                weights = torch.softmax(scores, dim=-1)
-                out_i.append(torch.matmul(weights, v_c))
+                mask = (idx_q - idx_k).abs() <= self.local_window_size
+                out_i.append(
+                    F.scaled_dot_product_attention(
+                        q_c,
+                        k_c,
+                        v_c,
+                        attn_mask=mask,
+                        dropout_p=0.0,
+                    )
+                )
 
             outputs.append(torch.cat(out_i, dim=1).transpose(0, 1).to(v.dtype))
         return (
