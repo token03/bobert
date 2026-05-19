@@ -88,6 +88,17 @@ class AlignmentModule(pl.LightningModule):
         inverse = torch.empty_like(order)
         inverse[order] = torch.arange(order.shape[0], device=order.device)
 
+        def concat_token_value(values):
+            first = values[0]
+            if isinstance(first, torch.Tensor):
+                return torch.cat(values, dim=0)
+            if isinstance(first, dict):
+                return {
+                    key: concat_token_value([value[key] for value in values])
+                    for key in first
+                }
+            return first
+
         def scatter_value(values):
             first = values[0]
             if isinstance(first, torch.Tensor):
@@ -99,10 +110,14 @@ class AlignmentModule(pl.LightningModule):
                 }
             return first
 
-        return {
-            key: scatter_value([part[key] for part in parts])
-            for key in parts[0]
-        }
+        predictions = {}
+        for key in parts[0]:
+            values = [part[key] for part in parts]
+            if key in {"mlm", "mlm_targets"}:
+                predictions[key] = concat_token_value(values)
+            else:
+                predictions[key] = scatter_value(values)
+        return predictions
 
     def _forward_chunked_batch(self, batch: Dict[str, Any]):
         pred_parts = []
@@ -140,6 +155,7 @@ class AlignmentModule(pl.LightningModule):
                 "train_loss": loss_dict["total_loss"],
                 "train_contrastive_loss": loss_dict["contrastive_loss"],
                 "train_graph_loss": loss_dict["graph_loss"],
+                "train_mlm_loss": loss_dict["mlm_loss"],
             },
             prog_bar=True,
             batch_size=self.batch_size,
@@ -171,6 +187,12 @@ class AlignmentModule(pl.LightningModule):
             "val_loss",
             loss_dict["total_loss"],
             prog_bar=True,
+            sync_dist=True,
+            batch_size=self.batch_size,
+        )
+        self.log(
+            "val_mlm_loss",
+            loss_dict["mlm_loss"],
             sync_dist=True,
             batch_size=self.batch_size,
         )

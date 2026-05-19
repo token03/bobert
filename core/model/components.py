@@ -412,18 +412,19 @@ class SpanMasker(nn.Module):
 
         encoder_input = packed_embed.clone()
 
-        random_indices = torch.randint(
-            packed_embed.shape[0], (packed_embed.shape[0],), device=packed_embed.device
-        )
-        random_embeds = packed_embed[random_indices]
-        encoder_input = torch.where(
-            mask_random.unsqueeze(-1), random_embeds, encoder_input
-        )
+        random_positions = torch.nonzero(mask_random, as_tuple=True)[0]
+        if random_positions.numel() > 0:
+            random_indices = torch.randint(
+                packed_embed.shape[0],
+                (random_positions.numel(),),
+                device=packed_embed.device,
+            )
+            encoder_input[random_positions] = packed_embed[random_indices]
 
-        encoder_input = torch.where(
-            mask_replace.unsqueeze(-1),
-            self.mask_token_embed.to(packed_embed.dtype).view(1, -1),
-            encoder_input,
-        )
+        replace_positions = torch.nonzero(mask_replace, as_tuple=True)[0]
+        if replace_positions.numel() > 0:
+            encoder_input[replace_positions] = self.mask_token_embed.to(
+                packed_embed.dtype
+            ).view(1, -1)
 
         return encoder_input, is_masked

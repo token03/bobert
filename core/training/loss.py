@@ -8,9 +8,9 @@ from core.data.hitobject import OBJECT_TYPE_SLIDER_HEAD, HitObject
 
 
 def mlm_loss_fn(
-    predictions: Dict[str, Any], targets: torch.Tensor, mask: torch.Tensor
+    predictions: Dict[str, Any], targets: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
-    if not torch.any(mask):
+    if mask is not None and not torch.any(mask):
         return torch.tensor(0.0, device=targets.device)
 
     feature_info = HitObject.get_feature_info()
@@ -20,7 +20,9 @@ def mlm_loss_fn(
     )
     cont_indices = [feature_info["continuous"][name] for name in cont_names]
 
-    masked_targets = targets[mask]
+    masked_targets = targets if mask is None else targets[mask]
+    if masked_targets.shape[0] == 0:
+        return torch.tensor(0.0, device=targets.device)
     cont_preds = predictions["continuous"]
     cont_targets = masked_targets[:, cont_indices]
 
@@ -214,6 +216,15 @@ def alignment_loss_fn(
         graph_loss = torch.zeros((), device=device)
     losses["graph_loss"] = graph_loss
     total_loss = total_loss + graph_loss * float(phase_config.get("graph_weight", 0.3))
+
+    if "mlm" in predictions:
+        mlm_loss = mlm_loss_fn(
+            predictions["mlm"], predictions["mlm_targets"], predictions.get("mlm_mask")
+        )
+    else:
+        mlm_loss = torch.zeros((), device=device)
+    losses["mlm_loss"] = mlm_loss
+    total_loss = total_loss + mlm_loss * float(phase_config.get("mlm_loss_weight", 0.0))
 
     difficulty_labels = labels.get("difficulty")
     if difficulty_labels:

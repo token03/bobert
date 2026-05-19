@@ -590,6 +590,8 @@ class BobertForAlignment(nn.Module):
         bert_model: BobertModel,
         contrastive_pooler: nn.Module,
         aux_pooler: nn.Module,
+        masker: SpanMasker,
+        mlm_head: BobertMaskedLMHead,
         embedding_dim: int = 128,
         teacher_dim: int = 128,
         map_feature_dim: int = 32,
@@ -599,6 +601,8 @@ class BobertForAlignment(nn.Module):
         self.bert = bert_model
         self.pooler = aux_pooler
         self.contrastive_pooler = contrastive_pooler
+        self.masker = masker
+        self.mlm_head = mlm_head
         self.embedding_dim = embedding_dim
         self.teacher_dim = teacher_dim
         self.map_projector = (
@@ -623,6 +627,8 @@ class BobertForAlignment(nn.Module):
         self.is_compiled = False
 
         for parameter in self.bert.feature_tokenizer.parameters():
+            parameter.requires_grad = False
+        for parameter in self.masker.parameters():
             parameter.requires_grad = False
 
     def freeze_bert_except_top_layers(self, trainable_layers: int) -> None:
@@ -685,10 +691,19 @@ class BobertForAlignment(nn.Module):
                 f"unknown alignment.contrastive_pooler={contrastive_pooler_type!r}"
             )
 
+        masker = SpanMasker(
+            d_model=base_model.d_model,
+            masking_ratio=alignment_config.get("masking_ratio", 0.15),
+            mean_span_length=alignment_config.get("mean_span_length", 4),
+        )
+        mlm_head = BobertMaskedLMHead(base_model.d_model)
+
         model = cls(
             base_model,
             contrastive_pooler=contrastive_pooler,
             aux_pooler=aux_pooler,
+            masker=masker,
+            mlm_head=mlm_head,
             embedding_dim=alignment_config.get("embedding_dim", 128),
             teacher_dim=alignment_config.get("teacher_dim", 128),
             map_feature_dim=alignment_config.get("map_feature_dim", 32),
@@ -721,14 +736,21 @@ class BobertForAlignment(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
         map_features: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        packed_input, attention_mask, cu_seqlens = self.bert._embed(
-            x, attention_mask, cu_seqlens
-        )
+        if cu_seqlens is None:
+            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
+            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+
+        packed_targets = x[attention_mask]
+        packed_embed = self.bert.embed_sequences(packed_targets)
+        packed_input, is_masked = self.masker(packed_embed, attention_mask)
+        packed_input = packed_input.detach()
         max_seqlen = x.shape[1]
 
         packed_output = self.bert.encode(
             packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
+
+        mlm_predictions = self.mlm_head(packed_output, is_masked)
 
         contrastive_pooled = self.contrastive_pooler(
             packed_output,
@@ -767,6 +789,8 @@ class BobertForAlignment(nn.Module):
             "graph_embedding": graph_embedding,
             "sequence_representation": contrastive_pooled,
             "aux_sequence_representation": aux_pooled,
+            "mlm": mlm_predictions,
+            "mlm_targets": packed_targets[is_masked],
             "difficulty": {
                 name: difficulty_raw[:, i]
                 for i, name in enumerate(DIFFICULTY_ATTRIBUTES)

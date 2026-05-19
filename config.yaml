@@ -120,7 +120,11 @@ alignment:
 
   temperature: 0.15
 
+  masking_ratio: 0.15
+  mean_span_length: 4
+
   difficulty_loss_weight: 0.4
+  mlm_loss_weight: 0.1
   aim_loss_weight: 0.2
   speed_loss_weight: 0.2
   contrastive_weight: 1.0
