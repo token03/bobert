@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from .batch import collate_align, collate_align_chunked, collate_pretrain
 from .dataset import BeatmapDataset
-from .mining import MiningConfig, load_cache
+from .mining import MiningConfig, load_alignment_cache
 from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .source import load_beatmap_dataset, setup_dataset
@@ -264,7 +264,7 @@ class AlignData(BeatmapData):
             return {}
 
         alignment_size = align_config.get("alignment_size")
-        anchor_cache = load_cache(
+        anchor_cache = load_alignment_cache(
             cache_path,
             alignment_size=alignment_size,
             random_seed=align_config.get("seed", self.data_config.get("dataset_seed", 42)),
@@ -280,7 +280,7 @@ class AlignData(BeatmapData):
             for ids_key, _ in ALIGNMENT_POSITIVE_LIST_PAIRS:
                 needed_ids.update(int(bid) for bid in row.get(ids_key, []))
 
-        cache = load_cache(
+        cache = load_alignment_cache(
             cache_path,
             ids_to_load=sorted(needed_ids),
             min_sr=self.data_config.get("min_sr"),

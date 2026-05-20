@@ -593,7 +593,6 @@ class BobertForAlignment(nn.Module):
         masker: SpanMasker,
         mlm_head: BobertMaskedLMHead,
         embedding_dim: int = 128,
-        teacher_dim: int = 128,
         map_feature_dim: int = 32,
         num_map_features: int = len(MAP_FEATURE_ATTRIBUTES),
     ):
@@ -604,7 +603,6 @@ class BobertForAlignment(nn.Module):
         self.masker = masker
         self.mlm_head = mlm_head
         self.embedding_dim = embedding_dim
-        self.teacher_dim = teacher_dim
         self.map_projector = (
             BobertMapFeatureProjector(num_map_features, map_feature_dim)
             if map_feature_dim > 0 and num_map_features > 0
@@ -622,7 +620,6 @@ class BobertForAlignment(nn.Module):
             nn.GELU(),
             nn.Linear(bert_model.d_model, embedding_dim),
         )
-        self.graph_head = nn.Linear(contrastive_head_dim, teacher_dim)
         self.difficulty_head = nn.Linear(aux_head_dim, len(DIFFICULTY_ATTRIBUTES))
         self.is_compiled = False
 
@@ -705,7 +702,6 @@ class BobertForAlignment(nn.Module):
             masker=masker,
             mlm_head=mlm_head,
             embedding_dim=alignment_config.get("embedding_dim", 128),
-            teacher_dim=alignment_config.get("teacher_dim", 128),
             map_feature_dim=alignment_config.get("map_feature_dim", 32),
             num_map_features=len(
                 alignment_config.get("map_feature_names", MAP_FEATURE_ATTRIBUTES)
@@ -781,12 +777,10 @@ class BobertForAlignment(nn.Module):
         retrieval_embedding = F.normalize(
             self.retrieval_head(contrastive_pooled), dim=-1
         )
-        graph_embedding = F.normalize(self.graph_head(contrastive_pooled), dim=-1)
         difficulty_raw = self.difficulty_head(aux_pooled)
 
         return {
             "embedding": retrieval_embedding,
-            "graph_embedding": graph_embedding,
             "sequence_representation": contrastive_pooled,
             "aux_sequence_representation": aux_pooled,
             "mlm": mlm_predictions,

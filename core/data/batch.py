@@ -72,20 +72,6 @@ def _alignment_labels(
     targets: Tuple[Dict[str, Any], ...],
     ignore_near_star_delta: float,
 ):
-    teacher_dim = 0
-    for target in targets:
-        teacher_dim = max(teacher_dim, len(target.get("graph_embedding", [])))
-    teacher_dim = teacher_dim or 128
-
-    graph_teacher = torch.zeros(len(targets), teacher_dim, dtype=torch.float32)
-    has_teacher = torch.zeros(len(targets), dtype=torch.bool)
-    for i, target in enumerate(targets):
-        teacher = target.get("graph_embedding", [])
-        if teacher:
-            teacher_tensor = torch.tensor(teacher[:teacher_dim], dtype=torch.float32)
-            graph_teacher[i, : teacher_tensor.shape[0]] = teacher_tensor
-            has_teacher[i] = True
-
     id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
     positive_weights = torch.zeros(len(targets), len(targets), dtype=torch.float32)
     beatmapset_ids = torch.tensor(
@@ -133,8 +119,6 @@ def _alignment_labels(
                     ignore_contrastive[i, j] = True
 
     return {
-        "graph_teacher": graph_teacher,
-        "has_teacher": has_teacher,
         "positive_weights": positive_weights,
         "ignore_contrastive": ignore_contrastive,
         "difficulty": stack_dicts(list(attrs)),
@@ -168,8 +152,6 @@ def collate_align(
         padded_vec,
         mask,
         cu_seqlens,
-        labels["graph_teacher"],
-        labels["has_teacher"],
         labels["positive_weights"],
         labels["ignore_contrastive"],
         labels["difficulty"],

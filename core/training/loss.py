@@ -204,19 +204,6 @@ def alignment_loss_fn(
         phase_config.get("contrastive_weight", 1.0)
     )
 
-    teacher = labels.get("graph_teacher")
-    has_teacher = labels.get("has_teacher")
-    if teacher is not None and has_teacher is not None and torch.any(has_teacher):
-        pred_teacher = predictions["graph_embedding"][has_teacher]
-        target_teacher = F.normalize(teacher[has_teacher].to(pred_teacher.dtype), dim=-1)
-        graph_loss = 1.0 - F.cosine_similarity(
-            pred_teacher, target_teacher, dim=-1
-        ).mean()
-    else:
-        graph_loss = torch.zeros((), device=device)
-    losses["graph_loss"] = graph_loss
-    total_loss = total_loss + graph_loss * float(phase_config.get("graph_weight", 0.3))
-
     if "mlm" in predictions:
         mlm_loss = mlm_loss_fn(
             predictions["mlm"], predictions["mlm_targets"], predictions.get("mlm_mask")

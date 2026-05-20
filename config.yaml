@@ -1,7 +1,7 @@
 data:
   dataset_path: './data/dataset'
   dataset_seed: 42
-  num_workers: 0
+  num_workers: 1
   max_seq_len: 4096
   length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
@@ -85,10 +85,9 @@ alignment:
   forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
   batch_size: 128
   num_epochs: 2
-  alignment_size: 150000
+  alignment_size: 100000
 
   embedding_dim: 256
-  teacher_dim: 96
   map_feature_names: ["ar", "cs", "od", "hp_drain", "drain_time", "slider_multiplier"]
   map_feature_dim: 32
   pooling_stats: ["mean", "max", "std"]
@@ -118,14 +117,13 @@ alignment:
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 2
 
-  temperature: 0.15
+  temperature: 0.10
 
   masking_ratio: 0.15
   mean_span_length: 4
 
-  difficulty_loss_weight: 0.4
-  mlm_loss_weight: 0.1
+  difficulty_loss_weight: 0.3
+  mlm_loss_weight: 0.2
   aim_loss_weight: 0.2
   speed_loss_weight: 0.2
   contrastive_weight: 1.0
-  graph_weight: 0.3

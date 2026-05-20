@@ -66,8 +66,6 @@ class AlignmentModule(pl.LightningModule):
             vectors,
             attention_mask,
             cu_seqlens,
-            graph_teacher,
-            has_teacher,
             positive_weights,
             ignore_contrastive,
             attrs,
@@ -75,8 +73,6 @@ class AlignmentModule(pl.LightningModule):
         ) = batch
 
         return vectors, attention_mask, cu_seqlens, map_features, {
-            "graph_teacher": graph_teacher,
-            "has_teacher": has_teacher,
             "positive_weights": positive_weights,
             "ignore_contrastive": ignore_contrastive,
             "difficulty": attrs,
@@ -154,7 +150,6 @@ class AlignmentModule(pl.LightningModule):
             {
                 "train_loss": loss_dict["total_loss"],
                 "train_contrastive_loss": loss_dict["contrastive_loss"],
-                "train_graph_loss": loss_dict["graph_loss"],
                 "train_mlm_loss": loss_dict["mlm_loss"],
             },
             prog_bar=True,

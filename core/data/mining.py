@@ -118,17 +118,26 @@ def load_cache(
     ids_to_load: list[int] | None = None,
     min_sr: float | None = None,
     max_sr: float | None = None,
+    include_graph_embedding: bool = True,
 ) -> pl.DataFrame:
     cache_path = Path(cache_path)
+    columns = None
+    if not include_graph_embedding:
+        columns = [
+            col
+            for col in pl.scan_parquet(str(cache_path)).collect_schema().names()
+            if col != "graph_embedding"
+        ]
     if alignment_size is None:
         if ids_to_load is None:
-            cache = pl.read_parquet(cache_path)
+            cache = pl.read_parquet(cache_path, columns=columns)
         else:
-            cache = (
-                pl.scan_parquet(str(cache_path))
-                .filter(pl.col("beatmap_id").is_in([int(bid) for bid in ids_to_load]))
-                .collect()
+            cache_lf = pl.scan_parquet(str(cache_path)).filter(
+                pl.col("beatmap_id").is_in([int(bid) for bid in ids_to_load])
             )
+            if columns is not None:
+                cache_lf = cache_lf.select(columns)
+            cache = cache_lf.collect()
     else:
         if alignment_size <= 0:
             raise ValueError("alignment_size must be positive when provided.")
@@ -153,11 +162,12 @@ def load_cache(
         else:
             selected_ids = beatmap_ids.to_list()
 
-        cache = (
-            pl.scan_parquet(str(cache_path))
-            .filter(pl.col("beatmap_id").is_in(selected_ids))
-            .collect()
+        cache_lf = pl.scan_parquet(str(cache_path)).filter(
+            pl.col("beatmap_id").is_in(selected_ids)
         )
+        if columns is not None:
+            cache_lf = cache_lf.select(columns)
+        cache = cache_lf.collect()
     if min_sr is not None:
         cache = cache.filter(pl.col("stars") >= min_sr)
     if max_sr is not None:
@@ -173,6 +183,25 @@ def load_cache(
             )
     cache = cache.with_columns(exprs) if exprs else cache
     return _filter_primary_positive_rows(cache) if min_sr is not None or max_sr is not None else cache
+
+
+def load_alignment_cache(
+    cache_path: str | Path,
+    alignment_size: int | None = None,
+    random_seed: int = 42,
+    ids_to_load: list[int] | None = None,
+    min_sr: float | None = None,
+    max_sr: float | None = None,
+) -> pl.DataFrame:
+    return load_cache(
+        cache_path,
+        alignment_size=alignment_size,
+        random_seed=random_seed,
+        ids_to_load=ids_to_load,
+        min_sr=min_sr,
+        max_sr=max_sr,
+        include_graph_embedding=False,
+    )
 
 
 def build_cache(
