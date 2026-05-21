@@ -61,6 +61,7 @@ DEFAULT_RATE_LIMITS = {
 }
 DEFAULT_MAX_RECOMMEND_TOP_K = 200
 DEFAULT_RECOMMEND_BEATMAP_IDS: list[int] = []
+OSU_TOKEN_REFRESH_SKEW_SECONDS = 300
 
 
 def load_api_config() -> dict[str, Any]:
@@ -83,6 +84,7 @@ DEFAULT_RECOMMEND_IDS = [
         "default_recommend_beatmap_ids", DEFAULT_RECOMMEND_BEATMAP_IDS
     )
 ]
+OSU_API_VERSION = str(API_CONFIG.get("osu_api_version", "20241024"))
 
 torch.set_num_threads(THREAD_COUNT)
 configure_logging()
@@ -428,7 +430,7 @@ def mark_unavailable_embedding(rt: Runtime, beatmap_id: int, reason: str) -> Non
 
 @timed_call("embedding.osu_metadata", fields=("beatmap_id",))
 async def fetch_query_metadata(beatmap_id: int) -> dict[str, Any]:
-    return await run_in_threadpool(fetch_full_beatmap_metadata, beatmap_id)
+    return await fetch_full_beatmap_metadata(beatmap_id)
 
 
 @timed_call("embedding.osu_download", fields=("beatmap_id",))
@@ -495,15 +497,66 @@ def get_osu_api() -> Ossapi:
         return _OSU_API
 
 
-def fetch_full_beatmap_metadata(beatmap_id: int) -> dict[str, Any]:
-    beatmaps = get_osu_api().beatmaps([int(beatmap_id)])
+def get_osu_api_token(force_refresh: bool = False) -> str:
+    api = get_osu_api()
+
+    with _OSU_API_LOCK:
+        token = api.session.token
+        expires_at = float(token.get("expires_at") or 0)
+        if force_refresh or expires_at <= time.time() + OSU_TOKEN_REFRESH_SKEW_SECONDS:
+            api.session = api._new_client_grant(api.client_id, api.client_secret)
+            token = api.session.token
+            log.info(
+                "osu.token_refreshed",
+                expires_at=token.get("expires_at"),
+                expires_in=token.get("expires_in"),
+            )
+
+        access_token = token.get("access_token")
+
+    if not access_token:
+        raise RuntimeError("osu API token is missing an access token")
+    return str(access_token)
+
+
+async def fetch_full_beatmap_metadata(beatmap_id: int) -> dict[str, Any]:
+    response = await request_full_beatmap_metadata(beatmap_id)
+
+    if response.status_code == 401:
+        response = await request_full_beatmap_metadata(beatmap_id, force_refresh=True)
+
+    response.raise_for_status()
+
+    data = response.json()
+    if data == {"authentication": "basic"}:
+        response = await request_full_beatmap_metadata(beatmap_id, force_refresh=True)
+        response.raise_for_status()
+        data = response.json()
+
+    beatmaps = data.get("beatmaps", []) if isinstance(data, dict) else []
     if not beatmaps:
         raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
 
     metadata = beatmap_metadata(beatmaps[0])
+    if isinstance(metadata.get("ranked"), int):
+        metadata["status"] = metadata["ranked"]
     if metadata.get("deleted_at"):
         raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
     return metadata
+
+
+async def request_full_beatmap_metadata(
+    beatmap_id: int, force_refresh: bool = False
+) -> httpx.Response:
+    response = await get_http_client().get(
+        "https://osu.ppy.sh/api/v2/beatmaps",
+        params=[("ids[]", int(beatmap_id))],
+        headers={
+            "Authorization": f"Bearer {get_osu_api_token(force_refresh)}",
+            "x-api-version": OSU_API_VERSION,
+        },
+    )
+    return response
 
 
 def beatmap_metadata(bm: Any) -> dict[str, Any]:

@@ -14,6 +14,7 @@ alignment:
   use_amp: false
 
 api:
+  osu_api_version: "20241024"
   max_recommend_top_k: 200
   default_recommend_beatmap_ids: [
     1872396, # tsukinmai
