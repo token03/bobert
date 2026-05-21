@@ -25,13 +25,13 @@ components:
   compile_model: true
   compile_mode: "default" 
   compile_dynamic: true
-  activation_checkpointing: false
+  activation_checkpointing: true
     
 pretraining:
-  pretrain_size: 100000
+  pretrain_size: 180000
   use_length_buckets: true
-  batch_size: 128
-  num_epochs: 10
+  batch_size: 64
+  num_epochs: 12
 
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 2
@@ -83,9 +83,9 @@ alignment:
   trainable_layers: 1
   use_length_buckets: false
   forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
-  batch_size: 128
+  batch_size: 256
   num_epochs: 2
-  alignment_size: 100000
+  alignment_size: 150000
 
   embedding_dim: 256
   map_feature_names: ["ar", "cs", "od", "hp_drain", "drain_time", "slider_multiplier"]
@@ -115,7 +115,7 @@ alignment:
 
   use_amp: true
   grad_clip_norm: 1.0
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
 
   temperature: 0.10
 

@@ -45,6 +45,10 @@ def configure_logging() -> None:
     )
 
     logging.getLogger("uvicorn.access").disabled = True
+    for name in ("ossapi", "httpx", "httpcore"):
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.setLevel(logging.WARNING)
 
 
 def get_logger(name: str):
@@ -149,6 +153,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         )
 
         log = get_logger("bobert.api")
+        log.info("request.start")
         try:
             response = await call_next(request)
         except Exception:
