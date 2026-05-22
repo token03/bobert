@@ -572,7 +572,7 @@ class BobertForPretraining(nn.Module):
         pooler = self.difficulty_head.pooler
         pooled = pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
         pieces = []
-        for stat in ("mean", "max"):
+        for stat in ("mean", "max", "std"):
             start = pooler.stats.index(stat) * pooler.stat_dim
             pieces.append(pooled[:, start : start + pooler.stat_dim])
         return F.normalize(torch.cat(pieces, dim=-1), dim=-1)
