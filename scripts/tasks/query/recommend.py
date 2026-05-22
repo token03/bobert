@@ -5,10 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from omegaconf import OmegaConf
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from core.data.mining import load_alignment_cache
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
 from scripts.common.paths import resolve_path
@@ -31,6 +33,17 @@ from scripts.common.query import (
 )
 
 console = Console()
+MODE_DEFAULT = "default"
+MODE_GRAPH = "graph"
+MODE_CANDIDATES = "candidates"
+DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
+CANDIDATE_LIMIT = 8
+CANDIDATE_LANES = [
+    ("Graph", "graph_positive_ids", "graph_positive_weights"),
+    ("Song", "song_positive_ids", "song_positive_weights"),
+    ("Creator", "creator_positive_ids", "creator_positive_weights"),
+    ("Cross Status", "cross_status_positive_ids", "cross_status_positive_weights"),
+]
 
 
 @dataclass
@@ -39,12 +52,14 @@ class QueryContext:
     embeddings: np.ndarray
     id_to_index: dict[int, int]
     metadata_lookup: dict[int, dict]
-    embedder: LazyEmbedder
+    embedder: LazyEmbedder | None
     beatmaps_dir: Path
     metadata_path: Path
     top_k: int
     include_same_set: bool
     allow_download: bool
+    mode: str = MODE_DEFAULT
+    candidates_lookup: dict[int, dict] = field(default_factory=dict)
     cache: dict[int, np.ndarray] = field(default_factory=dict)
 
 
@@ -75,14 +90,26 @@ def refresh_missing_metadata(
     return refreshed
 
 
-def get_embedding(raw_input: str, ctx: QueryContext):
+def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = None):
     beatmap_id = extract_beatmap_id(raw_input)
+    if fixed_label is not None:
+        idx = ctx.id_to_index.get(beatmap_id)
+        if idx is None:
+            console.print(
+                f"[yellow]Skipping unsupported {fixed_label} id:[/yellow] "
+                f"{beatmap_id}\n"
+            )
+            return None
+        return beatmap_id, ctx.embeddings[idx]
+
     if beatmap_id in ctx.cache:
         return beatmap_id, ctx.cache[beatmap_id]
 
     if beatmap_id in ctx.id_to_index:
         embedding = ctx.embeddings[ctx.id_to_index[beatmap_id]]
     else:
+        if ctx.embedder is None:
+            raise ValueError(f"{beatmap_id} is not available in the loaded embeddings")
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
         embedding = ctx.embedder.embed_osu(osu_path)
 
@@ -90,11 +117,11 @@ def get_embedding(raw_input: str, ctx: QueryContext):
     return beatmap_id, embedding
 
 
-def add_map_columns(table: Table, *, similarity: bool = False, side: bool = False):
+def add_map_columns(table: Table, *, score: str | None = None, side: bool = False):
     if side:
         table.add_column("Side", style="cyan", no_wrap=True)
-    if similarity:
-        table.add_column("Sim", justify="right", style="green", no_wrap=True)
+    if score:
+        table.add_column(score, justify="right", style="green", no_wrap=True)
     table.add_column("ID", justify="right", style="cyan", no_wrap=True)
     table.add_column("Stars", justify="right", style="magenta", no_wrap=True)
     table.add_column("Map", style="white", overflow="ellipsis")
@@ -120,9 +147,63 @@ def map_cells(beatmap_id: int, row: dict | None):
     ]
 
 
+def is_ranked_like(row: dict | None) -> bool:
+    status = str(clean_value((row or {}).get("status"), "")).lower()
+    ranked = str(clean_value((row or {}).get("ranked"), "")).lower()
+    return status in {"ranked", "approved", "qualified", "loved"} or ranked in {
+        "1",
+        "2",
+        "3",
+        "4",
+        "ranked",
+        "approved",
+        "qualified",
+        "loved",
+    }
+
+
+def print_query_table(beatmap_id: int, ctx: QueryContext, row: dict | None = None):
+    table = Table(title="Query", show_header=True, header_style="bold magenta")
+    add_map_columns(table)
+    table.add_row(*map_cells(beatmap_id, row or ctx.metadata_lookup.get(beatmap_id)))
+    console.print()
+    console.print(table)
+
+
+def print_result_table(
+    results: list[tuple[int, float, dict | None]],
+    *,
+    title: str | None = None,
+    score: str = "Sim",
+):
+    table = Table(title=title, show_header=True, header_style="bold magenta")
+    add_map_columns(table, score=score)
+    for beatmap_id, value, row in results:
+        table.add_row(f"{value:.3f}", *map_cells(beatmap_id, row))
+    console.print(table)
+
+
+def iter_neighbors(beatmap_id: int, query_embedding: np.ndarray, ctx: QueryContext):
+    similarities = ctx.embeddings @ query_embedding
+    for idx in np.argsort(-similarities):
+        candidate_id = int(ctx.beatmap_ids[idx])
+        if candidate_id != beatmap_id:
+            yield candidate_id, float(similarities[idx]), ctx.metadata_lookup.get(
+                candidate_id
+            )
+
+
 def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
-    beatmap_id_a, embedding_a = get_embedding(raw_input_a, ctx)
-    beatmap_id_b, embedding_b = get_embedding(raw_input_b, ctx)
+    if ctx.mode == MODE_GRAPH:
+        graph_a = get_embedding(raw_input_a, ctx, fixed_label="graph")
+        graph_b = get_embedding(raw_input_b, ctx, fixed_label="graph")
+        if graph_a is None or graph_b is None:
+            return
+        beatmap_id_a, embedding_a = graph_a
+        beatmap_id_b, embedding_b = graph_b
+    else:
+        beatmap_id_a, embedding_a = get_embedding(raw_input_a, ctx)
+        beatmap_id_b, embedding_b = get_embedding(raw_input_b, ctx)
     similarity = float(embedding_a @ embedding_b)
 
     table = Table(show_header=True, header_style="bold magenta")
@@ -135,22 +216,72 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
     console.print(f"[bold]Similarity:[/bold] [green]{similarity:.6f}[/green]\n")
 
 
+def graph_recommend(raw_input: str, ctx: QueryContext):
+    query = get_embedding(raw_input, ctx, fixed_label="graph")
+    if query is None:
+        return
+    beatmap_id, query_embedding = query
+
+    ranked_results = []
+    unranked_results = []
+    for result in iter_neighbors(beatmap_id, query_embedding, ctx):
+        _candidate_id, _similarity, row = result
+        if is_ranked_like(row):
+            if len(ranked_results) < ctx.top_k:
+                ranked_results.append(result)
+        elif len(unranked_results) < ctx.top_k:
+            unranked_results.append(result)
+
+        if len(ranked_results) >= ctx.top_k and len(unranked_results) >= ctx.top_k:
+            break
+
+    print_query_table(beatmap_id, ctx)
+    for title, results in (("Ranked", ranked_results), ("Unranked", unranked_results)):
+        print_result_table(results, title=title)
+    console.print()
+
+
+def candidates_recommend(raw_input: str, ctx: QueryContext):
+    beatmap_id = extract_beatmap_id(raw_input)
+    candidate_row = ctx.candidates_lookup.get(beatmap_id)
+    if candidate_row is None:
+        console.print(
+            f"[yellow]Skipping unsupported candidates id:[/yellow] {beatmap_id}\n"
+        )
+        return
+
+    print_query_table(beatmap_id, ctx)
+
+    for title, ids_key, weights_key in CANDIDATE_LANES:
+        items = list(
+            zip(candidate_row.get(ids_key, []), candidate_row.get(weights_key, []))
+        )
+        results = [
+            (int(candidate_id), float(weight), ctx.metadata_lookup.get(int(candidate_id)))
+            for candidate_id, weight in items[:CANDIDATE_LIMIT]
+        ]
+        print_result_table(results, title=title, score="Weight")
+    console.print()
+
+
 def recommend(raw_input: str, ctx: QueryContext):
+    if ctx.mode == MODE_CANDIDATES:
+        candidates_recommend(raw_input, ctx)
+        return
+
+    if ctx.mode == MODE_GRAPH:
+        graph_recommend(raw_input, ctx)
+        return
+
     beatmap_id, query_embedding = get_embedding(raw_input, ctx)
     query_row = refresh_missing_metadata(
         [(beatmap_id, 0.0, ctx.metadata_lookup.get(beatmap_id))], ctx
     )[0][2]
     query_set_id = get_query_set_id(beatmap_id, raw_input, ctx.metadata_lookup)
 
-    similarities = ctx.embeddings @ query_embedding
     results = []
     seen_set_ids = set()
-    for idx in np.argsort(-similarities):
-        candidate_id = int(ctx.beatmap_ids[idx])
-        if candidate_id == beatmap_id:
-            continue
-
-        row = ctx.metadata_lookup.get(candidate_id)
+    for candidate_id, similarity, row in iter_neighbors(beatmap_id, query_embedding, ctx):
         candidate_set_id = metadata_set_id(row)
         if (
             not ctx.include_same_set
@@ -161,30 +292,28 @@ def recommend(raw_input: str, ctx: QueryContext):
         if candidate_set_id is not None and candidate_set_id in seen_set_ids:
             continue
 
-        results.append((candidate_id, float(similarities[idx]), row))
+        results.append((candidate_id, similarity, row))
         if candidate_set_id is not None:
             seen_set_ids.add(candidate_set_id)
         if len(results) >= ctx.top_k:
             break
 
-    query_table = Table(title="Query", show_header=True, header_style="bold magenta")
-    add_map_columns(query_table)
-    query_table.add_row(*map_cells(beatmap_id, query_row))
-
-    console.print()
-    console.print(query_table)
+    print_query_table(beatmap_id, ctx, query_row)
     if query_set_id is not None and not ctx.include_same_set:
         console.print(f"[dim]Excluding same beatmapset: {query_set_id}[/dim]")
 
-    table = Table(show_header=True, header_style="bold magenta")
-    add_map_columns(table, similarity=True)
-    for candidate_id, similarity, row in refresh_missing_metadata(results, ctx):
-        table.add_row(f"{similarity:.3f}", *map_cells(candidate_id, row))
-    console.print(table)
+    print_result_table(refresh_missing_metadata(results, ctx))
     console.print()
 
 
 def run_query(parts: list[str], ctx: QueryContext):
+    if ctx.mode == MODE_CANDIDATES:
+        if not parts:
+            raise ValueError("enter one or more beatmap ids or URLs")
+        for part in parts:
+            candidates_recommend(part, ctx)
+        return
+
     if len(parts) == 1:
         recommend(parts[0], ctx)
     elif len(parts) == 2:
@@ -197,7 +326,9 @@ def run_interactive(ctx: QueryContext):
     console.print(
         "[dim]Paste one beatmap id/URL for recommendations, or two for comparison.[/dim]"
     )
-    console.print("[dim]Press Ctrl+C to clear, or Ctrl+D, q, quit, or empty input to exit.[/dim]")
+    console.print(
+        "[dim]Press Ctrl+C to clear, or Ctrl+D, q, quit, or empty input to exit.[/dim]"
+    )
     while True:
         try:
             raw_input = console.input("[bold cyan]query>[/bold cyan] ").strip()
@@ -231,6 +362,21 @@ def parse_args():
         help="One beatmap id/URL recommends; two beatmap ids/URLs compares.",
     )
     parser.add_argument("--embeddings", default=str(DEFAULT_EMBEDDINGS_PATH))
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="Use fixed graph embeddings from data/graph.parquet",
+    )
+    parser.add_argument(
+        "--candidates",
+        action="store_true",
+        help="Show mining-cache candidates per lane",
+    )
+    parser.add_argument(
+        "--candidates-path",
+        default=None,
+        help="Defaults to config.alignment.mining_cache_path",
+    )
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
@@ -245,38 +391,94 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
-    if len(args.beatmaps) > 2:
+def validate_args(args: argparse.Namespace):
+    if len(args.beatmaps) > 2 and not args.candidates:
         raise SystemExit("Error: provide at most two beatmap ids or URLs")
+    if args.graph and args.candidates:
+        raise SystemExit("Error: --graph and --candidates are mutually exclusive")
 
-    metadata_path = resolve_path(args.metadata)
-    checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
-    if len(args.beatmaps) == 2:
-        beatmap_ids = np.array([], dtype=np.int64)
-        embeddings = np.empty((0, 0), dtype=np.float32)
-        id_to_index = {}
-    else:
-        embeddings_path = resolve_path(args.embeddings)
+
+def query_mode(args: argparse.Namespace) -> str:
+    if args.candidates:
+        return MODE_CANDIDATES
+    if args.graph:
+        return MODE_GRAPH
+    return MODE_DEFAULT
+
+
+def empty_embeddings():
+    return np.array([], dtype=np.int64), np.empty((0, 0), dtype=np.float32), {}
+
+
+def load_candidate_lookup(args: argparse.Namespace):
+    config = OmegaConf.load(resolve_path(args.config))
+    candidates_path = resolve_path(
+        args.candidates_path or config.alignment.mining_cache_path
+    )
+    candidates_cache = load_alignment_cache(candidates_path)
+    lookup = {
+        int(row["beatmap_id"]): row for row in candidates_cache.iter_rows(named=True)
+    }
+    console.print(
+        f"[green]Loaded[/green] {len(lookup):,} candidate rows from "
+        f"[dim]{escape(str(candidates_path))}[/dim]"
+    )
+    return lookup
+
+
+def load_query_data(args: argparse.Namespace, mode: str):
+    if mode == MODE_CANDIDATES:
+        return (*empty_embeddings(), load_candidate_lookup(args))
+    if mode == MODE_GRAPH:
+        embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
         beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
         console.print(
-            f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
+            f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
+        return beatmap_ids, embeddings, id_to_index, {}
+    if len(args.beatmaps) == 2:
+        return (*empty_embeddings(), {})
 
-    ctx = QueryContext(
+    embeddings_path = resolve_path(args.embeddings)
+    beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
+    console.print(
+        f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
+        f"[dim]{escape(str(embeddings_path))}[/dim]"
+    )
+    return beatmap_ids, embeddings, id_to_index, {}
+
+
+def build_context(args: argparse.Namespace) -> QueryContext:
+    mode = query_mode(args)
+    beatmap_ids, embeddings, id_to_index, candidates_lookup = load_query_data(args, mode)
+    checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
+    embedder = (
+        None
+        if mode != MODE_DEFAULT
+        else LazyEmbedder(resolve_path(args.config), checkpoint_path)
+    )
+
+    return QueryContext(
         beatmap_ids=beatmap_ids,
         embeddings=embeddings,
         id_to_index=id_to_index,
-        metadata_lookup=metadata_by_id(load_metadata(metadata_path)),
-        embedder=LazyEmbedder(resolve_path(args.config), checkpoint_path),
+        metadata_lookup=metadata_by_id(load_metadata(resolve_path(args.metadata))),
+        embedder=embedder,
         beatmaps_dir=resolve_path(args.beatmaps_dir),
-        metadata_path=metadata_path,
+        metadata_path=resolve_path(args.metadata),
         top_k=args.top_k,
         include_same_set=args.include_same_set,
         allow_download=not args.no_download,
+        mode=mode,
+        candidates_lookup=candidates_lookup,
     )
 
+
+def main():
+    args = parse_args()
+    validate_args(args)
+    ctx = build_context(args)
     run_query(args.beatmaps, ctx) if args.beatmaps else run_interactive(ctx)
 
 
