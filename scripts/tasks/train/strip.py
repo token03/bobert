@@ -12,11 +12,12 @@ from scripts.common.paths import resolve_path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Strip a BoBERT alignment checkpoint.")
+    parser = argparse.ArgumentParser(description="Strip a BoBERT checkpoint.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--checkpoint")
     parser.add_argument("--checkpoint-dir")
-    parser.add_argument("--output", default="data/bobert.pt")
+    parser.add_argument("--output")
+    parser.add_argument("--pretrain", action="store_true")
     return parser.parse_args()
 
 
@@ -28,7 +29,12 @@ def resolve_checkpoint(args: argparse.Namespace) -> Path:
         return checkpoint
 
     config = OmegaConf.load(resolve_path(args.config))
-    checkpoint_dir = args.checkpoint_dir or config.alignment.checkpoint_dir
+    default_dir = (
+        config.pretraining.checkpoint_dir
+        if args.pretrain
+        else config.alignment.checkpoint_dir
+    )
+    checkpoint_dir = args.checkpoint_dir or default_dir
     checkpoint = find_latest_checkpoint(resolve_path(checkpoint_dir))
     if checkpoint is None:
         raise FileNotFoundError(f"No checkpoint found in {checkpoint_dir}")
@@ -49,7 +55,9 @@ def strip_state(state: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     checkpoint_path = resolve_checkpoint(args)
-    output_path = resolve_path(args.output)
+    output_path = resolve_path(
+        args.output or ("data/bobert-pretrain.pt" if args.pretrain else "data/bobert.pt")
+    )
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     stripped = {"state_dict": strip_state(checkpoint.get("state_dict", checkpoint))}

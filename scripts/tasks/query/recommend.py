@@ -37,6 +37,9 @@ MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
 MODE_CANDIDATES = "candidates"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
+DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
+DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
+DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 CANDIDATE_LIMIT = 8
 CANDIDATE_LANES = [
     ("Graph", "graph_positive_ids", "graph_positive_weights"),
@@ -361,7 +364,8 @@ def parse_args():
         nargs="*",
         help="One beatmap id/URL recommends; two beatmap ids/URLs compares.",
     )
-    parser.add_argument("--embeddings", default=str(DEFAULT_EMBEDDINGS_PATH))
+    parser.add_argument("--embeddings", default=None)
+    parser.add_argument("--pretrain", action="store_true")
     parser.add_argument(
         "--graph",
         action="store_true",
@@ -382,8 +386,8 @@ def parse_args():
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument(
         "--checkpoint",
-        default="data/bobert.pt",
-        help="Defaults to data/bobert.pt",
+        default=None,
+        help="Defaults to data/bobert.pt or data/bobert-pretrain.pt with --pretrain",
     )
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--include-same-set", action="store_true")
@@ -440,7 +444,10 @@ def load_query_data(args: argparse.Namespace, mode: str):
     if len(args.beatmaps) == 2:
         return (*empty_embeddings(), {})
 
-    embeddings_path = resolve_path(args.embeddings)
+    embeddings_path = resolve_path(
+        args.embeddings
+        or (DEFAULT_PRETRAIN_EMBEDDINGS_PATH if args.pretrain else DEFAULT_EMBEDDINGS_PATH)
+    )
     beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
     console.print(
         f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
@@ -452,11 +459,14 @@ def load_query_data(args: argparse.Namespace, mode: str):
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = query_mode(args)
     beatmap_ids, embeddings, id_to_index, candidates_lookup = load_query_data(args, mode)
-    checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
+    checkpoint_path = resolve_path(
+        args.checkpoint
+        or (DEFAULT_PRETRAIN_CHECKPOINT_PATH if args.pretrain else DEFAULT_CHECKPOINT_PATH)
+    )
     embedder = (
         None
         if mode != MODE_DEFAULT
-        else LazyEmbedder(resolve_path(args.config), checkpoint_path)
+        else LazyEmbedder(resolve_path(args.config), checkpoint_path, pretrain=args.pretrain)
     )
 
     return QueryContext(

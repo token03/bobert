@@ -16,7 +16,7 @@ from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.sampler import LengthBucketBatchSampler, length_bucket
 from core.data.source import load_beatmap_dataset
-from core.model.bobert import BobertForAlignment
+from core.model.bobert import BobertForAlignment, BobertForPretraining
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
@@ -58,25 +58,22 @@ def collate_export(batch, max_seq_len: int, vector_dim: int):
     )
 
 
-def find_checkpoint(path: str | Path | None) -> Path:
+def find_checkpoint(path: str | Path | None, checkpoint_dir: str | Path) -> Path:
     if path is not None:
         ckpt = resolve_path(path)
         if not ckpt.exists():
             raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
         return ckpt
 
-    candidates = sorted(
-        (PROJECT_ROOT / "experiments").glob("**/checkpoints/last.ckpt"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not candidates:
-        raise FileNotFoundError("No last.ckpt found under experiments/**/checkpoints")
-    return candidates[0]
+    ckpt = resolve_path(checkpoint_dir) / "checkpoints" / "last.ckpt"
+    if not ckpt.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+    return ckpt
 
 
 def normalize_checkpoint_state(
     state: dict[str, torch.Tensor],
+    flatten_difficulty_head: bool = True,
 ) -> dict[str, torch.Tensor]:
     normalized = {}
     for key, value in state.items():
@@ -84,7 +81,7 @@ def normalize_checkpoint_state(
             if key.startswith(prefix):
                 key = key[len(prefix) :]
                 break
-        if key.startswith("difficulty_head.head."):
+        if flatten_difficulty_head and key.startswith("difficulty_head.head."):
             key = key.replace("difficulty_head.head.", "difficulty_head.", 1)
         normalized[key] = value
     return normalized
@@ -118,6 +115,23 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
         f"State load: loaded={len(compatible_state)} skipped={len(skipped)} "
         f"missing={len(missing)} unexpected={len(unexpected)}"
     )
+    print(f"Model dim_feedforward={config.model.dim_feedforward}")
+    model.to(device).float().eval()
+    return model, checkpoint
+
+
+def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
+    config.components.compile_model = False
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = normalize_checkpoint_state(
+        checkpoint.get("state_dict", checkpoint), flatten_difficulty_head=False
+    )
+    apply_checkpoint_model_shape(config, state)
+
+    model = BobertForPretraining.from_config(config, device)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    print(f"Loaded checkpoint: {checkpoint_path}")
+    print(f"State load: missing={len(missing)} unexpected={len(unexpected)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
     model.to(device).float().eval()
     return model, checkpoint
@@ -192,6 +206,7 @@ def flush_embeddings(
 def export_embeddings(
     config_path: Path,
     checkpoint_path: Path | None,
+    pretrain: bool,
     dataset_dir: Path | None,
     output_path: Path,
     limit: int | None,
@@ -212,12 +227,18 @@ def export_embeddings(
     ids = sample_ids(dataset_dir, limit, seed)
     print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
 
-    ckpt_path = find_checkpoint(checkpoint_path)
+    checkpoint_dir = (
+        config.pretraining.checkpoint_dir if pretrain else config.alignment.checkpoint_dir
+    )
+    ckpt_path = find_checkpoint(checkpoint_path, checkpoint_dir)
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    model, checkpoint = load_alignment_model(config, ckpt_path, device)
+    if pretrain:
+        model, checkpoint = load_pretraining_model(config, ckpt_path, device)
+    else:
+        model, checkpoint = load_alignment_model(config, ckpt_path, device)
     normalizer = BeatmapNormalizer(
         vector_stats=checkpoint["vector_stats"],
         attribute_stats=checkpoint.get("attribute_stats", {}),
@@ -280,9 +301,12 @@ def export_embeddings(
                         dtype=amp_dtype,
                         enabled=device.type == "cuda",
                     ):
-                        embeddings = model.embed(
-                            vectors, attention_mask, cu_seqlens, map_features
-                        )
+                        if pretrain:
+                            embeddings = model.embed(vectors, attention_mask, cu_seqlens)
+                        else:
+                            embeddings = model.embed(
+                                vectors, attention_mask, cu_seqlens, map_features
+                            )
 
                     embeddings_np = embeddings.float().cpu().numpy()
                     buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
@@ -309,19 +333,22 @@ def export_embeddings(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export Bobert alignment embeddings")
+    parser = argparse.ArgumentParser(description="Export Bobert embeddings")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
     parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Defaults to newest experiments/**/checkpoints/last.ckpt",
+        help="Override checkpoint path; otherwise uses align or pretrain last.ckpt",
+    )
+    parser.add_argument(
+        "--pretrain",
+        action="store_true",
+        help="Use config.pretraining.checkpoint_dir instead of config.alignment.checkpoint_dir",
     )
     parser.add_argument(
         "--dataset", default=None, help="Defaults to config.data.dataset_path"
     )
-    parser.add_argument(
-        "--output", default=str(PROJECT_ROOT / "data" / "embeddings.parquet")
-    )
+    parser.add_argument("--output", default=None)
     parser.add_argument(
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
@@ -335,8 +362,14 @@ def main():
     export_embeddings(
         config_path=resolve_path(args.config),
         checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+        pretrain=args.pretrain,
         dataset_dir=Path(args.dataset) if args.dataset else None,
-        output_path=resolve_path(args.output),
+        output_path=resolve_path(
+            args.output
+            or PROJECT_ROOT
+            / "data"
+            / ("embeddings-pretrain.parquet" if args.pretrain else "embeddings.parquet")
+        ),
         limit=args.limit,
         batch_size=args.batch_size,
         load_chunk_size=args.load_chunk_size,

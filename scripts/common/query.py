@@ -202,11 +202,16 @@ def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
 
 class LazyEmbedder:
     def __init__(
-        self, config_path: Path, checkpoint_path: Path | None, device: str | None = None
+        self,
+        config_path: Path,
+        checkpoint_path: Path | None,
+        device: str | None = None,
+        pretrain: bool = False,
     ):
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
         self.device_name = device
+        self.pretrain = pretrain
         self.config = None
         self.model = None
         self.normalizer = None
@@ -217,7 +222,11 @@ class LazyEmbedder:
         from omegaconf import OmegaConf
 
         from core.data.normalizer import BeatmapNormalizer
-        from scripts.tasks.embed.bobert import find_checkpoint, load_alignment_model
+        from scripts.tasks.embed.bobert import (
+            find_checkpoint,
+            load_alignment_model,
+            load_pretraining_model,
+        )
 
         if self.model is not None:
             return
@@ -226,10 +235,14 @@ class LazyEmbedder:
         self.device = torch.device(
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        ckpt_path = find_checkpoint(self.checkpoint_path)
-        self.model, checkpoint = load_alignment_model(
-            self.config, ckpt_path, self.device
+        checkpoint_dir = (
+            self.config.pretraining.checkpoint_dir
+            if self.pretrain
+            else self.config.alignment.checkpoint_dir
         )
+        ckpt_path = find_checkpoint(self.checkpoint_path, checkpoint_dir)
+        loader = load_pretraining_model if self.pretrain else load_alignment_model
+        self.model, checkpoint = loader(self.config, ckpt_path, self.device)
         self.normalizer = BeatmapNormalizer(
             vector_stats=checkpoint["vector_stats"],
             attribute_stats=checkpoint.get("attribute_stats", {}),
@@ -269,9 +282,10 @@ class LazyEmbedder:
                 dtype=amp_dtype,
                 enabled=self.device.type == "cuda",
             ):
-                embedding = self.model(padded, mask, cu_seqlens, map_features)[
-                    "embedding"
-                ]
+                if self.pretrain:
+                    embedding = self.model.embed(padded, mask, cu_seqlens)
+                else:
+                    embedding = self.model.embed(padded, mask, cu_seqlens, map_features)
 
         embedding = embedding.float().cpu().numpy()[0]
         norm = np.linalg.norm(embedding)

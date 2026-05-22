@@ -553,6 +553,30 @@ class BobertForPretraining(nn.Module):
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
 
+    def embed(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        packed_input, attention_mask, cu_seqlens = self.bert._embed(
+            x, attention_mask, cu_seqlens
+        )
+        max_seqlen = x.shape[1]
+        packed_output = self.bert.encode(
+            packed_input,
+            attention_mask,
+            max_seqlen=max_seqlen,
+            cu_seqlens=cu_seqlens,
+        )
+        pooler = self.difficulty_head.pooler
+        pooled = pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+        pieces = []
+        for stat in ("mean", "max"):
+            start = pooler.stats.index(stat) * pooler.stat_dim
+            pieces.append(pooled[:, start : start + pooler.stat_dim])
+        return F.normalize(torch.cat(pieces, dim=-1), dim=-1)
+
     def forward(
         self,
         x: torch.Tensor,
