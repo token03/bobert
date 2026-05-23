@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import time
 
-from scripts.common.api import osu_api
+from scripts.common.api import ossapi_request, osu_api
 from scripts.common.io import atomic_json, atomic_pyarrow_table
 from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
 
@@ -100,7 +100,9 @@ def main():
     # Fetch tag map once at startup
     print("[cyan]Fetching tag map from API...[/cyan]")
     try:
-        tags_response = api.tags()
+        tags_response = ossapi_request(
+            api.tags, retries=MAX_RETRIES, base_delay=RETRY_BASE_DELAY
+        )
         tag_map = {tag.id: tag.name for tag in tags_response}
         print(f"[green]Loaded {len(tag_map)} tags[/green]")
     except Exception as e:
@@ -186,77 +188,59 @@ def main():
                     break
 
                 success = False
-                for attempt in range(MAX_RETRIES):
-                    if is_shutting_down:
-                        break
+                try:
+                    beatmapset = ossapi_request(
+                        api.beatmapset,
+                        beatmapset_id,
+                        retries=MAX_RETRIES,
+                        base_delay=RETRY_BASE_DELAY,
+                    )
 
-                    try:
-                        beatmapset = api.beatmapset(beatmapset_id)
+                    genre_id = beatmapset.genre["id"] if beatmapset.genre else None  # type: ignore
+                    genre_name = (
+                        beatmapset.genre["name"] if beatmapset.genre else "Unknown"  # type: ignore
+                    )
+                    language_id = (
+                        beatmapset.language["id"] if beatmapset.language else None  # type: ignore
+                    )
+                    language_name = (
+                        beatmapset.language["name"] if beatmapset.language else "Unknown"  # type: ignore
+                    )
 
-                        # Extract beatmapset-level metadata
-                        genre_id = beatmapset.genre["id"] if beatmapset.genre else None  # type: ignore
-                        genre_name = (
-                            beatmapset.genre["name"] if beatmapset.genre else "Unknown"  # type: ignore
+                    if genre_id is not None:
+                        genre_map[str(genre_id)] = genre_name
+                    if language_id is not None:
+                        language_map[str(language_id)] = language_name
+
+                    for beatmap in beatmapset.beatmaps or []:
+                        if beatmap.id not in intersection_beatmap_ids:
+                            continue
+                        tag_ids = []
+                        tag_counts = []
+                        for tag in getattr(beatmap, "top_tag_ids", None) or []:
+                            tag_ids.append(tag["tag_id"])  # type: ignore
+                            tag_counts.append(tag["count"])  # type: ignore
+                        new_data.append(
+                            {
+                                "beatmap_id": beatmap.id,
+                                "beatmapset_id": beatmapset_id,
+                                "genre_id": genre_id,
+                                "language_id": language_id,
+                                "tag_ids": tag_ids,
+                                "tag_counts": tag_counts,
+                            }
                         )
-                        language_id = (
-                            beatmapset.language["id"] if beatmapset.language else None  # type: ignore
-                        )
-                        language_name = (
-                            beatmapset.language["name"]  # type: ignore
-                            if beatmapset.language
-                            else "Unknown"
-                        )
 
-                        # Accumulate metadata maps
-                        if genre_id is not None:
-                            genre_map[str(genre_id)] = genre_name
-                        if language_id is not None:
-                            language_map[str(language_id)] = language_name
-
-                        # Process each beatmap in the beatmapset
-                        if beatmapset.beatmaps:
-                            for beatmap in beatmapset.beatmaps:
-                                # Only process beatmaps in our intersection
-                                if beatmap.id in intersection_beatmap_ids:
-                                    # Extract tags (handle empty case)
-                                    tag_ids = []
-                                    tag_counts = []
-
-                                    if (
-                                        hasattr(beatmap, "top_tag_ids")
-                                        and beatmap.top_tag_ids
-                                    ):
-                                        for tag in beatmap.top_tag_ids:
-                                            tag_ids.append(tag["tag_id"])  # type: ignore
-                                            tag_counts.append(tag["count"])  # type: ignore
-
-                                    new_data.append(
-                                        {
-                                            "beatmap_id": beatmap.id,
-                                            "beatmapset_id": beatmapset_id,
-                                            "genre_id": genre_id,
-                                            "language_id": language_id,
-                                            "tag_ids": tag_ids,
-                                            "tag_counts": tag_counts,
-                                        }
-                                    )
-
-                        progress["completed_beatmapset_ids"].append(int(beatmapset_id))
-                        progress["completed_count"] = len(
-                            progress["completed_beatmapset_ids"]
-                        )
-                        success = True
-                        break
-
-                    except Exception as e:
-                        if attempt == MAX_RETRIES - 1:
-                            bar.console.print(
-                                f"[red]Failed beatmapset {beatmapset_id} after {MAX_RETRIES} attempts: {e}[/red]"
-                            )
-                            failed_state["failed_beatmapsets"][str(beatmapset_id)] = (
-                                str(e)
-                            )
-                        time.sleep(RETRY_BASE_DELAY * (2**attempt))
+                    progress["completed_beatmapset_ids"].append(int(beatmapset_id))
+                    progress["completed_count"] = len(
+                        progress["completed_beatmapset_ids"]
+                    )
+                    success = True
+                except Exception as e:
+                    bar.console.print(
+                        f"[red]Failed beatmapset {beatmapset_id} after {MAX_RETRIES} attempts: {e}[/red]"
+                    )
+                    failed_state["failed_beatmapsets"][str(beatmapset_id)] = str(e)
 
                 bar.update(task, advance=1)
 

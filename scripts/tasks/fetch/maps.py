@@ -12,7 +12,7 @@ from rich.progress import (
 import pandas as pd
 import time
 
-from scripts.common.api import osu_api
+from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import beatmap_to_dict
 from scripts.common.io import atomic_json, atomic_parquet
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
@@ -24,43 +24,61 @@ BATCH_SIZE = 50
 SAVE_INTERVAL = 5000
 API_RATE_LIMIT_DELAY = 0.9
 
-def main():
+
+def load_existing_beatmaps():
+    if not BEATMAPS_PATH.exists():
+        return pd.DataFrame(), set()
+    try:
+        beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
+        existing_ids = (
+            {str(bid) for bid in beatmaps_df["id"].unique()}
+            if "id" in beatmaps_df.columns
+            else set()
+        )
+        print(
+            f"[yellow]Resuming: Found {len(existing_ids)} beatmaps already on disk.[/yellow]"
+        )
+        return beatmaps_df, existing_ids
+    except Exception as e:
+        print(f"[red]Error loading Parquet: {e}. Starting fresh.[/red]")
+        return pd.DataFrame(), set()
+
+
+def load_failed_state():
+    if not FAILED_BEATMAPS_PATH.exists():
+        return {"failed_ids": {}}
+    try:
+        with open(FAILED_BEATMAPS_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {"failed_ids": {}}
+
+
+def fetch_missing_beatmaps(ids=None):
     DATA_DIR.mkdir(exist_ok=True)
 
-    if not COLLECTION_BEATMAPS_PATH.exists():
+    if ids is None and not COLLECTION_BEATMAPS_PATH.exists():
+        beatmaps_df, _ = load_existing_beatmaps()
+        if not beatmaps_df.empty:
+            return beatmaps_df
         print(f"[red]Error: Source file not found at {COLLECTION_BEATMAPS_PATH}[/red]")
-        return
+        return pd.DataFrame()
 
-    all_ids = pd.read_parquet(COLLECTION_BEATMAPS_PATH)["beatmap_id"].unique()
+    source_ids = (
+        pd.Series(ids).dropna().unique()
+        if ids is not None
+        else pd.read_parquet(COLLECTION_BEATMAPS_PATH)["beatmap_id"].unique()
+    )
+    all_ids = [int(bid) for bid in source_ids if str(bid).isdigit()]
 
-    existing_ids = set()
-    if BEATMAPS_PATH.exists():
-        try:
-            beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
-            if "id" in beatmaps_df.columns:
-                existing_ids = set(beatmaps_df["id"].unique())
-            print(
-                f"[yellow]Resuming: Found {len(existing_ids)} beatmaps already on disk.[/yellow]"
-            )
-        except Exception as e:
-            print(f"[red]Error loading Parquet: {e}. Starting fresh.[/red]")
-            beatmaps_df = pd.DataFrame()
-    else:
-        beatmaps_df = pd.DataFrame()
+    beatmaps_df, existing_ids = load_existing_beatmaps()
+    failed_state = load_failed_state()
 
-    failed_state = {"failed_ids": {}}
-    if FAILED_BEATMAPS_PATH.exists():
-        try:
-            with open(FAILED_BEATMAPS_PATH) as f:
-                failed_state = json.load(f)
-        except Exception:
-            pass
-
-    todo_ids = [bid for bid in all_ids if bid not in existing_ids]
+    todo_ids = [bid for bid in all_ids if str(bid) not in existing_ids]
 
     if len(todo_ids) == 0:
         print("[bold green]All beatmaps have been fetched![/bold green]")
-        return
+        return beatmaps_df
 
     print(f"[cyan]Total left to fetch: {len(todo_ids)}[/cyan]")
 
@@ -98,7 +116,7 @@ def main():
                 batch = todo_ids[i : i + BATCH_SIZE]
 
                 try:
-                    success_batch = api.beatmaps(batch)
+                    success_batch = ossapi_request(api.beatmaps, batch)
                     new_data.extend([beatmap_to_dict(b) for b in success_batch])
                 except Exception as e:
                     bar.console.print(f"[red]Batch failed: {e}[/red]")
@@ -137,6 +155,12 @@ def main():
 
         atomic_json(failed_state, FAILED_BEATMAPS_PATH)
         print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
+
+    return beatmaps_df
+
+
+def main():
+    fetch_missing_beatmaps()
 
 
 if __name__ == "__main__":

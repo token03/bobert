@@ -2,16 +2,37 @@ from __future__ import annotations
 
 import os
 
-
-API_TIERS = [
-    {"url": "https://osu.ppy.sh/osu/{id}", "delay": 0.2, "name": "osu.ppy.sh"},
-    {"url": "https://osu.direct/api/osu/{id}", "delay": 1.0, "name": "osu.direct"},
-]
+from scripts.common.api import beatconnect_api_token
 
 DOWNLOAD_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 }
+
+API_TIERS = [
+    {
+        "url": "https://osu.ppy.sh/osu/{id}",
+        "delay": 0.2,
+        "name": "osu.ppy.sh",
+        "headers": DOWNLOAD_HEADERS,
+    }
+]
+
+
+def get_api_tiers() -> list[dict]:
+    tiers = []
+    token = beatconnect_api_token()
+    if token:
+        tiers.append(
+            {
+                "url": "https://beatconnect.io/osu/{beatmapset_id}/{id}/",
+                "delay": 0.1,
+                "name": "beatconnect",
+                "headers": {"Token": token},
+            }
+        )
+    tiers.extend(API_TIERS)
+    return tiers
 
 
 def is_valid_osu_file(content: bytes) -> bool:

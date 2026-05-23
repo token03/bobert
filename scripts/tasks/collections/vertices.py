@@ -3,6 +3,8 @@ import pandas as pd
 import signal
 import argparse
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from abc import ABC, abstractmethod
 from rich import print
@@ -22,6 +24,7 @@ VERTEX_PATH = COLLECTIONS_DIR / "vertices.parquet"
 SAVE_INTERVAL = 100
 RATE_LIMIT_DELAY = 0.5
 TIMEOUT = 60.0
+SAVE_LOCK = threading.Lock()
 
 
 class BaseVertexFetcher(ABC):
@@ -54,7 +57,10 @@ class BaseVertexFetcher(ABC):
         if not new_records:
             return
 
-        append_dedup_parquet(new_records, self.vertex_path, ["collection_id", "source"])
+        with SAVE_LOCK:
+            append_dedup_parquet(
+                new_records, self.vertex_path, ["collection_id", "source"]
+            )
 
     @abstractmethod
     def fetch_all(self):
@@ -282,21 +288,24 @@ def main():
     )
     parser.add_argument(
         "--source",
-        choices=["collector", "stats"],
+        choices=["collector", "stats", "both"],
         required=True,
         help="Which source to fetch from",
     )
     args = parser.parse_args()
 
-    if args.source == "collector":
-        fetcher = OsuCollectorVertexFetcher()
+    if args.source == "both":
+        fetchers = [OsuCollectorVertexFetcher(), OsuStatsVertexFetcher()]
+    elif args.source == "collector":
+        fetchers = [OsuCollectorVertexFetcher()]
     elif args.source == "stats":
-        fetcher = OsuStatsVertexFetcher()
+        fetchers = [OsuStatsVertexFetcher()]
 
     def handle_interrupt(signum, frame):
-        if fetcher.is_shutting_down:
+        if all(fetcher.is_shutting_down for fetcher in fetchers):
             return
-        fetcher.is_shutting_down = True
+        for fetcher in fetchers:
+            fetcher.is_shutting_down = True
         print(
             "\n[bold yellow]Stopping gracefully... Please wait for saving to finish.[/bold yellow]"
         )
@@ -304,7 +313,12 @@ def main():
 
     signal.signal(signal.SIGINT, handle_interrupt)
 
-    fetcher.fetch_all()
+    if len(fetchers) == 1:
+        fetchers[0].fetch_all()
+    else:
+        with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
+            for future in [executor.submit(fetcher.fetch_all) for fetcher in fetchers]:
+                future.result()
 
     print("[bold green]Done![/bold green]")
 

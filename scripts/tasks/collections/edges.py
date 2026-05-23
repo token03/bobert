@@ -3,6 +3,8 @@ import pandas as pd
 import signal
 import argparse
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from abc import ABC, abstractmethod
 from rich import print
 from rich.progress import (
@@ -26,6 +28,7 @@ SAVE_INTERVAL = 50
 RATE_LIMIT_DELAY = 0.3
 TIMEOUT = 60.0
 OSDB_THRESHOLD = 100
+SAVE_LOCK = threading.Lock()
 
 
 class BaseEdgeFetcher(ABC):
@@ -60,7 +63,7 @@ class BaseEdgeFetcher(ABC):
             expected_count = row["beatmap_count"]
             actual_count = edge_counts.get(cid, 0)
 
-            if actual_count != expected_count:
+            if actual_count == 0:
                 collections_needing_edges[cid] = expected_count
 
         return collections_needing_edges
@@ -70,9 +73,10 @@ class BaseEdgeFetcher(ABC):
         if not new_records:
             return
 
-        append_dedup_parquet(
-            new_records, self.edge_path, ["collection_id", "source", "beatmap_id"]
-        )
+        with SAVE_LOCK:
+            append_dedup_parquet(
+                new_records, self.edge_path, ["collection_id", "source", "beatmap_id"]
+            )
 
     @abstractmethod
     def fetch_all(self):
@@ -326,21 +330,24 @@ def main():
     )
     parser.add_argument(
         "--source",
-        choices=["collector", "stats"],
+        choices=["collector", "stats", "both"],
         required=True,
         help="Which source to fetch from",
     )
     args = parser.parse_args()
 
-    if args.source == "collector":
-        fetcher = OsuCollectorEdgeFetcher()
+    if args.source == "both":
+        fetchers = [OsuCollectorEdgeFetcher(), OsuStatsEdgeFetcher()]
+    elif args.source == "collector":
+        fetchers = [OsuCollectorEdgeFetcher()]
     elif args.source == "stats":
-        fetcher = OsuStatsEdgeFetcher()
+        fetchers = [OsuStatsEdgeFetcher()]
 
     def handle_interrupt(signum, frame):
-        if fetcher.is_shutting_down:
+        if all(fetcher.is_shutting_down for fetcher in fetchers):
             return
-        fetcher.is_shutting_down = True
+        for fetcher in fetchers:
+            fetcher.is_shutting_down = True
         print(
             "\n[bold yellow]Stopping gracefully... Please wait for saving to finish.[/bold yellow]"
         )
@@ -348,7 +355,12 @@ def main():
 
     signal.signal(signal.SIGINT, handle_interrupt)
 
-    fetcher.fetch_all()
+    if len(fetchers) == 1:
+        fetchers[0].fetch_all()
+    else:
+        with ThreadPoolExecutor(max_workers=len(fetchers)) as executor:
+            for future in [executor.submit(fetcher.fetch_all) for fetcher in fetchers]:
+                future.result()
 
     print("[bold green]Done![/bold green]")
 
