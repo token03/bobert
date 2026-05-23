@@ -66,7 +66,6 @@ def _length_bucket(length: int, buckets: Sequence[int]) -> int:
 
 
 def _alignment_labels(
-    attrs: Tuple[Dict[str, Any], ...],
     map_features: Tuple[Dict[str, Any], ...],
     beatmap_ids: Tuple[int, ...],
     targets: Tuple[Dict[str, Any], ...],
@@ -74,6 +73,10 @@ def _alignment_labels(
 ):
     id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
     positive_weights = torch.zeros(len(targets), len(targets), dtype=torch.float32)
+    anchor_weights = torch.tensor(
+        [float(target.get("anchor_weight", 1.0)) for target in targets],
+        dtype=torch.float32,
+    )
     beatmapset_ids = torch.tensor(
         [int(target.get("beatmapset_id", -1)) for target in targets], dtype=torch.long
     )
@@ -106,22 +109,22 @@ def _alignment_labels(
         return 1.0 - (1.0 - existing_value) * (1.0 - new_weight)
 
     for i, target in enumerate(targets):
-        for ids_key, weights_key in (
-            ("graph_positive_ids", "graph_positive_weights"),
-            ("song_positive_ids", "song_positive_weights"),
-            ("creator_positive_ids", "creator_positive_weights"),
-            ("cross_status_positive_ids", "cross_status_positive_weights"),
+        for bid in target.get("ignore_ids", []):
+            j = id_to_batch.get(int(bid))
+            if j is not None and j != i:
+                ignore_contrastive[i, j] = True
+        for bid, weight in zip(
+            target.get("graph_positive_ids", []), target.get("graph_positive_weights", [])
         ):
-            for bid, weight in zip(target.get(ids_key, []), target.get(weights_key, [])):
-                j = id_to_batch.get(int(bid))
-                if j is not None and j != i:
-                    positive_weights[i, j] = combine_weight(positive_weights[i, j], weight)
-                    ignore_contrastive[i, j] = True
+            j = id_to_batch.get(int(bid))
+            if j is not None and j != i:
+                positive_weights[i, j] = combine_weight(positive_weights[i, j], weight)
+                ignore_contrastive[i, j] = True
 
     return {
         "positive_weights": positive_weights,
         "ignore_contrastive": ignore_contrastive,
-        "difficulty": stack_dicts(list(attrs)),
+        "anchor_weights": anchor_weights,
         "map_features": stack_map_features(list(map_features)),
     }
 
@@ -142,10 +145,10 @@ def collate_align(
     vector_dim: int,
     ignore_near_star_delta: float,
 ):
-    vectors, attrs, map_features, beatmap_ids, targets = zip(*batch)
+    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
     padded_vec, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
     labels = _alignment_labels(
-        attrs, map_features, beatmap_ids, targets, ignore_near_star_delta
+        map_features, beatmap_ids, targets, ignore_near_star_delta
     )
 
     return (
@@ -154,7 +157,7 @@ def collate_align(
         cu_seqlens,
         labels["positive_weights"],
         labels["ignore_contrastive"],
-        labels["difficulty"],
+        labels["anchor_weights"],
         labels["map_features"],
     )
 
@@ -167,9 +170,9 @@ def collate_align_chunked(
     forward_length_buckets: Sequence[int],
     ignore_near_star_delta: float,
 ):
-    vectors, attrs, map_features, beatmap_ids, targets = zip(*batch)
+    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
     labels = _alignment_labels(
-        attrs, map_features, beatmap_ids, targets, ignore_near_star_delta
+        map_features, beatmap_ids, targets, ignore_near_star_delta
     )
 
     buckets = sorted(int(bucket) for bucket in forward_length_buckets)

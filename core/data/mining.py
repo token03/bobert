@@ -1,41 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from heapq import nlargest
+from functools import lru_cache
 from pathlib import Path
 import re
 from typing import Any, Mapping
 
 import numpy as np
 import polars as pl
+from scipy import sparse
 from tqdm import tqdm
 
 
 RANKED_VALUES = {1, 2, 3}
+SUPPORT_NEIGHBOR_CAP = 128
 CACHE_LIST_COLUMNS = [
     "graph_positive_ids",
     "graph_positive_weights",
-    "song_positive_ids",
-    "song_positive_weights",
-    "creator_positive_ids",
-    "creator_positive_weights",
-    "cross_status_positive_ids",
-    "cross_status_positive_weights",
+    "ignore_ids",
     "graph_embedding",
 ]
-POSITIVE_LIST_PAIRS = [
-    ("graph_positive_ids", "graph_positive_weights"),
-    ("song_positive_ids", "song_positive_weights"),
-    ("creator_positive_ids", "creator_positive_weights"),
-    ("cross_status_positive_ids", "cross_status_positive_weights"),
-]
-PRIMARY_POSITIVE_COLUMNS = [
-    "graph_positive_ids",
-    "creator_positive_ids",
-    "cross_status_positive_ids",
-]
-
-
 @dataclass(frozen=True)
 class MiningConfig:
     top_k: int
@@ -46,8 +30,6 @@ class MiningConfig:
     use_faiss_gpu: bool
     min_sr: float | None
     max_sr: float | None
-    positive_max_star_delta: float
-    trivial_duplicate_star_delta: float
     ignore_near_star_delta: float
 
     @classmethod
@@ -77,8 +59,6 @@ class MiningConfig:
             max_sr=(
                 None if config.get("max_sr") is None else float(config["max_sr"])
             ),
-            positive_max_star_delta=float(config["positive_max_star_delta"]),
-            trivial_duplicate_star_delta=float(config["trivial_duplicate_star_delta"]),
             ignore_near_star_delta=float(config["ignore_near_star_delta"]),
         )
 
@@ -99,16 +79,11 @@ class MiningTable:
     mapper_ids: np.ndarray
     status_groups: np.ndarray
     graph: np.ndarray
-    difficulty_composition: np.ndarray
+    pretrain: np.ndarray
 
     @property
     def size(self) -> int:
         return len(self.beatmap_ids)
-
-
-@dataclass(frozen=True)
-class RowCandidateIndex:
-    metadata_candidates: list[np.ndarray]
 
 
 def load_cache(
@@ -182,7 +157,7 @@ def load_cache(
                 .alias(col)
             )
     cache = cache.with_columns(exprs) if exprs else cache
-    return _filter_primary_positive_rows(cache) if min_sr is not None or max_sr is not None else cache
+    return cache.filter(pl.col("graph_positive_ids").list.len() > 0)
 
 
 def load_alignment_cache(
@@ -220,65 +195,31 @@ def build_cache(
 
     table = _load_table(data_path, dataset_path, cfg, rng)
     query_indices = np.arange(table.size, dtype=np.int64)
-    ranked_indices = np.flatnonzero(table.status_groups == "ranked").astype(np.int64)
-    unranked_indices = np.flatnonzero(table.status_groups == "unranked").astype(np.int64)
-
-    ranked_graph_idx, ranked_graph_scores = _topk_faiss(
+    graph_idx = _topk_faiss(
         table.graph,
         query_indices,
-        index_indices=ranked_indices,
         candidate_k=cfg.candidate_k,
         block_size=cfg.block_size,
-        desc="Ranked graph neighbors",
+        desc="Graph neighbors",
         metric="ip",
         use_gpu=cfg.use_faiss_gpu,
     )
-    unranked_graph_idx, unranked_graph_scores = _topk_faiss(
-        table.graph,
+    pretrain_idx = _topk_faiss(
+        table.pretrain,
         query_indices,
-        index_indices=unranked_indices,
         candidate_k=cfg.candidate_k,
         block_size=cfg.block_size,
-        desc="Unranked graph neighbors",
+        desc="Pretrain neighbors",
         metric="ip",
         use_gpu=cfg.use_faiss_gpu,
     )
-    graph_idx, graph_scores = _merge_status_graph_candidates(
-        table,
-        ranked_graph_idx,
-        ranked_graph_scores,
-        unranked_graph_idx,
-        unranked_graph_scores,
-    )
 
-    row_index = _build_row_candidate_index(table)
-    rows = _build_rows(table, graph_idx, graph_scores, cfg, row_index)
+    rows = _build_rows(table, graph_idx, pretrain_idx, cfg)
 
-    cache = _filter_primary_positive_rows(pl.DataFrame(rows))
+    cache = pl.DataFrame(rows).filter(pl.col("graph_positive_ids").list.len() > 0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cache.write_parquet(output_path)
     return cache
-
-
-def _filter_primary_positive_rows(cache: pl.DataFrame) -> pl.DataFrame:
-    rows = cache.to_dicts()
-    while True:
-        retained_ids = {int(row["beatmap_id"]) for row in rows}
-        next_rows = []
-        for row in rows:
-            for ids_key, weights_key in POSITIVE_LIST_PAIRS:
-                filtered = [
-                    (int(bid), float(weight))
-                    for bid, weight in zip(row[ids_key], row[weights_key])
-                    if int(bid) in retained_ids
-                ]
-                row[ids_key] = [bid for bid, _ in filtered]
-                row[weights_key] = [weight for _, weight in filtered]
-            if any(row[key] for key in PRIMARY_POSITIVE_COLUMNS):
-                next_rows.append(row)
-        if len(next_rows) == len(rows):
-            return pl.DataFrame(next_rows, schema=cache.schema)
-        rows = next_rows
 
 
 def _load_table(
@@ -289,7 +230,12 @@ def _load_table(
 ) -> MiningTable:
     allowed_ids = _read_dataset_ids(dataset_dir)
 
-    graph = pl.read_parquet(data_dir / "graph.parquet")
+    graph = pl.read_parquet(data_dir / "graph.parquet").rename(
+        {"embedding": "graph_embedding"}
+    )
+    pretrain = pl.read_parquet(data_dir / "embeddings-pretrain.parquet").rename(
+        {"embedding": "pretrain_embedding"}
+    )
     ratings = pl.read_parquet(data_dir / "ratings.parquet")
     beatmaps = pl.read_parquet(
         data_dir / "beatmaps.parquet",
@@ -311,7 +257,8 @@ def _load_table(
     ).rename({"id": "beatmap_id", "drain": "hp"})
 
     meta = (
-        graph.select(["beatmap_id", "embedding"])
+        graph.select(["beatmap_id", "graph_embedding"])
+        .join(pretrain.select(["beatmap_id", "pretrain_embedding"]), on="beatmap_id", how="inner")
         .join(beatmaps, on="beatmap_id", how="inner")
         .join(ratings, on="beatmap_id", how="inner")
         .filter(pl.col("mode") == "osu")
@@ -366,8 +313,10 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         artist_key_sets=[frozenset(key for key in keys if key) for keys in artist_keys],
         mapper_ids=_mapper_id_sets(meta),
         status_groups=meta["status_group"].to_numpy(),
-        graph=_normalize_rows(np.stack(meta["embedding"].to_list()).astype(np.float32)),
-        difficulty_composition=_difficulty_composition(meta),
+        graph=_normalize_rows(np.stack(meta["graph_embedding"].to_list()).astype(np.float32)),
+        pretrain=_normalize_rows(
+            np.stack(meta["pretrain_embedding"].to_list()).astype(np.float32)
+        ),
     )
 
 
@@ -467,20 +416,6 @@ def _normalize_rows(x: np.ndarray) -> np.ndarray:
     return x / np.clip(norm, 1e-9, None)
 
 
-def _difficulty_composition(meta: pl.DataFrame) -> np.ndarray:
-    aim = meta["aim"].to_numpy().astype(np.float32)
-    speed = meta["speed"].to_numpy().astype(np.float32)
-    slider_factor = meta["slider_factor"].to_numpy().astype(np.float32)
-
-    aim = np.nan_to_num(aim, nan=0.0, posinf=0.0, neginf=0.0)
-    speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
-    slider_factor = np.nan_to_num(slider_factor, nan=1.0, posinf=1.0, neginf=1.0)
-
-    denom = np.clip(aim + speed, 1e-6, None)
-    aim_share = aim / denom
-    return np.column_stack([aim_share, slider_factor]).astype(np.float32)
-
-
 def _topk_faiss(
     matrix: np.ndarray,
     query_indices: np.ndarray,
@@ -490,17 +425,14 @@ def _topk_faiss(
     index_indices: np.ndarray | None = None,
     metric: str = "ip",
     use_gpu: bool = True,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     import faiss
 
     matrix = np.ascontiguousarray(matrix.astype(np.float32, copy=False))
     index_matrix = matrix if index_indices is None else matrix[index_indices]
     n, dim = index_matrix.shape
     if n == 0:
-        return (
-            np.empty((len(query_indices), 0), dtype=np.int32),
-            np.empty((len(query_indices), 0), dtype=np.float32),
-        )
+        return np.empty((len(query_indices), 0), dtype=np.int32)
     k = min(candidate_k + 1, n)
 
     if metric == "ip":
@@ -517,98 +449,19 @@ def _topk_faiss(
 
     index.add(index_matrix)
     all_indices: list[np.ndarray] = []
-    all_scores: list[np.ndarray] = []
 
     starts = range(0, len(query_indices), block_size)
     for start in tqdm(starts, total=len(starts), desc=desc, unit="blocks"):
         qidx = query_indices[start : start + block_size]
-        scores, idx = index.search(matrix[qidx], k)
+        _, idx = index.search(matrix[qidx], k)
         if index_indices is not None:
             mapped_idx = np.full_like(idx, -1)
             valid = idx >= 0
             mapped_idx[valid] = index_indices[idx[valid]]
             idx = mapped_idx
         all_indices.append(idx.astype(np.int32, copy=False))
-        all_scores.append(scores.astype(np.float32, copy=False))
 
-    return np.vstack(all_indices), np.vstack(all_scores)
-
-
-def _merge_status_graph_candidates(
-    table: MiningTable,
-    ranked_idx: np.ndarray,
-    ranked_scores: np.ndarray,
-    unranked_idx: np.ndarray,
-    unranked_scores: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    width = max(ranked_idx.shape[1], unranked_idx.shape[1])
-    ranked_idx, ranked_scores = _pad_topk(ranked_idx, ranked_scores, width)
-    unranked_idx, unranked_scores = _pad_topk(unranked_idx, unranked_scores, width)
-
-    ranked_anchor = (table.status_groups == "ranked")[:, None]
-    same_idx = np.where(ranked_anchor, ranked_idx, unranked_idx)
-    same_scores = np.where(ranked_anchor, ranked_scores, unranked_scores)
-    cross_idx = np.where(ranked_anchor, unranked_idx, ranked_idx)
-    cross_scores = np.where(ranked_anchor, unranked_scores, ranked_scores)
-    return (
-        np.concatenate([same_idx, cross_idx], axis=1),
-        np.concatenate([same_scores, cross_scores], axis=1),
-    )
-
-
-def _pad_topk(
-    indices: np.ndarray, scores: np.ndarray, width: int
-) -> tuple[np.ndarray, np.ndarray]:
-    if indices.shape[1] == width:
-        return indices, scores
-
-    padded_indices = np.full((indices.shape[0], width), -1, dtype=indices.dtype)
-    padded_scores = np.full((scores.shape[0], width), -np.inf, dtype=scores.dtype)
-    padded_indices[:, : indices.shape[1]] = indices
-    padded_scores[:, : scores.shape[1]] = scores
-    return padded_indices, padded_scores
-
-
-def _build_row_candidate_index(
-    table: MiningTable,
-) -> RowCandidateIndex:
-    set_members: dict[int, list[int]] = {}
-    song_members: dict[str, list[int]] = {}
-    artist_members: dict[str, list[int]] = {}
-    mapper_members: dict[int, list[int]] = {}
-    for idx, beatmapset_id in enumerate(table.beatmapset_ids):
-        set_members.setdefault(int(beatmapset_id), []).append(idx)
-        for key in table.song_lookup_keys[idx]:
-            song_members.setdefault(key, []).append(idx)
-        for key in table.artist_key_sets[idx]:
-            artist_members.setdefault(key, []).append(idx)
-        for mapper_id in table.mapper_ids[idx]:
-            mapper_members.setdefault(int(mapper_id), []).append(idx)
-
-    set_arrays = {k: np.array(v, dtype=np.int64) for k, v in set_members.items()}
-    song_arrays = {k: np.array(v, dtype=np.int64) for k, v in song_members.items()}
-    artist_arrays = {k: np.array(v, dtype=np.int64) for k, v in artist_members.items()}
-    mapper_arrays = {k: np.array(v, dtype=np.int64) for k, v in mapper_members.items()}
-    empty = np.array([], dtype=np.int64)
-    metadata_candidates = []
-    for idx, beatmapset_id in enumerate(table.beatmapset_ids):
-        metadata_indices = [set_arrays.get(int(beatmapset_id), empty)]
-        metadata_indices.extend(
-            song_arrays.get(key, empty) for key in table.song_lookup_keys[idx]
-        )
-        metadata_indices.extend(
-            artist_arrays.get(key, empty) for key in table.artist_key_sets[idx]
-        )
-        metadata_indices.extend(
-            mapper_arrays.get(int(mapper_id), empty)
-            for mapper_id in table.mapper_ids[idx]
-        )
-        if metadata_indices:
-            metadata_candidates.append(np.unique(np.concatenate(metadata_indices)))
-        else:
-            metadata_candidates.append(empty)
-
-    return RowCandidateIndex(metadata_candidates=metadata_candidates)
+    return np.vstack(all_indices)
 
 
 def _song_lookup_keys(song_key: object) -> tuple[str, ...]:
@@ -631,46 +484,77 @@ def _same_mapper(a: frozenset[int], b: frozenset[int]) -> bool:
     return bool(a and b and a & b)
 
 
-def _plateau_weights(scores: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    scores = np.asarray(scores, dtype=np.float32)
-    if scores.size == 0:
-        return scores
-    if scores.size == 1:
-        return np.ones_like(scores)
-
-    best = float(np.max(scores))
-    gaps = best - scores
-    positive_gaps = gaps[gaps > eps]
-    if positive_gaps.size == 0:
-        return np.ones_like(scores)
-
-    scale = float(positive_gaps.mean()) + eps
-    return np.exp(-0.5 * (gaps / scale) ** 2).astype(np.float32)
+def _clean_neighbors(row: np.ndarray, anchor: int) -> list[int]:
+    ids = [int(cid) for cid in row if int(cid) >= 0 and int(cid) != anchor]
+    return list(dict.fromkeys(ids))
 
 
-def _plateau_rescale_items(items: list[tuple[int, float]]) -> list[tuple[int, float]]:
-    if not items:
-        return items
+def _effective_neighbors(ids: list[int]) -> tuple[list[int], dict[int, float], float]:
+    if not ids:
+        return [], {}, 0.0
 
-    scores = np.array([score for _, score in items], dtype=np.float32)
-    weights = _plateau_weights(scores)
-    return [(bid, float(weight)) for (bid, _), weight in zip(items, weights)]
+    ranks = np.arange(1, len(ids) + 1, dtype=np.float32)
+    inv_rank = 1.0 / ranks
+    probs_arr = inv_rank / inv_rank.sum()
+    entropy = float(-(probs_arr * np.log(np.clip(probs_arr, 1e-12, None))).sum())
+    eff_k = max(1, min(len(ids), SUPPORT_NEIGHBOR_CAP, int(np.ceil(np.exp(entropy)))))
+    confidence = 1.0 - entropy / max(np.log(len(ids)), 1e-9) if len(ids) > 1 else 1.0
+    probs = {cid: float(prob) for cid, prob in zip(ids[:eff_k], probs_arr[:eff_k])}
+    return ids[:eff_k], probs, max(0.0, confidence)
 
 
-def _top_items(values: dict[int, float], k: int) -> list[tuple[int, float]]:
-    if len(values) <= k:
-        return sorted(values.items(), key=lambda x: x[1], reverse=True)
-    return nlargest(k, values.items(), key=lambda x: x[1])
+def _forward_lookup(row: np.ndarray, anchor: int) -> dict[int, int]:
+    return {cid: rank for rank, cid in enumerate(_clean_neighbors(row, anchor), start=1)}
+
+
+def _reverse_ranks(neighbors: np.ndarray, candidates: np.ndarray, target: int, default: int) -> np.ndarray:
+    matches = neighbors[candidates] == target
+    found = matches.any(axis=1)
+    ranks = np.full(candidates.shape[0], default, dtype=np.float32)
+    if found.any():
+        ranks[found] = matches[found].argmax(axis=1).astype(np.float32) + 1.0
+    return ranks
+
+
+def _support_matrix(neighbors: np.ndarray, size: int) -> tuple[sparse.csr_matrix, list[tuple[int, ...]], np.ndarray]:
+    rows = []
+    cols = []
+    data = []
+    effective_neighbors: list[tuple[int, ...]] = []
+    confidence = np.empty(size, dtype=np.float32)
+    for row_idx, row in enumerate(tqdm(neighbors, desc="Building support index", unit="rows")):
+        eff, probs, conf = _effective_neighbors(_clean_neighbors(row, row_idx))
+        effective_neighbors.append(tuple(eff))
+        confidence[row_idx] = conf
+        for cid in eff:
+            rows.append(row_idx)
+            cols.append(cid)
+            data.append(np.sqrt(probs[cid]))
+    matrix = sparse.csr_matrix(
+        (
+            np.asarray(data, dtype=np.float32),
+            (np.asarray(rows, dtype=np.int32), np.asarray(cols, dtype=np.int32)),
+        ),
+        shape=(size, size),
+    )
+    return matrix, effective_neighbors, confidence
+
+
+def _metadata_match(table: MiningTable, left: int, right: int) -> bool:
+    return (
+        table.beatmapset_ids[left] == table.beatmapset_ids[right]
+        or _has_overlap(table.song_lookup_key_sets[left], table.song_lookup_key_sets[right])
+        or _has_overlap(table.artist_key_sets[left], table.artist_key_sets[right])
+        or _same_mapper(table.mapper_ids[left], table.mapper_ids[right])
+    )
 
 
 def _build_rows(
     table: MiningTable,
     graph_idx: np.ndarray,
-    graph_scores: np.ndarray,
+    pretrain_idx: np.ndarray,
     cfg: MiningConfig,
-    row_index: RowCandidateIndex,
 ) -> dict[str, list]:
-    batch_size = 10000
     columns: dict[str, list] = {
         "beatmap_id": [],
         "status_group": [],
@@ -682,152 +566,107 @@ def _build_rows(
         "song_key": [],
         "graph_positive_ids": [],
         "graph_positive_weights": [],
-        "song_positive_ids": [],
-        "song_positive_weights": [],
-        "creator_positive_ids": [],
-        "creator_positive_weights": [],
-        "cross_status_positive_ids": [],
-        "cross_status_positive_weights": [],
+        "ignore_ids": [],
+        "anchor_weight": [],
         "graph_embedding": [],
     }
 
-    starts = range(0, table.size, batch_size)
-    for start in tqdm(starts, desc="Building mining rows", unit="batch"):
-        end = min(table.size, start + batch_size)
-        anchor_idx = np.arange(start, end)[:, None]
-        anch_set = table.beatmapset_ids[start:end, None]
-        anch_status = table.status_groups[start:end, None]
-        anch_stars = table.stars[start:end, None]
+    default_rank = cfg.candidate_k + 1
+    support_index, graph_effective, graph_confidence = _support_matrix(graph_idx, table.size)
 
-        valid = (graph_idx[start:end] >= 0) & (graph_idx[start:end] != anchor_idx)
-        safe_idx = np.where(valid, graph_idx[start:end], 0)
-        star_deltas = np.abs(table.stars[safe_idx] - anch_stars)
-        same_set = anch_set == table.beatmapset_ids[safe_idx]
-        trivial_duplicate = same_set & (star_deltas <= cfg.trivial_duplicate_star_delta)
-        graph_mask = valid & ~same_set
-        graph_mask &= star_deltas <= cfg.positive_max_star_delta
-        graph_mask &= ~trivial_duplicate
-        same_status = anch_status == table.status_groups[safe_idx]
-        same_pool = graph_mask & same_status
-        cross_pool = graph_mask & ~same_status
-        graph_score_values = graph_scores[start:end]
+    @lru_cache(maxsize=8192)
+    def pretrain_eff(row_idx: int) -> tuple[int, ...]:
+        ids = _clean_neighbors(pretrain_idx[row_idx], row_idx)
+        eff, _, _ = _effective_neighbors(ids)
+        return tuple(eff)
 
-        for i in range(end - start):
-            row_idx = start + i
-            graph_dict: dict[int, float] = {}
-            song_dict: dict[int, float] = {}
-            creator_dict: dict[int, float] = {}
-            cross_dict: dict[int, float] = {}
-
-            for cid, score, same_keep, cross_keep in zip(
-                safe_idx[i],
-                graph_score_values[i],
-                same_pool[i],
-                cross_pool[i],
-            ):
-                cid = int(cid)
-                bid = int(table.beatmap_ids[cid])
-                if same_keep:
-                    graph_dict[bid] = max(graph_dict.get(bid, -np.inf), float(score))
-                if cross_keep:
-                    cross_dict[bid] = max(cross_dict.get(bid, -np.inf), float(score))
-
-            row_song_keys = table.song_lookup_keys[row_idx]
-            row_song_key_set = table.song_lookup_key_sets[row_idx]
-            sams_candidates: list[tuple[int, int, float, bool, bool]] = []
-            for cid in row_index.metadata_candidates[row_idx]:
-                cid = int(cid)
-                if cid == row_idx:
-                    continue
-                same_set_candidate = (
-                    table.beatmapset_ids[row_idx] == table.beatmapset_ids[cid]
-                )
-                same_song_candidate = _has_overlap(
-                    row_song_key_set, table.song_lookup_key_sets[cid]
-                )
-                same_artist_candidate = _has_overlap(
-                    table.artist_key_sets[row_idx], table.artist_key_sets[cid]
-                )
-                same_mapper_candidate = _same_mapper(
-                    table.mapper_ids[row_idx], table.mapper_ids[cid]
-                )
-                if not (
-                    same_set_candidate
-                    or same_song_candidate
-                    or same_artist_candidate
-                    or same_mapper_candidate
-                ):
-                    continue
-                star_delta = abs(float(table.stars[row_idx] - table.stars[cid]))
-                if star_delta > cfg.positive_max_star_delta:
-                    continue
-                if same_set_candidate and star_delta <= cfg.trivial_duplicate_star_delta:
-                    continue
-                if same_set_candidate:
-                    base = 3
-                elif same_song_candidate:
-                    base = 2
-                elif same_artist_candidate:
-                    base = 1
-                else:
-                    base = 0
-                mapper_bonus = 1 if same_mapper_candidate else 0
-                comp_dist = float(
-                    np.linalg.norm(
-                        table.difficulty_composition[row_idx]
-                        - table.difficulty_composition[cid]
-                    )
-                )
-                sams_candidates.append(
-                    (
-                        cid,
-                        base + mapper_bonus,
-                        comp_dist,
-                        same_set_candidate or same_song_candidate,
-                        same_artist_candidate or same_mapper_candidate,
-                    )
-                )
-
-            if sams_candidates:
-                comp_scores = -np.array(
-                    [comp_dist for _, _, comp_dist, _, _ in sams_candidates],
-                    dtype=np.float32,
-                )
-                comp_support = _plateau_weights(comp_scores)
-            else:
-                comp_support = np.empty(0, dtype=np.float32)
-
-            for (cid, relation_score, _, song_lane, creator_lane), support in zip(
-                sams_candidates, comp_support
-            ):
-                score = float(relation_score) + float(support)
-                bid = int(table.beatmap_ids[cid])
-                if song_lane:
-                    song_dict[bid] = max(song_dict.get(bid, -np.inf), score)
-                elif creator_lane:
-                    creator_dict[bid] = max(creator_dict.get(bid, -np.inf), score)
-
-            graph_sorted = _plateau_rescale_items(_top_items(graph_dict, cfg.top_k))
-            song_sorted = _plateau_rescale_items(_top_items(song_dict, cfg.top_k))
-            creator_sorted = _plateau_rescale_items(_top_items(creator_dict, cfg.top_k))
-            cross_sorted = _plateau_rescale_items(_top_items(cross_dict, cfg.top_k))
-
-            columns["beatmap_id"].append(int(table.beatmap_ids[row_idx]))
-            columns["status_group"].append(str(table.status_groups[row_idx]))
-            columns["stars"].append(float(table.stars[row_idx]))
-            columns["aim"].append(float(table.aim[row_idx]))
-            columns["speed"].append(float(table.speed[row_idx]))
-            columns["slider_factor"].append(float(table.slider_factor[row_idx]))
-            columns["beatmapset_id"].append(int(table.beatmapset_ids[row_idx]))
-            columns["song_key"].append("|".join(row_song_keys))
-            columns["graph_positive_ids"].append([k for k, _ in graph_sorted])
-            columns["graph_positive_weights"].append([v for _, v in graph_sorted])
-            columns["song_positive_ids"].append([k for k, _ in song_sorted])
-            columns["song_positive_weights"].append([v for _, v in song_sorted])
-            columns["creator_positive_ids"].append([k for k, _ in creator_sorted])
-            columns["creator_positive_weights"].append([v for _, v in creator_sorted])
-            columns["cross_status_positive_ids"].append([k for k, _ in cross_sorted])
-            columns["cross_status_positive_weights"].append([v for _, v in cross_sorted])
-            columns["graph_embedding"].append(table.graph[row_idx].tolist())
+    for row_idx in tqdm(range(table.size), desc="Building mining rows", unit="rows"):
+        _build_row(
+            table,
+            graph_idx,
+            pretrain_idx,
+            default_rank,
+            graph_effective,
+            graph_confidence,
+            pretrain_eff,
+            support_index,
+            columns,
+            row_idx,
+            cfg.top_k,
+        )
 
     return columns
+
+
+def _build_row(
+    table: MiningTable,
+    graph_idx: np.ndarray,
+    pretrain_idx: np.ndarray,
+    default_rank: int,
+    graph_effective: list[tuple[int, ...]],
+    graph_confidence: np.ndarray,
+    pretrain_eff,
+    support_index: sparse.csr_matrix,
+    columns: dict[str, list],
+    row_idx: int,
+    top_k: int,
+) -> None:
+        candidates = []
+        graph_forward_ranks = []
+        for rg_ij, cid in enumerate(_clean_neighbors(graph_idx[row_idx], row_idx), start=1):
+            if table.status_groups[cid] != table.status_groups[row_idx]:
+                continue
+            if _metadata_match(table, row_idx, cid):
+                continue
+            candidates.append(cid)
+            graph_forward_ranks.append(rg_ij)
+
+        positives: list[tuple[int, float]] = []
+        if candidates:
+            candidate_arr = np.asarray(candidates, dtype=np.int32)
+            pretrain_forward = _forward_lookup(pretrain_idx[row_idx], row_idx)
+
+            rg_ij = np.asarray(graph_forward_ranks, dtype=np.float32)
+            rg_ji = _reverse_ranks(graph_idx, candidate_arr, row_idx, default_rank)
+            re_ij = np.asarray(
+                [pretrain_forward.get(int(cid), default_rank) for cid in candidate_arr],
+                dtype=np.float32,
+            )
+            re_ji = _reverse_ranks(pretrain_idx, candidate_arr, row_idx, default_rank)
+            m_graph = 1.0 / np.sqrt(rg_ij * rg_ji)
+            m_pretrain = 1.0 / np.sqrt(re_ij * re_ji)
+            surprise = np.maximum(0.0, np.log(m_graph / np.clip(m_pretrain, 1e-12, None)))
+            support = support_index[row_idx].dot(support_index[candidate_arr].T).toarray().ravel().astype(np.float32)
+            utility = m_graph * np.sqrt(m_pretrain) * np.log1p(surprise) * support
+            keep = utility > 0.0
+            positives = [
+                (int(table.beatmap_ids[cid]), float(weight))
+                for cid, weight in zip(candidate_arr[keep], utility[keep])
+            ]
+
+        positives.sort(key=lambda x: x[1], reverse=True)
+        positives = positives[:top_k]
+        total_utility = sum(weight for _, weight in positives)
+        if total_utility > 0.0:
+            positive_ids = [bid for bid, _ in positives]
+            positive_weights = [float(weight / total_utility) for _, weight in positives]
+        else:
+            positive_ids = []
+            positive_weights = []
+        surprise_weight = float(np.log1p(max((w for _, w in positives), default=0.0)))
+        anchor_weight = float(graph_confidence[row_idx]) * surprise_weight
+
+        columns["beatmap_id"].append(int(table.beatmap_ids[row_idx]))
+        columns["status_group"].append(str(table.status_groups[row_idx]))
+        columns["stars"].append(float(table.stars[row_idx]))
+        columns["aim"].append(float(table.aim[row_idx]))
+        columns["speed"].append(float(table.speed[row_idx]))
+        columns["slider_factor"].append(float(table.slider_factor[row_idx]))
+        columns["beatmapset_id"].append(int(table.beatmapset_ids[row_idx]))
+        columns["song_key"].append("|".join(table.song_lookup_keys[row_idx]))
+        columns["graph_positive_ids"].append(positive_ids)
+        columns["graph_positive_weights"].append(positive_weights)
+        ignore = set(graph_effective[row_idx]) | set(pretrain_eff(row_idx))
+        columns["ignore_ids"].append([int(table.beatmap_ids[cid]) for cid in sorted(ignore)])
+        columns["anchor_weight"].append(anchor_weight)
+        columns["graph_embedding"].append(table.graph[row_idx].tolist())

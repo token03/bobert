@@ -185,7 +185,13 @@ def contrastive_loss_fn(
         return {"contrastive_loss": torch.zeros((), device=device)}
 
     loss = -(log_prob * positive_weights).sum(dim=1) / positive_sums.clamp_min(1e-9)
-    loss = loss[valid].mean()
+    anchor_weights = labels.get("anchor_weights")
+    if anchor_weights is not None:
+        anchor_weights = anchor_weights.to(device=device, dtype=loss.dtype)
+        valid_weights = anchor_weights[valid].clamp_min(0.0)
+        loss = (loss[valid] * valid_weights).sum() / valid_weights.sum().clamp_min(1e-9)
+    else:
+        loss = loss[valid].mean()
 
     return {"contrastive_loss": loss}
 
@@ -198,28 +204,8 @@ def alignment_loss_fn(
 ) -> Dict[str, torch.Tensor]:
     phase_config = config[phase]
     losses = contrastive_loss_fn(predictions, labels, config)
-    device = predictions["embedding"].device
-
     total_loss = losses["contrastive_loss"] * float(
         phase_config.get("contrastive_weight", 1.0)
     )
-
-    if "mlm" in predictions:
-        mlm_loss = mlm_loss_fn(
-            predictions["mlm"], predictions["mlm_targets"], predictions.get("mlm_mask")
-        )
-    else:
-        mlm_loss = torch.zeros((), device=device)
-    losses["mlm_loss"] = mlm_loss
-    total_loss = total_loss + mlm_loss * float(phase_config.get("mlm_loss_weight", 0.0))
-
-    difficulty_labels = labels.get("difficulty")
-    if difficulty_labels:
-        diff_losses = difficulty_loss_fn(
-            predictions["difficulty"], difficulty_labels, config, phase=phase
-        )
-        losses.update(diff_losses)
-        total_loss = total_loss + diff_losses["difficulty_loss"]
-
     losses["total_loss"] = total_loss
     return losses

@@ -41,12 +41,6 @@ DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
 DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
 DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 CANDIDATE_LIMIT = 8
-CANDIDATE_LANES = [
-    ("Graph", "graph_positive_ids", "graph_positive_weights"),
-    ("Song", "song_positive_ids", "song_positive_weights"),
-    ("Creator", "creator_positive_ids", "creator_positive_weights"),
-    ("Cross Status", "cross_status_positive_ids", "cross_status_positive_weights"),
-]
 
 
 @dataclass
@@ -254,16 +248,22 @@ def candidates_recommend(raw_input: str, ctx: QueryContext):
         return
 
     print_query_table(beatmap_id, ctx)
+    console.print(
+        f"[dim]Anchor weight: {float(candidate_row.get('anchor_weight', 1.0)):.4f}; "
+        f"ignored negatives: {len(candidate_row.get('ignore_ids', []))}[/dim]"
+    )
 
-    for title, ids_key, weights_key in CANDIDATE_LANES:
-        items = list(
-            zip(candidate_row.get(ids_key, []), candidate_row.get(weights_key, []))
+    items = list(
+        zip(
+            candidate_row.get("graph_positive_ids", []),
+            candidate_row.get("graph_positive_weights", []),
         )
-        results = [
-            (int(candidate_id), float(weight), ctx.metadata_lookup.get(int(candidate_id)))
-            for candidate_id, weight in items[:CANDIDATE_LIMIT]
-        ]
-        print_result_table(results, title=title, score="Weight")
+    )
+    results = [
+        (int(candidate_id), float(weight), ctx.metadata_lookup.get(int(candidate_id)))
+        for candidate_id, weight in items[:CANDIDATE_LIMIT]
+    ]
+    print_result_table(results, title="Surprising Graph Positives", score="Weight")
     console.print()
 
 
@@ -389,7 +389,7 @@ def parse_args():
         default=None,
         help="Defaults to data/bobert.pt or data/bobert-pretrain.pt with --pretrain",
     )
-    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
     return parser.parse_args()

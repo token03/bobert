@@ -161,62 +161,26 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             return len(self.anchor_indices)
         return min(self.epoch_size, len(self.anchor_indices))
 
-    def _choose_ranked_id(
-        self,
-        ids: List[int],
-        exclude: set[int],
-        offset: int,
-        avoid_beatmapset_id: Optional[int] = None,
-    ) -> Optional[int]:
-        available = []
-        for bid in ids:
-            bid = int(bid)
-            if bid not in self.id_to_idx or bid in exclude:
-                continue
-            if avoid_beatmapset_id is not None:
-                target = self.mining_lookup.get(bid, {})
-                if int(target.get("beatmapset_id", -1)) == avoid_beatmapset_id:
-                    continue
-            available.append(bid)
-        if not available:
+    def _sample_positive(self, mining: Dict[str, Any], rng: random.Random) -> Optional[int]:
+        ids = [int(bid) for bid in mining.get("graph_positive_ids", [])]
+        weights = [float(w) for w in mining.get("graph_positive_weights", [])]
+        candidates = [
+            (bid, max(weight, 0.0))
+            for bid, weight in zip(ids, weights)
+            if bid in self.id_to_idx
+        ]
+        if not candidates:
             return None
-        return available[offset % len(available)]
-
-    def _add_ranked(
-        self,
-        group: List[int],
-        group_ids: set[int],
-        ids: List[int],
-        offset: int,
-        avoid_beatmapset_id: Optional[int] = None,
-    ) -> bool:
-        bid = self._choose_ranked_id(ids, group_ids, offset, avoid_beatmapset_id)
-        if bid is None:
-            return False
-        group.append(self.id_to_idx[bid])
-        group_ids.add(bid)
-        return True
-
-    def _add_random(
-        self,
-        group: List[int],
-        group_ids: set[int],
-        rng: random.Random,
-        avoid_beatmapset_id: Optional[int] = None,
-    ) -> bool:
-        for _ in range(max(1, len(self.beatmap_ids) * 2)):
-            random_idx = rng.randrange(len(self.beatmap_ids))
-            random_id = self.beatmap_ids[random_idx]
-            if len(group_ids) < len(self.beatmap_ids) and random_id in group_ids:
-                continue
-            if avoid_beatmapset_id is not None:
-                target = self.mining_lookup.get(random_id, {})
-                if int(target.get("beatmapset_id", -1)) == avoid_beatmapset_id:
-                    continue
-            group.append(random_idx)
-            group_ids.add(random_id)
-            return True
-        return False
+        total = sum(weight for _, weight in candidates)
+        if total <= 0.0:
+            return candidates[rng.randrange(len(candidates))][0]
+        threshold = rng.random() * total
+        cumulative = 0.0
+        for bid, weight in candidates:
+            cumulative += weight
+            if cumulative >= threshold:
+                return bid
+        return candidates[-1][0]
 
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
@@ -232,104 +196,10 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         for anchor_idx in anchor_indices:
             anchor_id = self.beatmap_ids[anchor_idx]
             mining = self.mining_lookup.get(anchor_id, {})
-
-            graph_ids = mining.get("graph_positive_ids", [])
-            song_ids = mining.get("song_positive_ids", [])
-            creator_ids = mining.get("creator_positive_ids", [])
-            cross_ids = mining.get("cross_status_positive_ids", [])
-            anchor_set_id = int(mining.get("beatmapset_id", -1))
-            offset = max(0, self.epoch - 1)
-
-            group = [anchor_idx]
-            group_ids = {anchor_id}
-
-            if len(group) < self.group_size:
-                added = self._add_ranked(
-                    group,
-                    group_ids,
-                    graph_ids,
-                    offset,
-                    avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                )
-                if not added:
-                    added = self._add_ranked(
-                        group,
-                        group_ids,
-                        cross_ids,
-                        offset,
-                        avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                    )
-                if not added:
-                    added = self._add_ranked(
-                        group,
-                        group_ids,
-                        creator_ids,
-                        offset,
-                        avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                    )
-                if not added:
-                    continue
-
-            if len(group) < self.group_size:
-                added = self._add_ranked(group, group_ids, song_ids, offset)
-                if not added:
-                    added = self._add_ranked(group, group_ids, creator_ids, offset)
-                if not added:
-                    self._add_ranked(
-                        group,
-                        group_ids,
-                        graph_ids,
-                        offset + 1,
-                        avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                    )
-
-            if len(group) < self.group_size:
-                added = self._add_ranked(
-                    group,
-                    group_ids,
-                    cross_ids,
-                    offset,
-                    avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                )
-                if not added:
-                    added = self._add_ranked(
-                        group,
-                        group_ids,
-                        graph_ids,
-                        offset + 1,
-                        avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                    )
-                if not added:
-                    added = self._add_ranked(
-                        group,
-                        group_ids,
-                        creator_ids,
-                        offset + 1,
-                        avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                    )
-                if not added:
-                    self._add_ranked(
-                        group,
-                        group_ids,
-                        graph_ids,
-                        offset + 2,
-                        avoid_beatmapset_id=anchor_set_id if anchor_set_id >= 0 else None,
-                    )
-
-            while len(group) < self.group_size:
-                if not self._add_random(
-                    group,
-                    group_ids,
-                    rng,
-                    avoid_beatmapset_id=(
-                        None
-                        if len(group) == 2 or anchor_set_id < 0
-                        else anchor_set_id
-                    ),
-                ):
-                    break
-
-            group = group[: self.group_size]
+            positive_id = self._sample_positive(mining, rng)
+            if positive_id is None or positive_id == anchor_id:
+                continue
+            group = [anchor_idx, self.id_to_idx[positive_id]]
             if self.lengths is not None and self.buckets is not None:
                 group_len = max(self.lengths[idx] for idx in group)
                 bucket = length_bucket(group_len, self.buckets)

@@ -1,7 +1,7 @@
 data:
   dataset_path: './data/dataset'
   dataset_seed: 42
-  num_workers: 1
+  num_workers: 0
   max_seq_len: 4096
   length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
@@ -73,34 +73,32 @@ mining:
   random_seed: 42
   use_faiss_gpu: true
 
-  positive_max_star_delta: 0.25
-  trivial_duplicate_star_delta: 0.01
   ignore_near_star_delta: 0.25
 
 alignment:
   checkpoint_dir: "./experiments/align"
   model_name: "model"
-  trainable_layers: 1
+  trainable_layers: 0
   use_length_buckets: false
   forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
   batch_size: 256
-  num_epochs: 2
+  num_epochs: 1
   alignment_size: 150000
 
-  embedding_dim: 256
+  embedding_dim: 384
   map_feature_names: ["ar", "cs", "od", "hp_drain", "drain_time", "slider_multiplier"]
-  map_feature_dim: 32
+  map_feature_dim: 128
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
   contrastive_pooler: "query_attention"
   query_pool_num_queries: 8
   query_pool_heads: 8
   query_pool_head_dim: 32
-  query_pool_output_dim: 512
+  query_pool_output_dim: 256
   query_pool_dropout: 0.0
   query_pool_use_flash: true
 
-  group_size: 4
+  group_size: 2
   mining_cache_path: './data/candidates.parquet'
 
   adam_lr: 3e-5
@@ -122,8 +120,4 @@ alignment:
   masking_ratio: 0.15
   mean_span_length: 4
 
-  difficulty_loss_weight: 0.3
-  mlm_loss_weight: 0.2
-  aim_loss_weight: 0.2
-  speed_loss_weight: 0.2
   contrastive_weight: 1.0

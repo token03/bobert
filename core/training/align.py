@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 
-from core.training.metrics import ContrastiveMetrics, DifficultyMetrics
+from core.training.metrics import ContrastiveMetrics
 
 from .setup import create_optimizer, create_scheduler, create_trainer
 from .loss import alignment_loss_fn
@@ -28,7 +28,6 @@ class AlignmentModule(pl.LightningModule):
         phase_config = config["alignment"]
         self.batch_size = phase_config.get("batch_size", 1)
         self.metrics = ContrastiveMetrics(torch.device("cpu"))
-        self.difficulty_metrics = DifficultyMetrics(torch.device("cpu"), normalizer)
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
@@ -68,14 +67,14 @@ class AlignmentModule(pl.LightningModule):
             cu_seqlens,
             positive_weights,
             ignore_contrastive,
-            attrs,
+            anchor_weights,
             map_features,
         ) = batch
 
         return vectors, attention_mask, cu_seqlens, map_features, {
             "positive_weights": positive_weights,
             "ignore_contrastive": ignore_contrastive,
-            "difficulty": attrs,
+            "anchor_weights": anchor_weights,
             "use_contrastive": use_contrastive,
         }
 
@@ -150,18 +149,10 @@ class AlignmentModule(pl.LightningModule):
             {
                 "train_loss": loss_dict["total_loss"],
                 "train_contrastive_loss": loss_dict["contrastive_loss"],
-                "train_mlm_loss": loss_dict["mlm_loss"],
             },
             prog_bar=True,
             batch_size=self.batch_size,
         )
-
-        if "difficulty_loss" in loss_dict:
-            self.log(
-                "train_difficulty_loss",
-                loss_dict["difficulty_loss"],
-                batch_size=self.batch_size,
-            )
 
         return loss_dict["total_loss"]
 
@@ -172,22 +163,10 @@ class AlignmentModule(pl.LightningModule):
         predictions = self(vectors, attention_mask, cu_seqlens, map_features)
         loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
-        if "difficulty_loss" in loss_dict:
-            self.difficulty_metrics.update(
-                predictions["difficulty"],
-                labels["difficulty"],
-                loss=float(loss_dict["difficulty_loss"].detach().cpu()),
-            )
         self.log(
             "val_loss",
             loss_dict["total_loss"],
             prog_bar=True,
-            sync_dist=True,
-            batch_size=self.batch_size,
-        )
-        self.log(
-            "val_mlm_loss",
-            loss_dict["mlm_loss"],
             sync_dist=True,
             batch_size=self.batch_size,
         )
@@ -197,11 +176,7 @@ class AlignmentModule(pl.LightningModule):
         results = self.metrics.compute()
         for key, value in results.items():
             self.log(f"val_{key}", value)
-        diff_results = self.difficulty_metrics.compute()
-        for key, value in self._flatten_metrics(diff_results, prefix="val_diff").items():
-            self.log(key, value)
         self.metrics.reset()
-        self.difficulty_metrics.reset()
 
     @staticmethod
     def _flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
@@ -343,8 +318,6 @@ def load_pretraining_weights(
         "missing": len(missing),
         "unexpected": len(unexpected),
         "loaded_tokenizer": len(tokenizer_keys),
-        "loaded_difficulty_head": "difficulty_head.weight" in compatible_state
-        and "difficulty_head.bias" in compatible_state,
     }
 
 

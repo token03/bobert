@@ -17,9 +17,6 @@ from .split import random_split_aligned
 
 ALIGNMENT_POSITIVE_LIST_PAIRS = (
     ("graph_positive_ids", "graph_positive_weights"),
-    ("song_positive_ids", "song_positive_weights"),
-    ("creator_positive_ids", "creator_positive_weights"),
-    ("cross_status_positive_ids", "cross_status_positive_weights"),
 )
 
 

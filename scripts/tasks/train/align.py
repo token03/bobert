@@ -142,17 +142,15 @@ def main() -> int:
     print(f"Number of Layers: {base_model.bert.n_layers}")
 
     pretrain_checkpoint = resolve_pretrain_checkpoint(args, config)
-    if pretrain_checkpoint is not None:
-        stats = load_pretraining_weights(model, pretrain_checkpoint)
-        print(
-            "Loaded pretraining checkpoint: "
-            f"{stats['checkpoint_path']} "
-            f"(loaded={stats['loaded']} skipped={stats['skipped']} "
-            f"missing={stats['missing']} unexpected={stats['unexpected']} "
-            f"difficulty_head={stats['loaded_difficulty_head']})"
-        )
-    else:
-        print("No pretraining checkpoint found; training alignment from scratch.")
+    if pretrain_checkpoint is None:
+        raise FileNotFoundError("Alignment requires a pretraining checkpoint.")
+    stats = load_pretraining_weights(model, pretrain_checkpoint)
+    print(
+        "Loaded pretraining checkpoint: "
+        f"{stats['checkpoint_path']} "
+        f"(loaded={stats['loaded']} skipped={stats['skipped']} "
+        f"missing={stats['missing']} unexpected={stats['unexpected']})"
+    )
 
     resume_checkpoint = resolve_resume_checkpoint(args, config)
     logger_version = (

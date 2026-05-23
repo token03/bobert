@@ -614,8 +614,6 @@ class BobertForAlignment(nn.Module):
         bert_model: BobertModel,
         contrastive_pooler: nn.Module,
         aux_pooler: nn.Module,
-        masker: SpanMasker,
-        mlm_head: BobertMaskedLMHead,
         embedding_dim: int = 128,
         map_feature_dim: int = 32,
         num_map_features: int = len(MAP_FEATURE_ATTRIBUTES),
@@ -624,8 +622,6 @@ class BobertForAlignment(nn.Module):
         self.bert = bert_model
         self.pooler = aux_pooler
         self.contrastive_pooler = contrastive_pooler
-        self.masker = masker
-        self.mlm_head = mlm_head
         self.embedding_dim = embedding_dim
         self.map_projector = (
             BobertMapFeatureProjector(num_map_features, map_feature_dim)
@@ -636,20 +632,14 @@ class BobertForAlignment(nn.Module):
         contrastive_dim = getattr(contrastive_pooler, "output_dim", bert_model.d_model)
         aux_dim = getattr(aux_pooler, "output_dim", bert_model.d_model)
         map_dim = getattr(self.map_projector, "output_dim", 0)
-        contrastive_head_dim = contrastive_dim + map_dim
-        aux_head_dim = aux_dim + map_dim
-
         self.retrieval_head = nn.Sequential(
-            nn.Linear(contrastive_head_dim, bert_model.d_model),
+            nn.LayerNorm(contrastive_dim + aux_dim + map_dim),
+            nn.Linear(contrastive_dim + aux_dim + map_dim, embedding_dim),
             nn.GELU(),
-            nn.Linear(bert_model.d_model, embedding_dim),
         )
-        self.difficulty_head = nn.Linear(aux_head_dim, len(DIFFICULTY_ATTRIBUTES))
         self.is_compiled = False
 
         for parameter in self.bert.feature_tokenizer.parameters():
-            parameter.requires_grad = False
-        for parameter in self.masker.parameters():
             parameter.requires_grad = False
 
     def freeze_bert_except_top_layers(self, trainable_layers: int) -> None:
@@ -712,19 +702,10 @@ class BobertForAlignment(nn.Module):
                 f"unknown alignment.contrastive_pooler={contrastive_pooler_type!r}"
             )
 
-        masker = SpanMasker(
-            d_model=base_model.d_model,
-            masking_ratio=alignment_config.get("masking_ratio", 0.15),
-            mean_span_length=alignment_config.get("mean_span_length", 4),
-        )
-        mlm_head = BobertMaskedLMHead(base_model.d_model)
-
         model = cls(
             base_model,
             contrastive_pooler=contrastive_pooler,
             aux_pooler=aux_pooler,
-            masker=masker,
-            mlm_head=mlm_head,
             embedding_dim=alignment_config.get("embedding_dim", 128),
             map_feature_dim=alignment_config.get("map_feature_dim", 32),
             num_map_features=len(
@@ -760,17 +741,14 @@ class BobertForAlignment(nn.Module):
             seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
             cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
 
-        packed_targets = x[attention_mask]
-        packed_embed = self.bert.embed_sequences(packed_targets)
-        packed_input, is_masked = self.masker(packed_embed, attention_mask)
-        packed_input = packed_input.detach()
+        packed_input, attention_mask, cu_seqlens = self.bert._embed(
+            x, attention_mask, cu_seqlens
+        )
         max_seqlen = x.shape[1]
 
         packed_output = self.bert.encode(
             packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
         )
-
-        mlm_predictions = self.mlm_head(packed_output, is_masked)
 
         contrastive_pooled = self.contrastive_pooler(
             packed_output,
@@ -795,24 +773,15 @@ class BobertForAlignment(nn.Module):
                         dtype=contrastive_pooled.dtype,
                     )
                 )
-            contrastive_pooled = torch.cat([contrastive_pooled, map_projected], dim=-1)
-            aux_pooled = torch.cat([aux_pooled, map_projected], dim=-1)
+            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
+        else:
+            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
 
-        retrieval_embedding = F.normalize(
-            self.retrieval_head(contrastive_pooled), dim=-1
-        )
-        difficulty_raw = self.difficulty_head(aux_pooled)
+        retrieval_embedding = F.normalize(self.retrieval_head(pooled), dim=-1)
 
         return {
             "embedding": retrieval_embedding,
-            "sequence_representation": contrastive_pooled,
-            "aux_sequence_representation": aux_pooled,
-            "mlm": mlm_predictions,
-            "mlm_targets": packed_targets[is_masked],
-            "difficulty": {
-                name: difficulty_raw[:, i]
-                for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
-            },
+            "sequence_representation": pooled,
         }
 
     def embed(
@@ -835,6 +804,11 @@ class BobertForAlignment(nn.Module):
             cu_seqlens,
             max_seqlen=max_seqlen,
         )
+        aux_pooled = self.pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
 
         if self.map_projector is not None:
             if map_features is None:
@@ -848,6 +822,8 @@ class BobertForAlignment(nn.Module):
                         dtype=contrastive_pooled.dtype,
                     )
                 )
-            contrastive_pooled = torch.cat([contrastive_pooled, map_projected], dim=-1)
+            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
+        else:
+            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
 
-        return F.normalize(self.retrieval_head(contrastive_pooled), dim=-1)
+        return F.normalize(self.retrieval_head(pooled), dim=-1)
