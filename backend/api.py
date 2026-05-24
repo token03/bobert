@@ -733,6 +733,7 @@ def public_metadata(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]
         "artist": json_value(metadata.get("artist")),
         "title": json_value(metadata.get("title")),
         "creator": json_value(metadata.get("creator")),
+        "user_id": json_value(metadata.get("user_id")),
         "version": json_value(metadata.get("version")),
         "status": json_value(metadata.get("status")),
         "stars": json_value(metadata.get("difficulty_rating", metadata.get("stars"))),

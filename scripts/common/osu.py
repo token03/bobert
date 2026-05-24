@@ -12,7 +12,7 @@ DOWNLOAD_HEADERS = {
 API_TIERS = [
     {
         "url": "https://osu.ppy.sh/osu/{id}",
-        "delay": 0.2,
+        "delay": 0.5,
         "name": "osu.ppy.sh",
         "headers": DOWNLOAD_HEADERS,
     }
@@ -26,7 +26,7 @@ def get_api_tiers() -> list[dict]:
         tiers.append(
             {
                 "url": "https://beatconnect.io/osu/{beatmapset_id}/{id}/",
-                "delay": 0.1,
+                "delay": 0.5,
                 "name": "beatconnect",
                 "headers": {"Token": token},
             }
@@ -42,7 +42,10 @@ def is_valid_osu_file(content: bytes) -> bool:
     try:
         first_line = content.decode("utf-8", errors="ignore").split("\n")[0]
         first_line = first_line.lstrip("\ufeff")
-        return first_line.strip().startswith("osu file format v")
+        first_line = first_line.strip()
+        return first_line.startswith("osu file format v") or first_line[1:].startswith(
+            "osu file format v"
+        )
     except Exception:
         return False
 

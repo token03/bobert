@@ -65,7 +65,7 @@ def fetch_missing_beatmaps(ids=None):
         return pd.DataFrame()
 
     source_ids = (
-        pd.Series(ids).dropna().unique()
+        pd.Series(sorted(ids, key=str)).dropna().unique()
         if ids is not None
         else pd.read_parquet(COLLECTION_BEATMAPS_PATH)["beatmap_id"].unique()
     )
