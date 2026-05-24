@@ -62,6 +62,26 @@ DEFAULT_RATE_LIMITS = {
 DEFAULT_MAX_RECOMMEND_TOP_K = 200
 DEFAULT_RECOMMEND_BEATMAP_IDS: list[int] = []
 OSU_TOKEN_REFRESH_SKEW_SECONDS = 300
+BEATMAP_METADATA_COLUMNS = [
+    "id",
+    "beatmapset_id",
+    "user_id",
+    "artist",
+    "title",
+    "creator",
+    "version",
+    "status",
+    "ranked",
+    "difficulty_rating",
+    "ar",
+    "cs",
+    "accuracy",
+    "drain",
+    "bpm",
+    "total_length",
+    "hit_length",
+    "url",
+]
 
 
 def load_api_config() -> dict[str, Any]:
@@ -301,30 +321,38 @@ def get_runtime() -> Runtime:
         if missing:
             raise RuntimeError(f"missing required data files: {missing}")
 
-        beatmaps = pl.read_parquet(beatmaps_path)
-        embeddings_df = pl.read_parquet(embeddings_path)
+        with timed("startup.read_beatmaps"):
+            beatmaps = pl.read_parquet(beatmaps_path, columns=BEATMAP_METADATA_COLUMNS)
+        with timed("startup.read_embeddings"):
+            embeddings_df = pl.read_parquet(
+                embeddings_path, columns=["beatmap_id", "embedding"]
+            )
         if "beatmap_id" not in embeddings_df.columns or "embedding" not in embeddings_df.columns:
             raise RuntimeError("embeddings.parquet must contain beatmap_id and embedding")
 
-        embedding_ids = [int(x) for x in embeddings_df["beatmap_id"].to_list()]
-        embeddings = normalize_rows(
-            np.asarray(embeddings_df["embedding"].to_list(), dtype=np.float32)
-        )
+        with timed("startup.prepare_embeddings", rows=embeddings_df.height):
+            embedding_ids = [int(x) for x in embeddings_df["beatmap_id"].to_list()]
+            embeddings = np.array(
+                embeddings_df["embedding"].to_numpy(), dtype=np.float32, copy=True
+            )
+            normalize_rows_inplace(embeddings)
         if embeddings.ndim != 2 or embeddings.shape[0] != len(embedding_ids):
             raise RuntimeError("invalid embeddings.parquet shape")
 
-        id_to_index = {beatmap_id: idx for idx, beatmap_id in enumerate(embedding_ids)}
-        metadata_by_id = load_metadata_lookup(beatmaps)
-        cache = RuntimeCache(CACHE_DB, embedding_dim=embeddings.shape[1])
+        with timed("startup.build_metadata", rows=beatmaps.height):
+            id_to_index = {beatmap_id: idx for idx, beatmap_id in enumerate(embedding_ids)}
+            metadata_by_id = load_metadata_lookup(beatmaps)
+            cache = RuntimeCache(CACHE_DB, embedding_dim=embeddings.shape[1])
 
-        cached = []
-        for item in cache.load_all():
-            if item.beatmap_id in id_to_index:
-                continue
-            if not metadata_complete(item.metadata):
-                cache.delete(item.beatmap_id)
-                continue
-            cached.append(item)
+        with timed("startup.load_cache"):
+            cached = []
+            for item in cache.load_all():
+                if item.beatmap_id in id_to_index:
+                    continue
+                if not metadata_complete(item.metadata):
+                    cache.delete(item.beatmap_id)
+                    continue
+                cached.append(item)
         if cached:
             start = len(embedding_ids)
             embedding_ids.extend(item.beatmap_id for item in cached)
@@ -811,6 +839,12 @@ def metadata_set_id(metadata: dict[str, Any] | None) -> int | None:
 def normalize_rows(x: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(x, axis=1, keepdims=True)
     return x / np.clip(norm, 1e-9, None)
+
+
+def normalize_rows_inplace(x: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(x, axis=1, keepdims=True)
+    x /= np.clip(norm, 1e-9, None)
+    return x
 
 
 def rate_limit(key: str, limit: int, window_seconds: int) -> None:
