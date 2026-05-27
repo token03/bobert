@@ -122,6 +122,10 @@ class RecommendFilters(BaseModel):
     max_accuracy: float | None = Field(default=None, ge=0)
     min_drain: float | None = Field(default=None, ge=0)
     max_drain: float | None = Field(default=None, ge=0)
+    min_bpm: float | None = Field(default=None, ge=0)
+    max_bpm: float | None = Field(default=None, ge=0)
+    min_length: float | None = Field(default=None, ge=0)
+    max_length: float | None = Field(default=None, ge=0)
     status: str | None = Field(default=None, max_length=32)
     exclude_same_set: bool = True
 
@@ -800,6 +804,14 @@ def passes_filters(metadata: dict[str, Any], filters: RecommendFilters) -> bool:
     ):
         return False
     if not passes_range(metadata.get("drain"), filters.min_drain, filters.max_drain):
+        return False
+    if not passes_range(metadata.get("bpm"), filters.min_bpm, filters.max_bpm):
+        return False
+    if not passes_range(
+        metadata.get("total_length", metadata.get("hit_length")),
+        filters.min_length,
+        filters.max_length,
+    ):
         return False
     if filters.status:
         status_values = {
