@@ -141,7 +141,7 @@ class BobertModel(nn.Module):
     def encode(
         self,
         packed_embeddings: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
         max_seqlen: int,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -577,6 +577,27 @@ class BobertForPretraining(nn.Module):
             pieces.append(pooled[:, start : start + pooler.stat_dim])
         return F.normalize(torch.cat(pieces, dim=-1), dim=-1)
 
+    def embed_packed(
+        self,
+        packed_vectors: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        packed_input = self.bert.embed_sequences(packed_vectors)
+        packed_output = self.bert.encode(
+            packed_input,
+            attention_mask=None,
+            max_seqlen=max_seqlen,
+            cu_seqlens=cu_seqlens,
+        )
+        pooler = self.difficulty_head.pooler
+        pooled = pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+        pieces = []
+        for stat in ("mean", "max", "std"):
+            start = pooler.stats.index(stat) * pooler.stat_dim
+            pieces.append(pooled[:, start : start + pooler.stat_dim])
+        return F.normalize(torch.cat(pieces, dim=-1), dim=-1)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -798,6 +819,49 @@ class BobertForAlignment(nn.Module):
 
         packed_output = self.bert.encode(
             packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        )
+        contrastive_pooled = self.contrastive_pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        aux_pooled = self.pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+
+        if self.map_projector is not None:
+            if map_features is None:
+                map_projected = contrastive_pooled.new_zeros(
+                    (contrastive_pooled.shape[0], self.map_projector.output_dim)
+                )
+            else:
+                map_projected = self.map_projector(
+                    map_features.to(
+                        device=contrastive_pooled.device,
+                        dtype=contrastive_pooled.dtype,
+                    )
+                )
+            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
+        else:
+            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
+
+        return F.normalize(self.retrieval_head(pooled), dim=-1)
+
+    def embed_packed(
+        self,
+        packed_vectors: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        map_features: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        packed_input = self.bert.embed_sequences(packed_vectors)
+        packed_output = self.bert.encode(
+            packed_input,
+            attention_mask=None,
+            max_seqlen=max_seqlen,
+            cu_seqlens=cu_seqlens,
         )
         contrastive_pooled = self.contrastive_pooler(
             packed_output,

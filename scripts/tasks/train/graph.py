@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from core.data.mining import _whiten_centered_rows
 from scripts.common.collections import deduplicate_collections
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
@@ -27,10 +28,13 @@ COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
 GRAPH_EMBEDDINGS_PATH = DATA_DIR / "graph.parquet"
 PRETRAIN_EMBEDDINGS_PATH = DATA_DIR / "embeddings-pretrain.parquet"
 
-MIN_MAPS_IN_COLLECTION = 5
-MAX_MAPS_IN_COLLECTION = 3000
+MIN_MAPS_IN_COLLECTION = 15
 MIN_COLLECTIONS_PER_MAP = 2
 JACCARD_THRESHOLD = 0.9
+MIN_COLLECTION_QUALITY = 0.10
+NULL95_SIZES = np.array([5, 6, 8, 10, 15, 20, 30, 50, 100, 250, 500, 1000, 2500])
+NULL95_TRIALS = 1000
+NULL95_SEED = 13
 
 EMBEDDING_DIM = 64
 NUM_LAYERS = 2
@@ -43,7 +47,7 @@ L2_REG = 1e-6
 BPR_BATCH_SIZE = 65536
 CL_MAX_NODES = 2048
 CL_EVERY = 5
-TOTAL_STEPS = 5000
+TOTAL_STEPS = 2000
 LOG_EVERY = 100
 
 LR = 2e-3
@@ -90,24 +94,52 @@ def load_and_process_data(source_filter=None):
     df = df[df["beatmap_id"].astype(int).isin(pretrain_ids)].copy()
 
     col_counts = df.groupby("collection_key")["beatmap_id"].count()
-    valid_cols = col_counts[
-        (col_counts >= MIN_MAPS_IN_COLLECTION) & (col_counts <= MAX_MAPS_IN_COLLECTION)
-    ].index
+    valid_cols = col_counts[col_counts >= MIN_MAPS_IN_COLLECTION].index
     df = df[df["collection_key"].isin(valid_cols)].copy()
 
     df = deduplicate_collections(df, JACCARD_THRESHOLD)
     df = df.drop_duplicates(["collection_key", "beatmap_id"]).copy()
+    collection_quality, null95_q = collection_reliability(df)
+    collection_sizes = df.groupby("collection_key")["beatmap_id"].count().to_dict()
+    valid_cols = [
+        ckey
+        for ckey, q in collection_quality.items()
+        if collection_sizes[ckey] >= MIN_MAPS_IN_COLLECTION
+        and q >= max(MIN_COLLECTION_QUALITY, collection_null95(collection_sizes[ckey], null95_q))
+    ]
+    df = df[df["collection_key"].isin(valid_cols)].copy()
 
-    bm_counts = df["beatmap_id"].value_counts()
-    valid_maps = bm_counts[bm_counts >= MIN_COLLECTIONS_PER_MAP].index
-    df = df[df["beatmap_id"].isin(valid_maps)].copy()
+    df = prune_graph_edges(df)
+    collection_quality = {
+        ckey: collection_quality[ckey] for ckey in df["collection_key"].unique()
+    }
 
     unique_collections = sorted(df["collection_key"].unique())
     unique_beatmaps = sorted(df["beatmap_id"].unique())
     col_to_idx = {ckey: i for i, ckey in enumerate(unique_collections)}
     bm_to_idx = {bid: i for i, bid in enumerate(unique_beatmaps)}
 
-    return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx
+    return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, collection_quality
+
+
+def collection_null95(size, null95_q):
+    return float(np.interp(np.log(size), np.log(NULL95_SIZES), null95_q))
+
+
+def prune_graph_edges(df):
+    while True:
+        before = len(df)
+
+        col_counts = df.groupby("collection_key")["beatmap_id"].count()
+        valid_cols = col_counts[col_counts >= MIN_MAPS_IN_COLLECTION].index
+        df = df[df["collection_key"].isin(valid_cols)].copy()
+
+        bm_counts = df["beatmap_id"].value_counts()
+        valid_maps = bm_counts[bm_counts >= MIN_COLLECTIONS_PER_MAP].index
+        df = df[df["beatmap_id"].isin(valid_maps)].copy()
+
+        if len(df) == before:
+            return df
 
 
 def compute_weighted_normalized_adj(user_indices, item_indices, edge_weights, num_users, num_items):
@@ -137,8 +169,12 @@ def compute_weighted_normalized_adj(user_indices, item_indices, edge_weights, nu
 
 def collection_reliability(df):
     pretrain = pd.read_parquet(PRETRAIN_EMBEDDINGS_PATH, columns=["beatmap_id", "embedding"])
-    emb = torch.from_numpy(np.stack(pretrain["embedding"].to_numpy()).astype("float32"))
-    emb = F.normalize(emb, dim=-1)
+    emb = torch.from_numpy(
+        _whiten_centered_rows(
+            np.stack(pretrain["embedding"].to_numpy()).astype("float32")
+        )
+    )
+    null95_q = compute_null95_q(emb)
     emb_lookup = dict(zip(pretrain["beatmap_id"].astype(int), emb))
 
     values = []
@@ -149,7 +185,21 @@ def collection_reliability(df):
         mu = len(rows) ** -0.5
         q = max(0.0, min(1.0, (r - mu) / max(1.0 - mu, 1e-6)))
         values.append((collection_key, q))
-    return dict(values)
+    return dict(values), null95_q
+
+
+def compute_null95_q(emb):
+    generator = torch.Generator().manual_seed(NULL95_SEED)
+    null95_q = []
+    for size in NULL95_SIZES:
+        values = []
+        for _ in range(NULL95_TRIALS):
+            idx = torch.randint(0, emb.shape[0], (int(size),), generator=generator)
+            r = float(emb[idx].mean(dim=0).norm())
+            mu = int(size) ** -0.5
+            values.append(max(0.0, min(1.0, (r - mu) / max(1.0 - mu, 1e-6))))
+        null95_q.append(float(np.quantile(values, 0.95)))
+    return np.array(null95_q)
 
 
 def build_collection_items(df, col_to_idx, bm_to_idx, num_users):
@@ -164,21 +214,53 @@ def build_collection_items(df, col_to_idx, bm_to_idx, num_users):
     return flat, offsets, lengths
 
 
-def sample_bpr_batch(collection_items, collection_offsets, collection_lengths, collection_weights, item_degrees, degree_bins):
+def build_degree_sampler(item_degrees):
+    max_degree = int(item_degrees.max().item())
+    degree_counts = torch.bincount(item_degrees, minlength=max_degree + 1)
+    degree_offsets = torch.empty(max_degree + 2, dtype=torch.long, device=DEVICE)
+    degree_offsets[0] = 0
+    degree_offsets[1:] = torch.cumsum(degree_counts, dim=0)
+    degree_items = torch.argsort(item_degrees)
+    degree_positions = torch.empty_like(degree_items)
+    degree_positions[degree_items] = torch.arange(degree_items.numel(), device=DEVICE)
+    return degree_items, degree_offsets, degree_positions
+
+
+def sample_bpr_batch(
+    collection_items,
+    collection_offsets,
+    collection_lengths,
+    collection_weights,
+    item_degrees,
+    degree_items,
+    degree_offsets,
+    degree_positions,
+):
     batch_users = torch.multinomial(collection_weights, BPR_BATCH_SIZE, replacement=True)
     local = (torch.rand(BPR_BATCH_SIZE, device=DEVICE) * collection_lengths[batch_users]).long()
     batch_pos = collection_items[collection_offsets[batch_users] + local]
 
+    degrees = item_degrees[batch_pos]
+    starts = degree_offsets[degrees]
+    lengths = degree_offsets[degrees + 1] - starts
+    local_pos = degree_positions[batch_pos] - starts
     batch_neg = torch.empty_like(batch_pos)
-    for degree in torch.unique(item_degrees[batch_pos]).tolist():
-        mask = item_degrees[batch_pos] == degree
-        candidates = degree_bins[int(degree)]
-        batch_neg[mask] = candidates[
-            torch.randint(0, candidates.numel(), (int(mask.sum()),), device=DEVICE)
-        ]
-    same = batch_neg == batch_pos
-    if same.any():
-        batch_neg[same] = torch.randint(0, item_degrees.numel(), (int(same.sum()),), device=DEVICE)
+
+    multiple = lengths > 1
+    if multiple.any():
+        local_neg = (
+            torch.rand(int(multiple.sum()), device=DEVICE) * (lengths[multiple] - 1)
+        ).long()
+        local_neg += (local_neg >= local_pos[multiple]).long()
+        batch_neg[multiple] = degree_items[starts[multiple] + local_neg]
+
+    singleton = ~multiple
+    if singleton.any():
+        singleton_neg = torch.randint(
+            0, item_degrees.numel() - 1, (int(singleton.sum()),), device=DEVICE
+        )
+        singleton_neg += (singleton_neg >= batch_pos[singleton]).long()
+        batch_neg[singleton] = singleton_neg
     return batch_users, batch_pos, batch_neg
 
 
@@ -251,7 +333,7 @@ def train(source_filter=None):
         torch.set_float32_matmul_precision("high")
 
     print(f"--- Setting up ({DEVICE}) ---")
-    df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx = (
+    df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, collection_quality = (
         load_and_process_data(source_filter)
     )
     num_users = len(unique_collections)
@@ -264,11 +346,9 @@ def train(source_filter=None):
     item_indices = torch.tensor(
         df["beatmap_id"].map(bm_to_idx).values, dtype=torch.long, device=DEVICE
     )
-    collection_quality = collection_reliability(df)
-    collection_sizes = df.groupby("collection_key")["beatmap_id"].count().to_dict()
     edge_weights = torch.tensor(
         [
-            collection_quality[ckey] / (float(collection_sizes[ckey]) ** 0.5)
+            max(collection_quality[ckey], 1e-6)
             for ckey in df["collection_key"]
         ],
         dtype=torch.float32,
@@ -284,10 +364,7 @@ def train(source_filter=None):
         df, col_to_idx, bm_to_idx, num_users
     )
     item_degrees = torch.bincount(item_indices, minlength=num_items).clamp_min(1)
-    degree_bins = {
-        int(degree): torch.where(item_degrees == degree)[0]
-        for degree in torch.unique(item_degrees).tolist()
-    }
+    degree_items, degree_offsets, degree_positions = build_degree_sampler(item_degrees)
 
     print("Building coherence-weighted normalized adjacency...")
     sparse_adj = compute_weighted_normalized_adj(
@@ -300,7 +377,8 @@ def train(source_filter=None):
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.0)
 
     print(
-        f"--- Training XSimGCL: steps={TOTAL_STEPS}, bpr_batch={BPR_BATCH_SIZE}, cl_max_nodes={CL_MAX_NODES} ---"
+        f"--- Training XSimGCL: steps={TOTAL_STEPS} (~{TOTAL_STEPS * BPR_BATCH_SIZE / len(df):.1f} edge epochs), "
+        f"bpr_batch={BPR_BATCH_SIZE}, cl_max_nodes={CL_MAX_NODES} ---"
     )
     pbar = tqdm(range(1, TOTAL_STEPS + 1), desc="XSimGCL", dynamic_ncols=True)
     loss_ema = rec_ema = cl_ema = None
@@ -315,7 +393,9 @@ def train(source_filter=None):
             collection_lengths,
             collection_weights,
             item_degrees,
-            degree_bins,
+            degree_items,
+            degree_offsets,
+            degree_positions,
         )
 
         if CL_WEIGHT > 0 and step % CL_EVERY == 0:
@@ -366,7 +446,7 @@ def train(source_filter=None):
         _, item_emb = model(sparse_adj, perturbed=False)
         item_emb = F.normalize(item_emb, dim=-1)
 
-    item_emb_np = item_emb.cpu().numpy()
+    item_emb_np = _whiten_centered_rows(item_emb.cpu().numpy())
     pd.DataFrame(
         [
             {"beatmap_id": beatmap_id, "embedding": item_emb_np[idx].tolist()}

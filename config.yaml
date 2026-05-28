@@ -83,11 +83,11 @@ alignment:
   forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
   batch_size: 256
   num_epochs: 1
-  alignment_size: 150000
+  alignment_size: null
 
   embedding_dim: 384
   map_feature_names: ["ar", "cs", "od", "hp_drain", "drain_time", "slider_multiplier"]
-  map_feature_dim: 128
+  map_feature_dim: 32
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
   contrastive_pooler: "query_attention"

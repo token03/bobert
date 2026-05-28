@@ -56,9 +56,33 @@ class QueryContext:
     include_same_set: bool
     allow_download: bool
     mode: str = MODE_DEFAULT
+    embedding_transform: PretrainEmbeddingTransform | None = None
     candidates_lookup: dict[int, dict] = field(default_factory=dict)
     cache: dict[int, np.ndarray] = field(default_factory=dict)
 
+
+@dataclass
+class PretrainEmbeddingTransform:
+    mean: np.ndarray
+    top_pc: np.ndarray
+
+    @classmethod
+    def fit(cls, embeddings: np.ndarray) -> PretrainEmbeddingTransform:
+        mean = embeddings.mean(axis=0, keepdims=True).astype(np.float32)
+        centered = embeddings - mean
+        covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
+        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+        top_pc = eigenvectors[:, np.argmax(eigenvalues)][None, :]
+        return cls(mean=mean, top_pc=top_pc.astype(np.float32))
+
+    def apply(self, embeddings: np.ndarray) -> np.ndarray:
+        was_vector = embeddings.ndim == 1
+        x = embeddings[None, :] if was_vector else embeddings
+        x = x - self.mean
+        x = x - (x @ self.top_pc.T) @ self.top_pc
+        norms = np.linalg.norm(x, axis=1, keepdims=True)
+        x = x / np.maximum(norms, 1e-12)
+        return x[0].astype(np.float32) if was_vector else x.astype(np.float32)
 
 def metadata_set_id(row: dict | None) -> int | None:
     value = clean_value((row or {}).get("beatmapset_id"), None)
@@ -109,6 +133,8 @@ def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = N
             raise ValueError(f"{beatmap_id} is not available in the loaded embeddings")
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
         embedding = ctx.embedder.embed_osu(osu_path)
+        if ctx.embedding_transform is not None:
+            embedding = ctx.embedding_transform.apply(embedding)
 
     ctx.cache[beatmap_id] = embedding
     return beatmap_id, embedding
@@ -459,6 +485,10 @@ def load_query_data(args: argparse.Namespace, mode: str):
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = query_mode(args)
     beatmap_ids, embeddings, id_to_index, candidates_lookup = load_query_data(args, mode)
+    embedding_transform = None
+    if mode == MODE_DEFAULT and args.pretrain and len(embeddings):
+        embedding_transform = PretrainEmbeddingTransform.fit(embeddings)
+        embeddings = embedding_transform.apply(embeddings)
     checkpoint_path = resolve_path(
         args.checkpoint
         or (DEFAULT_PRETRAIN_CHECKPOINT_PATH if args.pretrain else DEFAULT_CHECKPOINT_PATH)
@@ -481,6 +511,7 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         include_same_set=args.include_same_set,
         allow_download=not args.no_download,
         mode=mode,
+        embedding_transform=embedding_transform,
         candidates_lookup=candidates_lookup,
     )
 

@@ -14,6 +14,8 @@ from tqdm import tqdm
 
 RANKED_VALUES = {1, 2, 3}
 SUPPORT_NEIGHBOR_CAP = 128
+EPS = 1e-12
+WHITEN_EIGENVALUE_FLOOR = 1e-4
 CACHE_LIST_COLUMNS = [
     "graph_positive_ids",
     "graph_positive_weights",
@@ -313,8 +315,10 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         artist_key_sets=[frozenset(key for key in keys if key) for keys in artist_keys],
         mapper_ids=_mapper_id_sets(meta),
         status_groups=meta["status_group"].to_numpy(),
-        graph=_normalize_rows(np.stack(meta["graph_embedding"].to_list()).astype(np.float32)),
-        pretrain=_normalize_rows(
+        graph=_whiten_centered_rows(
+            np.stack(meta["graph_embedding"].to_list()).astype(np.float32)
+        ),
+        pretrain=_whiten_centered_rows(
             np.stack(meta["pretrain_embedding"].to_list()).astype(np.float32)
         ),
     )
@@ -414,6 +418,23 @@ def _normalize_rows(x: np.ndarray) -> np.ndarray:
     x = x.astype(np.float32, copy=False)
     norm = np.linalg.norm(x, axis=1, keepdims=True)
     return x / np.clip(norm, 1e-9, None)
+
+
+def _whiten_centered_rows(
+    x: np.ndarray,
+    eigenvalue_floor: float = WHITEN_EIGENVALUE_FLOOR,
+) -> np.ndarray:
+    x = _normalize_rows(x).astype(np.float64, copy=False)
+    if x.shape[0] <= 1 or x.shape[1] == 0:
+        return x.astype(np.float32, copy=False)
+
+    centered = x - x.mean(axis=0, keepdims=True)
+    covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    floor = max(float(eigenvalues.max()) * eigenvalue_floor, EPS)
+    scale = 1.0 / np.sqrt(np.clip(eigenvalues, floor, None))
+    whitened = (centered @ eigenvectors) * scale
+    return _normalize_rows(whitened.astype(np.float32, copy=False))
 
 
 def _topk_faiss(

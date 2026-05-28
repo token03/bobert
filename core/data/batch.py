@@ -37,6 +37,32 @@ def pad_batch(
     return padded, mask, cu_seqlens
 
 
+def pack_batch(
+    vectors: List[torch.Tensor],
+    max_seq_len: int,
+    vector_dim: int,
+):
+    lengths = [min(v.shape[0], max_seq_len) for v in vectors]
+    total = sum(lengths)
+    packed = torch.empty(total, vector_dim, dtype=torch.float32)
+
+    offset = 0
+    for v, length in zip(vectors, lengths):
+        if length > 0:
+            actual_dim = min(v.shape[1], vector_dim)
+            packed[offset : offset + length, :actual_dim] = v[:length, :actual_dim]
+            if actual_dim < vector_dim:
+                packed[offset : offset + length, actual_dim:] = 0.0
+            offset += length
+
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    cu_seqlens = torch.nn.functional.pad(
+        torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
+    )
+    max_seqlen = max(lengths) if lengths else 0
+    return packed, cu_seqlens, max_seqlen
+
+
 def stack_dicts(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     if not dict_list:
         return {}
