@@ -11,6 +11,11 @@ try:
 except ImportError:
     flash_attn_varlen_qkvpacked_func = None
 
+try:
+    from flash_attn.layers.rotary import apply_rotary_emb as flash_apply_rotary_emb
+except ImportError:
+    flash_apply_rotary_emb = None
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-5):
@@ -19,10 +24,11 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = x.float() * torch.rsqrt(
-            x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps
+        output = x.float()
+        output = output * torch.rsqrt(
+            output.square().mean(dim=-1, keepdim=True) + self.eps
         )
-        return (output * self.weight.to(device=x.device, dtype=output.dtype)).to(x.dtype)
+        return (output * self.weight).to(dtype=x.dtype)
 
 from ..data.hitobject import OBJECT_TYPE_SLIDER_HEAD
 
@@ -51,6 +57,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         cu_seqlens = kwargs.get("cu_seqlens")
         max_seqlen = kwargs.get("max_seqlen")
         rotary_freqs = kwargs.get("rotary_freqs")
+        rotary_is_varlen = kwargs.get("rotary_is_varlen", False)
 
         total_tokens, _ = x.shape
 
@@ -59,8 +66,33 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         ).unbind(dim=1)
 
         if rotary_freqs is not None:
-            q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
-            k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
+            can_use_flash_rope = (
+                rotary_is_varlen
+                and flash_apply_rotary_emb is not None
+                and x.device.type == "cuda"
+            )
+            if can_use_flash_rope:
+                cos = rotary_freqs[:, ::2].cos()
+                sin = rotary_freqs[:, ::2].sin()
+                q = flash_apply_rotary_emb(
+                    q,
+                    cos,
+                    sin,
+                    interleaved=True,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+                k = flash_apply_rotary_emb(
+                    k,
+                    cos,
+                    sin,
+                    interleaved=True,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+            else:
+                q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
+                k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
 
         window_size = (
             (-1, -1)
@@ -175,6 +207,7 @@ class BobertEncoderLayer(nn.Module):
         self,
         src: torch.Tensor,
         rotary_freqs: Optional[torch.Tensor] = None,
+        rotary_is_varlen: bool = False,
         cu_seqlens: torch.Tensor = None,
         max_seqlen: int = None,
     ) -> torch.Tensor:
@@ -183,6 +216,7 @@ class BobertEncoderLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_freqs=rotary_freqs,
+            rotary_is_varlen=rotary_is_varlen,
         )
 
         src = src + self.dropout1(src2)

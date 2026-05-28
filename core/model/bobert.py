@@ -19,6 +19,7 @@ from .components import (
     BobertEncoderLayer,
     HitObjectFeatureTokenizer,
     RMSNorm,
+    flash_apply_rotary_emb,
 )
 from ..data.hitobject import HitObject
 
@@ -150,20 +151,29 @@ class BobertModel(nn.Module):
             cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
 
         packed_output = packed_embeddings
-        total_tokens = packed_embeddings.shape[0]
-        token_idx = torch.arange(total_tokens, device=packed_embeddings.device)
-        batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
-        pos = token_idx - cu_seqlens[batch_ids]
         all_freqs = self.rotary_emb(
             torch.arange(max_seqlen, device=packed_embeddings.device),
             seq_len=max_seqlen,
         )
-        rotary_freqs = all_freqs[pos].view(total_tokens, 1, self.d_model // self.n_heads)
+        use_flash_rope = (
+            flash_apply_rotary_emb is not None and packed_embeddings.device.type == "cuda"
+        )
+        if use_flash_rope:
+            rotary_freqs = all_freqs
+        else:
+            total_tokens = packed_embeddings.shape[0]
+            token_idx = torch.arange(total_tokens, device=packed_embeddings.device)
+            batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
+            pos = token_idx - cu_seqlens[batch_ids]
+            rotary_freqs = all_freqs[pos].view(
+                total_tokens, 1, self.d_model // self.n_heads
+            )
 
         for layer in self.layers:
             packed_output = layer(
                 packed_output,
                 rotary_freqs=rotary_freqs,
+                rotary_is_varlen=use_flash_rope,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
