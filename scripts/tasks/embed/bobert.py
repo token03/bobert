@@ -1,4 +1,5 @@
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
@@ -92,20 +93,7 @@ def apply_checkpoint_model_shape(config, state: dict[str, torch.Tensor]):
         config.model.dim_feedforward = int(w13.shape[0] // 2)
 
 
-def compile_model_if_enabled(model, config, device: torch.device):
-    if device.type != "cuda" or not config.components.get("compile_model", False):
-        return model
-    compile_mode = config.components.get("compile_mode", "default")
-    compile_dynamic = config.components.get("compile_dynamic", True)
-    print("Compiling export embedding with torch.compile...")
-    model.embed_packed = torch.compile(
-        model.embed_packed, mode=compile_mode, dynamic=compile_dynamic
-    )
-    return model
-
-
 def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
-    compile_model = config.components.get("compile_model", False)
     config.components.compile_model = False
     if device.type == "cpu":
         config.alignment.query_pool_use_flash = False
@@ -129,13 +117,10 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
     )
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
     model.to(device).float().eval()
-    config.components.compile_model = compile_model
-    model = compile_model_if_enabled(model, config, device)
     return model, checkpoint
 
 
 def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
-    compile_model = config.components.get("compile_model", False)
     config.components.compile_model = False
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = normalize_checkpoint_state(
@@ -149,8 +134,6 @@ def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
     print(f"State load: missing={len(missing)} unexpected={len(unexpected)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
     model.to(device).float().eval()
-    config.components.compile_model = compile_model
-    model = compile_model_if_enabled(model, config, device)
     return model, checkpoint
 
 
@@ -162,6 +145,11 @@ def sample_ids(dataset_dir: Path, limit: int | None, seed: int):
         rng = np.random.default_rng(seed)
         ids = rng.choice(ids, size=limit, replace=False)
     return [int(x) for x in ids]
+
+
+def chunked(values: list[int], chunk_size: int):
+    for start in range(0, len(values), chunk_size):
+        yield values[start : start + chunk_size]
 
 
 def bucket_batch_sampler(
@@ -262,71 +250,74 @@ def export_embeddings(
     buffered_embeddings: list[np.ndarray] = []
     saved_count = 0
 
-    beatmaps = load_beatmap_dataset(
-        str(dataset_dir),
-        max_seq_len=config.data.max_seq_len,
-        ids_to_load=ids,
-        chunk_size=load_chunk_size,
-        min_sr=None,
-        max_sr=None,
-        require_ratings=False,
-    )
-    if not beatmaps:
-        raise RuntimeError("No beatmaps loaded for export")
-
-    vector_dim = beatmaps[0]["hitobjects"].shape[1]
-    dataset = ExportDataset(beatmaps, normalizer)
-    batch_sampler = bucket_batch_sampler(
-        beatmaps,
-        batch_size,
-        config.data.max_seq_len,
-        [int(bucket) for bucket in config.data.get("length_buckets", [])],
-    )
-    loader_kwargs = {
-        "shuffle": False,
-        "num_workers": 0,
-        "pin_memory": device.type == "cuda",
-        "collate_fn": lambda batch: collate_export(
-            batch, config.data.max_seq_len, vector_dim
-        ),
-    }
-    if batch_sampler is None:
-        loader_kwargs["batch_size"] = batch_size
-    else:
-        loader_kwargs["batch_sampler"] = batch_sampler
-    loader = DataLoader(dataset, **loader_kwargs)
-
     try:
         with torch.inference_mode():
-            for beatmap_ids, vectors, cu_seqlens, map_features, max_seqlen in tqdm(
-                loader, desc="Embedding"
+            chunk_count = math.ceil(len(ids) / load_chunk_size)
+            for id_chunk in tqdm(
+                chunked(ids, load_chunk_size), total=chunk_count, desc="Loading chunks"
             ):
-                vectors = vectors.to(device, non_blocking=True)
-                cu_seqlens = cu_seqlens.to(device, non_blocking=True)
-                map_features = map_features.to(device, non_blocking=True)
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=amp_dtype,
-                    enabled=device.type == "cuda",
+                beatmaps = load_beatmap_dataset(
+                    str(dataset_dir),
+                    max_seq_len=config.data.max_seq_len,
+                    ids_to_load=id_chunk,
+                    min_sr=None,
+                    max_sr=None,
+                    require_ratings=False,
+                )
+                if not beatmaps:
+                    continue
+
+                vector_dim = beatmaps[0]["hitobjects"].shape[1]
+                dataset = ExportDataset(beatmaps, normalizer)
+                batch_sampler = bucket_batch_sampler(
+                    beatmaps,
+                    batch_size,
+                    config.data.max_seq_len,
+                    [int(bucket) for bucket in config.data.get("length_buckets", [])],
+                )
+                loader_kwargs = {
+                    "shuffle": False,
+                    "num_workers": 0,
+                    "pin_memory": device.type == "cuda",
+                    "collate_fn": lambda batch: collate_export(
+                        batch, config.data.max_seq_len, vector_dim
+                    ),
+                }
+                if batch_sampler is None:
+                    loader_kwargs["batch_size"] = batch_size
+                else:
+                    loader_kwargs["batch_sampler"] = batch_sampler
+                loader = DataLoader(dataset, **loader_kwargs)
+
+                for beatmap_ids, vectors, cu_seqlens, map_features, max_seqlen in tqdm(
+                    loader, desc="Embedding", leave=False
                 ):
-                    if pretrain:
-                        embeddings = model.embed_packed(
-                            vectors, cu_seqlens, int(max_seqlen)
-                        )
-                    else:
-                        embeddings = model.embed_packed(
-                            vectors, cu_seqlens, int(max_seqlen), map_features
-                        )
+                    vectors = vectors.to(device, non_blocking=True)
+                    cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+                    map_features = map_features.to(device, non_blocking=True)
+                    with torch.autocast(
+                        device_type=device.type,
+                        dtype=amp_dtype,
+                        enabled=device.type == "cuda",
+                    ):
+                        if pretrain:
+                            embeddings = model.embed_packed(
+                                vectors, cu_seqlens, int(max_seqlen)
+                            )
+                        else:
+                            embeddings = model.embed_packed(
+                                vectors, cu_seqlens, int(max_seqlen), map_features
+                            )
 
-                embeddings_np = embeddings.float().cpu().numpy()
-                buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
-                buffered_embeddings.append(embeddings_np)
+                    embeddings_np = embeddings.float().cpu().numpy()
+                    buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
+                    buffered_embeddings.append(embeddings_np)
 
-                if len(buffered_ids) >= flush_size:
-                    writer, flushed_count = flush_embeddings(
-                        writer, output_path, buffered_ids, buffered_embeddings
-                    )
-                    saved_count += flushed_count
+                    if len(buffered_ids) >= flush_size:
+                        writer, flushed_count = flush_embeddings(
+                            writer, output_path, buffered_ids, buffered_embeddings
+                        )
+                        saved_count += flushed_count
 
             writer, flushed_count = flush_embeddings(
                 writer, output_path, buffered_ids, buffered_embeddings
