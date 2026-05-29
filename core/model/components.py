@@ -30,7 +30,13 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if liger_rms_norm is not None and x.device.type == "cuda":
+        use_liger = liger_rms_norm is not None and x.device.type == "cuda"
+        if use_liger and torch.compiler.is_compiling():
+            use_liger = not torch.is_grad_enabled() or not (
+                x.requires_grad or self.weight.requires_grad
+            )
+
+        if use_liger:
             return liger_rms_norm(x, self.weight, self.eps, in_place=False)
 
         output = x.float()
