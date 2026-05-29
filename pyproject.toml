@@ -12,6 +12,7 @@ dependencies = [
     "flash-attn==2.8.3",
     "gdown>=5.2.0",
     "httpx>=0.28.1",
+    "liger-kernel>=0.8.0",
     "matplotlib>=3.10.6",
     "muon-optimizer",
     "numpy>=2.2,<2.3",

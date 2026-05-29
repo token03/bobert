@@ -16,6 +16,12 @@ try:
 except ImportError:
     flash_apply_rotary_emb = None
 
+try:
+    import torch.distributed.tensor  # noqa: F401
+    from liger_kernel.transformers.functional import liger_rms_norm
+except (ImportError, AttributeError):
+    liger_rms_norm = None
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-5):
@@ -24,6 +30,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if liger_rms_norm is not None and x.device.type == "cuda":
+            return liger_rms_norm(x, self.weight, self.eps, in_place=False)
+
         output = x.float()
         output = output * torch.rsqrt(
             output.square().mean(dim=-1, keepdim=True) + self.eps
