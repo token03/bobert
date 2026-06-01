@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from core.data.module import PretrainData
 from core.model.bobert import BobertForPretraining
+from core.paths import PRETRAIN_DIR
 from core.training import create_kde_sampler
 from core.training.pretrain import setup_pretraining, train
 from core.training.setup import find_latest_checkpoint, find_latest_logger_version, setup_device
@@ -20,7 +21,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-path")
     parser.add_argument("--pretrain-size", type=int)
     parser.add_argument("--dataset-seed", type=int)
-    parser.add_argument("--checkpoint-dir")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--resume-ckpt")
@@ -49,8 +49,6 @@ def load_config(args: argparse.Namespace) -> DictConfig:
         config.pretraining.pretrain_size = args.pretrain_size
     if args.dataset_seed is not None:
         config.data.dataset_seed = args.dataset_seed
-    if args.checkpoint_dir:
-        config.pretraining.checkpoint_dir = args.checkpoint_dir
     if args.batch_size is not None:
         config.pretraining.batch_size = args.batch_size
     if args.epochs is not None:
@@ -63,15 +61,13 @@ def load_config(args: argparse.Namespace) -> DictConfig:
     return config
 
 
-def resolve_resume_checkpoint(args: argparse.Namespace, config: DictConfig) -> Path | None:
+def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
     if not args.resume_ckpt:
         return None
     if args.resume_ckpt == "latest":
-        checkpoint = find_latest_checkpoint(config.pretraining.checkpoint_dir)
+        checkpoint = find_latest_checkpoint(PRETRAIN_DIR)
         if checkpoint is None:
-            raise FileNotFoundError(
-                f"No checkpoint found in {config.pretraining.checkpoint_dir}"
-            )
+            raise FileNotFoundError(f"No checkpoint found in {PRETRAIN_DIR}")
         return checkpoint
     return Path(args.resume_ckpt)
 
@@ -108,9 +104,9 @@ def main() -> int:
     print(f"Number of Heads: {base_model.bert.n_heads}")
     print(f"Number of Layers: {base_model.bert.n_layers}")
 
-    resume_checkpoint = resolve_resume_checkpoint(args, config)
+    resume_checkpoint = resolve_resume_checkpoint(args)
     logger_version = (
-        find_latest_logger_version(config.pretraining.checkpoint_dir)
+        find_latest_logger_version(PRETRAIN_DIR)
         if resume_checkpoint is not None
         else None
     )

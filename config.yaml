@@ -9,17 +9,14 @@ data:
   max_sr: 14.0
 
 model:
-  d_model: 384
+  d_model: 512
   n_heads: 8
-  n_layers: 9
-  dim_feedforward: 960
+  n_layers: 6
+  dim_feedforward: 1280
   dropout: 0.1
   local_attention_window: 128
-  global_attention_layers: [2, 5, 8]
-  input_tokenizer: "feature_mixer"
+  global_attention_layers: [2, 5]
   feature_token_dim: 32
-  feature_mixer_layers: 1
-  feature_pooling: "gated_sum"
 
 components:
   compile_model: true
@@ -49,7 +46,6 @@ pretraining:
   stable_ratio: 0.1
 
   use_amp: true
-  checkpoint_dir: "./experiments/pretrain"
 
   difficulty_loss_weight: 1.0
   mlm_loss_weight: 1.0
@@ -76,8 +72,6 @@ mining:
   ignore_near_star_delta: 0.25
 
 alignment:
-  checkpoint_dir: "./experiments/align"
-  model_name: "model"
   trainable_layers: 0
   use_length_buckets: false
   forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
@@ -90,7 +84,6 @@ alignment:
   map_feature_dim: 32
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
-  contrastive_pooler: "query_attention"
   query_pool_num_queries: 8
   query_pool_heads: 8
   query_pool_head_dim: 32
@@ -99,7 +92,6 @@ alignment:
   query_pool_use_flash: true
 
   group_size: 2
-  mining_cache_path: './data/candidates.parquet'
 
   adam_lr: 3e-5
   adam_wd: 0.05

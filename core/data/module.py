@@ -13,6 +13,7 @@ from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .source import load_beatmap_dataset, setup_dataset
 from .split import random_split_aligned
+from core.paths import MINING_CACHE_PATH
 
 
 ALIGNMENT_POSITIVE_LIST_PAIRS = (
@@ -256,8 +257,8 @@ class AlignData(BeatmapData):
 
     def _load_mining_targets(self) -> Dict[int, Dict[str, Any]]:
         align_config = self._alignment_config()
-        cache_path = align_config.get("mining_cache_path")
-        if not cache_path or not os.path.exists(cache_path):
+        cache_path = MINING_CACHE_PATH
+        if not os.path.exists(cache_path):
             return {}
 
         alignment_size = align_config.get("alignment_size")

@@ -4,6 +4,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from core.data.mining import MiningConfig, build_cache
+from core.paths import MINING_CACHE_PATH
 
 
 def main():
@@ -18,10 +19,10 @@ def main():
     cache = build_cache(
         data_dir=Path("data"),
         dataset_dir=Path(config.data.dataset_path),
-        output_path=Path(config.alignment.mining_cache_path),
+        output_path=MINING_CACHE_PATH,
         config=MiningConfig.from_mapping(mining_config),
     )
-    print(f"Saved {len(cache):,} mining rows to {config.alignment.mining_cache_path}")
+    print(f"Saved {len(cache):,} mining rows to {MINING_CACHE_PATH}")
 
 
 if __name__ == "__main__":

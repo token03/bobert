@@ -5,12 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from omegaconf import OmegaConf
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from core.data.mining import load_alignment_cache
+from core.paths import MINING_CACHE_PATH
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
 from scripts.common.paths import resolve_path
@@ -405,7 +405,7 @@ def parse_args():
     parser.add_argument(
         "--candidates-path",
         default=None,
-        help="Defaults to config.alignment.mining_cache_path",
+        help="Defaults to data/candidates.parquet",
     )
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
@@ -441,9 +441,8 @@ def empty_embeddings():
 
 
 def load_candidate_lookup(args: argparse.Namespace):
-    config = OmegaConf.load(resolve_path(args.config))
-    candidates_path = resolve_path(
-        args.candidates_path or config.alignment.mining_cache_path
+    candidates_path = (
+        resolve_path(args.candidates_path) if args.candidates_path else MINING_CACHE_PATH
     )
     candidates_cache = load_alignment_cache(candidates_path)
     lookup = {

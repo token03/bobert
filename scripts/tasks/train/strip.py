@@ -5,17 +5,15 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from omegaconf import OmegaConf
 
+from core.paths import ALIGN_DIR, PRETRAIN_DIR
 from core.training.setup import find_latest_checkpoint
 from scripts.common.paths import resolve_path
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Strip a BoBERT checkpoint.")
-    parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--checkpoint")
-    parser.add_argument("--checkpoint-dir")
     parser.add_argument("--output")
     parser.add_argument("--pretrain", action="store_true")
     return parser.parse_args()
@@ -28,16 +26,10 @@ def resolve_checkpoint(args: argparse.Namespace) -> Path:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
         return checkpoint
 
-    config = OmegaConf.load(resolve_path(args.config))
-    default_dir = (
-        config.pretraining.checkpoint_dir
-        if args.pretrain
-        else config.alignment.checkpoint_dir
-    )
-    checkpoint_dir = args.checkpoint_dir or default_dir
-    checkpoint = find_latest_checkpoint(resolve_path(checkpoint_dir))
+    default_dir = PRETRAIN_DIR if args.pretrain else ALIGN_DIR
+    checkpoint = find_latest_checkpoint(default_dir)
     if checkpoint is None:
-        raise FileNotFoundError(f"No checkpoint found in {checkpoint_dir}")
+        raise FileNotFoundError(f"No checkpoint found in {default_dir}")
     return checkpoint
 
 

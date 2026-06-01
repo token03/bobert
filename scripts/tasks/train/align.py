@@ -10,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from core.data.mining import MiningConfig, build_cache
 from core.data.module import AlignData
 from core.model.bobert import BobertForAlignment
+from core.paths import ALIGN_DIR, MINING_CACHE_PATH, PRETRAIN_DIR
 from core.training.align import (
     find_pretraining_checkpoint,
     load_pretraining_weights,
@@ -23,10 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT alignment.")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dataset-path")
-    parser.add_argument("--checkpoint-dir")
-    parser.add_argument("--mining-cache-path")
     parser.add_argument("--pretrain-ckpt")
-    parser.add_argument("--pretrain-checkpoint-dir")
     parser.add_argument("--resume-ckpt")
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--alignment-size", type=int)
@@ -57,10 +55,6 @@ def load_config(args: argparse.Namespace) -> DictConfig:
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
-    if args.checkpoint_dir:
-        config.alignment.checkpoint_dir = args.checkpoint_dir
-    if args.mining_cache_path:
-        config.alignment.mining_cache_path = args.mining_cache_path
     if args.batch_size is not None:
         config.alignment.batch_size = args.batch_size
     if args.alignment_size is not None:
@@ -76,41 +70,39 @@ def load_config(args: argparse.Namespace) -> DictConfig:
 
 
 def maybe_build_cache(config: DictConfig, mode: str) -> None:
-    cache_path = Path(config.alignment.mining_cache_path)
-    should_build = mode == "always" or (mode == "auto" and not cache_path.exists())
+    should_build = mode == "always" or (
+        mode == "auto" and not MINING_CACHE_PATH.exists()
+    )
 
     if not should_build:
-        print(f"Using mining cache: {cache_path}")
+        print(f"Using mining cache: {MINING_CACHE_PATH}")
         return
 
-    print(f"Building mining cache: {cache_path}")
+    print(f"Building mining cache: {MINING_CACHE_PATH}")
     mining_config = OmegaConf.to_container(config.mining, resolve=True)
     mining_config["min_sr"] = config.data.get("min_sr")
     mining_config["max_sr"] = config.data.get("max_sr")
     build_cache(
         data_dir=Path("data"),
         dataset_dir=Path(config.data.dataset_path),
-        output_path=cache_path,
+        output_path=MINING_CACHE_PATH,
         config=MiningConfig.from_mapping(mining_config),
     )
 
 
-def resolve_pretrain_checkpoint(args: argparse.Namespace, config: DictConfig) -> Path | None:
+def resolve_pretrain_checkpoint(args: argparse.Namespace) -> Path | None:
     if args.pretrain_ckpt:
         return Path(args.pretrain_ckpt)
-    checkpoint_dir = args.pretrain_checkpoint_dir or config.pretraining.checkpoint_dir
-    return find_pretraining_checkpoint(checkpoint_dir)
+    return find_pretraining_checkpoint(PRETRAIN_DIR)
 
 
-def resolve_resume_checkpoint(args: argparse.Namespace, config: DictConfig) -> Path | None:
+def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
     if not args.resume_ckpt:
         return None
     if args.resume_ckpt == "latest":
-        checkpoint = find_latest_checkpoint(config.alignment.checkpoint_dir)
+        checkpoint = find_latest_checkpoint(ALIGN_DIR)
         if checkpoint is None:
-            raise FileNotFoundError(
-                f"No checkpoint found in {config.alignment.checkpoint_dir}"
-            )
+            raise FileNotFoundError(f"No checkpoint found in {ALIGN_DIR}")
         return checkpoint
     return Path(args.resume_ckpt)
 
@@ -141,7 +133,7 @@ def main() -> int:
     print(f"Number of Heads: {base_model.bert.n_heads}")
     print(f"Number of Layers: {base_model.bert.n_layers}")
 
-    pretrain_checkpoint = resolve_pretrain_checkpoint(args, config)
+    pretrain_checkpoint = resolve_pretrain_checkpoint(args)
     if pretrain_checkpoint is None:
         raise FileNotFoundError("Alignment requires a pretraining checkpoint.")
     stats = load_pretraining_weights(model, pretrain_checkpoint)
@@ -152,9 +144,9 @@ def main() -> int:
         f"missing={stats['missing']} unexpected={stats['unexpected']})"
     )
 
-    resume_checkpoint = resolve_resume_checkpoint(args, config)
+    resume_checkpoint = resolve_resume_checkpoint(args)
     logger_version = (
-        find_latest_logger_version(config.alignment.checkpoint_dir)
+        find_latest_logger_version(ALIGN_DIR)
         if resume_checkpoint is not None
         else None
     )

@@ -232,12 +232,9 @@ def setup_alignment(
     config: Dict[str, Any],
     model: nn.Module,
     normalizer: Optional[BeatmapNormalizer] = None,
-    checkpoint_dir: Optional[str] = None,
     logger_version: Optional[int] = None,
 ) -> Tuple[AlignmentModule, pl.Trainer]:
     module = AlignmentModule(model, config, normalizer)
-    if checkpoint_dir is not None:
-        config["alignment"]["checkpoint_dir"] = checkpoint_dir
     trainer = create_trainer(config, "alignment", logger_version=logger_version)
     return module, trainer
 

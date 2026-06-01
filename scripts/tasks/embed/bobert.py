@@ -17,6 +17,7 @@ from core.data.normalizer import BeatmapNormalizer
 from core.data.sampler import LengthBucketBatchSampler, length_bucket
 from core.data.source import load_beatmap_dataset
 from core.model.bobert import BobertForAlignment, BobertForPretraining
+from core.paths import ALIGN_DIR, PRETRAIN_DIR
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
@@ -227,9 +228,7 @@ def export_embeddings(
     ids = sample_ids(dataset_dir, limit, seed)
     print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
 
-    checkpoint_dir = (
-        config.pretraining.checkpoint_dir if pretrain else config.alignment.checkpoint_dir
-    )
+    checkpoint_dir = PRETRAIN_DIR if pretrain else ALIGN_DIR
     ckpt_path = find_checkpoint(checkpoint_path, checkpoint_dir)
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -344,7 +343,7 @@ def main():
     parser.add_argument(
         "--pretrain",
         action="store_true",
-        help="Use config.pretraining.checkpoint_dir instead of config.alignment.checkpoint_dir",
+        help="Use experiments/pretrain instead of experiments/align",
     )
     parser.add_argument(
         "--dataset", default=None, help="Defaults to config.data.dataset_path"

@@ -20,6 +20,8 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 from muon import SingleDeviceMuonWithAuxAdam
 
+from core.paths import ALIGN_DIR, PRETRAIN_DIR
+
 
 def setup_device() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
@@ -227,10 +229,10 @@ def create_trainer(
     logger_version: Optional[int] = None,
 ) -> pl.Trainer:
     phase_config = config[phase]
-    base_dir = phase_config["checkpoint_dir"]
+    base_dir = PRETRAIN_DIR if phase == "pretraining" else ALIGN_DIR
 
-    checkpoint_path = os.path.join(base_dir, "checkpoints")
-    logs_path = base_dir
+    checkpoint_path = os.path.join(str(base_dir), "checkpoints")
+    logs_path = str(base_dir)
 
     progress_bar = TQDMProgressBar(refresh_rate=1)
 

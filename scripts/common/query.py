@@ -222,6 +222,7 @@ class LazyEmbedder:
         from omegaconf import OmegaConf
 
         from core.data.normalizer import BeatmapNormalizer
+        from core.paths import ALIGN_DIR, PRETRAIN_DIR
         from scripts.tasks.embed.bobert import (
             find_checkpoint,
             load_alignment_model,
@@ -236,9 +237,9 @@ class LazyEmbedder:
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )
         checkpoint_dir = (
-            self.config.pretraining.checkpoint_dir
+            PRETRAIN_DIR
             if self.pretrain
-            else self.config.alignment.checkpoint_dir
+            else ALIGN_DIR
         )
         ckpt_path = find_checkpoint(self.checkpoint_path, checkpoint_dir)
         loader = load_pretraining_model if self.pretrain else load_alignment_model

@@ -38,15 +38,9 @@ class BobertModel(nn.Module):
         dropout: float = 0.1,
         max_seq_len: int = 2048,
         activation_checkpointing: bool = False,
-        input_tokenizer: str = "feature_mixer",
         feature_token_dim: int = 32,
-        feature_mixer_layers: int = 1,
-        feature_pooling: str = "gated_sum",
     ):
         super().__init__()
-        if input_tokenizer != "feature_mixer":
-            raise ValueError(f"unsupported input_tokenizer={input_tokenizer!r}")
-
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
@@ -58,8 +52,6 @@ class BobertModel(nn.Module):
             feature_info=self.feature_info,
             d_feat=feature_token_dim,
             d_model=d_model,
-            mixer_layers=feature_mixer_layers,
-            pooling=feature_pooling,
         )
 
         self.layers = nn.ModuleList(
@@ -103,10 +95,7 @@ class BobertModel(nn.Module):
             activation_checkpointing=components_config.get(
                 "activation_checkpointing", False
             ),
-            input_tokenizer=model_config.get("input_tokenizer", "feature_mixer"),
             feature_token_dim=model_config.get("feature_token_dim", 32),
-            feature_mixer_layers=model_config.get("feature_mixer_layers", 1),
-            feature_pooling=model_config.get("feature_pooling", "gated_sum"),
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -707,31 +696,20 @@ class BobertForAlignment(nn.Module):
             stats=pooling_stats,
         )
 
-        contrastive_pooler_type = alignment_config.get(
-            "contrastive_pooler", "query_attention"
+        contrastive_pooler = BobertQueryAttentionPooler(
+            d_model=base_model.d_model,
+            n_heads=alignment_config.get("query_pool_heads", base_model.n_heads),
+            num_queries=alignment_config.get("query_pool_num_queries", 8),
+            head_dim=alignment_config.get(
+                "query_pool_head_dim",
+                base_model.d_model // base_model.n_heads,
+            ),
+            output_dim=alignment_config.get(
+                "query_pool_output_dim", stats_output_dim
+            ),
+            dropout=alignment_config.get("query_pool_dropout", 0.0),
+            use_flash=alignment_config.get("query_pool_use_flash", True),
         )
-
-        if contrastive_pooler_type == "query_attention":
-            contrastive_pooler = BobertQueryAttentionPooler(
-                d_model=base_model.d_model,
-                n_heads=alignment_config.get("query_pool_heads", base_model.n_heads),
-                num_queries=alignment_config.get("query_pool_num_queries", 8),
-                head_dim=alignment_config.get(
-                    "query_pool_head_dim",
-                    base_model.d_model // base_model.n_heads,
-                ),
-                output_dim=alignment_config.get(
-                    "query_pool_output_dim", stats_output_dim
-                ),
-                dropout=alignment_config.get("query_pool_dropout", 0.0),
-                use_flash=alignment_config.get("query_pool_use_flash", True),
-            )
-        elif contrastive_pooler_type == "stats":
-            contrastive_pooler = aux_pooler
-        else:
-            raise ValueError(
-                f"unknown alignment.contrastive_pooler={contrastive_pooler_type!r}"
-            )
 
         model = cls(
             base_model,

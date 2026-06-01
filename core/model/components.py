@@ -252,16 +252,10 @@ class HitObjectFeatureTokenizer(nn.Module):
         feature_info: Dict[str, Dict],
         d_feat: int,
         d_model: int,
-        mixer_layers: int = 1,
-        pooling: str = "gated_sum",
     ):
         super().__init__()
-        if pooling != "gated_sum":
-            raise ValueError(f"unsupported feature pooling: {pooling!r}")
         if d_feat <= 0:
             raise ValueError("d_feat must be positive")
-        if mixer_layers < 0:
-            raise ValueError("mixer_layers must be non-negative")
 
         self.feature_info = feature_info
         self.continuous = feature_info["continuous"]
@@ -284,29 +278,13 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.snap = self._categorical_token("rhythmic_snap", d_feat)
 
         self.feature_bias = nn.Parameter(torch.zeros(self.num_tokens, d_feat))
-        self.mixer = nn.ModuleList(
-            [
-                nn.ModuleDict(
-                    {
-                        "token": nn.Sequential(
-                            nn.Linear(self.num_tokens, self.num_tokens),
-                            nn.GELU(),
-                            nn.Linear(self.num_tokens, self.num_tokens),
-                        ),
-                        "channel": nn.Sequential(
-                            nn.Linear(d_feat, d_feat * 2),
-                            nn.GELU(),
-                            nn.Linear(d_feat * 2, d_feat),
-                        ),
-                    }
-                )
-                for _ in range(mixer_layers)
-            ]
+        self.object_mlp = nn.Sequential(
+            nn.LayerNorm(self.num_tokens * d_feat),
+            nn.Linear(self.num_tokens * d_feat, d_feat * 2),
+            nn.GELU(),
+            nn.Linear(d_feat * 2, d_feat),
         )
-        self.gate = nn.Linear(d_feat, 1)
         self.out = nn.Linear(d_feat, d_model, bias=False)
-
-        nn.init.constant_(self.gate.bias, 2.0)
 
     def _numeric_token(self, input_dim: int, d_feat: int) -> nn.Sequential:
         return nn.Sequential(nn.Linear(input_dim, d_feat), nn.GELU())
@@ -358,20 +336,15 @@ class HitObjectFeatureTokenizer(nn.Module):
         )
 
         tokens = tokens + self.feature_bias.to(dtype=tokens.dtype)
-        for layer in self.mixer:
-            tokens = tokens + layer["token"](tokens.transpose(-1, -2)).transpose(
-                -1, -2
-            )
-            tokens = tokens + layer["channel"](tokens)
 
         hard_gate = torch.ones(tokens.shape[:-1], device=x.device, dtype=tokens.dtype)
         hard_gate[..., 7] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
-        soft_gate = torch.sigmoid(self.gate(tokens)).squeeze(-1)
-        gate = hard_gate * soft_gate
+        tokens = tokens * hard_gate.unsqueeze(-1)
 
-        pooled = (tokens * gate.unsqueeze(-1)).sum(dim=-2) / gate.sum(
+        pooled = tokens.sum(dim=-2) / hard_gate.sum(
             dim=-1, keepdim=True
-        ).clamp_min(1e-4)
+        ).clamp_min(1.0)
+        pooled = pooled + self.object_mlp(tokens.flatten(-2))
         return self.out(pooled)
 
 
