@@ -22,6 +22,11 @@ try:
 except (ImportError, AttributeError):
     liger_rms_norm = None
 
+try:
+    from liger_kernel.ops import LigerSiLUMulFunction
+except (ImportError, AttributeError):
+    LigerSiLUMulFunction = None
+
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-5):
@@ -76,9 +81,9 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
         total_tokens, _ = x.shape
 
-        q, k, v = self.wqkv(x).view(
-            total_tokens, 3, self.n_heads, self.d_head
-        ).unbind(dim=1)
+        qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
+        q, k, v = qkv.unbind(dim=1)
+        qkv_for_flash = qkv
 
         if rotary_freqs is not None:
             can_use_flash_rope = (
@@ -87,8 +92,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 and x.device.type == "cuda"
             )
             if can_use_flash_rope:
-                cos = rotary_freqs[:, ::2].cos()
-                sin = rotary_freqs[:, ::2].sin()
+                cos, sin = rotary_freqs
                 q = flash_apply_rotary_emb(
                     q,
                     cos,
@@ -105,6 +109,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                     cu_seqlens=cu_seqlens,
                     max_seqlen=max_seqlen,
                 )
+                qkv_for_flash = None
             else:
                 q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
                 k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
@@ -118,9 +123,12 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             flash_attn_varlen_qkvpacked_func is not None and x.device.type == "cuda"
         )
         if can_use_flash:
-            qkv = torch.stack([q, k, v], dim=1)
+            if qkv_for_flash is None:
+                qkv_for_flash = qkv.clone()
+                qkv_for_flash[:, 0] = q
+                qkv_for_flash[:, 1] = k
             out = flash_attn_varlen_qkvpacked_func(
-                qkv,
+                qkv_for_flash,
                 cu_seqlens,
                 max_seqlen,
                 dropout_p=0.0,
@@ -185,7 +193,21 @@ class SwiGLU(nn.Module):
     def forward(self, x):
         x13 = self.w13(x)
         x1, x3 = torch.chunk(x13, 2, dim=-1)
-        return self.w2(F.silu(x1) * x3)
+        use_liger = (
+            LigerSiLUMulFunction is not None
+            and x1.device.type == "cuda"
+            and x1.dtype in (torch.float16, torch.bfloat16)
+        )
+        if use_liger and torch.compiler.is_compiling():
+            use_liger = not torch.is_grad_enabled() or not (
+                x1.requires_grad or x3.requires_grad
+            )
+
+        if use_liger:
+            hidden = LigerSiLUMulFunction.apply(x1, x3)
+        else:
+            hidden = F.silu(x1) * x3
+        return self.w2(hidden)
 
 
 class BobertEncoderLayer(nn.Module):
@@ -221,7 +243,7 @@ class BobertEncoderLayer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        rotary_freqs: Optional[torch.Tensor] = None,
+        rotary_freqs: Optional[torch.Tensor | Tuple[torch.Tensor, torch.Tensor]] = None,
         rotary_is_varlen: bool = False,
         cu_seqlens: torch.Tensor = None,
         max_seqlen: int = None,

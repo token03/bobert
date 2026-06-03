@@ -273,4 +273,5 @@ def create_trainer(
         enable_progress_bar=True,
         log_every_n_steps=10,
         enable_model_summary=False,
+        num_sanity_val_steps=0,
     )

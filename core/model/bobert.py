@@ -3,14 +3,14 @@ from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Dict, Any, Type, TypeVar, Optional, Sequence, cast
+from typing import Tuple, Dict, Any, Type, TypeVar, Optional, Sequence
 
 from rotary_embedding_torch import RotaryEmbedding
 
 try:
-    from flash_attn import flash_attn_varlen_func
+    from flash_attn import flash_attn_varlen_kvpacked_func
 except ImportError:
-    flash_attn_varlen_func = None
+    flash_attn_varlen_kvpacked_func = None
 
 from ..data.beatmap import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
 
@@ -24,6 +24,23 @@ from .components import (
 from ..data.hitobject import HitObject
 
 T = TypeVar("T", bound="BobertModel")
+
+
+def _compile_encoder_only(model: nn.Module, config: DictConfig, label: str) -> None:
+    print(f"Compiling BERT {label} tokenizer and encoder with torch.compile...")
+    compile_mode = config.components.get("compile_mode", "default")
+    compile_dynamic = config.components.get("compile_dynamic", True)
+    model.bert.embed_sequences = torch.compile(
+        model.bert.embed_sequences,
+        mode=compile_mode,
+        dynamic=compile_dynamic,
+    )
+    model.bert.encode = torch.compile(
+        model.bert.encode,
+        mode=compile_mode,
+        dynamic=compile_dynamic,
+    )
+    model.is_compiled = True
 
 
 class BobertModel(nn.Module):
@@ -148,7 +165,7 @@ class BobertModel(nn.Module):
             flash_apply_rotary_emb is not None and packed_embeddings.device.type == "cuda"
         )
         if use_flash_rope:
-            rotary_freqs = all_freqs
+            rotary_freqs = (all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin())
         else:
             total_tokens = packed_embeddings.shape[0]
             token_idx = torch.arange(total_tokens, device=packed_embeddings.device)
@@ -324,21 +341,22 @@ class BobertQueryAttentionPooler(nn.Module):
             return packed_output.new_zeros((0, self.output_dim))
 
         x = self.norm(packed_output)
-        k, v = self.kv(x).view(
+        kv = self.kv(x).view(
             packed_output.shape[0], 2, self.n_heads, self.head_dim
-        ).unbind(dim=1)
+        )
 
         can_use_flash = (
             self.use_flash
-            and flash_attn_varlen_func is not None
+            and flash_attn_varlen_kvpacked_func is not None
             and packed_output.device.type == "cuda"
-            and k.dtype in (torch.float16, torch.bfloat16)
+            and kv.dtype in (torch.float16, torch.bfloat16)
             and not torch.any(seqlens == 0)
         )
 
         if can_use_flash:
-            pooled = self._forward_flash(k, v, cu_seqlens, batch_size, max_seqlen)
+            pooled = self._forward_flash(kv, cu_seqlens, batch_size, max_seqlen)
         else:
+            k, v = kv.unbind(dim=1)
             pooled = self._forward_torch(k, v, seqlens, batch_size)
 
         pooled = pooled.reshape(batch_size, self.num_queries * self.inner_dim)
@@ -346,14 +364,13 @@ class BobertQueryAttentionPooler(nn.Module):
 
     def _forward_flash(
         self,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        kv: torch.Tensor,
         cu_seqlens: torch.Tensor,
         batch_size: int,
         max_seqlen: Optional[int],
     ) -> torch.Tensor:
         q = (
-            self.query.to(dtype=k.dtype, device=k.device)
+            self.query.to(dtype=kv.dtype, device=kv.device)
             .unsqueeze(0)
             .expand(batch_size, -1, -1, -1)
             .reshape(batch_size * self.num_queries, self.n_heads, self.head_dim)
@@ -361,17 +378,16 @@ class BobertQueryAttentionPooler(nn.Module):
         )
 
         cu_seqlens_q = (
-            torch.arange(batch_size + 1, device=k.device, dtype=torch.int32)
+            torch.arange(batch_size + 1, device=kv.device, dtype=torch.int32)
             * self.num_queries
         )
 
         if max_seqlen is None:
             max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
 
-        out = flash_attn_varlen_func(
+        out = flash_attn_varlen_kvpacked_func(
             q,
-            k.contiguous(),
-            v.contiguous(),
+            kv,
             cu_seqlens_q,
             cu_seqlens,
             self.num_queries,
@@ -540,12 +556,7 @@ class BobertForPretraining(nn.Module):
         model = model.to(device)
 
         if config.components.get("compile_model", False):
-            print("Compiling BERT pre-training model with torch.compile...")
-            compile_mode = config.components.get("compile_mode", "default")
-            compile_dynamic = config.components.get("compile_dynamic", True)
-            model.is_compiled = True
-            model = torch.compile(model, mode=compile_mode, dynamic=compile_dynamic)
-            model = cast(BobertForPretraining, model)
+            _compile_encoder_only(model, config, "pre-training")
 
         return model
 
@@ -727,12 +738,7 @@ class BobertForAlignment(nn.Module):
         model = model.to(device)
 
         if config.components.get("compile_model", False):
-            print("Compiling BERT alignment model with torch.compile...")
-            compile_mode = config.components.get("compile_mode", "default")
-            compile_dynamic = config.components.get("compile_dynamic", True)
-            model.is_compiled = True
-            model = torch.compile(model, mode=compile_mode, dynamic=compile_dynamic)
-            model = cast(BobertForAlignment, model)
+            _compile_encoder_only(model, config, "alignment")
 
         return model
 

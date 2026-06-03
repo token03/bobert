@@ -103,7 +103,9 @@ class BeatmapData(pl.LightningDataModule):
             self.data_config["val_split"],
         )
 
-    def _get_dataloader(self, dataset, shuffle, collate_fn, sampler=None):
+    def _get_dataloader(
+        self, dataset, shuffle, collate_fn, sampler=None, drop_last=False
+    ):
         num_workers = self._num_workers()
         return DataLoader(
             dataset,
@@ -114,7 +116,11 @@ class BeatmapData(pl.LightningDataModule):
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
+            drop_last=drop_last,
         )
+
+    def _drop_last_training_batches(self) -> bool:
+        return bool(self.config.get("components", {}).get("compile_model", False))
 
     def _length_buckets(self) -> Optional[List[int]]:
         if not self.phase_config.get("use_length_buckets", True):
@@ -144,7 +150,13 @@ class BeatmapData(pl.LightningDataModule):
     def _get_bucketed_train_dataloader(self, dataset, collate_fn, sampler=None):
         buckets = self._length_buckets()
         if not buckets:
-            return self._get_dataloader(dataset, True, collate_fn, sampler)
+            return self._get_dataloader(
+                dataset,
+                True,
+                collate_fn,
+                sampler,
+                drop_last=self._drop_last_training_batches(),
+            )
 
         num_workers = self._num_workers()
         lengths = self._lengths(dataset)
@@ -155,6 +167,7 @@ class BeatmapData(pl.LightningDataModule):
             sampler=sampler,
             max_tokens=self._token_budget(lengths, buckets),
             seed=self.data_config.get("dataset_seed", 42),
+            drop_last=self._drop_last_training_batches(),
         )
         return DataLoader(
             dataset,
@@ -226,6 +239,7 @@ class PretrainData(BeatmapData):
             collate_pretrain,
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
+            length_buckets=self._length_buckets(),
         )
         return self._get_bucketed_train_dataloader(
             self.train_dataset, collate, self._sampler
@@ -236,6 +250,7 @@ class PretrainData(BeatmapData):
             collate_pretrain,
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
+            length_buckets=self._length_buckets(),
         )
         return self._get_bucketed_val_dataloader(self.val_dataset, collate)
 
@@ -409,6 +424,7 @@ class AlignData(BeatmapData):
                 epoch_size=align_config.get("alignment_size"),
                 lengths=lengths if buckets else None,
                 buckets=buckets,
+                drop_last=self._drop_last_training_batches(),
             )
             return DataLoader(
                 self.train_dataset,
@@ -418,7 +434,12 @@ class AlignData(BeatmapData):
                 pin_memory=True,
                 persistent_workers=self._num_workers() > 0,
             )
-        return self._get_dataloader(self.train_dataset, True, collate)
+        return self._get_dataloader(
+            self.train_dataset,
+            True,
+            collate,
+            drop_last=self._drop_last_training_batches(),
+        )
 
     def val_dataloader(self):
         collate = partial(
@@ -426,5 +447,6 @@ class AlignData(BeatmapData):
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
             ignore_near_star_delta=self._mining_config().ignore_near_star_delta,
+            length_buckets=self._length_buckets(),
         )
         return self._get_bucketed_val_dataloader(self.val_dataset, collate)

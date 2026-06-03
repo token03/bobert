@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -399,7 +399,7 @@ def _apply_object_specific_features(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _finalize_vectors(
-    df: pl.DataFrame, split_indices: np.ndarray
+    df: pl.DataFrame, split_indices: np.ndarray, max_seq_len: Optional[int] = None
 ) -> List[torch.Tensor]:
     vector_field_names = HitObject.get_field_names()
     all_vectors_np = np.nan_to_num(
@@ -409,11 +409,22 @@ def _finalize_vectors(
         neginf=0.0,
     )
     vector_arrays = np.split(all_vectors_np, split_indices)
-    return [torch.from_numpy(vectors) for vectors in vector_arrays]
+    if max_seq_len is not None:
+        max_seq_len = int(max_seq_len)
+        return [
+            torch.from_numpy(vectors[:max_seq_len].astype(np.float16, copy=True))
+            for vectors in vector_arrays
+        ]
+    return [
+        torch.from_numpy(vectors.astype(np.float16, copy=True))
+        for vectors in vector_arrays
+    ]
 
 
 def build_feature_tensors(
-    beatmaps_df: pl.DataFrame, hitobjects_df: pl.DataFrame
+    beatmaps_df: pl.DataFrame,
+    hitobjects_df: pl.DataFrame,
+    max_seq_len: Optional[int] = None,
 ) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]]:
     beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)
 
@@ -431,7 +442,7 @@ def build_feature_tensors(
     df = _apply_temporal_features(df, split_indices)
     df = _apply_object_specific_features(df)
 
-    final_data = _finalize_vectors(df, split_indices)
+    final_data = _finalize_vectors(df, split_indices, max_seq_len)
     unique_ids = ids[np.concatenate(([0], split_indices))]
 
     return final_data, unique_ids, original_counts

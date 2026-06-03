@@ -36,12 +36,7 @@ class BeatmapDataset(Dataset):
         vec = self.beatmap_data[idx].clone()
 
         if self.max_seq_len is not None and vec.shape[0] > self.max_seq_len:
-            max_start = vec.shape[0] - self.max_seq_len
-            if self.is_training:
-                start = int(torch.randint(max_start + 1, (1,)).item())
-            else:
-                start = max_start // 2
-            vec = vec[start : start + self.max_seq_len]
+            vec = vec[: self.max_seq_len]
 
         if self.augmenter is not None:
             vec = self.augmenter(vec)

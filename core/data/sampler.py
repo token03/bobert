@@ -62,7 +62,10 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
     def _bucket_batch_size(self, bucket: int) -> int:
         if self.max_tokens is None:
             return self.batch_size
-        return max(1, min(self.batch_size, self.max_tokens // bucket))
+        size = max(1, min(self.batch_size, self.max_tokens // bucket))
+        if size >= 8:
+            size = max(8, (size // 8) * 8)
+        return size
 
     def _indices(self) -> Iterator[int]:
         if self.sampler is not None:
@@ -108,6 +111,7 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         epoch_size: Optional[int] = None,
         lengths: Optional[Sequence[int]] = None,
         buckets: Optional[Sequence[int]] = None,
+        drop_last: bool = False,
     ):
         if batch_size % group_size != 0:
             raise ValueError("alignment batch_size must be divisible by group_size")
@@ -132,10 +136,13 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             [int(length) for length in lengths] if lengths is not None else None
         )
         self.buckets = [int(bucket) for bucket in buckets] if buckets else None
+        self.drop_last = drop_last
 
     def __len__(self) -> int:
         anchor_count = self._anchor_count()
         if self.lengths is None or self.buckets is None:
+            if self.drop_last:
+                return max(1, anchor_count // self.groups_per_batch)
             return max(1, math.ceil(anchor_count / self.groups_per_batch))
 
         counts = {bucket: 0 for bucket in self.buckets}
@@ -150,7 +157,10 @@ class AlignmentBatchSampler(Sampler[List[int]]):
 
         total = 0
         for bucket, count in counts.items():
-            total += math.ceil(count / self.groups_per_batch)
+            if self.drop_last:
+                total += count // self.groups_per_batch
+            else:
+                total += math.ceil(count / self.groups_per_batch)
         return max(1, total)
 
     def set_epoch(self, epoch: int):
@@ -217,7 +227,7 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         if self.lengths is not None and self.buckets is not None:
             for bucket in self.buckets:
                 bucket_batch = batches[bucket]
-                if bucket_batch:
+                if bucket_batch and not self.drop_last:
                     yield bucket_batch.copy()
-        elif batch:
+        elif batch and not self.drop_last:
             yield batch

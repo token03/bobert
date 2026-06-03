@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Dict, Any, Optional, Tuple
 
 from omegaconf import DictConfig
@@ -10,6 +11,7 @@ from core.data.module import PretrainData
 from .setup import create_trainer, create_optimizer, create_scheduler
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
+from ..data.beatmap import DIFFICULTY_ATTRIBUTES
 from ..data.hitobject import HitObject
 
 
@@ -48,30 +50,86 @@ class PretrainingModule(pl.LightningModule):
         self.difficulty_metrics.normalizer = self.datamodule.normalizer
 
         if self.global_rank == 0:
-            print("Running warmup pass to initialize RoPE cache to max_seq_len...")
+            print("Running max-length preallocation pass for pretraining...")
 
         max_seq_len = self.config["data"]["max_seq_len"]
-        
+        warmup_batch = self._create_preallocation_batch(max_seq_len)
+
         target_dtype = torch.float32
-        
+
         precision_str = str(self.trainer.precision)
         if "bf16" in precision_str:
             target_dtype = torch.bfloat16
         elif "16" in precision_str:
             target_dtype = torch.float16
 
-        model_to_run = self.model
-        if hasattr(model_to_run, "_orig_mod"):
-            model_to_run = model_to_run._orig_mod
+        optimizer = self.trainer.optimizers[0]
+        optimizer.zero_grad(set_to_none=True)
 
-        with torch.no_grad():
-            with torch.autocast(device_type=self.device.type, dtype=target_dtype):
-                model_to_run.bert.rotary_emb(
-                    torch.arange(max_seq_len, device=self.device), seq_len=max_seq_len
-                )
+        autocast_context = (
+            torch.autocast(device_type=self.device.type, dtype=target_dtype)
+            if target_dtype != torch.float32
+            else nullcontext()
+        )
+        with autocast_context:
+            _, _, _, _, loss_dict = self._shared_step(warmup_batch)
+        loss_dict["total_loss"].backward()
+        optimizer.zero_grad(set_to_none=True)
 
         if self.global_rank == 0:
-            print(f"Warmup complete. RoPE cache initialized for L={max_seq_len} using {target_dtype}.")
+            vectors = warmup_batch[0]
+            print(
+                "Preallocation complete. "
+                f"Ran B={vectors.shape[0]}, L={vectors.shape[1]} using {target_dtype}."
+            )
+
+    def _create_preallocation_batch(self, max_seq_len: int) -> Tuple:
+        batch_size = self._preallocation_batch_size(max_seq_len)
+        vector_dim = self.datamodule.vector_dim or HitObject.get_vector_dim()
+        vectors = torch.randn(
+            batch_size,
+            max_seq_len,
+            vector_dim,
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+        feature_info = HitObject.get_feature_info()
+        for info in feature_info["categorical"].values():
+            vectors[..., info["index"]] = torch.randint(
+                info["cardinality"],
+                (batch_size, max_seq_len),
+                device=self.device,
+            ).to(vectors.dtype)
+
+        attention_mask = torch.ones(
+            batch_size, max_seq_len, device=self.device, dtype=torch.bool
+        )
+        cu_seqlens = torch.arange(
+            0,
+            (batch_size + 1) * max_seq_len,
+            max_seq_len,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        difficulty_labels = {
+            name: torch.zeros(batch_size, device=self.device, dtype=torch.float32)
+            for name in DIFFICULTY_ATTRIBUTES
+        }
+        return vectors, attention_mask, difficulty_labels, cu_seqlens
+
+    def _preallocation_batch_size(self, max_seq_len: int) -> int:
+        phase_batch_size = int(self.config["pretraining"]["batch_size"])
+        buckets = self.datamodule._length_buckets()
+        if not buckets or self.datamodule.train_dataset is None:
+            return phase_batch_size
+
+        lengths = self.datamodule._lengths(self.datamodule.train_dataset)
+        max_tokens = self.datamodule._token_budget(lengths, buckets)
+        batch_size = max(1, min(phase_batch_size, max_tokens // int(max_seq_len)))
+        if batch_size >= 8:
+            batch_size = max(8, (batch_size // 8) * 8)
+        return batch_size
 
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
         _, _, _, _, loss_dict = self._shared_step(batch)

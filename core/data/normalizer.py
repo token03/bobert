@@ -19,6 +19,7 @@ class BeatmapNormalizer:
         self.vector_norm_specs = HitObject.get_normalization_specs()
 
     def normalize_vectors(self, vectors: torch.Tensor) -> torch.Tensor:
+        vectors = vectors.to(dtype=torch.float32)
         normalized_vectors = vectors.clone()
         for i, field_name in enumerate(HitObject.get_field_names()):
             if field_name not in self.vector_stats:

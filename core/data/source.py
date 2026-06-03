@@ -248,6 +248,7 @@ def load_beatmap_dataset(
         hitobject_data, ids, _ = build_feature_tensors(
             beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
             hitobjects_chunk,
+            max_seq_len=max_seq_len,
         )
 
         id_to_vectors = {int(bid): vec for bid, vec in zip(ids, hitobject_data)}
@@ -296,7 +297,7 @@ def load_beatmap_dataset(
             all_beatmap_data.append(
                 {
                     "beatmap_id": bid_int,
-                    "hitobjects": vectors.clone(),
+                    "hitobjects": vectors,
                     "difficulty": {
                         k: attrs.get(k, 0.0) for k in DIFFICULTY_ATTRIBUTES
                     },

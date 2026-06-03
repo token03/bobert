@@ -37,6 +37,15 @@ def pad_batch(
     return padded, mask, cu_seqlens
 
 
+def rounded_pad_length(
+    length: int, max_seq_len: int, buckets: Sequence[int] | None = None
+) -> int:
+    length = min(int(length), int(max_seq_len))
+    if buckets:
+        return min(_length_bucket(length, buckets), int(max_seq_len))
+    return min(((length + 127) // 128) * 128, int(max_seq_len))
+
+
 def pack_batch(
     vectors: List[torch.Tensor],
     max_seq_len: int,
@@ -159,9 +168,16 @@ def collate_pretrain(
     batch: List[Tuple[torch.Tensor, Dict[str, float]]],
     max_seq_len: int,
     vector_dim: int,
+    length_buckets: Sequence[int] | None = None,
 ):
     vectors, attrs = zip(*batch)
-    padded, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
+    max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
+    padded, mask, cu_seqlens = pad_batch(
+        vectors,
+        max_seq_len,
+        vector_dim,
+        pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
+    )
     return padded, mask, stack_dicts(attrs), cu_seqlens
 
 
@@ -170,9 +186,16 @@ def collate_align(
     max_seq_len: int,
     vector_dim: int,
     ignore_near_star_delta: float,
+    length_buckets: Sequence[int] | None = None,
 ):
     vectors, _, map_features, beatmap_ids, targets = zip(*batch)
-    padded_vec, mask, cu_seqlens = pad_batch(vectors, max_seq_len, vector_dim)
+    max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
+    padded_vec, mask, cu_seqlens = pad_batch(
+        vectors,
+        max_seq_len,
+        vector_dim,
+        pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
+    )
     labels = _alignment_labels(
         map_features, beatmap_ids, targets, ignore_near_star_delta
     )

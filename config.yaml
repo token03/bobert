@@ -19,16 +19,16 @@ model:
   feature_token_dim: 32
 
 components:
-  compile_model: true
+  compile_model: false
   compile_mode: "default" 
   compile_dynamic: true
   activation_checkpointing: true
     
 pretraining:
-  pretrain_size: 60000
+  pretrain_size: 300000
   use_length_buckets: true
   batch_size: 64
-  num_epochs: 6
+  num_epochs: 15
 
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 2
