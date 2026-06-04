@@ -9,13 +9,13 @@ data:
   max_sr: 14.0
 
 model:
-  d_model: 512
+  d_model: 384
   n_heads: 8
-  n_layers: 6
-  dim_feedforward: 1280
+  n_layers: 9
+  dim_feedforward: 960
   dropout: 0.1
   local_attention_window: 128
-  global_attention_layers: [2, 5]
+  global_attention_layers: [2, 5, 8]
   feature_token_dim: 32
 
 components:
