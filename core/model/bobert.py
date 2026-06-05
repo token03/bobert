@@ -441,6 +441,33 @@ class BobertQueryAttentionPooler(nn.Module):
         )
 
 
+class BobertStatsMixerPooler(nn.Module):
+    def __init__(self, pooler: nn.Module, output_dim: int):
+        super().__init__()
+        if output_dim <= 0:
+            raise ValueError("output_dim must be positive")
+
+        self.pooler = pooler
+        input_dim = getattr(pooler, "output_dim")
+        self.output_dim = output_dim
+        self.mixer = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, output_dim),
+            nn.GELU(),
+            nn.Linear(output_dim, output_dim),
+        )
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: Optional[int] = None,
+    ) -> torch.Tensor:
+        return self.mixer(
+            self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+        )
+
+
 class BobertMaskedLMHead(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
@@ -648,12 +675,23 @@ class BobertForAlignment(nn.Module):
         embedding_dim: int = 128,
         map_feature_dim: int = 32,
         num_map_features: int = len(MAP_FEATURE_ATTRIBUTES),
+        map_feature_indices: Optional[Sequence[int]] = None,
     ):
         super().__init__()
         self.bert = bert_model
         self.pooler = aux_pooler
         self.contrastive_pooler = contrastive_pooler
         self.embedding_dim = embedding_dim
+        if map_feature_indices is None:
+            map_feature_indices = tuple(range(num_map_features))
+        else:
+            map_feature_indices = tuple(int(index) for index in map_feature_indices)
+            num_map_features = len(map_feature_indices)
+        self.register_buffer(
+            "map_feature_indices",
+            torch.tensor(map_feature_indices, dtype=torch.long),
+            persistent=False,
+        )
         self.map_projector = (
             BobertMapFeatureProjector(num_map_features, map_feature_dim)
             if map_feature_dim > 0 and num_map_features > 0
@@ -667,6 +705,7 @@ class BobertForAlignment(nn.Module):
             nn.LayerNorm(contrastive_dim + aux_dim + map_dim),
             nn.Linear(contrastive_dim + aux_dim + map_dim, embedding_dim),
             nn.GELU(),
+            nn.Linear(embedding_dim, embedding_dim),
         )
         self.is_compiled = False
 
@@ -706,6 +745,9 @@ class BobertForAlignment(nn.Module):
             stat_dim=pooling_stat_dim,
             stats=pooling_stats,
         )
+        stats_mixer_dim = alignment_config.get("stats_mixer_dim")
+        if stats_mixer_dim is not None:
+            aux_pooler = BobertStatsMixerPooler(aux_pooler, int(stats_mixer_dim))
 
         contrastive_pooler = BobertQueryAttentionPooler(
             d_model=base_model.d_model,
@@ -721,6 +763,19 @@ class BobertForAlignment(nn.Module):
             dropout=alignment_config.get("query_pool_dropout", 0.0),
             use_flash=alignment_config.get("query_pool_use_flash", True),
         )
+        map_feature_names = alignment_config.get(
+            "map_feature_names", MAP_FEATURE_ATTRIBUTES
+        )
+        unknown_map_features = [
+            name for name in map_feature_names if name not in MAP_FEATURE_ATTRIBUTES
+        ]
+        if unknown_map_features:
+            raise ValueError(
+                f"unsupported map_feature_names: {sorted(unknown_map_features)}"
+            )
+        map_feature_indices = [
+            MAP_FEATURE_ATTRIBUTES.index(name) for name in map_feature_names
+        ]
 
         model = cls(
             base_model,
@@ -728,9 +783,8 @@ class BobertForAlignment(nn.Module):
             aux_pooler=aux_pooler,
             embedding_dim=alignment_config.get("embedding_dim", 128),
             map_feature_dim=alignment_config.get("map_feature_dim", 32),
-            num_map_features=len(
-                alignment_config.get("map_feature_names", MAP_FEATURE_ATTRIBUTES)
-            ),
+            num_map_features=len(map_feature_indices),
+            map_feature_indices=map_feature_indices,
         )
         trainable_layers = alignment_config.get("trainable_layers")
         if trainable_layers is not None:
@@ -744,6 +798,26 @@ class BobertForAlignment(nn.Module):
 
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
+
+    def _project_map_features(
+        self,
+        map_features: Optional[torch.Tensor],
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.map_projector is None:
+            return reference.new_zeros((reference.shape[0], 0))
+        if map_features is None:
+            return reference.new_zeros((reference.shape[0], self.map_projector.output_dim))
+
+        map_features = map_features.to(device=reference.device, dtype=reference.dtype)
+        map_feature_indices = self.map_feature_indices.to(device=reference.device)
+        if map_features.shape[-1] <= int(map_feature_indices.max()):
+            raise ValueError(
+                f"expected at least {int(map_feature_indices.max()) + 1} map features, "
+                f"got {map_features.shape[-1]}"
+            )
+        map_features = map_features.index_select(-1, map_feature_indices)
+        return self.map_projector(map_features)
 
     def forward(
         self,
@@ -777,17 +851,9 @@ class BobertForAlignment(nn.Module):
         )
 
         if self.map_projector is not None:
-            if map_features is None:
-                map_projected = contrastive_pooled.new_zeros(
-                    (contrastive_pooled.shape[0], self.map_projector.output_dim)
-                )
-            else:
-                map_projected = self.map_projector(
-                    map_features.to(
-                        device=contrastive_pooled.device,
-                        dtype=contrastive_pooled.dtype,
-                    )
-                )
+            map_projected = self._project_map_features(
+                map_features, contrastive_pooled
+            )
             pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
         else:
             pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
@@ -826,17 +892,9 @@ class BobertForAlignment(nn.Module):
         )
 
         if self.map_projector is not None:
-            if map_features is None:
-                map_projected = contrastive_pooled.new_zeros(
-                    (contrastive_pooled.shape[0], self.map_projector.output_dim)
-                )
-            else:
-                map_projected = self.map_projector(
-                    map_features.to(
-                        device=contrastive_pooled.device,
-                        dtype=contrastive_pooled.dtype,
-                    )
-                )
+            map_projected = self._project_map_features(
+                map_features, contrastive_pooled
+            )
             pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
         else:
             pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
@@ -869,17 +927,9 @@ class BobertForAlignment(nn.Module):
         )
 
         if self.map_projector is not None:
-            if map_features is None:
-                map_projected = contrastive_pooled.new_zeros(
-                    (contrastive_pooled.shape[0], self.map_projector.output_dim)
-                )
-            else:
-                map_projected = self.map_projector(
-                    map_features.to(
-                        device=contrastive_pooled.device,
-                        dtype=contrastive_pooled.dtype,
-                    )
-                )
+            map_projected = self._project_map_features(
+                map_features, contrastive_pooled
+            )
             pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
         else:
             pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)

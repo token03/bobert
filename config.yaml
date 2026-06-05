@@ -19,16 +19,16 @@ model:
   feature_token_dim: 32
 
 components:
-  compile_model: false
-  compile_mode: "default" 
+  compile_model: true
+  compile_mode: "reduce-overhead" 
   compile_dynamic: true
-  activation_checkpointing: true
+  activation_checkpointing: false
     
 pretraining:
   pretrain_size: 300000
   use_length_buckets: true
   batch_size: 64
-  num_epochs: 15
+  num_epochs: 20
 
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 2
@@ -74,24 +74,25 @@ mining:
 alignment:
   trainable_layers: 0
   use_length_buckets: false
-  forward_length_buckets: [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096]
+  forward_length_buckets: [1024, 2048, 3072, 4096]
   batch_size: 256
   num_epochs: 1
   alignment_size: null
 
   embedding_dim: 384
-  map_feature_names: ["ar", "cs", "od", "hp_drain", "drain_time", "slider_multiplier"]
-  map_feature_dim: 32
+  map_feature_names: ["ar", "cs", "drain_time", "slider_multiplier"]
+  map_feature_dim: 64
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
-  query_pool_num_queries: 8
+  stats_mixer_dim: 384
+  query_pool_num_queries: 16
   query_pool_heads: 8
   query_pool_head_dim: 32
-  query_pool_output_dim: 256
+  query_pool_output_dim: 384
   query_pool_dropout: 0.0
   query_pool_use_flash: true
 
-  group_size: 2
+  group_size: 4
 
   adam_lr: 3e-5
   adam_wd: 0.05

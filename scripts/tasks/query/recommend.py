@@ -56,18 +56,18 @@ class QueryContext:
     include_same_set: bool
     allow_download: bool
     mode: str = MODE_DEFAULT
-    embedding_transform: PretrainEmbeddingTransform | None = None
+    embedding_transform: EmbeddingTransform | None = None
     candidates_lookup: dict[int, dict] = field(default_factory=dict)
     cache: dict[int, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
-class PretrainEmbeddingTransform:
+class EmbeddingTransform:
     mean: np.ndarray
     top_pc: np.ndarray
 
     @classmethod
-    def fit(cls, embeddings: np.ndarray) -> PretrainEmbeddingTransform:
+    def fit(cls, embeddings: np.ndarray) -> EmbeddingTransform:
         mean = embeddings.mean(axis=0, keepdims=True).astype(np.float32)
         centered = embeddings - mean
         covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
@@ -83,6 +83,7 @@ class PretrainEmbeddingTransform:
         norms = np.linalg.norm(x, axis=1, keepdims=True)
         x = x / np.maximum(norms, 1e-12)
         return x[0].astype(np.float32) if was_vector else x.astype(np.float32)
+
 
 def metadata_set_id(row: dict | None) -> int | None:
     value = clean_value((row or {}).get("beatmapset_id"), None)
@@ -466,9 +467,6 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
         return beatmap_ids, embeddings, id_to_index, {}
-    if len(args.beatmaps) == 2:
-        return (*empty_embeddings(), {})
-
     embeddings_path = resolve_path(
         args.embeddings
         or (DEFAULT_PRETRAIN_EMBEDDINGS_PATH if args.pretrain else DEFAULT_EMBEDDINGS_PATH)
@@ -486,7 +484,7 @@ def build_context(args: argparse.Namespace) -> QueryContext:
     beatmap_ids, embeddings, id_to_index, candidates_lookup = load_query_data(args, mode)
     embedding_transform = None
     if mode == MODE_DEFAULT and args.pretrain and len(embeddings):
-        embedding_transform = PretrainEmbeddingTransform.fit(embeddings)
+        embedding_transform = EmbeddingTransform.fit(embeddings)
         embeddings = embedding_transform.apply(embeddings)
     checkpoint_path = resolve_path(
         args.checkpoint

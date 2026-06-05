@@ -171,7 +171,9 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             return len(self.anchor_indices)
         return min(self.epoch_size, len(self.anchor_indices))
 
-    def _sample_positive(self, mining: Dict[str, Any], rng: random.Random) -> Optional[int]:
+    def _sample_positives(
+        self, mining: Dict[str, Any], rng: random.Random, count: int
+    ) -> List[int]:
         ids = [int(bid) for bid in mining.get("graph_positive_ids", [])]
         weights = [float(w) for w in mining.get("graph_positive_weights", [])]
         candidates = [
@@ -179,18 +181,26 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             for bid, weight in zip(ids, weights)
             if bid in self.id_to_idx
         ]
-        if not candidates:
-            return None
-        total = sum(weight for _, weight in candidates)
-        if total <= 0.0:
-            return candidates[rng.randrange(len(candidates))][0]
-        threshold = rng.random() * total
-        cumulative = 0.0
-        for bid, weight in candidates:
-            cumulative += weight
-            if cumulative >= threshold:
-                return bid
-        return candidates[-1][0]
+        if len(candidates) < count:
+            return []
+
+        selected = []
+        for _ in range(count):
+            total = sum(weight for _, weight in candidates)
+            if total <= 0.0:
+                index = rng.randrange(len(candidates))
+            else:
+                threshold = rng.random() * total
+                cumulative = 0.0
+                index = len(candidates) - 1
+                for i, (_, weight) in enumerate(candidates):
+                    cumulative += weight
+                    if cumulative >= threshold:
+                        index = i
+                        break
+            bid, _ = candidates.pop(index)
+            selected.append(bid)
+        return selected
 
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
@@ -206,10 +216,12 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         for anchor_idx in anchor_indices:
             anchor_id = self.beatmap_ids[anchor_idx]
             mining = self.mining_lookup.get(anchor_id, {})
-            positive_id = self._sample_positive(mining, rng)
-            if positive_id is None or positive_id == anchor_id:
+            positive_ids = self._sample_positives(
+                mining, rng, self.group_size - 1
+            )
+            if len(positive_ids) != self.group_size - 1 or anchor_id in positive_ids:
                 continue
-            group = [anchor_idx, self.id_to_idx[positive_id]]
+            group = [anchor_idx] + [self.id_to_idx[bid] for bid in positive_ids]
             if self.lengths is not None and self.buckets is not None:
                 group_len = max(self.lengths[idx] for idx in group)
                 bucket = length_bucket(group_len, self.buckets)
