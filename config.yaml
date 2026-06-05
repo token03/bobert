@@ -19,7 +19,7 @@ model:
   feature_token_dim: 32
 
 components:
-  compile_model: true
+  compile_model: false
   compile_mode: "reduce-overhead" 
   compile_dynamic: true
   activation_checkpointing: false
