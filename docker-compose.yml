@@ -3,6 +3,7 @@ services:
     build:
       context: .
       network: host
+    mem_limit: 3.5g
     restart: unless-stopped
     volumes:
       - ./data:/app/data:ro
