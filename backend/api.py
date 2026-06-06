@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from math import isnan
 from pathlib import Path
@@ -62,6 +62,7 @@ DEFAULT_RATE_LIMITS = {
 DEFAULT_MAX_RECOMMEND_TOP_K = 200
 DEFAULT_RECOMMEND_BEATMAP_IDS: list[int] = []
 OSU_TOKEN_REFRESH_SKEW_SECONDS = 300
+RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 BEATMAP_METADATA_COLUMNS = [
     "id",
     "beatmapset_id",
@@ -81,7 +82,21 @@ BEATMAP_METADATA_COLUMNS = [
     "total_length",
     "hit_length",
     "url",
+    "last_updated",
+    "ranked_date",
+    "submitted_date",
 ]
+
+
+class DateWindow(str, Enum):
+    last_week = "last_week"
+    last_month = "last_month"
+    last_3_months = "last_3_months"
+    last_6_months = "last_6_months"
+    last_year = "last_year"
+    last_2_years = "last_2_years"
+    last_5_years = "last_5_years"
+    all_time = "all_time"
 
 
 def load_api_config() -> dict[str, Any]:
@@ -127,6 +142,7 @@ class RecommendFilters(BaseModel):
     min_length: float | None = Field(default=None, ge=0)
     max_length: float | None = Field(default=None, ge=0)
     status: str | None = Field(default=None, max_length=32)
+    date_window: DateWindow | None = None
     exclude_same_set: bool = True
 
 
@@ -690,6 +706,7 @@ def search(
         dynamic_scores = np.asarray(dynamic_embeddings, dtype=np.float32) @ query_embedding
         scores = np.concatenate([scores, dynamic_scores])
     query_set_id = metadata_set_id(query_metadata)
+    date_cutoff = date_window_cutoff(filters.date_window)
     seen_set_ids: set[int] = set()
     results = []
 
@@ -707,7 +724,7 @@ def search(
 
             metadata = metadata_by_id.get(beatmap_id, {})
             candidate_set_id = metadata_set_id(metadata)
-            if not passes_filters(metadata, filters):
+            if not passes_filters(metadata, filters, date_cutoff):
                 continue
             if (
                 filters.exclude_same_set
@@ -775,6 +792,10 @@ def public_metadata(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]
         "drain": json_value(metadata.get("drain")),
         "bpm": json_value(metadata.get("bpm")),
         "total_length": json_value(metadata.get("total_length")),
+        "last_updated": json_value(metadata.get("last_updated")),
+        "ranked_date": json_value(metadata.get("ranked_date")),
+        "submitted_date": json_value(metadata.get("submitted_date")),
+        "release_date": json_value(metadata_release_date(metadata)),
         "url": json_value(metadata.get("url")) or f"https://osu.ppy.sh/b/{int(beatmap_id)}",
     }
 
@@ -789,7 +810,9 @@ def json_value(value: Any) -> Any:
     return value
 
 
-def passes_filters(metadata: dict[str, Any], filters: RecommendFilters) -> bool:
+def passes_filters(
+    metadata: dict[str, Any], filters: RecommendFilters, date_cutoff: datetime | None
+) -> bool:
     stars = metadata.get("difficulty_rating", metadata.get("stars"))
     if filters.min_sr is not None and (stars is None or float(stars) < filters.min_sr):
         return False
@@ -820,7 +843,77 @@ def passes_filters(metadata: dict[str, Any], filters: RecommendFilters) -> bool:
         }
         if filters.status.lower() not in status_values:
             return False
+    if date_cutoff is not None:
+        release_date = parse_metadata_datetime(metadata_release_date(metadata))
+        if release_date is None or release_date < date_cutoff:
+            return False
     return True
+
+
+def metadata_release_date(metadata: dict[str, Any]) -> Any:
+    if is_ranked_status(metadata):
+        ranked_date = json_value(metadata.get("ranked_date"))
+        if ranked_date is not None:
+            return ranked_date
+    return json_value(metadata.get("submitted_date"))
+
+
+def is_ranked_status(metadata: dict[str, Any]) -> bool:
+    values = [metadata.get("status"), metadata.get("ranked")]
+    return any(str(json_value(value)).lower() in RANKED_STATUS_VALUES for value in values)
+
+
+def date_window_cutoff(window: DateWindow | None) -> datetime | None:
+    if window is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if window == DateWindow.last_week:
+        return now - timedelta(days=7)
+    if window == DateWindow.last_month:
+        return shift_months(now, -1)
+    if window == DateWindow.last_3_months:
+        return shift_months(now, -3)
+    if window == DateWindow.last_6_months:
+        return shift_months(now, -6)
+    if window == DateWindow.last_year:
+        return shift_months(now, -12)
+    if window == DateWindow.last_2_years:
+        return shift_months(now, -24)
+    if window == DateWindow.last_5_years:
+        return shift_months(now, -60)
+    return None
+
+
+def shift_months(value: datetime, months: int) -> datetime:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, days_in_month(year, month))
+    return value.replace(year=year, month=month, day=day)
+
+
+def days_in_month(year: int, month: int) -> int:
+    if month == 2:
+        if year % 400 == 0 or (year % 4 == 0 and year % 100 != 0):
+            return 29
+        return 28
+    return 30 if month in {4, 6, 9, 11} else 31
+
+
+def parse_metadata_datetime(value: Any) -> datetime | None:
+    value = json_value(value)
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def passes_range(value: Any, minimum: float | None, maximum: float | None) -> bool:
