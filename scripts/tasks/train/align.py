@@ -13,6 +13,7 @@ from core.model.bobert import BobertForAlignment
 from core.paths import ALIGN_DIR, MINING_CACHE_PATH, PRETRAIN_DIR
 from core.training.align import (
     find_pretraining_checkpoint,
+    load_pretraining_normalizer,
     load_pretraining_weights,
     setup_alignment,
     train,
@@ -118,7 +119,12 @@ def main() -> int:
     torch.set_float32_matmul_precision("high")
     maybe_build_cache(config, args.build_cache)
 
-    datamodule = AlignData(config)
+    pretrain_checkpoint = resolve_pretrain_checkpoint(args)
+    if pretrain_checkpoint is None:
+        raise FileNotFoundError("Alignment requires a pretraining checkpoint.")
+
+    pretrain_normalizer = load_pretraining_normalizer(pretrain_checkpoint)
+    datamodule = AlignData(config, normalizer=pretrain_normalizer)
     datamodule.prepare_data()
     datamodule.setup("fit")
 
@@ -133,9 +139,6 @@ def main() -> int:
     print(f"Number of Heads: {base_model.bert.n_heads}")
     print(f"Number of Layers: {base_model.bert.n_layers}")
 
-    pretrain_checkpoint = resolve_pretrain_checkpoint(args)
-    if pretrain_checkpoint is None:
-        raise FileNotFoundError("Alignment requires a pretraining checkpoint.")
     stats = load_pretraining_weights(model, pretrain_checkpoint)
     print(
         "Loaded pretraining checkpoint: "

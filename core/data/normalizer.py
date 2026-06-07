@@ -50,6 +50,22 @@ class BeatmapNormalizer:
         )
 
     @classmethod
+    def attribute_stats_from_data(
+        cls,
+        attributes: Dict[str, np.ndarray],
+        epsilon: float = 1e-8,
+    ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
+        attribute_stats = {}
+        for key, values in attributes.items():
+            tensor = torch.from_numpy(values.astype(np.float32))
+            if tensor.numel() > 0:
+                attribute_stats[key] = (
+                    tensor.mean(),
+                    torch.clamp(tensor.std(unbiased=False), min=epsilon),
+                )
+        return attribute_stats
+
+    @classmethod
     def from_data(
         cls,
         train_data: List[torch.Tensor],
@@ -105,14 +121,7 @@ class BeatmapNormalizer:
                 torch.clamp(torch.sqrt(variance), min=epsilon),
             )
 
-        attribute_stats = {}
-        for key, values in difficulty_attributes.items():
-            tensor = torch.from_numpy(values.astype(np.float32))
-            if tensor.numel() > 0:
-                attribute_stats[key] = (
-                    tensor.mean(),
-                    torch.clamp(tensor.std(unbiased=False), min=epsilon),
-                )
+        attribute_stats = cls.attribute_stats_from_data(difficulty_attributes, epsilon)
 
         return cls(
             vector_stats=vector_stats, attribute_stats=attribute_stats, epsilon=epsilon

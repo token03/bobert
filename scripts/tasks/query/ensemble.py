@@ -214,27 +214,24 @@ def prepare_query_inputs(
             )
         )
 
-    shared_inputs_valid = True
-    for label, member_vectors, member_features in zip(
+    shared_vectors_valid = True
+    mismatch_label = None
+    for label, member_vectors in zip(
         [member.label for member in ctx.members[1:]],
         normalized_vectors[1:],
-        normalized_map_features[1:],
     ):
         if not np.allclose(normalized_vectors[0], member_vectors, rtol=1e-5, atol=1e-6):
-            shared_inputs_valid = False
-            break
-        if not np.allclose(
-            normalized_map_features[0], member_features, rtol=1e-5, atol=1e-6
-        ):
-            shared_inputs_valid = False
+            shared_vectors_valid = False
+            mismatch_label = label
             break
 
-    if not shared_inputs_valid and ctx.shared_encoder == "require":
+    if not shared_vectors_valid and ctx.shared_encoder == "require":
         raise ValueError(
-            f"{label} normalizer produces different inputs; shared encoder pass is invalid"
+            f"{mismatch_label} normalizer produces different vector inputs; "
+            "shared encoder pass is invalid"
         )
 
-    return list(zip(normalized_vectors, normalized_map_features)), shared_inputs_valid
+    return list(zip(normalized_vectors, normalized_map_features)), shared_vectors_valid
 
 
 def run_head(
@@ -264,7 +261,7 @@ def run_head(
 
 def embed_osu(path: Path, ctx: EnsembleContext):
     vectors, raw_map_features = beatmap_inputs_from_osu(path, ctx.max_seq_len)
-    query_inputs, shared_inputs_valid = prepare_query_inputs(
+    query_inputs, shared_vectors_valid = prepare_query_inputs(
         vectors, raw_map_features, ctx
     )
     amp_dtype = torch.bfloat16 if ctx.device.type == "cuda" else torch.float32
@@ -276,17 +273,13 @@ def embed_osu(path: Path, ctx: EnsembleContext):
             dtype=amp_dtype,
             enabled=ctx.device.type == "cuda",
         ):
-            if shared_inputs_valid and ctx.shared_encoder != "off":
-                normalized_vectors, map_features_np = query_inputs[0]
+            if shared_vectors_valid and ctx.shared_encoder != "off":
+                normalized_vectors, _map_features_np = query_inputs[0]
                 packed, cu_seqlens, max_seqlen = pack_batch(
                     [normalized_vectors], ctx.max_seq_len, normalized_vectors.shape[1]
                 )
-                map_features = torch.tensor(
-                    map_features_np, dtype=torch.float32
-                ).unsqueeze(0)
                 packed = packed.to(ctx.device)
                 cu_seqlens = cu_seqlens.to(ctx.device)
-                map_features = map_features.to(ctx.device)
                 packed_input = shared_bert.embed_sequences(packed)
                 packed_output = shared_bert.encode(
                     packed_input,
@@ -296,15 +289,23 @@ def embed_osu(path: Path, ctx: EnsembleContext):
                 )
                 embeddings = [
                     run_head(
-                        member.model, packed_output, cu_seqlens, max_seqlen, map_features
+                        member.model,
+                        packed_output,
+                        cu_seqlens,
+                        max_seqlen,
+                        torch.tensor(map_features_np, dtype=torch.float32)
+                        .unsqueeze(0)
+                        .to(ctx.device),
                     )
-                    for member in ctx.members
+                    for member, (_normalized_vectors, map_features_np) in zip(
+                        ctx.members, query_inputs
+                    )
                 ]
             else:
-                if not shared_inputs_valid and not ctx.warned_normalizer_mismatch:
+                if not shared_vectors_valid and not ctx.warned_normalizer_mismatch:
                     console.print(
                         "[yellow]Warning:[/yellow] checkpoint normalizers produce "
-                        "different query inputs; using one encoder pass per head."
+                        "different vector inputs; using one encoder pass per head."
                     )
                     ctx.warned_normalizer_mismatch = True
                 embeddings = []

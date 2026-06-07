@@ -23,7 +23,11 @@ ALIGNMENT_POSITIVE_LIST_PAIRS = (
 
 class BeatmapData(pl.LightningDataModule):
     def __init__(
-        self, config: Dict[str, Any], section: str, dataset_path: Optional[str] = None
+        self,
+        config: Dict[str, Any],
+        section: str,
+        dataset_path: Optional[str] = None,
+        normalizer: Optional[BeatmapNormalizer] = None,
     ):
         super().__init__()
         self.config = config
@@ -33,7 +37,7 @@ class BeatmapData(pl.LightningDataModule):
         self.dataset_path = dataset_path or self.data_config["dataset_path"]
         self.batch_size = self.phase_config["batch_size"]
         self.vector_dim: Optional[int] = None
-        self.normalizer: Optional[BeatmapNormalizer] = None
+        self.normalizer: Optional[BeatmapNormalizer] = normalizer
         self.train_dataset: Optional[BeatmapDataset] = None
         self.val_dataset: Optional[BeatmapDataset] = None
 
@@ -72,7 +76,8 @@ class BeatmapData(pl.LightningDataModule):
         train_s, val_s = self._split_loaded_data(all_beatmap_data)
 
         train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
-        self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
+        if self.normalizer is None:
+            self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
         self.vector_dim = train_s["data"][0].shape[1]
 
         self.train_dataset, self.val_dataset = self._create_datasets(train_s, val_s)
@@ -256,8 +261,8 @@ class PretrainData(BeatmapData):
 
 
 class AlignData(BeatmapData):
-    def __init__(self, config, dataset_path=None):
-        super().__init__(config, "alignment", dataset_path)
+    def __init__(self, config, dataset_path=None, normalizer=None):
+        super().__init__(config, "alignment", dataset_path, normalizer)
         self.mining_cache = None
         self.train_mining_lookup: Dict[int, Dict[str, Any]] = {}
         self.val_mining_lookup: Dict[int, Dict[str, Any]] = {}
@@ -337,7 +342,24 @@ class AlignData(BeatmapData):
             for attrs in (train_s["attrs"], train_s.get("map_features", {}))
             for k, v in attrs.items()
         }
-        self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
+        if self.normalizer is None:
+            self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
+        else:
+            attribute_stats = dict(self.normalizer.get_attribute_stats())
+            map_features_np = {
+                k: np.array(v) for k, v in train_s.get("map_features", {}).items()
+            }
+            attribute_stats.update(
+                BeatmapNormalizer.attribute_stats_from_data(
+                    map_features_np,
+                    epsilon=self.normalizer.epsilon,
+                )
+            )
+            self.normalizer = BeatmapNormalizer(
+                vector_stats=self.normalizer.get_vector_stats(),
+                attribute_stats=attribute_stats,
+                epsilon=self.normalizer.epsilon,
+            )
         self.vector_dim = train_s["data"][0].shape[1]
 
         all_data = [b["hitobjects"] for b in all_beatmap_data]

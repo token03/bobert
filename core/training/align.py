@@ -195,6 +195,12 @@ class AlignmentModule(pl.LightningModule):
             checkpoint["attribute_stats"] = self.normalizer.get_attribute_stats()
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
+        if self.normalizer is not None:
+            if "vector_stats" in checkpoint:
+                self.normalizer.vector_stats = checkpoint["vector_stats"]
+            if "attribute_stats" in checkpoint:
+                self.normalizer.attribute_stats = checkpoint["attribute_stats"]
+
         state_dict = checkpoint.get("state_dict")
         if not state_dict:
             return
@@ -275,6 +281,11 @@ def load_pretraining_weights(
         raise FileNotFoundError(checkpoint_path)
 
     checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    if "vector_stats" not in checkpoint:
+        raise RuntimeError(
+            "Pretraining checkpoint does not contain vector_stats; "
+            "alignment requires the pretraining normalizer."
+        )
     raw_state = checkpoint.get("state_dict", checkpoint)
     state = {}
 
@@ -316,6 +327,29 @@ def load_pretraining_weights(
         "unexpected": len(unexpected),
         "loaded_tokenizer": len(tokenizer_keys),
     }
+
+
+def load_pretraining_normalizer(
+    checkpoint_path: str | Path | None,
+    map_location: str | torch.device = "cpu",
+) -> BeatmapNormalizer:
+    if checkpoint_path is None:
+        raise FileNotFoundError("No pretraining checkpoint found.")
+
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(checkpoint_path)
+
+    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    if "vector_stats" not in checkpoint:
+        raise RuntimeError(
+            "Pretraining checkpoint does not contain vector_stats; "
+            "alignment requires the pretraining normalizer."
+        )
+    return BeatmapNormalizer(
+        vector_stats=checkpoint["vector_stats"],
+        attribute_stats=checkpoint.get("attribute_stats", {}),
+    )
 
 
 def train(
