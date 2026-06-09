@@ -208,7 +208,7 @@ def print_result_table(
 
 
 def iter_neighbors(beatmap_id: int, query_embedding: np.ndarray, ctx: QueryContext):
-    similarities = ctx.embeddings @ query_embedding
+    similarities = ctx.embeddings @ query_embedding.astype(np.float32, copy=False)
     for idx in np.argsort(-similarities):
         candidate_id = int(ctx.beatmap_ids[idx])
         if candidate_id != beatmap_id:
@@ -228,7 +228,10 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
     else:
         beatmap_id_a, embedding_a = get_embedding(raw_input_a, ctx)
         beatmap_id_b, embedding_b = get_embedding(raw_input_b, ctx)
-    similarity = float(embedding_a @ embedding_b)
+    similarity = float(
+        embedding_a.astype(np.float32, copy=False)
+        @ embedding_b.astype(np.float32, copy=False)
+    )
 
     table = Table(show_header=True, header_style="bold magenta")
     add_map_columns(table, side=True)
@@ -471,7 +474,11 @@ def load_query_data(args: argparse.Namespace, mode: str):
         args.embeddings
         or (DEFAULT_PRETRAIN_EMBEDDINGS_PATH if args.pretrain else DEFAULT_EMBEDDINGS_PATH)
     )
-    beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
+    beatmap_ids, embeddings, id_to_index = load_embeddings(
+        embeddings_path,
+        dtype=np.float16,
+        normalize=False,
+    )
     console.print(
         f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
         f"[dim]{escape(str(embeddings_path))}[/dim]"

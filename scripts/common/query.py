@@ -51,7 +51,12 @@ def extract_beatmapset_id(raw_input: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def load_embeddings(path: Path):
+def load_embeddings(
+    path: Path,
+    *,
+    dtype: np.dtype | type | None = np.float32,
+    normalize: bool = True,
+):
     if not path.exists():
         raise FileNotFoundError(f"Embeddings parquet not found: {path}")
 
@@ -60,9 +65,13 @@ def load_embeddings(path: Path):
         raise ValueError(f"Expected beatmap_id and embedding columns in {path}")
 
     beatmap_ids = df["beatmap_id"].to_numpy().astype(np.int64)
-    embeddings = np.asarray(df["embedding"].to_list(), dtype=np.float32)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    embeddings = embeddings / np.maximum(norms, 1e-12)
+    embeddings = df["embedding"].to_numpy()
+    if normalize:
+        embeddings = embeddings.astype(np.float32, copy=False)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = embeddings / np.maximum(norms, 1e-12)
+    if dtype is not None:
+        embeddings = embeddings.astype(dtype, copy=False)
     id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
     return beatmap_ids, embeddings, id_to_index
 

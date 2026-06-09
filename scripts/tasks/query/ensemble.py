@@ -42,18 +42,18 @@ from scripts.tasks.query.recommend import (
 console = Console()
 DEFAULT_MEMBERS = (
     (
-        "v3.1",
-        Path("experiments/align/checkpoints/v3.1.ckpt"),
+        "v4.1",
+        Path("experiments/align/checkpoints/v4.1.ckpt"),
         Path("data/embeddings-v1.parquet"),
     ),
     (
-        "v3.2",
-        Path("experiments/align/checkpoints/v3.2.ckpt"),
+        "v4.2",
+        Path("experiments/align/checkpoints/v4.2.ckpt"),
         Path("data/embeddings-v2.parquet"),
     ),
     (
-        "v3.3",
-        Path("experiments/align/checkpoints/v3.3.ckpt"),
+        "v4.3",
+        Path("experiments/align/checkpoints/v4.3.ckpt"),
         Path("data/embeddings-v3.parquet"),
     ),
 )
@@ -62,7 +62,6 @@ DEFAULT_MEMBERS = (
 @dataclass
 class EnsembleMember:
     label: str
-    checkpoint_path: Path
     embeddings_path: Path
     model: torch.nn.Module
     normalizer: BeatmapNormalizer
@@ -86,12 +85,14 @@ class EnsembleContext:
     allow_download: bool
     show_head_scores: bool
     max_seq_len: int
-    shared_encoder: str
-    warned_normalizer_mismatch: bool = False
     cache: dict[int, np.ndarray] = field(default_factory=dict)
 
 
 def patch_config_from_state(config, state: dict[str, torch.Tensor]):
+    ffn = state.get("bert.layers.0.ffn.w13.weight")
+    if ffn is not None:
+        config.model.dim_feedforward = int(ffn.shape[0] // 2)
+
     query = state.get("contrastive_pooler.query")
     if query is not None:
         config.alignment.query_pool_num_queries = int(query.shape[0])
@@ -105,6 +106,20 @@ def patch_config_from_state(config, state: dict[str, torch.Tensor]):
     retrieval = state.get("retrieval_head.3.weight")
     if retrieval is not None:
         config.alignment.embedding_dim = int(retrieval.shape[0])
+
+    projection = state.get("pooler.pooler.projections.mean.1.weight")
+    if projection is None:
+        projection = state.get("pooler.projections.mean.1.weight")
+    if projection is not None:
+        config.alignment.pooling_stat_dim = int(projection.shape[0])
+
+    mixer = state.get("pooler.mixer.1.weight")
+    if mixer is not None:
+        config.alignment.stats_mixer_dim = int(mixer.shape[0])
+
+    map_projection = state.get("map_projector.net.1.weight")
+    if map_projection is not None:
+        config.alignment.map_feature_dim = int(map_projection.shape[0])
 
 
 def load_checkpoint_state(path: Path):
@@ -126,21 +141,23 @@ def verify_shared_encoder(states: list[dict[str, torch.Tensor]], labels: list[st
 
 
 def normalized_matrix(path: Path):
-    beatmap_ids, embeddings, id_to_index = load_embeddings(path)
-    return beatmap_ids, embeddings.astype(np.float16), id_to_index
+    beatmap_ids, embeddings, _id_to_index = load_embeddings(
+        path,
+        dtype=np.float16,
+        normalize=False,
+    )
+    return beatmap_ids, embeddings
 
 
 def load_ensemble_embeddings(paths: list[Path]):
     beatmap_ids = None
-    id_to_index = None
     head_embeddings = []
     centroid_sum = None
 
     for path in paths:
-        ids, embeddings, lookup = normalized_matrix(path)
+        ids, embeddings = normalized_matrix(path)
         if beatmap_ids is None:
             beatmap_ids = ids
-            id_to_index = lookup
             centroid_sum = embeddings.astype(np.float32)
         else:
             if not np.array_equal(beatmap_ids, ids):
@@ -154,7 +171,8 @@ def load_ensemble_embeddings(paths: list[Path]):
 
     centroid = centroid_sum / len(head_embeddings)
     centroid /= np.maximum(np.linalg.norm(centroid, axis=1, keepdims=True), 1e-12)
-    return beatmap_ids, head_embeddings, centroid.astype(np.float32), id_to_index
+    id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
+    return beatmap_ids, head_embeddings, centroid.astype(np.float16), id_to_index
 
 
 def load_members(args: argparse.Namespace):
@@ -184,7 +202,6 @@ def load_members(args: argparse.Namespace):
         members.append(
             EnsembleMember(
                 label=label,
-                checkpoint_path=checkpoint_path,
                 embeddings_path=resolve_path(emb_path),
                 model=model.eval(),
                 normalizer=normalizer,
@@ -214,24 +231,17 @@ def prepare_query_inputs(
             )
         )
 
-    shared_vectors_valid = True
-    mismatch_label = None
     for label, member_vectors in zip(
         [member.label for member in ctx.members[1:]],
         normalized_vectors[1:],
     ):
         if not np.allclose(normalized_vectors[0], member_vectors, rtol=1e-5, atol=1e-6):
-            shared_vectors_valid = False
-            mismatch_label = label
-            break
+            raise ValueError(
+                f"{label} normalizer produces different vector inputs; "
+                "shared encoder pass is invalid"
+            )
 
-    if not shared_vectors_valid and ctx.shared_encoder == "require":
-        raise ValueError(
-            f"{mismatch_label} normalizer produces different vector inputs; "
-            "shared encoder pass is invalid"
-        )
-
-    return list(zip(normalized_vectors, normalized_map_features)), shared_vectors_valid
+    return normalized_vectors[0], normalized_map_features
 
 
 def run_head(
@@ -261,8 +271,10 @@ def run_head(
 
 def embed_osu(path: Path, ctx: EnsembleContext):
     vectors, raw_map_features = beatmap_inputs_from_osu(path, ctx.max_seq_len)
-    query_inputs, shared_vectors_valid = prepare_query_inputs(
-        vectors, raw_map_features, ctx
+    normalized_vectors, map_features_by_head = prepare_query_inputs(
+        vectors,
+        raw_map_features,
+        ctx,
     )
     amp_dtype = torch.bfloat16 if ctx.device.type == "cuda" else torch.float32
     shared_bert = ctx.members[0].model.bert
@@ -273,70 +285,30 @@ def embed_osu(path: Path, ctx: EnsembleContext):
             dtype=amp_dtype,
             enabled=ctx.device.type == "cuda",
         ):
-            if shared_vectors_valid and ctx.shared_encoder != "off":
-                normalized_vectors, _map_features_np = query_inputs[0]
-                packed, cu_seqlens, max_seqlen = pack_batch(
-                    [normalized_vectors], ctx.max_seq_len, normalized_vectors.shape[1]
+            packed, cu_seqlens, max_seqlen = pack_batch(
+                [normalized_vectors], ctx.max_seq_len, normalized_vectors.shape[1]
+            )
+            packed = packed.to(ctx.device)
+            cu_seqlens = cu_seqlens.to(ctx.device)
+            packed_input = shared_bert.embed_sequences(packed)
+            packed_output = shared_bert.encode(
+                packed_input,
+                attention_mask=None,
+                max_seqlen=max_seqlen,
+                cu_seqlens=cu_seqlens,
+            )
+            embeddings = [
+                run_head(
+                    member.model,
+                    packed_output,
+                    cu_seqlens,
+                    max_seqlen,
+                    torch.tensor(map_features, dtype=torch.float32)
+                    .unsqueeze(0)
+                    .to(ctx.device),
                 )
-                packed = packed.to(ctx.device)
-                cu_seqlens = cu_seqlens.to(ctx.device)
-                packed_input = shared_bert.embed_sequences(packed)
-                packed_output = shared_bert.encode(
-                    packed_input,
-                    attention_mask=None,
-                    max_seqlen=max_seqlen,
-                    cu_seqlens=cu_seqlens,
-                )
-                embeddings = [
-                    run_head(
-                        member.model,
-                        packed_output,
-                        cu_seqlens,
-                        max_seqlen,
-                        torch.tensor(map_features_np, dtype=torch.float32)
-                        .unsqueeze(0)
-                        .to(ctx.device),
-                    )
-                    for member, (_normalized_vectors, map_features_np) in zip(
-                        ctx.members, query_inputs
-                    )
-                ]
-            else:
-                if not shared_vectors_valid and not ctx.warned_normalizer_mismatch:
-                    console.print(
-                        "[yellow]Warning:[/yellow] checkpoint normalizers produce "
-                        "different vector inputs; using one encoder pass per head."
-                    )
-                    ctx.warned_normalizer_mismatch = True
-                embeddings = []
-                for member, (normalized_vectors, map_features_np) in zip(
-                    ctx.members, query_inputs
-                ):
-                    packed, cu_seqlens, max_seqlen = pack_batch(
-                        [normalized_vectors], ctx.max_seq_len, normalized_vectors.shape[1]
-                    )
-                    map_features = torch.tensor(
-                        map_features_np, dtype=torch.float32
-                    ).unsqueeze(0)
-                    packed = packed.to(ctx.device)
-                    cu_seqlens = cu_seqlens.to(ctx.device)
-                    map_features = map_features.to(ctx.device)
-                    packed_input = shared_bert.embed_sequences(packed)
-                    packed_output = shared_bert.encode(
-                        packed_input,
-                        attention_mask=None,
-                        max_seqlen=max_seqlen,
-                        cu_seqlens=cu_seqlens,
-                    )
-                    embeddings.append(
-                        run_head(
-                            member.model,
-                            packed_output,
-                            cu_seqlens,
-                            max_seqlen,
-                            map_features,
-                        )
-                    )
+                for member, map_features in zip(ctx.members, map_features_by_head)
+            ]
 
     head_embeddings = torch.cat(embeddings, dim=0).float().cpu().numpy()
     head_embeddings /= np.maximum(
@@ -350,8 +322,14 @@ def get_head_embeddings(raw_input: str, ctx: EnsembleContext):
     if beatmap_id in ctx.cache:
         return beatmap_id, ctx.cache[beatmap_id]
 
-    osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
-    embeddings = embed_osu(osu_path, ctx)
+    if beatmap_id in ctx.id_to_index:
+        idx = ctx.id_to_index[beatmap_id]
+        embeddings = np.stack([head[idx] for head in ctx.head_embeddings], axis=0)
+    else:
+        osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
+        console.print(f"[dim]Embedding {beatmap_id}...[/dim]")
+        embeddings = embed_osu(osu_path, ctx)
+
     ctx.cache[beatmap_id] = embeddings
     return beatmap_id, embeddings
 
@@ -475,7 +453,11 @@ def recommend(raw_input: str, ctx: EnsembleContext):
 def compare(raw_input_a: str, raw_input_b: str, ctx: EnsembleContext):
     beatmap_id_a, heads_a = get_head_embeddings(raw_input_a, ctx)
     beatmap_id_b, heads_b = get_head_embeddings(raw_input_b, ctx)
-    scores = np.sum(heads_a * heads_b, axis=1)
+    scores = np.sum(
+        heads_a.astype(np.float32, copy=False)
+        * heads_b.astype(np.float32, copy=False),
+        axis=1,
+    )
     mean = float(scores.mean())
     std = float(scores.std())
     final = mean - ctx.lambda_std * std
@@ -550,12 +532,6 @@ def parse_args():
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
     parser.add_argument("--show-head-scores", action="store_true")
-    parser.add_argument(
-        "--shared-encoder",
-        default="auto",
-        choices=("auto", "require", "off"),
-        help="Use one encoder pass when normalized inputs match; require errors on mismatch.",
-    )
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
     return parser.parse_args()
 
@@ -592,7 +568,6 @@ def build_context(args: argparse.Namespace):
         allow_download=not args.no_download,
         show_head_scores=args.show_head_scores,
         max_seq_len=int(OmegaConf.load(resolve_path(args.config)).data.max_seq_len),
-        shared_encoder=args.shared_encoder,
     )
 
 

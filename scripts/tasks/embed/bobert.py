@@ -175,8 +175,8 @@ def bucket_batch_sampler(
 
 
 def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
-    embeddings = np.asarray(embeddings, dtype=np.float32)
-    values = pa.array(embeddings.reshape(-1), type=pa.float32())
+    embeddings = np.asarray(embeddings, dtype=np.float16)
+    values = pa.array(embeddings.reshape(-1), type=pa.float16())
     embedding_column = pa.FixedSizeListArray.from_arrays(values, embeddings.shape[1])
     return pa.Table.from_arrays(
         [pa.array(beatmap_ids, type=pa.int64()), embedding_column],
