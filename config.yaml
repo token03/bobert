@@ -22,13 +22,13 @@ components:
   compile_model: false
   compile_mode: "reduce-overhead" 
   compile_dynamic: true
-  activation_checkpointing: false
+  activation_checkpointing: true
     
 pretraining:
-  pretrain_size: 300000
+  pretrain_size: 60000
   use_length_buckets: true
   batch_size: 64
-  num_epochs: 20
+  num_epochs: 6
 
   grad_clip_norm: 1.0
   gradient_accumulation_steps: 2

@@ -308,7 +308,11 @@ def export_embeddings(
                                 vectors, cu_seqlens, int(max_seqlen), map_features
                             )
 
-                    embeddings_np = embeddings.float().cpu().numpy()
+                    embeddings_np = (
+                        embeddings.cpu().numpy()
+                        if pretrain
+                        else embeddings.float().cpu().numpy()
+                    )
                     buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
                     buffered_embeddings.append(embeddings_np)
 

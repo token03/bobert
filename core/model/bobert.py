@@ -612,7 +612,7 @@ class BobertForPretraining(nn.Module):
         for stat in ("mean", "max", "std"):
             start = pooler.stats.index(stat) * pooler.stat_dim
             pieces.append(pooled[:, start : start + pooler.stat_dim])
-        return F.normalize(torch.cat(pieces, dim=-1), dim=-1)
+        return F.normalize(torch.cat(pieces, dim=-1), dim=-1).to(torch.float16)
 
     def embed_packed(
         self,
@@ -633,7 +633,7 @@ class BobertForPretraining(nn.Module):
         for stat in ("mean", "max", "std"):
             start = pooler.stats.index(stat) * pooler.stat_dim
             pieces.append(pooled[:, start : start + pooler.stat_dim])
-        return F.normalize(torch.cat(pieces, dim=-1), dim=-1)
+        return F.normalize(torch.cat(pieces, dim=-1), dim=-1).to(torch.float16)
 
     def forward(
         self,
