@@ -464,7 +464,10 @@ def load_query_data(args: argparse.Namespace, mode: str):
         return (*empty_embeddings(), load_candidate_lookup(args))
     if mode == MODE_GRAPH:
         embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
-        beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
+        beatmap_ids, embeddings, id_to_index = load_embeddings(
+            embeddings_path,
+            dtype=np.float32,
+        )
         console.print(
             f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
             f"[dim]{escape(str(embeddings_path))}[/dim]"

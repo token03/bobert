@@ -66,6 +66,8 @@ def load_embeddings(
 
     beatmap_ids = df["beatmap_id"].to_numpy().astype(np.int64)
     embeddings = df["embedding"].to_numpy()
+    if embeddings.dtype == object:
+        embeddings = np.stack(embeddings)
     if normalize:
         embeddings = embeddings.astype(np.float32, copy=False)
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
