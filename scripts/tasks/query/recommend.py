@@ -293,7 +293,7 @@ def candidates_recommend(raw_input: str, ctx: QueryContext):
         (int(candidate_id), float(weight), ctx.metadata_lookup.get(int(candidate_id)))
         for candidate_id, weight in items[:CANDIDATE_LIMIT]
     ]
-    print_result_table(results, title="Surprising Graph Positives", score="Weight")
+    print_result_table(results, title="Graph Positives", score="Weight")
     console.print()
 
 
