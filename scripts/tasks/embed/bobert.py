@@ -138,10 +138,46 @@ def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
     return model, checkpoint
 
 
-def sample_ids(dataset_dir: Path, limit: int | None, seed: int):
+def sample_ids(
+    dataset_dir: Path,
+    limit: int | None,
+    seed: int,
+    min_sr: float | None,
+    max_seq_len: int | None,
+):
     beatmaps_dir = dataset_dir / "beatmaps"
     beatmaps_df = pl.read_parquet(beatmaps_dir, columns=["beatmap_id"])
     ids = np.array(sorted(beatmaps_df["beatmap_id"].unique().to_list()), dtype=np.int64)
+
+    if min_sr is not None:
+        ratings_path = PROJECT_ROOT / "data" / "ratings.parquet"
+        if not ratings_path.exists():
+            raise FileNotFoundError(f"Ratings file not found: {ratings_path}")
+
+        ratings_lf = pl.scan_parquet(ratings_path)
+        if "seq_len" in ratings_lf.collect_schema().names() and max_seq_len is not None:
+            ratings_lf = ratings_lf.with_columns(
+                pl.when(pl.col("seq_len") == 0)
+                .then(pl.lit(2_147_483_647))
+                .otherwise(pl.col("seq_len"))
+                .alias("_rating_order")
+            ).filter((pl.col("seq_len") > 0) & (pl.col("seq_len") <= max_seq_len))
+            best_lengths = ratings_lf.group_by("beatmap_id").agg(
+                pl.col("_rating_order").max().alias("_rating_order")
+            )
+            ratings_lf = ratings_lf.join(
+                best_lengths, on=["beatmap_id", "_rating_order"], how="inner"
+            )
+
+        eligible_ids = set(
+            ratings_lf.filter(pl.col("stars") >= min_sr)
+            .select("beatmap_id")
+            .unique()
+            .collect()["beatmap_id"]
+            .to_list()
+        )
+        ids = np.array([bid for bid in ids if int(bid) in eligible_ids], dtype=np.int64)
+
     if limit is not None and limit > 0 and len(ids) > limit:
         rng = np.random.default_rng(seed)
         ids = rng.choice(ids, size=limit, replace=False)
@@ -211,6 +247,7 @@ def export_embeddings(
     dataset_dir: Path | None,
     output_path: Path,
     limit: int | None,
+    min_sr: float | None,
     batch_size: int,
     load_chunk_size: int,
     flush_size: int,
@@ -225,7 +262,7 @@ def export_embeddings(
 
     dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
     dataset_dir = resolve_path(dataset_dir)
-    ids = sample_ids(dataset_dir, limit, seed)
+    ids = sample_ids(dataset_dir, limit, seed, min_sr, config.data.max_seq_len)
     print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
 
     checkpoint_dir = PRETRAIN_DIR if pretrain else ALIGN_DIR
@@ -259,9 +296,9 @@ def export_embeddings(
                     str(dataset_dir),
                     max_seq_len=config.data.max_seq_len,
                     ids_to_load=id_chunk,
-                    min_sr=None,
+                    min_sr=min_sr,
                     max_sr=None,
-                    require_ratings=False,
+                    require_ratings=min_sr is not None,
                 )
                 if not beatmaps:
                     continue
@@ -356,6 +393,7 @@ def main():
     parser.add_argument(
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
+    parser.add_argument("--min_sr", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--load-chunk-size", type=int, default=20000)
     parser.add_argument("--flush-size", type=int, default=20000)
@@ -375,6 +413,7 @@ def main():
             / ("embeddings-pretrain.parquet" if args.pretrain else "embeddings.parquet")
         ),
         limit=args.limit,
+        min_sr=args.min_sr,
         batch_size=args.batch_size,
         load_chunk_size=args.load_chunk_size,
         flush_size=args.flush_size,
