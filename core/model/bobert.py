@@ -865,6 +865,46 @@ class BobertForAlignment(nn.Module):
             "sequence_representation": pooled,
         }
 
+    def forward_packed(
+        self,
+        packed_vectors: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        map_features: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        packed_input = self.bert.embed_sequences(packed_vectors)
+        packed_output = self.bert.encode(
+            packed_input,
+            attention_mask=None,
+            max_seqlen=max_seqlen,
+            cu_seqlens=cu_seqlens,
+        )
+        contrastive_pooled = self.contrastive_pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        aux_pooled = self.pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+
+        if self.map_projector is not None:
+            map_projected = self._project_map_features(
+                map_features, contrastive_pooled
+            )
+            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
+        else:
+            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
+
+        retrieval_embedding = F.normalize(self.retrieval_head(pooled), dim=-1)
+
+        return {
+            "embedding": retrieval_embedding,
+            "sequence_representation": pooled,
+        }
+
     def embed(
         self,
         x: torch.Tensor,

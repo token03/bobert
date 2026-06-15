@@ -6,7 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-from .batch import collate_align, collate_align_chunked, collate_pretrain
+from .batch import collate_align, collate_align_chunked, collate_align_packed, collate_pretrain
 from .dataset import BeatmapDataset
 from .mining import MiningConfig, load_alignment_cache
 from .normalizer import BeatmapNormalizer
@@ -118,10 +118,8 @@ class BeatmapData(pl.LightningDataModule):
             shuffle=shuffle and sampler is None,
             sampler=sampler,
             collate_fn=collate_fn,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
             drop_last=drop_last,
+            **self._dataloader_kwargs(num_workers),
         )
 
     def _drop_last_training_batches(self) -> bool:
@@ -138,6 +136,20 @@ class BeatmapData(pl.LightningDataModule):
 
     def _num_workers(self) -> int:
         return int(self.data_config.get("num_workers", 4))
+
+    def _dataloader_kwargs(self, num_workers: Optional[int] = None) -> Dict[str, Any]:
+        num_workers = self._num_workers() if num_workers is None else int(num_workers)
+        kwargs = {
+            "num_workers": num_workers,
+            "pin_memory": bool(self.data_config.get("pin_memory", True)),
+            "persistent_workers": bool(
+                self.data_config.get("persistent_workers", num_workers > 0)
+            )
+            and num_workers > 0,
+        }
+        if num_workers > 0:
+            kwargs["prefetch_factor"] = int(self.data_config.get("prefetch_factor", 2))
+        return kwargs
 
     def _lengths(self, dataset) -> List[int]:
         max_seq_len = int(self.data_config["max_seq_len"])
@@ -178,9 +190,7 @@ class BeatmapData(pl.LightningDataModule):
             dataset,
             batch_sampler=batch_sampler,
             collate_fn=collate_fn,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
+            **self._dataloader_kwargs(num_workers),
         )
 
     def _get_bucketed_val_dataloader(self, dataset, collate_fn):
@@ -202,9 +212,7 @@ class BeatmapData(pl.LightningDataModule):
             dataset,
             batch_sampler=batch_sampler,
             collate_fn=collate_fn,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
+            **self._dataloader_kwargs(num_workers),
         )
 
 
@@ -422,17 +430,23 @@ class AlignData(BeatmapData):
 
     def train_dataloader(self):
         align_config = self._alignment_config()
-        collate = partial(
-            collate_align_chunked,
-            max_seq_len=self.data_config["max_seq_len"],
-            vector_dim=self.vector_dim,
-            group_size=align_config.get("group_size", 4),
-            forward_length_buckets=align_config.get(
-                "forward_length_buckets",
-                [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
-            ),
-            ignore_near_star_delta=self._mining_config().ignore_near_star_delta,
-        )
+        if align_config.get("use_packed_batches", True):
+            collate = partial(
+                collate_align_packed,
+                max_seq_len=self.data_config["max_seq_len"],
+                vector_dim=self.vector_dim,
+            )
+        else:
+            collate = partial(
+                collate_align_chunked,
+                max_seq_len=self.data_config["max_seq_len"],
+                vector_dim=self.vector_dim,
+                group_size=align_config.get("group_size", 4),
+                forward_length_buckets=align_config.get(
+                    "forward_length_buckets",
+                    [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
+                ),
+            )
         if self.train_mining_lookup:
             buckets = self._length_buckets()
             lengths = self._lengths(self.train_dataset)
@@ -452,9 +466,7 @@ class AlignData(BeatmapData):
                 self.train_dataset,
                 batch_sampler=sampler,
                 collate_fn=collate,
-                num_workers=self._num_workers(),
-                pin_memory=True,
-                persistent_workers=self._num_workers() > 0,
+                **self._dataloader_kwargs(),
             )
         return self._get_dataloader(
             self.train_dataset,
@@ -468,7 +480,6 @@ class AlignData(BeatmapData):
             collate_align,
             max_seq_len=self.data_config["max_seq_len"],
             vector_dim=self.vector_dim,
-            ignore_near_star_delta=self._mining_config().ignore_near_star_delta,
             length_buckets=self._length_buckets(),
         )
         return self._get_bucketed_val_dataloader(self.val_dataset, collate)

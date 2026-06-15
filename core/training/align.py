@@ -133,8 +133,22 @@ class AlignmentModule(pl.LightningModule):
         predictions = self._scatter_chunked_predictions(pred_parts, positions)
         return predictions, batch["labels"]
 
+    def _forward_packed_batch(self, batch: Dict[str, Any]):
+        labels = batch["labels"]
+        max_seqlen = int(batch["max_seqlen"].item())
+        predictions = self.model.forward_packed(
+            batch["packed_vectors"],
+            batch["cu_seqlens"],
+            max_seqlen,
+            labels.get("map_features"),
+        )
+        return predictions, labels
+
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        if isinstance(batch, dict) and "chunks" in batch:
+        if isinstance(batch, dict) and "packed_vectors" in batch:
+            predictions, labels = self._forward_packed_batch(batch)
+            labels["use_contrastive"] = True
+        elif isinstance(batch, dict) and "chunks" in batch:
             predictions, labels = self._forward_chunked_batch(batch)
             labels["use_contrastive"] = True
         else:
@@ -143,7 +157,7 @@ class AlignmentModule(pl.LightningModule):
             )
             predictions = self(vectors, attention_mask, cu_seqlens, map_features)
 
-        loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
+        loss_dict = alignment_loss_fn(predictions, labels, self.config)
 
         self.log_dict(
             {
@@ -161,7 +175,7 @@ class AlignmentModule(pl.LightningModule):
             batch, False
         )
         predictions = self(vectors, attention_mask, cu_seqlens, map_features)
-        loss_dict = alignment_loss_fn(predictions, labels, self.config, phase="alignment")
+        loss_dict = alignment_loss_fn(predictions, labels, self.config)
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
         self.log(
             "val_loss",

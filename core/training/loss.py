@@ -200,12 +200,7 @@ def alignment_loss_fn(
     predictions: Dict[str, Any],
     labels: Dict[str, Any],
     config: DictConfig,
-    phase: str = "alignment",
 ) -> Dict[str, torch.Tensor]:
-    phase_config = config[phase]
     losses = contrastive_loss_fn(predictions, labels, config)
-    total_loss = losses["contrastive_loss"] * float(
-        phase_config.get("contrastive_weight", 1.0)
-    )
-    losses["total_loss"] = total_loss
+    losses["total_loss"] = losses["contrastive_loss"]
     return losses

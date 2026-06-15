@@ -33,21 +33,12 @@ MIN_COLLECTIONS_PER_MAP = 4
 COLLECTION_SET_STAR_DELTA = 1.5
 JACCARD_THRESHOLD = 0.9
 MIN_COLLECTION_QUALITY = 0.15
-NULL95_SIZES = np.array([5, 6, 8, 10, 15, 20, 30, 50, 100, 250, 500, 1000, 2500])
-NULL95_TRIALS = 1000
-NULL95_SEED = 13
 
 EMBEDDING_DIM = 64
 NUM_LAYERS = 2
-LAYER_CL = 1
-EPS = 0.10
-TAU = 0.20
-CL_WEIGHT = 0.10
 L2_REG = 1e-6
 
 BPR_BATCH_SIZE = 65536
-CL_MAX_NODES = 2048
-CL_EVERY = 5
 TOTAL_STEPS = 2000
 LOG_EVERY = 100
 
@@ -104,13 +95,13 @@ def load_and_process_data(source_filter=None):
 
     df = deduplicate_collections(df, JACCARD_THRESHOLD)
     df = df.drop_duplicates(["collection_key", "beatmap_id"]).copy()
-    collection_quality, null95_q = collection_reliability(df)
+    collection_quality = collection_reliability(df)
     collection_sizes = df.groupby("collection_key")["beatmap_id"].count().to_dict()
     valid_cols = [
         ckey
         for ckey, q in collection_quality.items()
         if collection_sizes[ckey] >= MIN_MAPS_IN_COLLECTION
-        and q >= max(MIN_COLLECTION_QUALITY, collection_null95(collection_sizes[ckey], null95_q))
+        and q >= MIN_COLLECTION_QUALITY
     ]
     df = df[df["collection_key"].isin(valid_cols)].copy()
 
@@ -125,10 +116,6 @@ def load_and_process_data(source_filter=None):
     bm_to_idx = {bid: i for i, bid in enumerate(unique_beatmaps)}
 
     return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, collection_quality
-
-
-def collection_null95(size, null95_q):
-    return float(np.interp(np.log(size), np.log(NULL95_SIZES), null95_q))
 
 
 def prune_graph_edges(df):
@@ -179,7 +166,6 @@ def collection_reliability(df):
             np.stack(pretrain["embedding"].to_numpy()).astype("float32")
         )
     )
-    null95_q = compute_null95_q(emb)
     emb_lookup = dict(zip(pretrain["beatmap_id"].astype(int), emb))
 
     values = []
@@ -190,21 +176,7 @@ def collection_reliability(df):
         mu = len(rows) ** -0.5
         q = max(0.0, min(1.0, (r - mu) / max(1.0 - mu, 1e-6)))
         values.append((collection_key, q))
-    return dict(values), null95_q
-
-
-def compute_null95_q(emb):
-    generator = torch.Generator().manual_seed(NULL95_SEED)
-    null95_q = []
-    for size in NULL95_SIZES:
-        values = []
-        for _ in range(NULL95_TRIALS):
-            idx = torch.randint(0, emb.shape[0], (int(size),), generator=generator)
-            r = float(emb[idx].mean(dim=0).norm())
-            mu = int(size) ** -0.5
-            values.append(max(0.0, min(1.0, (r - mu) / max(1.0 - mu, 1e-6))))
-        null95_q.append(float(np.quantile(values, 0.95)))
-    return np.array(null95_q)
+    return dict(values)
 
 
 def build_collection_items(df, col_to_idx, bm_to_idx, num_users):
@@ -215,7 +187,9 @@ def build_collection_items(df, col_to_idx, bm_to_idx, num_users):
     offsets = torch.empty(num_users, dtype=torch.long, device=DEVICE)
     offsets[0] = 0
     offsets[1:] = torch.cumsum(lengths[:-1], dim=0)
-    flat = torch.tensor([item for group in items for item in group], dtype=torch.long, device=DEVICE)
+    flat = torch.tensor(
+        [item for group in items for item in group], dtype=torch.long, device=DEVICE
+    )
     return flat, offsets, lengths
 
 
@@ -269,67 +243,35 @@ def sample_bpr_batch(
     return batch_users, batch_pos, batch_neg
 
 
-class XSimGCL(nn.Module):
-    def __init__(self, num_users, num_items, embedding_dim, num_layers, layer_cl, eps):
+class GraphModel(nn.Module):
+    def __init__(self, num_users, num_items, embedding_dim, num_layers):
         super().__init__()
-        if layer_cl < 1 or layer_cl > num_layers:
-            raise ValueError("layer_cl must be in [1, num_layers]")
         self.num_users = num_users
         self.num_items = num_items
         self.num_layers = num_layers
-        self.layer_cl = layer_cl
-        self.eps = eps
         self.user_embedding = nn.Embedding(num_users, embedding_dim)
         self.item_embedding = nn.Embedding(num_items, embedding_dim)
         nn.init.xavier_uniform_(self.user_embedding.weight)
         nn.init.xavier_uniform_(self.item_embedding.weight)
 
-    def forward(self, sparse_adj, perturbed=False):
+    def forward(self, sparse_adj):
         x = torch.cat([self.user_embedding.weight, self.item_embedding.weight], dim=0)
         layer_outputs = [x]
-        cl_output = None
 
         with torch.amp.autocast("cuda", enabled=False):
             x = x.float()
-            for layer_idx in range(self.num_layers):
+            for _ in range(self.num_layers):
                 x = torch.sparse.mm(sparse_adj, x)
-                if perturbed:
-                    noise = F.normalize(torch.rand_like(x), dim=-1)
-                    x = x + torch.sign(x) * noise * self.eps
                 layer_outputs.append(x)
-                if layer_idx + 1 == self.layer_cl:
-                    cl_output = x
             final = torch.stack(layer_outputs, dim=0).mean(dim=0)
 
-        user_final, item_final = torch.split(final, [self.num_users, self.num_items])
-        if not perturbed:
-            return user_final, item_final
-
-        user_cl, item_cl = torch.split(cl_output, [self.num_users, self.num_items])
-        return user_final, item_final, user_cl, item_cl
+        return torch.split(final, [self.num_users, self.num_items])
 
 
 def bpr_loss(user_emb, pos_emb, neg_emb):
     pos_scores = (user_emb * pos_emb).sum(dim=-1)
     neg_scores = (user_emb * neg_emb).sum(dim=-1)
     return F.softplus(neg_scores - pos_scores).mean()
-
-
-def info_nce(z1, z2, temperature):
-    if z1.shape[0] < 2:
-        return z1.new_zeros(())
-    z1 = F.normalize(z1, dim=-1)
-    z2 = F.normalize(z2, dim=-1)
-    logits = z1 @ z2.t() / temperature
-    labels = torch.arange(z1.shape[0], device=z1.device)
-    return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
-
-
-def sample_unique(values, max_count):
-    values = torch.unique(values)
-    if values.numel() > max_count:
-        values = values[torch.randperm(values.numel(), device=values.device)[:max_count]]
-    return values
 
 
 def train(source_filter=None):
@@ -376,17 +318,15 @@ def train(source_filter=None):
         user_indices, item_indices, edge_weights, num_users, num_items
     )
 
-    model = XSimGCL(
-        num_users, num_items, EMBEDDING_DIM, NUM_LAYERS, LAYER_CL, EPS
-    ).to(DEVICE)
+    model = GraphModel(num_users, num_items, EMBEDDING_DIM, NUM_LAYERS).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.0)
 
     print(
-        f"--- Training XSimGCL: steps={TOTAL_STEPS} (~{TOTAL_STEPS * BPR_BATCH_SIZE / len(df):.1f} edge epochs), "
-        f"bpr_batch={BPR_BATCH_SIZE}, cl_max_nodes={CL_MAX_NODES} ---"
+        f"--- Training graph model: steps={TOTAL_STEPS} (~{TOTAL_STEPS * BPR_BATCH_SIZE / len(df):.1f} edge epochs), "
+        f"bpr_batch={BPR_BATCH_SIZE} ---"
     )
-    pbar = tqdm(range(1, TOTAL_STEPS + 1), desc="XSimGCL", dynamic_ncols=True)
-    loss_ema = rec_ema = cl_ema = None
+    pbar = tqdm(range(1, TOTAL_STEPS + 1), desc="Graph", dynamic_ncols=True)
+    loss_ema = rec_ema = None
 
     for step in pbar:
         model.train()
@@ -403,18 +343,7 @@ def train(source_filter=None):
             degree_positions,
         )
 
-        if CL_WEIGHT > 0 and step % CL_EVERY == 0:
-            user_emb, item_emb, user_cl, item_cl = model(sparse_adj, perturbed=True)
-
-            cl_users = sample_unique(batch_users, CL_MAX_NODES)
-            cl_items = sample_unique(batch_pos, CL_MAX_NODES)
-            cl_loss = info_nce(user_emb[cl_users], user_cl[cl_users], TAU) + info_nce(
-                item_emb[cl_items], item_cl[cl_items], TAU
-            )
-        else:
-            user_emb, item_emb = model(sparse_adj, perturbed=False)
-            cl_loss = user_emb.new_zeros(())
-
+        user_emb, item_emb = model(sparse_adj)
         rec_loss = bpr_loss(user_emb[batch_users], item_emb[batch_pos], item_emb[batch_neg])
 
         reg = (
@@ -422,7 +351,7 @@ def train(source_filter=None):
             + model.item_embedding(batch_pos).pow(2).sum(dim=-1).mean()
             + model.item_embedding(batch_neg).pow(2).sum(dim=-1).mean()
         ) / 3.0
-        loss = rec_loss + CL_WEIGHT * cl_loss + L2_REG * reg
+        loss = rec_loss + L2_REG * reg
         loss.backward()
 
         if GRAD_CLIP_NORM is not None and GRAD_CLIP_NORM > 0:
@@ -431,24 +360,20 @@ def train(source_filter=None):
 
         loss_val = float(loss.detach())
         rec_val = float(rec_loss.detach())
-        cl_val = float(cl_loss.detach())
         if loss_ema is None:
-            loss_ema, rec_ema, cl_ema = loss_val, rec_val, cl_val
+            loss_ema, rec_ema = loss_val, rec_val
         else:
             decay = 0.98
             loss_ema = decay * loss_ema + (1.0 - decay) * loss_val
             rec_ema = decay * rec_ema + (1.0 - decay) * rec_val
-            cl_ema = decay * cl_ema + (1.0 - decay) * cl_val
 
         if step % LOG_EVERY == 0:
-            pbar.set_postfix(
-                loss=f"{loss_ema:.4f}", rec=f"{rec_ema:.4f}", cl=f"{cl_ema:.4f}"
-            )
+            pbar.set_postfix(loss=f"{loss_ema:.4f}", rec=f"{rec_ema:.4f}")
 
     print("Saving normalized graph embeddings...")
     model.eval()
     with torch.no_grad():
-        _, item_emb = model(sparse_adj, perturbed=False)
+        _, item_emb = model(sparse_adj)
         item_emb = F.normalize(item_emb, dim=-1)
 
     item_emb_np = _whiten_centered_rows(item_emb.cpu().numpy())

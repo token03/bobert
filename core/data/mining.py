@@ -31,7 +31,6 @@ class MiningConfig:
     use_faiss_gpu: bool
     min_sr: float | None
     max_sr: float | None
-    ignore_near_star_delta: float
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "MiningConfig":
@@ -60,7 +59,6 @@ class MiningConfig:
             max_sr=(
                 None if config.get("max_sr") is None else float(config["max_sr"])
             ),
-            ignore_near_star_delta=float(config["ignore_near_star_delta"]),
         )
 
 
@@ -72,7 +70,6 @@ class MiningTable:
     aim: np.ndarray
     speed: np.ndarray
     slider_factor: np.ndarray
-    song_keys: np.ndarray
     song_lookup_keys: list[tuple[str, ...]]
     song_lookup_key_sets: list[frozenset[str]]
     artist_keys: np.ndarray
@@ -289,8 +286,7 @@ def _load_table(
 
 
 def _to_table(meta: pl.DataFrame) -> MiningTable:
-    song_keys = _song_keys(meta)
-    song_lookup_keys = [_song_lookup_keys(song_key) for song_key in song_keys]
+    song_lookup_keys = [_song_lookup_keys(song_key) for song_key in _song_keys(meta)]
     artist_keys = _metadata_key_pairs(meta, "artist", "artist_unicode")
     return MiningTable(
         beatmap_ids=meta["beatmap_id"].to_numpy().astype(np.int64),
@@ -299,7 +295,6 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         aim=meta["aim"].to_numpy().astype(np.float32),
         speed=meta["speed"].to_numpy().astype(np.float32),
         slider_factor=meta["slider_factor"].to_numpy().astype(np.float32),
-        song_keys=song_keys,
         song_lookup_keys=song_lookup_keys,
         song_lookup_key_sets=[frozenset(keys) for keys in song_lookup_keys],
         artist_keys=artist_keys,
@@ -491,10 +486,6 @@ def _has_overlap(a: frozenset, b: frozenset) -> bool:
     return bool(a and b and a & b)
 
 
-def _same_mapper(a: frozenset[int], b: frozenset[int]) -> bool:
-    return bool(a and b and a & b)
-
-
 def _clean_neighbors(row: np.ndarray, anchor: int) -> list[int]:
     ids = [int(cid) for cid in row if int(cid) >= 0 and int(cid) != anchor]
     return list(dict.fromkeys(ids))
@@ -556,7 +547,7 @@ def _metadata_match(table: MiningTable, left: int, right: int) -> bool:
         table.beatmapset_ids[left] == table.beatmapset_ids[right]
         or _has_overlap(table.song_lookup_key_sets[left], table.song_lookup_key_sets[right])
         or _has_overlap(table.artist_key_sets[left], table.artist_key_sets[right])
-        or _same_mapper(table.mapper_ids[left], table.mapper_ids[right])
+        or _has_overlap(table.mapper_ids[left], table.mapper_ids[right])
     )
 
 

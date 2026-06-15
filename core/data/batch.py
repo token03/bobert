@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import torch
 
 from .beatmap import MAP_FEATURE_ATTRIBUTES
+from .sampler import length_bucket
 
 
 def pad_batch(
@@ -42,7 +43,7 @@ def rounded_pad_length(
 ) -> int:
     length = min(int(length), int(max_seq_len))
     if buckets:
-        return min(_length_bucket(length, buckets), int(max_seq_len))
+        return min(length_bucket(length, buckets), int(max_seq_len))
     return min(((length + 127) // 128) * 128, int(max_seq_len))
 
 
@@ -93,18 +94,10 @@ def stack_map_features(dict_list: List[Dict[str, Any]]) -> torch.Tensor:
     )
 
 
-def _length_bucket(length: int, buckets: Sequence[int]) -> int:
-    for bucket in buckets:
-        if length <= bucket:
-            return int(bucket)
-    return int(buckets[-1])
-
-
 def _alignment_labels(
     map_features: Tuple[Dict[str, Any], ...],
     beatmap_ids: Tuple[int, ...],
     targets: Tuple[Dict[str, Any], ...],
-    ignore_near_star_delta: float,
 ):
     id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
     positive_weights = torch.zeros(len(targets), len(targets), dtype=torch.float32)
@@ -115,14 +108,8 @@ def _alignment_labels(
     beatmapset_ids = torch.tensor(
         [int(target.get("beatmapset_id", -1)) for target in targets], dtype=torch.long
     )
-    stars = torch.tensor(
-        [float(target.get("stars", float("nan"))) for target in targets],
-        dtype=torch.float32,
-    )
     valid_sets = beatmapset_ids >= 0
-    valid_stars = ~torch.isnan(stars)
     same_set = beatmapset_ids[:, None] == beatmapset_ids[None, :]
-    near_star = torch.abs(stars[:, None] - stars[None, :]) <= ignore_near_star_delta
     song_keys = [str(target.get("song_key", "")) for target in targets]
     same_song = torch.zeros(len(targets), len(targets), dtype=torch.bool)
     parsed_song_keys = [set(key.split("|")) - {""} for key in song_keys]
@@ -132,8 +119,7 @@ def _alignment_labels(
         for j, right in enumerate(parsed_song_keys):
             same_song[i, j] = bool(left & right)
 
-    ignore_contrastive = near_star & valid_stars[:, None] & valid_stars[None, :]
-    ignore_contrastive &= (
+    ignore_contrastive = (
         same_set & valid_sets[:, None] & valid_sets[None, :]
     ) | same_song
     ignore_contrastive.fill_diagonal_(False)
@@ -185,7 +171,6 @@ def collate_align(
     batch: List[Tuple],
     max_seq_len: int,
     vector_dim: int,
-    ignore_near_star_delta: float,
     length_buckets: Sequence[int] | None = None,
 ):
     vectors, _, map_features, beatmap_ids, targets = zip(*batch)
@@ -196,9 +181,7 @@ def collate_align(
         vector_dim,
         pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
     )
-    labels = _alignment_labels(
-        map_features, beatmap_ids, targets, ignore_near_star_delta
-    )
+    labels = _alignment_labels(map_features, beatmap_ids, targets)
 
     return (
         padded_vec,
@@ -211,18 +194,37 @@ def collate_align(
     )
 
 
+def collate_align_packed(
+    batch: List[Tuple],
+    max_seq_len: int,
+    vector_dim: int,
+):
+    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
+    packed_vectors, cu_seqlens, max_seqlen = pack_batch(
+        list(vectors),
+        max_seq_len,
+        vector_dim,
+    )
+    labels = _alignment_labels(map_features, beatmap_ids, targets)
+    labels["use_contrastive"] = True
+    return {
+        "packed_vectors": packed_vectors,
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": torch.tensor(max_seqlen, dtype=torch.long),
+        "labels": labels,
+        "batch_size": len(batch),
+    }
+
+
 def collate_align_chunked(
     batch: List[Tuple],
     max_seq_len: int,
     vector_dim: int,
     group_size: int,
     forward_length_buckets: Sequence[int],
-    ignore_near_star_delta: float,
 ):
     vectors, _, map_features, beatmap_ids, targets = zip(*batch)
-    labels = _alignment_labels(
-        map_features, beatmap_ids, targets, ignore_near_star_delta
-    )
+    labels = _alignment_labels(map_features, beatmap_ids, targets)
 
     buckets = sorted(int(bucket) for bucket in forward_length_buckets)
     if not buckets:
@@ -234,7 +236,7 @@ def collate_align_chunked(
     for start in range(0, len(vectors), group_size):
         positions = list(range(start, min(start + group_size, len(vectors))))
         group_max_len = max(min(vectors[pos].shape[0], max_seq_len) for pos in positions)
-        bucket = _length_bucket(group_max_len, buckets)
+        bucket = length_bucket(group_max_len, buckets)
         chunk_groups[bucket].extend(positions)
 
     chunks = []
