@@ -16,6 +16,10 @@ from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.sampler import LengthBucketBatchSampler, length_bucket
 from core.data.source import load_beatmap_dataset
+from core.model.checkpoint import (
+    configure_from_checkpoint,
+    normalize_checkpoint_state,
+)
 from core.model.bobert import BobertForAlignment, BobertForPretraining
 from core.paths import ALIGN_DIR, PRETRAIN_DIR
 from scripts.common.paths import PROJECT_ROOT, resolve_path
@@ -72,35 +76,13 @@ def find_checkpoint(path: str | Path | None, checkpoint_dir: str | Path) -> Path
     return ckpt
 
 
-def normalize_checkpoint_state(
-    state: dict[str, torch.Tensor],
-    flatten_difficulty_head: bool = True,
-) -> dict[str, torch.Tensor]:
-    normalized = {}
-    for key, value in state.items():
-        for prefix in ("model._orig_mod.", "model.", "_orig_mod."):
-            if key.startswith(prefix):
-                key = key[len(prefix) :]
-                break
-        if flatten_difficulty_head and key.startswith("difficulty_head.head."):
-            key = key.replace("difficulty_head.head.", "difficulty_head.", 1)
-        normalized[key] = value
-    return normalized
-
-
-def apply_checkpoint_model_shape(config, state: dict[str, torch.Tensor]):
-    w13 = state.get("bert.layers.0.ffn.w13.weight")
-    if w13 is not None and len(w13.shape) == 2:
-        config.model.dim_feedforward = int(w13.shape[0] // 2)
-
-
 def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
+    config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
     config.components.compile_model = False
     if device.type == "cpu":
         config.alignment.query_pool_use_flash = False
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
-    apply_checkpoint_model_shape(config, state)
 
     model = BobertForAlignment.from_config(config, device)
     model_state = model.state_dict()
@@ -122,12 +104,12 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
 
 
 def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
-    config.components.compile_model = False
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = normalize_checkpoint_state(
         checkpoint.get("state_dict", checkpoint), flatten_difficulty_head=False
     )
-    apply_checkpoint_model_shape(config, state)
+    config = configure_from_checkpoint(config, checkpoint, state, alignment=False)
+    config.components.compile_model = False
 
     model = BobertForPretraining.from_config(config, device)
     missing, unexpected = model.load_state_dict(state, strict=False)

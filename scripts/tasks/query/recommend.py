@@ -17,7 +17,6 @@ from scripts.common.paths import resolve_path
 from scripts.common.query import (
     DEFAULT_BEATMAPS_DIR,
     DEFAULT_CONFIG_PATH,
-    DEFAULT_EMBEDDINGS_PATH,
     DEFAULT_METADATA_PATH,
     LazyEmbedder,
     beatmap_map_style,
@@ -37,8 +36,9 @@ MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
 MODE_CANDIDATES = "candidates"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
+DEFAULT_COMPARE_EMBEDDINGS_PATH = Path("data/embeddings-compare.parquet")
 DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
-DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
+DEFAULT_CHECKPOINT_PATH = Path("data/bobert-compare.pt")
 DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 CANDIDATE_LIMIT = 8
 
@@ -417,7 +417,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Defaults to data/bobert.pt or data/bobert-pretrain.pt with --pretrain",
+        help="Defaults to data/bobert-compare.pt or data/bobert-pretrain.pt with --pretrain",
     )
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--include-same-set", action="store_true")
@@ -475,7 +475,11 @@ def load_query_data(args: argparse.Namespace, mode: str):
         return beatmap_ids, embeddings, id_to_index, {}
     embeddings_path = resolve_path(
         args.embeddings
-        or (DEFAULT_PRETRAIN_EMBEDDINGS_PATH if args.pretrain else DEFAULT_EMBEDDINGS_PATH)
+        or (
+            DEFAULT_PRETRAIN_EMBEDDINGS_PATH
+            if args.pretrain
+            else DEFAULT_COMPARE_EMBEDDINGS_PATH
+        )
     )
     beatmap_ids, embeddings, id_to_index = load_embeddings(
         embeddings_path,

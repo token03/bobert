@@ -15,6 +15,7 @@ from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file
 from core.model.bobert import BobertForAlignment
+from core.model.checkpoint import configure_from_checkpoint, normalize_checkpoint_state
 
 
 MIN_OBJECTS_PER_MAP = 1
@@ -44,16 +45,15 @@ class CpuInferencer:
             )
         else:
             config = OmegaConf.load(self.config_path)
+        checkpoint = torch.load(self.model_path, map_location="cpu", weights_only=False)
+        state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
+        config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
         config.components.compile_model = False
         config.components.compile_dynamic = False
         config.components.activation_checkpointing = False
         config.alignment.query_pool_use_flash = False
         if "use_amp" in config.alignment:
             config.alignment.use_amp = False
-
-        checkpoint = torch.load(self.model_path, map_location="cpu", weights_only=False)
-        state = _normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
-        _apply_checkpoint_model_shape(config, state)
 
         model = BobertForAlignment.from_config(config, self.device)
         model_state = model.state_dict()
@@ -109,25 +109,6 @@ class CpuInferencer:
         vector = embedding.float().cpu().numpy()[0]
         norm = np.linalg.norm(vector)
         return (vector / max(norm, 1e-12)).astype(np.float32)
-
-
-def _normalize_checkpoint_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    normalized = {}
-    for key, value in state.items():
-        for prefix in ("model._orig_mod.", "model.", "_orig_mod."):
-            if key.startswith(prefix):
-                key = key[len(prefix) :]
-                break
-        if key.startswith("difficulty_head.head."):
-            key = key.replace("difficulty_head.head.", "difficulty_head.", 1)
-        normalized[key] = value
-    return normalized
-
-
-def _apply_checkpoint_model_shape(config: Any, state: dict[str, torch.Tensor]) -> None:
-    w13 = state.get("bert.layers.0.ffn.w13.weight")
-    if w13 is not None and len(w13.shape) == 2:
-        config.model.dim_feedforward = int(w13.shape[0] // 2)
 
 
 def _beatmap_inputs_from_osu(path: Path, max_seq_len: int):

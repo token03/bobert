@@ -83,7 +83,7 @@ alignment:
 
   embedding_dim: 256
   map_feature_names: ["ar", "cs", "drain_time", "slider_multiplier"]
-  map_feature_dim: 16
+  map_feature_dim: 32
   pooling_stats: ["mean", "max", "std"]
   pooling_stat_dim: 256
   stats_mixer_dim: 384

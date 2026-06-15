@@ -53,7 +53,7 @@ def main() -> int:
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     stripped = {"state_dict": strip_state(checkpoint.get("state_dict", checkpoint))}
-    for key in ("vector_stats", "attribute_stats"):
+    for key in ("vector_stats", "attribute_stats", "hyper_parameters", "hparams_name"):
         if key in checkpoint:
             stripped[key] = checkpoint[key]
 
