@@ -12,7 +12,6 @@ from scipy import sparse
 from tqdm import tqdm
 
 
-RANKED_VALUES = {1, 2, 3}
 SUPPORT_NEIGHBOR_CAP = 128
 EPS = 1e-12
 WHITEN_EIGENVALUE_FLOOR = 1e-4
@@ -79,7 +78,6 @@ class MiningTable:
     artist_keys: np.ndarray
     artist_key_sets: list[frozenset[str]]
     mapper_ids: np.ndarray
-    status_groups: np.ndarray
     graph: np.ndarray
     pretrain: np.ndarray
 
@@ -245,7 +243,6 @@ def _load_table(
             "id",
             "beatmapset_id",
             "mode",
-            "ranked",
             "drain",
             "bpm",
             "total_length",
@@ -281,12 +278,6 @@ def _load_table(
     if cfg.max_sr is not None:
         meta = meta.filter(pl.col("stars") <= cfg.max_sr)
 
-    meta = meta.with_columns(
-        pl.when(pl.col("ranked").cast(pl.Int64, strict=False).is_in(RANKED_VALUES))
-        .then(pl.lit("ranked"))
-        .otherwise(pl.lit("unranked"))
-        .alias("status_group")
-    )
     if cfg.alignment_size is not None and cfg.alignment_size < meta.height:
         sampled = rng.choice(
             np.arange(meta.height), size=cfg.alignment_size, replace=False
@@ -314,7 +305,6 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         artist_keys=artist_keys,
         artist_key_sets=[frozenset(key for key in keys if key) for keys in artist_keys],
         mapper_ids=_mapper_id_sets(meta),
-        status_groups=meta["status_group"].to_numpy(),
         graph=_whiten_centered_rows(
             np.stack(meta["graph_embedding"].to_list()).astype(np.float32)
         ),
@@ -578,7 +568,6 @@ def _build_rows(
 ) -> dict[str, list]:
     columns: dict[str, list] = {
         "beatmap_id": [],
-        "status_group": [],
         "stars": [],
         "aim": [],
         "speed": [],
@@ -632,62 +621,67 @@ def _build_row(
     row_idx: int,
     top_k: int,
 ) -> None:
-        candidates = []
-        graph_forward_ranks = []
-        for rg_ij, cid in enumerate(_clean_neighbors(graph_idx[row_idx], row_idx), start=1):
-            if table.status_groups[cid] != table.status_groups[row_idx]:
-                continue
-            if _metadata_match(table, row_idx, cid):
-                continue
-            candidates.append(cid)
-            graph_forward_ranks.append(rg_ij)
+    candidates = []
+    graph_forward_ranks = []
+    for rg_ij, cid in enumerate(_clean_neighbors(graph_idx[row_idx], row_idx), start=1):
+        candidates.append(cid)
+        graph_forward_ranks.append(rg_ij)
 
-        positives: list[tuple[int, float]] = []
-        if candidates:
-            candidate_arr = np.asarray(candidates, dtype=np.int32)
-            pretrain_forward = _forward_lookup(pretrain_idx[row_idx], row_idx)
+    positives: list[tuple[int, float]] = []
+    if candidates:
+        candidate_arr = np.asarray(candidates, dtype=np.int32)
+        pretrain_forward = _forward_lookup(pretrain_idx[row_idx], row_idx)
 
-            rg_ij = np.asarray(graph_forward_ranks, dtype=np.float32)
-            rg_ji = _reverse_ranks(graph_idx, candidate_arr, row_idx, default_rank)
-            re_ij = np.asarray(
-                [pretrain_forward.get(int(cid), default_rank) for cid in candidate_arr],
-                dtype=np.float32,
-            )
-            re_ji = _reverse_ranks(pretrain_idx, candidate_arr, row_idx, default_rank)
-            m_graph = 1.0 / np.sqrt(rg_ij * rg_ji)
-            m_pretrain = 1.0 / np.sqrt(re_ij * re_ji)
-            surprise = np.maximum(0.0, np.log(m_graph / np.clip(m_pretrain, 1e-12, None)))
-            support = support_index[row_idx].dot(support_index[candidate_arr].T).toarray().ravel().astype(np.float32)
-            utility = m_graph * np.sqrt(m_pretrain) * np.log1p(surprise) * support
-            keep = utility > 0.0
-            positives = [
-                (int(table.beatmap_ids[cid]), float(weight))
-                for cid, weight in zip(candidate_arr[keep], utility[keep])
-            ]
+        rg_ij = np.asarray(graph_forward_ranks, dtype=np.float32)
+        rg_ji = _reverse_ranks(graph_idx, candidate_arr, row_idx, default_rank)
+        re_ij = np.asarray(
+            [pretrain_forward.get(int(cid), default_rank) for cid in candidate_arr],
+            dtype=np.float32,
+        )
+        re_ji = _reverse_ranks(pretrain_idx, candidate_arr, row_idx, default_rank)
+        m_graph = 1.0 / np.sqrt(rg_ij * rg_ji)
+        m_pretrain = 1.0 / np.sqrt(re_ij * re_ji)
+        surprise = np.maximum(0.0, np.log(m_graph / np.clip(m_pretrain, 1e-12, None)))
+        support = support_index[row_idx].dot(support_index[candidate_arr].T).toarray().ravel().astype(np.float32)
+        utility = m_graph * np.sqrt(m_pretrain) * np.log1p(surprise) * support
+        keep = utility > 0.0
+        positives = [
+            (int(table.beatmap_ids[cid]), float(weight))
+            for cid, weight in zip(candidate_arr[keep], utility[keep])
+        ]
 
-        positives.sort(key=lambda x: x[1], reverse=True)
-        positives = positives[:top_k]
-        total_utility = sum(weight for _, weight in positives)
-        if total_utility > 0.0:
-            positive_ids = [bid for bid, _ in positives]
-            positive_weights = [float(weight / total_utility) for _, weight in positives]
-        else:
-            positive_ids = []
-            positive_weights = []
-        surprise_weight = float(np.log1p(max((w for _, w in positives), default=0.0)))
-        anchor_weight = float(graph_confidence[row_idx]) * surprise_weight
+    positives.sort(key=lambda x: x[1], reverse=True)
+    positives = positives[:top_k]
+    total_utility = sum(weight for _, weight in positives)
+    if total_utility > 0.0:
+        positive_ids = [bid for bid, _ in positives]
+        positive_weights = [float(weight / total_utility) for _, weight in positives]
+    else:
+        positive_ids = []
+        positive_weights = []
+    surprise_weight = float(np.log1p(max((w for _, w in positives), default=0.0)))
+    anchor_weight = float(graph_confidence[row_idx]) * surprise_weight
 
-        columns["beatmap_id"].append(int(table.beatmap_ids[row_idx]))
-        columns["status_group"].append(str(table.status_groups[row_idx]))
-        columns["stars"].append(float(table.stars[row_idx]))
-        columns["aim"].append(float(table.aim[row_idx]))
-        columns["speed"].append(float(table.speed[row_idx]))
-        columns["slider_factor"].append(float(table.slider_factor[row_idx]))
-        columns["beatmapset_id"].append(int(table.beatmapset_ids[row_idx]))
-        columns["song_key"].append("|".join(table.song_lookup_keys[row_idx]))
-        columns["graph_positive_ids"].append(positive_ids)
-        columns["graph_positive_weights"].append(positive_weights)
-        ignore = set(graph_effective[row_idx]) | set(pretrain_eff(row_idx))
-        columns["ignore_ids"].append([int(table.beatmap_ids[cid]) for cid in sorted(ignore)])
-        columns["anchor_weight"].append(anchor_weight)
-        columns["graph_embedding"].append(table.graph[row_idx].tolist())
+    columns["beatmap_id"].append(int(table.beatmap_ids[row_idx]))
+    columns["stars"].append(float(table.stars[row_idx]))
+    columns["aim"].append(float(table.aim[row_idx]))
+    columns["speed"].append(float(table.speed[row_idx]))
+    columns["slider_factor"].append(float(table.slider_factor[row_idx]))
+    columns["beatmapset_id"].append(int(table.beatmapset_ids[row_idx]))
+    columns["song_key"].append("|".join(table.song_lookup_keys[row_idx]))
+    columns["graph_positive_ids"].append(positive_ids)
+    columns["graph_positive_weights"].append(positive_weights)
+    ignore = set(graph_effective[row_idx]) | set(pretrain_eff(row_idx))
+    ignore.update(
+        cid
+        for cid in _clean_neighbors(graph_idx[row_idx], row_idx)
+        if _metadata_match(table, row_idx, cid)
+    )
+    ignore.update(
+        cid
+        for cid in _clean_neighbors(pretrain_idx[row_idx], row_idx)
+        if _metadata_match(table, row_idx, cid)
+    )
+    columns["ignore_ids"].append([int(table.beatmap_ids[cid]) for cid in sorted(ignore)])
+    columns["anchor_weight"].append(anchor_weight)
+    columns["graph_embedding"].append(table.graph[row_idx].tolist())

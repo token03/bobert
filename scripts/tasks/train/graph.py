@@ -28,10 +28,11 @@ COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
 GRAPH_EMBEDDINGS_PATH = DATA_DIR / "graph.parquet"
 PRETRAIN_EMBEDDINGS_PATH = DATA_DIR / "embeddings-pretrain.parquet"
 
-MIN_MAPS_IN_COLLECTION = 15
-MIN_COLLECTIONS_PER_MAP = 2
+MIN_MAPS_IN_COLLECTION = 16
+MIN_COLLECTIONS_PER_MAP = 4
+COLLECTION_SET_STAR_DELTA = 1.5
 JACCARD_THRESHOLD = 0.9
-MIN_COLLECTION_QUALITY = 0.10
+MIN_COLLECTION_QUALITY = 0.15
 NULL95_SIZES = np.array([5, 6, 8, 10, 15, 20, 30, 50, 100, 250, 500, 1000, 2500])
 NULL95_TRIALS = 1000
 NULL95_SEED = 13
@@ -80,12 +81,16 @@ def load_and_process_data(source_filter=None):
 
     beatmaps_df = pd.read_parquet(
         BEATMAPS_PATH,
-        columns=["id", "beatmapset_id", "mode"],
-    ).rename(columns={"id": "beatmap_id"})
+        columns=["id", "beatmapset_id", "mode", "difficulty_rating"],
+    ).rename(columns={"id": "beatmap_id", "difficulty_rating": "stars"})
 
     df = df.merge(beatmaps_df, on="beatmap_id", how="left")
     df = df[df["mode"] == "osu"].copy()
-    df = df.dropna(subset=["beatmapset_id"]).copy()
+    df = df.dropna(subset=["beatmapset_id", "stars"]).copy()
+    top_stars = df.groupby(["collection_key", "beatmapset_id"])["stars"].transform(
+        "max"
+    )
+    df = df[df["stars"] >= top_stars - COLLECTION_SET_STAR_DELTA].copy()
     pretrain_ids = set(
         pl.read_parquet(PRETRAIN_EMBEDDINGS_PATH, columns=["beatmap_id"])["beatmap_id"]
         .cast(pl.Int64)
