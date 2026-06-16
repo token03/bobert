@@ -10,7 +10,6 @@ dependencies = [
     "cupy-cuda12x==14.0.1",
     "faiss-gpu-cu12>=1.14.1.post1",
     "flash-attn==2.8.3",
-    "gdown>=5.2.0",
     "httpx>=0.28.1",
     "liger-kernel>=0.8.0",
     "matplotlib>=3.10.6",

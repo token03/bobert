@@ -11,7 +11,7 @@ from .dataset import BeatmapDataset
 from .mining import MiningConfig, load_alignment_cache
 from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
-from .source import load_beatmap_dataset, setup_dataset
+from .source import load_beatmap_dataset
 from .split import random_split_aligned
 from core.paths import MINING_CACHE_PATH
 
@@ -40,9 +40,6 @@ class BeatmapData(pl.LightningDataModule):
         self.normalizer: Optional[BeatmapNormalizer] = normalizer
         self.train_dataset: Optional[BeatmapDataset] = None
         self.val_dataset: Optional[BeatmapDataset] = None
-
-    def prepare_data(self):
-        setup_dataset(self.dataset_path, self.phase_config.get("colab_url"))
 
     def _load_data(
         self,

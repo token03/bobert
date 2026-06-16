@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import gdown
 import numpy as np
 import polars as pl
 from tqdm import tqdm
@@ -35,26 +34,6 @@ def _parquet_source(path: str) -> str:
 
 def _scan_parquet(path: str) -> pl.LazyFrame:
     return pl.scan_parquet(_parquet_source(path))
-
-
-def setup_dataset(dataset_path: str, colab_url: Optional[str] = None) -> str:
-    try:
-        import google.colab  # type: ignore
-
-        colab_path = "/content/dataset"
-        if not os.path.exists(colab_path) and colab_url:
-            print("Downloading dataset for Colab environment...")
-            zip_path = "/content/dataset.zip"
-            gdown.download(colab_url, zip_path, quiet=False)
-            print("Unzipping dataset...")
-            import zipfile
-
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                zip_ref.extractall("/content/")
-            os.remove(zip_path)
-        return colab_path
-    except ImportError:
-        return dataset_path
 
 
 def _best_supported_ratings_lf(
