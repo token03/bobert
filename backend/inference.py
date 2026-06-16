@@ -9,6 +9,7 @@ import polars as pl
 import torch
 from omegaconf import OmegaConf
 
+from core.config import load_config
 from core.data.batch import pack_batch
 from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.feature import build_feature_tensors, calculate_drain_times
@@ -38,21 +39,17 @@ class CpuInferencer:
         if not self.model_path.exists():
             raise FileNotFoundError(f"model not found: {self.model_path}")
 
-        base_config_path = self.config_path.with_name("config.yaml")
-        if self.config_path.name != "config.yaml" and base_config_path.exists():
-            config = OmegaConf.merge(
-                OmegaConf.load(base_config_path), OmegaConf.load(self.config_path)
-            )
-        else:
-            config = OmegaConf.load(self.config_path)
+        config = load_config(self.config_path)
         checkpoint = torch.load(self.model_path, map_location="cpu", weights_only=False)
         state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
         config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
-        config.components.compile_model = False
-        config.components.compile_dynamic = False
-        config.components.activation_checkpointing = False
-        config.alignment.query_pool_use_flash = False
-        config.alignment.precision = 32
+        OmegaConf.set_struct(config, False)
+        config.runtime.compile_model = False
+        config.runtime.compile_dynamic = False
+        config.runtime.activation_checkpointing = False
+        config.alignment.query_pool.use_flash = False
+        config.alignment.trainer.precision = "32"
+        OmegaConf.set_struct(config, True)
 
         model = BobertForAlignment.from_config(config, self.device)
         model_state = model.state_dict()

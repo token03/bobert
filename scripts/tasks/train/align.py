@@ -7,6 +7,7 @@ from typing import cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from core.config import load_config as load_bobert_config
 from core.data.mining import MiningConfig, build_cache
 from core.data.module import AlignData
 from core.model.bobert import BobertForAlignment
@@ -50,20 +51,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_config(args: argparse.Namespace) -> DictConfig:
-    config = cast(DictConfig, OmegaConf.load(args.config))
+    config = cast(DictConfig, load_bobert_config(args.config))
+    OmegaConf.set_struct(config, False)
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
     if args.batch_size is not None:
-        config.alignment.batch_size = args.batch_size
+        config.alignment.trainer.batch_size = args.batch_size
     if args.alignment_size is not None:
-        config.alignment.alignment_size = args.alignment_size
+        config.alignment.data.alignment_size = args.alignment_size
     if args.epochs is not None:
-        config.alignment.epochs = args.epochs
+        config.alignment.trainer.epochs = args.epochs
     if args.compile_model is not None:
-        config.components.compile_model = args.compile_model
+        config.runtime.compile_model = args.compile_model
     if args.overrides:
         config = cast(DictConfig, OmegaConf.merge(config, OmegaConf.from_dotlist(args.overrides)))
+
+    OmegaConf.resolve(config)
+    OmegaConf.set_struct(config, True)
 
     return config
 
@@ -79,8 +84,8 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
 
     print(f"Building mining cache: {MINING_CACHE_PATH}")
     mining_config = OmegaConf.to_container(config.mining, resolve=True)
-    mining_config["min_sr"] = config.data.get("min_sr")
-    mining_config["max_sr"] = config.data.get("max_sr")
+    mining_config["min_sr"] = config.data.min_sr
+    mining_config["max_sr"] = config.data.max_sr
     build_cache(
         data_dir=Path("data"),
         dataset_dir=Path(config.data.dataset_path),
@@ -155,9 +160,9 @@ def main() -> int:
     trainer = create_trainer(config, "alignment", logger_version=logger_version)
 
     print("\nAlignment setup complete.")
-    print(f"Total epochs: {config.alignment.epochs}")
+    print(f"Total epochs: {config.alignment.trainer.epochs}")
     anchors_per_epoch = min(
-        int(config.alignment.get("alignment_size") or len(datamodule.train_anchor_indices)),
+        int(config.alignment.data.alignment_size or len(datamodule.train_anchor_indices)),
         len(datamodule.train_anchor_indices),
     )
     print(f"Training anchor pool: {len(datamodule.train_anchor_indices)}")

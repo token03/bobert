@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from core.config import load_config
 from core.data.batch import pack_batch
 from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
@@ -80,9 +81,11 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
     config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
-    config.components.compile_model = False
+    OmegaConf.set_struct(config, False)
+    config.runtime.compile_model = False
     if device.type == "cpu":
-        config.alignment.query_pool_use_flash = False
+        config.alignment.query_pool.use_flash = False
+    OmegaConf.set_struct(config, True)
 
     model = BobertForAlignment.from_config(config, device)
     model_state = model.state_dict()
@@ -109,7 +112,9 @@ def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
         checkpoint.get("state_dict", checkpoint), flatten_difficulty_head=False
     )
     config = configure_from_checkpoint(config, checkpoint, state, alignment=False)
-    config.components.compile_model = False
+    OmegaConf.set_struct(config, False)
+    config.runtime.compile_model = False
+    OmegaConf.set_struct(config, True)
 
     model = BobertForPretraining.from_config(config, device)
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -236,7 +241,7 @@ def export_embeddings(
     seed: int,
     device_name: str | None,
 ):
-    config = OmegaConf.load(config_path)
+    config = load_config(config_path)
     if load_chunk_size <= 0:
         raise ValueError("load_chunk_size must be positive")
     if flush_size <= 0:
@@ -291,7 +296,7 @@ def export_embeddings(
                     beatmaps,
                     batch_size,
                     config.data.max_seq_len,
-                    [int(bucket) for bucket in config.data.get("length_buckets", [])],
+                    [int(bucket) for bucket in config.data.length_buckets],
                 )
                 loader_kwargs = {
                     "shuffle": False,

@@ -35,7 +35,7 @@ class BeatmapData(pl.LightningDataModule):
         self.data_config = config["data"]
         self.phase_config = config[section]
         self.dataset_path = dataset_path or self.data_config["dataset_path"]
-        self.batch_size = self.phase_config["batch_size"]
+        self.batch_size = self.phase_config["trainer"]["batch_size"]
         self.vector_dim: Optional[int] = None
         self.normalizer: Optional[BeatmapNormalizer] = normalizer
         self.train_dataset: Optional[BeatmapDataset] = None
@@ -51,9 +51,9 @@ class BeatmapData(pl.LightningDataModule):
             max_seq_len=self.max_seq_len,
             ids_to_load=ids_to_load,
             sample_size=sample_size,
-            dataset_seed=self.data_config.get("dataset_seed", 42),
-            min_sr=self.data_config.get("min_sr"),
-            max_sr=self.data_config.get("max_sr"),
+            dataset_seed=self.data_config.dataset_seed,
+            min_sr=self.data_config.min_sr,
+            max_sr=self.data_config.max_sr,
         )
 
     @property
@@ -131,32 +131,30 @@ class BeatmapData(pl.LightningDataModule):
         )
 
     def _drop_last_training_batches(self) -> bool:
-        return bool(self.config.get("components", {}).get("compile_model", False))
+        return bool(self.config.runtime.compile_model)
 
     def _length_buckets(self) -> Optional[List[int]]:
-        if not self.phase_config.get("use_length_buckets", True):
+        if not self.phase_config.trainer.use_length_buckets:
             return None
 
-        buckets = self.data_config.get("length_buckets")
+        buckets = self.data_config.length_buckets
         if not buckets:
             return None
         return [int(bucket) for bucket in buckets]
 
     def _num_workers(self) -> int:
-        return int(self.data_config.get("num_workers", 4))
+        return int(self.data_config.dataloader.num_workers)
 
     def _dataloader_kwargs(self, num_workers: Optional[int] = None) -> Dict[str, Any]:
         num_workers = self._num_workers() if num_workers is None else int(num_workers)
         kwargs = {
             "num_workers": num_workers,
-            "pin_memory": bool(self.data_config.get("pin_memory", True)),
-            "persistent_workers": bool(
-                self.data_config.get("persistent_workers", num_workers > 0)
-            )
+            "pin_memory": bool(self.data_config.dataloader.pin_memory),
+            "persistent_workers": bool(self.data_config.dataloader.persistent_workers)
             and num_workers > 0,
         }
         if num_workers > 0:
-            kwargs["prefetch_factor"] = int(self.data_config.get("prefetch_factor", 2))
+            kwargs["prefetch_factor"] = int(self.data_config.dataloader.prefetch_factor)
         return kwargs
 
     def _lengths(self, dataset) -> List[int]:
@@ -183,7 +181,7 @@ class BeatmapData(pl.LightningDataModule):
             buckets,
             sampler=sampler,
             max_tokens=self._token_budget(lengths, buckets),
-            seed=self.data_config.get("dataset_seed", 42),
+            seed=self.data_config.dataset_seed,
             shuffle=train,
             drop_last=train and self._drop_last_training_batches(),
         )
@@ -201,7 +199,7 @@ class PretrainData(BeatmapData):
             self._sampler = self.sampler_fn(np.array(train_attrs["stars"]))
 
     def _load_kwargs(self) -> Dict[str, Any]:
-        return {"sample_size": self.phase_config.get("pretrain_size")}
+        return {"sample_size": self.phase_config.data.pretrain_size}
 
     def _create_datasets(self, train_s, val_s):
         return (
@@ -257,13 +255,13 @@ class AlignData(BeatmapData):
         if not os.path.exists(cache_path):
             return {}
 
-        alignment_size = align_config.get("alignment_size")
+        alignment_size = align_config.data.alignment_size
         anchor_cache = load_alignment_cache(
             cache_path,
             alignment_size=alignment_size,
-            random_seed=align_config.get("seed", self.data_config.get("dataset_seed", 42)),
-            min_sr=self.data_config.get("min_sr"),
-            max_sr=self.data_config.get("max_sr"),
+            random_seed=align_config.data.seed,
+            min_sr=self.data_config.min_sr,
+            max_sr=self.data_config.max_sr,
         )
         anchor_ids = {int(bid) for bid in anchor_cache["beatmap_id"].to_list()}
         if not anchor_ids:
@@ -277,12 +275,12 @@ class AlignData(BeatmapData):
         cache = load_alignment_cache(
             cache_path,
             ids_to_load=sorted(needed_ids),
-            min_sr=self.data_config.get("min_sr"),
-            max_sr=self.data_config.get("max_sr"),
+                min_sr=self.data_config.min_sr,
+                max_sr=self.data_config.max_sr,
         )
         targets = {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
         available_ids = set(targets)
-        max_positive_ids = align_config.get("max_positive_ids_per_type")
+        max_positive_ids = align_config.data.max_positive_ids_per_type
         max_positive_ids = int(max_positive_ids) if max_positive_ids else None
 
         for target in targets.values():
@@ -386,7 +384,7 @@ class AlignData(BeatmapData):
             if int(bid) in mining_targets
         }
         anchors_per_epoch = min(
-            int(self.config["alignment"].get("alignment_size") or len(train_anchor_indices)),
+            int(self.config.alignment.data.alignment_size or len(train_anchor_indices)),
             len(train_anchor_indices),
         )
         print(
@@ -410,10 +408,10 @@ class AlignData(BeatmapData):
                 self.train_dataset.beatmap_ids,
                 self.train_mining_lookup,
                 self.batch_size,
-                group_size=align_config.get("group_size", 4),
-                seed=align_config.get("seed", 42),
+                group_size=align_config.data.group_size,
+                seed=align_config.data.seed,
                 anchor_indices=self.train_anchor_indices,
-                epoch_size=align_config.get("alignment_size"),
+                epoch_size=align_config.data.alignment_size,
                 lengths=lengths if buckets else None,
                 buckets=buckets,
                 drop_last=self._drop_last_training_batches(),

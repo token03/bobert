@@ -230,8 +230,8 @@ class LazyEmbedder:
 
     def load(self):
         import torch
-        from omegaconf import OmegaConf
 
+        from core.config import load_config
         from core.data.normalizer import BeatmapNormalizer
         from core.paths import ALIGN_DIR, PRETRAIN_DIR
         from scripts.tasks.embed.bobert import (
@@ -243,7 +243,7 @@ class LazyEmbedder:
         if self.model is not None:
             return
 
-        self.config = OmegaConf.load(self.config_path)
+        self.config = load_config(self.config_path)
         self.device = torch.device(
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )

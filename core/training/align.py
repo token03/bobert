@@ -24,8 +24,7 @@ class AlignmentModule(BobertLightningModule):
         self.normalizer = normalizer
         self.save_hyperparameters(ignore=["model", "normalizer"])
 
-        phase_config = config["alignment"]
-        self.batch_size = phase_config.get("batch_size", 1)
+        self.batch_size = config.alignment.trainer.batch_size
         self.metrics = ContrastiveMetrics(torch.device("cpu"))
 
     def forward(self, *args, **kwargs):

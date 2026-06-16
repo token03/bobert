@@ -31,14 +31,18 @@ def configure_from_checkpoint(
     alignment: bool,
 ) -> Any:
     checkpoint_config = _checkpoint_config(checkpoint)
+    OmegaConf.set_struct(config, False)
     if checkpoint_config is not None:
         config = OmegaConf.merge(config, checkpoint_config)
+        OmegaConf.set_struct(config, False)
 
     _apply_encoder_shape(config, state)
     if alignment:
         _apply_alignment_shape(config, state)
     else:
         _apply_pretraining_shape(config, state)
+    OmegaConf.resolve(config)
+    OmegaConf.set_struct(config, True)
     return config
 
 
@@ -76,19 +80,19 @@ def _apply_encoder_shape(config: Any, state: dict[str, torch.Tensor]) -> None:
 def _apply_pretraining_shape(config: Any, state: dict[str, torch.Tensor]) -> None:
     projection = state.get("difficulty_head.pooler.projections.mean.1.weight")
     if projection is not None and len(projection.shape) == 2:
-        config.pretraining.pooling_stat_dim = int(projection.shape[0])
+        config.pretraining.pooling.stat_dim = int(projection.shape[0])
 
 
 def _apply_alignment_shape(config: Any, state: dict[str, torch.Tensor]) -> None:
     query = state.get("contrastive_pooler.query")
     if query is not None and len(query.shape) == 3:
-        config.alignment.query_pool_num_queries = int(query.shape[0])
-        config.alignment.query_pool_heads = int(query.shape[1])
-        config.alignment.query_pool_head_dim = int(query.shape[2])
+        config.alignment.query_pool.num_queries = int(query.shape[0])
+        config.alignment.query_pool.heads = int(query.shape[1])
+        config.alignment.query_pool.head_dim = int(query.shape[2])
 
     out = state.get("contrastive_pooler.out.1.weight")
     if out is not None and len(out.shape) == 2:
-        config.alignment.query_pool_output_dim = int(out.shape[0])
+        config.alignment.query_pool.output_dim = int(out.shape[0])
 
     retrieval = state.get("retrieval_head.3.weight")
     if retrieval is not None and len(retrieval.shape) == 2:
@@ -98,12 +102,12 @@ def _apply_alignment_shape(config: Any, state: dict[str, torch.Tensor]) -> None:
     if projection is None:
         projection = state.get("pooler.projections.mean.1.weight")
     if projection is not None and len(projection.shape) == 2:
-        config.alignment.pooling_stat_dim = int(projection.shape[0])
+        config.alignment.pooling.stat_dim = int(projection.shape[0])
 
     mixer = state.get("pooler.mixer.1.weight")
     if mixer is not None and len(mixer.shape) == 2:
-        config.alignment.stats_mixer_dim = int(mixer.shape[0])
+        config.alignment.pooling.stats_mixer_dim = int(mixer.shape[0])
 
     map_projection = state.get("map_projector.net.1.weight")
     if map_projection is not None and len(map_projection.shape) == 2:
-        config.alignment.map_feature_dim = int(map_projection.shape[0])
+        config.alignment.map_features.dim = int(map_projection.shape[0])

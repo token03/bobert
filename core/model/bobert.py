@@ -28,8 +28,8 @@ T = TypeVar("T", bound="BobertModel")
 
 def _compile_encoder_only(model: nn.Module, config: DictConfig, label: str) -> None:
     print(f"Compiling BERT {label} tokenizer and encoder with torch.compile...")
-    compile_mode = config.components.get("compile_mode", "default")
-    compile_dynamic = config.components.get("compile_dynamic", True)
+    compile_mode = config.runtime.compile_mode
+    compile_dynamic = config.runtime.compile_dynamic
     model.bert.embed_sequences = torch.compile(
         model.bert.embed_sequences,
         mode=compile_mode,
@@ -96,7 +96,7 @@ class BobertModel(nn.Module):
     def from_config(cls: Type[T], config: DictConfig) -> T:
         model_config = config.model
         data_config = config.data
-        components_config = config.components
+        runtime_config = config.runtime
 
         dim_feedforward = model_config.dim_feedforward
 
@@ -107,12 +107,10 @@ class BobertModel(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=model_config.dropout,
             local_attention_window=model_config.local_attention_window,
-            global_attention_layers=model_config.get("global_attention_layers", []),
+            global_attention_layers=model_config.global_attention_layers,
             max_seq_len=data_config.max_seq_len,
-            activation_checkpointing=components_config.get(
-                "activation_checkpointing", False
-            ),
-            feature_token_dim=model_config.get("feature_token_dim", 32),
+            activation_checkpointing=runtime_config.activation_checkpointing,
+            feature_token_dim=model_config.feature_token_dim,
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -548,18 +546,16 @@ class BobertForPretraining(nn.Module):
 
         masking_strategy = SpanMasker(
             d_model=base_model.d_model,
-            masking_ratio=pretraining_config.masking_ratio,
-            mean_span_length=pretraining_config.mean_span_length,
+            masking_ratio=pretraining_config.masking.ratio,
+            mean_span_length=pretraining_config.masking.mean_span_length,
         )
 
         mlm_head = BobertMaskedLMHead(base_model.d_model)
 
-        pooling_stats = tuple(
-            pretraining_config.get("pooling_stats", ["mean", "max", "std"])
-        )
+        pooling_stats = tuple(pretraining_config.pooling.stats)
         pooler = BobertProjectedStatsPooler(
             base_model.d_model,
-            stat_dim=pretraining_config.get("pooling_stat_dim", 256),
+            stat_dim=pretraining_config.pooling.stat_dim,
             stats=pooling_stats,
         )
         difficulty_head = BobertDifficultyHead(base_model.d_model, pooler)
@@ -567,7 +563,7 @@ class BobertForPretraining(nn.Module):
         model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
         model = model.to(device)
 
-        if config.components.get("compile_model", False):
+        if config.runtime.compile_model:
             _compile_encoder_only(model, config, "pre-training")
 
         return model
@@ -741,10 +737,8 @@ class BobertForAlignment(nn.Module):
         base_model = BobertModel.from_config(config)
         alignment_config = config.alignment
 
-        pooling_stats = tuple(
-            alignment_config.get("pooling_stats", ["mean", "max", "std"])
-        )
-        pooling_stat_dim = alignment_config.get("pooling_stat_dim", 256)
+        pooling_stats = tuple(alignment_config.pooling.stats)
+        pooling_stat_dim = alignment_config.pooling.stat_dim
         stats_output_dim = pooling_stat_dim * len(pooling_stats)
 
         aux_pooler = BobertProjectedStatsPooler(
@@ -752,27 +746,20 @@ class BobertForAlignment(nn.Module):
             stat_dim=pooling_stat_dim,
             stats=pooling_stats,
         )
-        stats_mixer_dim = alignment_config.get("stats_mixer_dim")
+        stats_mixer_dim = alignment_config.pooling.stats_mixer_dim
         if stats_mixer_dim is not None:
             aux_pooler = BobertStatsMixerPooler(aux_pooler, int(stats_mixer_dim))
 
         contrastive_pooler = BobertQueryAttentionPooler(
             d_model=base_model.d_model,
-            n_heads=alignment_config.get("query_pool_heads", base_model.n_heads),
-            num_queries=alignment_config.get("query_pool_num_queries", 8),
-            head_dim=alignment_config.get(
-                "query_pool_head_dim",
-                base_model.d_model // base_model.n_heads,
-            ),
-            output_dim=alignment_config.get(
-                "query_pool_output_dim", stats_output_dim
-            ),
-            dropout=alignment_config.get("query_pool_dropout", 0.0),
-            use_flash=alignment_config.get("query_pool_use_flash", True),
+            n_heads=alignment_config.query_pool.heads,
+            num_queries=alignment_config.query_pool.num_queries,
+            head_dim=alignment_config.query_pool.head_dim,
+            output_dim=alignment_config.query_pool.output_dim,
+            dropout=alignment_config.query_pool.dropout,
+            use_flash=alignment_config.query_pool.use_flash,
         )
-        map_feature_names = alignment_config.get(
-            "map_feature_names", MAP_FEATURE_ATTRIBUTES
-        )
+        map_feature_names = alignment_config.map_features.names
         unknown_map_features = [
             name for name in map_feature_names if name not in MAP_FEATURE_ATTRIBUTES
         ]
@@ -788,17 +775,17 @@ class BobertForAlignment(nn.Module):
             base_model,
             contrastive_pooler=contrastive_pooler,
             aux_pooler=aux_pooler,
-            embedding_dim=alignment_config.get("embedding_dim", 128),
-            map_feature_dim=alignment_config.get("map_feature_dim", 32),
+            embedding_dim=alignment_config.embedding_dim,
+            map_feature_dim=alignment_config.map_features.dim,
             num_map_features=len(map_feature_indices),
             map_feature_indices=map_feature_indices,
         )
-        trainable_layers = alignment_config.get("trainable_layers")
+        trainable_layers = alignment_config.encoder.trainable_layers
         if trainable_layers is not None:
             model.freeze_bert_except_top_layers(int(trainable_layers))
         model = model.to(device)
 
-        if config.components.get("compile_model", False):
+        if config.runtime.compile_model:
             _compile_encoder_only(model, config, "alignment")
 
         return model

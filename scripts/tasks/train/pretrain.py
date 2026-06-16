@@ -7,6 +7,7 @@ from typing import cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from core.config import load_config as load_bobert_config
 from core.data.module import PretrainData
 from core.model.bobert import BobertForPretraining
 from core.paths import PRETRAIN_DIR
@@ -41,22 +42,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_config(args: argparse.Namespace) -> DictConfig:
-    config = cast(DictConfig, OmegaConf.load(args.config))
+    config = cast(DictConfig, load_bobert_config(args.config))
+    OmegaConf.set_struct(config, False)
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
     if args.pretrain_size is not None:
-        config.pretraining.pretrain_size = args.pretrain_size
+        config.pretraining.data.pretrain_size = args.pretrain_size
     if args.dataset_seed is not None:
         config.data.dataset_seed = args.dataset_seed
     if args.batch_size is not None:
-        config.pretraining.batch_size = args.batch_size
+        config.pretraining.trainer.batch_size = args.batch_size
     if args.epochs is not None:
-        config.pretraining.epochs = args.epochs
+        config.pretraining.trainer.epochs = args.epochs
     if args.compile_model is not None:
-        config.components.compile_model = args.compile_model
+        config.runtime.compile_model = args.compile_model
     if args.overrides:
         config = cast(DictConfig, OmegaConf.merge(config, OmegaConf.from_dotlist(args.overrides)))
+
+    OmegaConf.resolve(config)
+    OmegaConf.set_struct(config, True)
 
     return config
 
@@ -85,8 +90,8 @@ def main() -> int:
     sampler_fn = lambda stars: create_kde_sampler(
         stars,
         bandwidth=config.pretraining.sampling.kde_bandwidth,
-        num_bins=config.pretraining.sampling.get("num_bins", 100),
-        strength=config.pretraining.sampling.get("strength", 0.1),
+        num_bins=config.pretraining.sampling.num_bins,
+        strength=config.pretraining.sampling.strength,
     )
 
     datamodule = PretrainData(config, sampler_fn=sampler_fn)
@@ -114,7 +119,7 @@ def main() -> int:
     trainer = create_trainer(config, "pretraining", logger_version=logger_version)
 
     print("\nPretraining setup complete.")
-    print(f"Total epochs: {config.pretraining.epochs}")
+    print(f"Total epochs: {config.pretraining.trainer.epochs}")
     print(f"Training samples: {len(datamodule.train_dataset)}")
     print(f"Validation samples: {len(datamodule.val_dataset)}")
 

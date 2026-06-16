@@ -25,7 +25,7 @@ class PretrainingModule(BobertLightningModule):
         self.model = model
         self.config = config
         self.datamodule = datamodule
-        self.batch_size = config["pretraining"]["batch_size"]
+        self.batch_size = config.pretraining.trainer.batch_size
         self.save_hyperparameters(ignore=["model", "datamodule"])
 
         feature_info = FEATURE_INFO
@@ -118,7 +118,7 @@ class PretrainingModule(BobertLightningModule):
         return vectors, attention_mask, difficulty_labels, cu_seqlens
 
     def _preallocation_batch_size(self, max_seq_len: int) -> int:
-        phase_batch_size = int(self.config["pretraining"]["batch_size"])
+        phase_batch_size = int(self.config.pretraining.trainer.batch_size)
         buckets = self.datamodule._length_buckets()
         if not buckets or self.datamodule.train_dataset is None:
             return phase_batch_size

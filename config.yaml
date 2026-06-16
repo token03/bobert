@@ -1,15 +1,19 @@
 data:
-  dataset_path: './data/dataset'
+  dataset_path: "./data/dataset"
   dataset_seed: 42
-  num_workers: 1
-  pin_memory: false
-  persistent_workers: false
-  prefetch_factor: 1
+
   max_seq_len: 4096
   length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
+
   min_sr: 2.0
   max_sr: 14.0
+
+  dataloader:
+    num_workers: 1
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor: 1
 
 model:
   d_model: 384
@@ -17,56 +21,62 @@ model:
   n_layers: 9
   dim_feedforward: 960
   dropout: 0.1
+
   local_attention_window: 128
   global_attention_layers: [2, 5, 8]
+
   feature_token_dim: 32
 
-components:
+runtime:
   compile_model: false
-  compile_mode: "reduce-overhead" 
+  compile_mode: "reduce-overhead"
   compile_dynamic: true
   activation_checkpointing: false
 
-train_defaults: &train_defaults
-  epochs: 1
-  batch_size: 128
-  grad_accum: 1
-  grad_clip: 1.0
-  precision: bf16-mixed
-
-optim_defaults: &optim_defaults
-  adam_lr: 2e-4
-  adam_wd: 0.05
-  adam_betas: [0.9, 0.95]
-  muon_lr: 0.02
-  muon_wd: 0.01
-
-schedule_defaults: &schedule_defaults
-  adam_min_lr: 1e-6
-  warmup_ratio: 0.05
-  stable_ratio: 0.1
-  cooldown: cosine
-
-pooling_defaults: &pooling_defaults
-  pooling_stats: [mean, max, std]
-  pooling_stat_dim: 256
-     
 pretraining:
-  <<: [*train_defaults, *optim_defaults, *schedule_defaults, *pooling_defaults]
-  pretrain_size: 300000
-  use_length_buckets: true
-  batch_size: 64
-  epochs: 20
-  grad_accum: 2
-  warmup_ratio: 0.1
-  stable_ratio: 0.1
+  trainer:
+    epochs: 20
+    batch_size: 64
+    grad_accum: 2
+    grad_clip: 1.0
+    precision: "bf16-mixed"
+    save_checkpoints: true
+    use_length_buckets: true
 
-  difficulty_loss_weight: 1.0
-  mlm_loss_weight: 1.0
+  data:
+    pretrain_size: 300000
 
-  masking_ratio: 0.25
-  mean_span_length: 4
-  
+  optimizer:
+    adam_lr: 2e-4
+    adam_wd: 0.05
+    adam_betas: [0.9, 0.95]
+    muon_lr: 0.02
+    muon_wd: 0.01
+
+  scheduler:
+    adam_min_lr: 1e-6
+    warmup_ratio: 0.1
+    stable_ratio: 0.1
+    cooldown: "cosine"
+    num_cycles: 0.5
+
+  pooling:
+    stats: ["mean", "max", "std"]
+    stat_dim: 256
+
+  masking:
+    ratio: 0.25
+    mean_span_length: 4
+
+  loss:
+    mlm_weight: 1.0
+    difficulty_weight: 1.0
+    difficulty_huber_beta: 1.0
+    stars_weight: 1.0
+    aim_weight: 1.0
+    speed_weight: 1.0
+    slider_factor_weight: 1.0
+
   sampling:
     kde_bandwidth: 0.2
     num_bins: 100
@@ -81,29 +91,56 @@ mining:
   use_faiss_gpu: true
 
 alignment:
-  <<: [*train_defaults, *optim_defaults, *schedule_defaults, *pooling_defaults]
-  trainable_layers: 0
-  use_length_buckets: false
-  batch_size: 128
-  epochs: 1
-  alignment_size: null
+  trainer:
+    epochs: 1
+    batch_size: 128
+    grad_accum: 1
+    grad_clip: 1.0
+    precision: "bf16-mixed"
+    save_checkpoints: true
+    use_length_buckets: false
+
+  data:
+    alignment_size: null
+    max_positive_ids_per_type: null
+    seed: 42
+    group_size: 4
+
+  optimizer:
+    adam_lr: 1e-4
+    adam_wd: 0.05
+    adam_betas: [0.9, 0.95]
+    muon_lr: 0.005
+    muon_wd: 0.01
+
+  scheduler:
+    adam_min_lr: 1e-5
+    warmup_ratio: 0.05
+    stable_ratio: 0.60
+    cooldown: "cosine"
+    num_cycles: 0.5
+
+  encoder:
+    trainable_layers: 0
+
+  pooling:
+    stats: ["mean", "max", "std"]
+    stat_dim: 256
+    stats_mixer_dim: 384
+
+  query_pool:
+    num_queries: 1
+    heads: 8
+    head_dim: 32
+    output_dim: 256
+    dropout: 0.0
+    use_flash: true
+
+  map_features:
+    names: ["ar", "cs", "drain_time", "slider_multiplier"]
+    dim: 32
+
+  loss:
+    temperature: 0.10
 
   embedding_dim: 256
-  map_feature_names: ["ar", "cs", "drain_time", "slider_multiplier"]
-  map_feature_dim: 32
-  stats_mixer_dim: 384
-  query_pool_num_queries: 1
-  query_pool_heads: 8
-  query_pool_head_dim: 32
-  query_pool_output_dim: 256
-  query_pool_dropout: 0.0
-  query_pool_use_flash: true
-
-  group_size: 4
-
-  adam_lr: 1e-4
-  muon_lr: 0.005
-  adam_min_lr: 1e-5
-  stable_ratio: 0.60
-
-  temperature: 0.10

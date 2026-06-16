@@ -78,19 +78,19 @@ def difficulty_loss_fn(
     phase: str = "pretraining",
 ) -> Dict[str, torch.Tensor]:
     losses = {}
-    phase_config = config.get(phase, {})
-    overall_weight = phase_config.get("difficulty_loss_weight", 1.0)
+    loss_config = config[phase].loss
+    overall_weight = loss_config.difficulty_weight
 
     per_attr_weights = {
-        "stars": phase_config.get("stars_loss_weight", 1.0),
-        "aim": phase_config.get("aim_loss_weight", 1.0),
-        "speed": phase_config.get("speed_loss_weight", 1.0),
-        "slider_factor": phase_config.get("slider_factor_loss_weight", 1.0),
+        "stars": loss_config.stars_weight,
+        "aim": loss_config.aim_weight,
+        "speed": loss_config.speed_weight,
+        "slider_factor": loss_config.slider_factor_weight,
     }
 
     device = next(iter(predictions.values())).device
     unscaled_sum = torch.zeros((), device=device)
-    beta = float(phase_config.get("difficulty_huber_beta", 1.0))
+    beta = float(loss_config.difficulty_huber_beta)
 
     for key in DIFFICULTY_ATTRIBUTES:
         if key in predictions and key in labels:
@@ -112,8 +112,7 @@ def pretrain_loss_fn(
     config: DictConfig,
 ) -> Dict[str, torch.Tensor]:
     losses = {}
-    pretrain_config = config.get("pretraining", {})
-    mlm_weight = pretrain_config.get("mlm_loss_weight", 1.0)
+    mlm_weight = config.pretraining.loss.mlm_weight
 
     mlm_loss = mlm_loss_fn(predictions["mlm"], targets, mask)
     losses["mlm_loss"] = mlm_loss
@@ -136,9 +135,8 @@ def contrastive_loss_fn(
     embeddings = predictions["embedding"]
     if not labels.get("use_contrastive", True):
         return {"contrastive_loss": torch.zeros((), device=embeddings.device)}
-    phase_config = config["alignment"]
-    group_size = int(phase_config.get("group_size", 4))
-    temperature = float(phase_config.get("temperature", 0.07))
+    group_size = int(config.alignment.data.group_size)
+    temperature = float(config.alignment.loss.temperature)
 
     batch_size = embeddings.shape[0]
     device = embeddings.device

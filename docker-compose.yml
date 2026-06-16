@@ -14,7 +14,7 @@ services:
       BOBERT_DATA_DIR: /app/data
       BOBERT_CACHE_DB: /app/cache/runtime.sqlite
       BOBERT_MODEL_PATH: /app/data/bobert.pt
-      BOBERT_CONFIG_PATH: /app/config.api.yaml
+      BOBERT_CONFIG_PATH: /app/config.backend.yaml
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY}
       API_SHARED_SECRET: ${API_SHARED_SECRET}
       OSU_CLIENT_ID: ${OSU_CLIENT_ID}

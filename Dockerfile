@@ -19,7 +19,7 @@ RUN uv pip install --system --no-cache --torch-backend=cpu -r requirements.txt
 
 COPY core ./core
 COPY config.yaml ./
-COPY config.api.yaml ./
+COPY config.backend.yaml ./
 
 COPY backend ./backend
 

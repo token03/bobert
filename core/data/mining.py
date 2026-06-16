@@ -34,11 +34,10 @@ class MiningConfig:
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "MiningConfig":
-        optional_fields = {"min_sr", "max_sr"}
         missing = [
             field
             for field in cls.__dataclass_fields__
-            if field not in optional_fields and field not in config
+            if field not in config
         ]
         if missing:
             raise KeyError(f"missing mining config keys: {missing}")
@@ -53,12 +52,8 @@ class MiningConfig:
             ),
             random_seed=int(config["random_seed"]),
             use_faiss_gpu=bool(config["use_faiss_gpu"]),
-            min_sr=(
-                None if config.get("min_sr") is None else float(config["min_sr"])
-            ),
-            max_sr=(
-                None if config.get("max_sr") is None else float(config["max_sr"])
-            ),
+            min_sr=None if config["min_sr"] is None else float(config["min_sr"]),
+            max_sr=None if config["max_sr"] is None else float(config["max_sr"]),
         )
 
 

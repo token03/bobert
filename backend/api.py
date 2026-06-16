@@ -25,7 +25,6 @@ import numpy as np
 from ossapi import Ossapi
 import polars as pl
 import torch
-import yaml
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -44,12 +43,13 @@ from backend.logging import (
     timed_call,
 )
 from backend.osu import close_osu_http_client, fetch_osu_file, open_osu_http_client
+from core.config import load_config
 
 
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
 CACHE_DB = Path(os.getenv("BOBERT_CACHE_DB", "/app/cache/runtime.sqlite"))
 MODEL_PATH = Path(os.getenv("BOBERT_MODEL_PATH", DATA_DIR / "bobert.pt"))
-CONFIG_PATH = Path(os.getenv("BOBERT_CONFIG_PATH", "/app/config.api.yaml"))
+CONFIG_PATH = Path(os.getenv("BOBERT_CONFIG_PATH", "/app/config.backend.yaml"))
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 API_SHARED_SECRET = os.getenv("API_SHARED_SECRET", "")
@@ -100,26 +100,16 @@ class DateWindow(str, Enum):
 
 
 def load_api_config() -> dict[str, Any]:
-    if not CONFIG_PATH.exists():
-        return {}
-
-    with CONFIG_PATH.open() as f:
-        config = yaml.safe_load(f) or {}
-
-    return config.get("api", {}) or {}
+    return load_config(CONFIG_PATH).api
 
 
 API_CONFIG = load_api_config()
-MAX_RECOMMEND_TOP_K = int(
-    API_CONFIG.get("max_recommend_top_k", DEFAULT_MAX_RECOMMEND_TOP_K)
-)
+MAX_RECOMMEND_TOP_K = int(API_CONFIG.max_recommend_top_k)
 DEFAULT_RECOMMEND_IDS = [
     int(beatmap_id)
-    for beatmap_id in API_CONFIG.get(
-        "default_recommend_beatmap_ids", DEFAULT_RECOMMEND_BEATMAP_IDS
-    )
+    for beatmap_id in API_CONFIG.default_recommend_beatmap_ids
 ]
-OSU_API_VERSION = str(API_CONFIG.get("osu_api_version", "20241024"))
+OSU_API_VERSION = str(API_CONFIG.osu_api_version)
 
 torch.set_num_threads(THREAD_COUNT)
 configure_logging()
@@ -181,9 +171,9 @@ class BeatmapUnavailableError(ValueError):
 
 
 def load_rate_limit_config() -> dict[str, int]:
-    configured = API_CONFIG.get("rate_limits", {}) or {}
+    configured = API_CONFIG.rate_limits
     return {
-        key: int(configured.get(key, default))
+        key: int(configured[key])
         for key, default in DEFAULT_RATE_LIMITS.items()
     }
 

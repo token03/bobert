@@ -138,14 +138,14 @@ def create_kde_sampler(
 
 
 def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimizer:
-    phase_config = config[phase]
+    optimizer_config = config[phase].optimizer
 
-    muon_lr = float(phase_config["muon_lr"])
-    muon_wd = float(phase_config["muon_wd"])
+    muon_lr = float(optimizer_config.muon_lr)
+    muon_wd = float(optimizer_config.muon_wd)
 
-    adam_lr = float(phase_config["adam_lr"])
-    adam_betas = tuple(phase_config["adam_betas"])
-    adam_wd = float(phase_config["adam_wd"])
+    adam_lr = float(optimizer_config.adam_lr)
+    adam_betas = tuple(optimizer_config.adam_betas)
+    adam_wd = float(optimizer_config.adam_wd)
 
     muon_params = []
 
@@ -182,16 +182,17 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
 def create_scheduler(
     optimizer: Optimizer, config: DictConfig, total_steps: int, phase: str
 ) -> LRScheduler:
-    phase_config = config[phase]
+    optimizer_config = config[phase].optimizer
+    scheduler_config = config[phase].scheduler
 
-    adam_lr = float(phase_config["adam_lr"])
-    adam_min_lr = float(phase_config["adam_min_lr"])
+    adam_lr = float(optimizer_config.adam_lr)
+    adam_min_lr = float(scheduler_config.adam_min_lr)
 
-    warmup_ratio = float(phase_config["warmup_ratio"])
-    stable_ratio = float(phase_config["stable_ratio"])
+    warmup_ratio = float(scheduler_config.warmup_ratio)
+    stable_ratio = float(scheduler_config.stable_ratio)
 
-    cooldown = phase_config["cooldown"]
-    num_cycles = float(phase_config.get("num_cycles", 0.5))
+    cooldown = scheduler_config.cooldown
+    num_cycles = float(scheduler_config.num_cycles)
 
     num_warmup_steps = int(warmup_ratio * total_steps)
     num_stable_steps = int(stable_ratio * total_steps)
@@ -227,7 +228,7 @@ def create_trainer(
     extra_callbacks: Optional[List[pl.Callback]] = None,
     logger_version: Optional[int] = None,
 ) -> pl.Trainer:
-    phase_config = config[phase]
+    trainer_config = config[phase].trainer
     base_dir = PRETRAIN_DIR if phase == "pretraining" else ALIGN_DIR
 
     checkpoint_path = os.path.join(str(base_dir), "checkpoints")
@@ -236,7 +237,7 @@ def create_trainer(
     progress_bar = TQDMProgressBar(refresh_rate=1)
 
     callbacks = []
-    if phase_config.get("save_checkpoints", True):
+    if trainer_config.save_checkpoints:
         callbacks.append(
             ModelCheckpoint(
                 dirpath=checkpoint_path,
@@ -252,7 +253,7 @@ def create_trainer(
     if extra_callbacks:
         callbacks.extend(extra_callbacks)
 
-    precision = phase_config["precision"]
+    precision = trainer_config.precision
 
     csv_logger_cls = AppendCSVLogger if logger_version is not None else CSVLogger
     csv_logger = csv_logger_cls(save_dir=logs_path, name="logs", version=logger_version)
@@ -262,12 +263,12 @@ def create_trainer(
     ]
 
     return pl.Trainer(
-        max_epochs=phase_config["epochs"],
+        max_epochs=trainer_config.epochs,
         accelerator=setup_device(),
         devices=1,
         precision=precision,
-        gradient_clip_val=phase_config["grad_clip"],
-        accumulate_grad_batches=phase_config["grad_accum"],
+        gradient_clip_val=trainer_config.grad_clip,
+        accumulate_grad_batches=trainer_config.grad_accum,
         logger=loggers,
         callbacks=callbacks,
         enable_progress_bar=True,
