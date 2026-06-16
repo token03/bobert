@@ -75,8 +75,6 @@ mining:
 alignment:
   trainable_layers: 0
   use_length_buckets: false
-  use_packed_batches: true
-  forward_length_buckets: [1024, 2048, 3072, 4096]
   batch_size: 128
   num_epochs: 1
   alignment_size: null

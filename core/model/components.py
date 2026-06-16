@@ -149,34 +149,20 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             seq_len = end - start
             if self.is_global or seq_len <= self.local_window_size:
                 out = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                outputs.append(out.transpose(0, 1).to(v.dtype))
-                continue
-
-            out_i = []
-            chunk_size = self.local_window_size
-            for c_start in range(0, seq_len, chunk_size):
-                c_end = min(seq_len, c_start + chunk_size)
-                k_start = max(0, c_start - self.local_window_size)
-                k_end = min(seq_len, c_end + self.local_window_size)
-
-                q_c = q_i[:, c_start:c_end, :]
-                k_c = k_i[:, k_start:k_end, :]
-                v_c = v_i[:, k_start:k_end, :]
-
-                idx_q = torch.arange(c_start, c_end, device=q.device).unsqueeze(1)
-                idx_k = torch.arange(k_start, k_end, device=q.device).unsqueeze(0)
-                mask = (idx_q - idx_k).abs() <= self.local_window_size
-                out_i.append(
-                    F.scaled_dot_product_attention(
-                        q_c,
-                        k_c,
-                        v_c,
-                        attn_mask=mask,
-                        dropout_p=0.0,
-                    )
+            else:
+                idx = torch.arange(seq_len, device=q.device)
+                mask = (
+                    idx.unsqueeze(1) - idx.unsqueeze(0)
+                ).abs() <= self.local_window_size
+                out = F.scaled_dot_product_attention(
+                    q_i,
+                    k_i,
+                    v_i,
+                    attn_mask=mask,
+                    dropout_p=0.0,
                 )
 
-            outputs.append(torch.cat(out_i, dim=1).transpose(0, 1).to(v.dtype))
+            outputs.append(out.transpose(0, 1).to(v.dtype))
         return (
             torch.cat(outputs, dim=0)
             if outputs

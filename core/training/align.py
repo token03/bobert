@@ -7,19 +7,20 @@ import pytorch_lightning as pl
 
 from core.training.metrics import ContrastiveMetrics
 
-from .setup import create_optimizer, create_scheduler, create_trainer
+from .base import BobertLightningModule
+from .setup import create_trainer
 from .loss import alignment_loss_fn
 from ..data.normalizer import BeatmapNormalizer
 
 
-class AlignmentModule(pl.LightningModule):
+class AlignmentModule(BobertLightningModule):
     def __init__(
         self,
         model: nn.Module,
         config: Dict[str, Any],
         normalizer: Optional[BeatmapNormalizer] = None,
     ):
-        super().__init__()
+        super().__init__("alignment")
         self.model = model
         self.config = config
         self.normalizer = normalizer
@@ -60,79 +61,6 @@ class AlignmentModule(pl.LightningModule):
                 f"Warmup complete. RoPE cache initialized for L={max_seq_len} using {target_dtype}."
             )
 
-    def _unpack_batch(self, batch: Tuple, use_contrastive: bool):
-        (
-            vectors,
-            attention_mask,
-            cu_seqlens,
-            positive_weights,
-            ignore_contrastive,
-            anchor_weights,
-            map_features,
-        ) = batch
-
-        return vectors, attention_mask, cu_seqlens, map_features, {
-            "positive_weights": positive_weights,
-            "ignore_contrastive": ignore_contrastive,
-            "anchor_weights": anchor_weights,
-            "use_contrastive": use_contrastive,
-        }
-
-    def _scatter_chunked_predictions(self, parts, positions):
-        order = torch.cat(positions, dim=0)
-        inverse = torch.empty_like(order)
-        inverse[order] = torch.arange(order.shape[0], device=order.device)
-
-        def concat_token_value(values):
-            first = values[0]
-            if isinstance(first, torch.Tensor):
-                return torch.cat(values, dim=0)
-            if isinstance(first, dict):
-                return {
-                    key: concat_token_value([value[key] for value in values])
-                    for key in first
-                }
-            return first
-
-        def scatter_value(values):
-            first = values[0]
-            if isinstance(first, torch.Tensor):
-                return torch.cat(values, dim=0)[inverse]
-            if isinstance(first, dict):
-                return {
-                    key: scatter_value([value[key] for value in values])
-                    for key in first
-                }
-            return first
-
-        predictions = {}
-        for key in parts[0]:
-            values = [part[key] for part in parts]
-            if key in {"mlm", "mlm_targets"}:
-                predictions[key] = concat_token_value(values)
-            else:
-                predictions[key] = scatter_value(values)
-        return predictions
-
-    def _forward_chunked_batch(self, batch: Dict[str, Any]):
-        pred_parts = []
-        positions = []
-        map_features = batch["labels"].get("map_features")
-
-        for chunk in batch["chunks"]:
-            pred_parts.append(
-                self(
-                    chunk["vectors"],
-                    chunk["attention_mask"],
-                    chunk["cu_seqlens"],
-                    map_features[chunk["positions"]] if map_features is not None else None,
-                )
-            )
-            positions.append(chunk["positions"])
-
-        predictions = self._scatter_chunked_predictions(pred_parts, positions)
-        return predictions, batch["labels"]
-
     def _forward_packed_batch(self, batch: Dict[str, Any]):
         labels = batch["labels"]
         max_seqlen = int(batch["max_seqlen"].item())
@@ -144,19 +72,20 @@ class AlignmentModule(pl.LightningModule):
         )
         return predictions, labels
 
-    def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        if isinstance(batch, dict) and "packed_vectors" in batch:
-            predictions, labels = self._forward_packed_batch(batch)
-            labels["use_contrastive"] = True
-        elif isinstance(batch, dict) and "chunks" in batch:
-            predictions, labels = self._forward_chunked_batch(batch)
-            labels["use_contrastive"] = True
-        else:
-            vectors, attention_mask, cu_seqlens, map_features, labels = self._unpack_batch(
-                batch, True
-            )
-            predictions = self(vectors, attention_mask, cu_seqlens, map_features)
+    def _forward_batch(self, batch: Dict[str, Any]):
+        if "packed_vectors" in batch:
+            return self._forward_packed_batch(batch)
+        labels = batch["labels"]
+        predictions = self(
+            batch["vectors"],
+            batch["attention_mask"],
+            batch["cu_seqlens"],
+            labels.get("map_features"),
+        )
+        return predictions, labels
 
+    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        predictions, labels = self._forward_batch(batch)
         loss_dict = alignment_loss_fn(predictions, labels, self.config)
 
         self.log_dict(
@@ -170,11 +99,8 @@ class AlignmentModule(pl.LightningModule):
 
         return loss_dict["total_loss"]
 
-    def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        vectors, attention_mask, cu_seqlens, map_features, labels = self._unpack_batch(
-            batch, False
-        )
-        predictions = self(vectors, attention_mask, cu_seqlens, map_features)
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        predictions, labels = self._forward_batch(batch)
         loss_dict = alignment_loss_fn(predictions, labels, self.config)
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
         self.log(
@@ -191,62 +117,6 @@ class AlignmentModule(pl.LightningModule):
         for key, value in results.items():
             self.log(f"val_{key}", value)
         self.metrics.reset()
-
-    @staticmethod
-    def _flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
-        flat = {}
-        for key, value in metrics.items():
-            new_key = f"{prefix}_{key}" if prefix else key
-            if isinstance(value, dict):
-                flat.update(AlignmentModule._flatten_metrics(value, new_key))
-            else:
-                flat[new_key] = value
-        return flat
-
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
-        if self.normalizer:
-            checkpoint["vector_stats"] = self.normalizer.get_vector_stats()
-            checkpoint["attribute_stats"] = self.normalizer.get_attribute_stats()
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        if self.normalizer is not None:
-            if "vector_stats" in checkpoint:
-                self.normalizer.vector_stats = checkpoint["vector_stats"]
-            if "attribute_stats" in checkpoint:
-                self.normalizer.attribute_stats = checkpoint["attribute_stats"]
-
-        state_dict = checkpoint.get("state_dict")
-        if not state_dict:
-            return
-
-        model_is_compiled = hasattr(self.model, "_orig_mod")
-        normalized_state = {}
-        for key, value in state_dict.items():
-            if model_is_compiled:
-                if key.startswith("model.") and not key.startswith("model._orig_mod."):
-                    key = "model._orig_mod." + key[len("model.") :]
-            elif key.startswith("model._orig_mod."):
-                key = "model." + key[len("model._orig_mod.") :]
-            normalized_state[key] = value
-        checkpoint["state_dict"] = normalized_state
-
-    def configure_optimizers(self):
-        optimizer = create_optimizer(self.model, self.config, "alignment")
-        total_steps = self.trainer.estimated_stepping_batches
-        scheduler = create_scheduler(optimizer, self.config, total_steps, "alignment")
-
-        if scheduler is None:
-            return optimizer
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1,
-            },
-        }
-
 
 def setup_alignment(
     config: Dict[str, Any],

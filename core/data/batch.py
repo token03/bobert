@@ -182,16 +182,14 @@ def collate_align(
         pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
     )
     labels = _alignment_labels(map_features, beatmap_ids, targets)
-
-    return (
-        padded_vec,
-        mask,
-        cu_seqlens,
-        labels["positive_weights"],
-        labels["ignore_contrastive"],
-        labels["anchor_weights"],
-        labels["map_features"],
-    )
+    labels["use_contrastive"] = False
+    return {
+        "vectors": padded_vec,
+        "attention_mask": mask,
+        "cu_seqlens": cu_seqlens,
+        "labels": labels,
+        "batch_size": len(batch),
+    }
 
 
 def collate_align_packed(
@@ -211,60 +209,6 @@ def collate_align_packed(
         "packed_vectors": packed_vectors,
         "cu_seqlens": cu_seqlens,
         "max_seqlen": torch.tensor(max_seqlen, dtype=torch.long),
-        "labels": labels,
-        "batch_size": len(batch),
-    }
-
-
-def collate_align_chunked(
-    batch: List[Tuple],
-    max_seq_len: int,
-    vector_dim: int,
-    group_size: int,
-    forward_length_buckets: Sequence[int],
-):
-    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
-    labels = _alignment_labels(map_features, beatmap_ids, targets)
-
-    buckets = sorted(int(bucket) for bucket in forward_length_buckets)
-    if not buckets:
-        raise ValueError("forward_length_buckets must not be empty")
-    if buckets[-1] < max_seq_len:
-        raise ValueError("forward_length_buckets must cover max_seq_len")
-
-    chunk_groups: Dict[int, List[int]] = {bucket: [] for bucket in buckets}
-    for start in range(0, len(vectors), group_size):
-        positions = list(range(start, min(start + group_size, len(vectors))))
-        group_max_len = max(min(vectors[pos].shape[0], max_seq_len) for pos in positions)
-        bucket = length_bucket(group_max_len, buckets)
-        chunk_groups[bucket].extend(positions)
-
-    chunks = []
-    for bucket in buckets:
-        positions = chunk_groups[bucket]
-        if not positions:
-            continue
-
-        chunk_vectors = [vectors[pos] for pos in positions]
-        padded_vec, mask, cu_seqlens = pad_batch(
-            chunk_vectors,
-            max_seq_len,
-            vector_dim,
-            pad_to_len=bucket,
-        )
-        chunks.append(
-            {
-                "vectors": padded_vec,
-                "attention_mask": mask,
-                "cu_seqlens": cu_seqlens,
-                "positions": torch.tensor(positions, dtype=torch.long),
-                "bucket": torch.tensor(bucket, dtype=torch.long),
-            }
-        )
-
-    labels["use_contrastive"] = True
-    return {
-        "chunks": chunks,
         "labels": labels,
         "batch_size": len(batch),
     }

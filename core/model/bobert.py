@@ -131,6 +131,10 @@ class BobertModel(nn.Module):
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
         return self.feature_tokenizer(x)
 
+    def _get_cu_seqlens(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
+        return F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+
     def _embed(
         self,
         x: torch.Tensor,
@@ -138,8 +142,7 @@ class BobertModel(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if cu_seqlens is None:
-            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+            cu_seqlens = self._get_cu_seqlens(attention_mask)
 
         packed_embed = self.embed_sequences(x[attention_mask])
 
@@ -153,8 +156,7 @@ class BobertModel(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if cu_seqlens is None:
-            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
+            cu_seqlens = self._get_cu_seqlens(attention_mask)
 
         packed_output = packed_embeddings
         all_freqs = self.rotary_emb(
@@ -243,45 +245,27 @@ class BobertProjectedStatsPooler(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
-        batch_size = seqlens.numel()
-        batch_idx = torch.repeat_interleave(
-            torch.arange(batch_size, device=packed_output.device), seqlens
-        )
-
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         packed_float = packed_output.float()
-        seqlens_float = seqlens.clamp_min(1).unsqueeze(1).to(packed_float.dtype)
         pooled = {}
 
         if "mean" in self.stats or "std" in self.stats:
-            pooled_sum = torch.zeros(
-                batch_size, self.d_model, device=packed_output.device, dtype=torch.float32
+            pooled["mean"] = torch.segment_reduce(
+                packed_float, reduce="mean", lengths=lengths
             )
-            pooled_sum.index_add_(0, batch_idx, packed_float)
-            mean = pooled_sum / seqlens_float
-            pooled["mean"] = mean
+            pooled["mean"] = pooled["mean"].masked_fill(lengths[:, None] == 0, 0.0)
 
         if "std" in self.stats:
-            pooled_squares = torch.zeros_like(pooled_sum)
-            pooled_squares.index_add_(0, batch_idx, packed_float.square())
-            variance = (pooled_squares / seqlens_float) - pooled["mean"].square()
-            pooled["std"] = variance.clamp_min(0.0).sqrt()
+            mean_sq = torch.segment_reduce(
+                packed_float.square(), reduce="mean", lengths=lengths
+            )
+            mean_sq = mean_sq.masked_fill(lengths[:, None] == 0, 0.0)
+            pooled["std"] = (mean_sq - pooled["mean"].square()).clamp_min(0.0).sqrt()
 
         if "max" in self.stats:
-            pooled_max = torch.full(
-                (batch_size, self.d_model),
-                -torch.inf,
-                device=packed_output.device,
-                dtype=torch.float32,
+            pooled["max"] = torch.segment_reduce(
+                packed_float, reduce="amax", lengths=lengths
             )
-            pooled_max.scatter_reduce_(
-                0,
-                batch_idx[:, None].expand(-1, self.d_model),
-                packed_float,
-                reduce="amax",
-                include_self=True,
-            )
-            pooled["max"] = pooled_max
 
         projected = [self.projections[name](pooled[name]) for name in self.stats]
         return torch.cat(projected, dim=-1).to(packed_output.dtype)
@@ -407,7 +391,6 @@ class BobertQueryAttentionPooler(nn.Module):
     ) -> torch.Tensor:
         device = k.device
         q = self.query.to(device=device, dtype=k.dtype)
-        scale = self.head_dim**-0.5
 
         outputs = []
         start = 0
@@ -423,13 +406,15 @@ class BobertQueryAttentionPooler(nn.Module):
                 )
                 continue
 
-            k_i = k[start:end].float()
-            v_i = v[start:end].float()
-
-            scores = torch.einsum("qhd,shd->qhs", q.float(), k_i) * scale
-            weights = torch.softmax(scores, dim=-1)
-            out = torch.einsum("qhs,shd->qhd", weights, v_i)
-            outputs.append(out.to(k.dtype))
+            k_i = k[start:end].transpose(0, 1).float()
+            v_i = v[start:end].transpose(0, 1).float()
+            out = F.scaled_dot_product_attention(
+                q.transpose(0, 1).float(),
+                k_i,
+                v_i,
+                dropout_p=0.0,
+            )
+            outputs.append(out.transpose(0, 1).to(k.dtype))
             start = end
 
         return (
@@ -596,16 +581,18 @@ class BobertForPretraining(nn.Module):
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        packed_input, attention_mask, cu_seqlens = self.bert._embed(
-            x, attention_mask, cu_seqlens
-        )
         max_seqlen = x.shape[1]
-        packed_output = self.bert.encode(
-            packed_input,
-            attention_mask,
-            max_seqlen=max_seqlen,
-            cu_seqlens=cu_seqlens,
-        )
+        packed_output, _ = self.bert(x, attention_mask, cu_seqlens)
+        if cu_seqlens is None:
+            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
+
+    def _get_embedding(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
         pooler = self.difficulty_head.pooler
         pooled = pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
         pieces = []
@@ -627,13 +614,7 @@ class BobertForPretraining(nn.Module):
             max_seqlen=max_seqlen,
             cu_seqlens=cu_seqlens,
         )
-        pooler = self.difficulty_head.pooler
-        pooled = pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
-        pieces = []
-        for stat in ("mean", "max", "std"):
-            start = pooler.stats.index(stat) * pooler.stat_dim
-            pieces.append(pooled[:, start : start + pooler.stat_dim])
-        return F.normalize(torch.cat(pieces, dim=-1), dim=-1).to(torch.float16)
+        return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
 
     def forward(
         self,
@@ -641,12 +622,10 @@ class BobertForPretraining(nn.Module):
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        if cu_seqlens is None:
-            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-
+        packed_embed, attention_mask, cu_seqlens = self.bert._embed(
+            x, attention_mask, cu_seqlens
+        )
         packed_targets = x[attention_mask]
-        packed_embed = self.bert.embed_sequences(packed_targets)
         packed_input, is_masked = self.masker(
             packed_embed,
             attention_mask,
@@ -819,26 +798,13 @@ class BobertForAlignment(nn.Module):
         map_features = map_features.index_select(-1, map_feature_indices)
         return self.map_projector(map_features)
 
-    def forward(
+    def _get_pooled_outputs(
         self,
-        x: torch.Tensor,
-        attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
         map_features: Optional[torch.Tensor] = None,
-    ) -> Dict[str, Any]:
-        if cu_seqlens is None:
-            seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-            cu_seqlens = F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-
-        packed_input, attention_mask, cu_seqlens = self.bert._embed(
-            x, attention_mask, cu_seqlens
-        )
-        max_seqlen = x.shape[1]
-
-        packed_output = self.bert.encode(
-            packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
-        )
-
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         contrastive_pooled = self.contrastive_pooler(
             packed_output,
             cu_seqlens,
@@ -849,16 +815,27 @@ class BobertForAlignment(nn.Module):
             cu_seqlens,
             max_seqlen=max_seqlen,
         )
-
+        pieces = [contrastive_pooled, aux_pooled]
         if self.map_projector is not None:
-            map_projected = self._project_map_features(
-                map_features, contrastive_pooled
-            )
-            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
-        else:
-            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
+            pieces.append(self._project_map_features(map_features, contrastive_pooled))
 
-        retrieval_embedding = F.normalize(self.retrieval_head(pooled), dim=-1)
+        pooled = torch.cat(pieces, dim=-1)
+        return pooled, F.normalize(self.retrieval_head(pooled), dim=-1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        map_features: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        max_seqlen = x.shape[1]
+        packed_output, _ = self.bert(x, attention_mask, cu_seqlens)
+        if cu_seqlens is None:
+            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        pooled, retrieval_embedding = self._get_pooled_outputs(
+            packed_output, cu_seqlens, max_seqlen, map_features
+        )
 
         return {
             "embedding": retrieval_embedding,
@@ -879,26 +856,9 @@ class BobertForAlignment(nn.Module):
             max_seqlen=max_seqlen,
             cu_seqlens=cu_seqlens,
         )
-        contrastive_pooled = self.contrastive_pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
+        pooled, retrieval_embedding = self._get_pooled_outputs(
+            packed_output, cu_seqlens, max_seqlen, map_features
         )
-        aux_pooled = self.pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-
-        if self.map_projector is not None:
-            map_projected = self._project_map_features(
-                map_features, contrastive_pooled
-            )
-            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
-        else:
-            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
-
-        retrieval_embedding = F.normalize(self.retrieval_head(pooled), dim=-1)
 
         return {
             "embedding": retrieval_embedding,
@@ -912,34 +872,14 @@ class BobertForAlignment(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
         map_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        packed_input, attention_mask, cu_seqlens = self.bert._embed(
-            x, attention_mask, cu_seqlens
-        )
         max_seqlen = x.shape[1]
-
-        packed_output = self.bert.encode(
-            packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+        packed_output, _ = self.bert(x, attention_mask, cu_seqlens)
+        if cu_seqlens is None:
+            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        _, retrieval_embedding = self._get_pooled_outputs(
+            packed_output, cu_seqlens, max_seqlen, map_features
         )
-        contrastive_pooled = self.contrastive_pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        aux_pooled = self.pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-
-        if self.map_projector is not None:
-            map_projected = self._project_map_features(
-                map_features, contrastive_pooled
-            )
-            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
-        else:
-            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
-
-        return F.normalize(self.retrieval_head(pooled), dim=-1)
+        return retrieval_embedding
 
     def embed_packed(
         self,
@@ -955,23 +895,7 @@ class BobertForAlignment(nn.Module):
             max_seqlen=max_seqlen,
             cu_seqlens=cu_seqlens,
         )
-        contrastive_pooled = self.contrastive_pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
+        _, retrieval_embedding = self._get_pooled_outputs(
+            packed_output, cu_seqlens, max_seqlen, map_features
         )
-        aux_pooled = self.pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-
-        if self.map_projector is not None:
-            map_projected = self._project_map_features(
-                map_features, contrastive_pooled
-            )
-            pooled = torch.cat([contrastive_pooled, aux_pooled, map_projected], dim=-1)
-        else:
-            pooled = torch.cat([contrastive_pooled, aux_pooled], dim=-1)
-
-        return F.normalize(self.retrieval_head(pooled), dim=-1)
+        return retrieval_embedding

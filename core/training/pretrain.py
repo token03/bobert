@@ -8,21 +8,22 @@ import pytorch_lightning as pl
 
 from core.data.module import PretrainData
 
-from .setup import create_trainer, create_optimizer, create_scheduler
+from .base import BobertLightningModule
+from .setup import create_trainer
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
 from ..data.beatmap import DIFFICULTY_ATTRIBUTES
 from ..data.hitobject import HitObject
 
 
-class PretrainingModule(pl.LightningModule):
+class PretrainingModule(BobertLightningModule):
     def __init__(
         self,
         model: nn.Module,
         config: DictConfig,
         datamodule: PretrainData,
     ):
-        super().__init__()
+        super().__init__("pretraining")
         self.model = model
         self.config = config
         self.datamodule = datamodule
@@ -178,65 +179,14 @@ class PretrainingModule(pl.LightningModule):
         return loss_dict["total_loss"]
 
     def on_validation_epoch_end(self):
-        mlm_results = self._flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
-        diff_results = self._flatten_metrics(self.difficulty_metrics.compute(), prefix="val_diff")
+        mlm_results = self.flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
+        diff_results = self.flatten_metrics(self.difficulty_metrics.compute(), prefix="val_diff")
 
         self.log_dict(mlm_results, sync_dist=True)
         self.log_dict(diff_results, sync_dist=True)
 
         self.mlm_metrics.reset()
         self.difficulty_metrics.reset()
-
-    @staticmethod
-    def _flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
-        flat = {}
-        for key, value in metrics.items():
-            new_key = f"{prefix}_{key}" if prefix else key
-            if isinstance(value, dict):
-                flat.update(PretrainingModule._flatten_metrics(value, new_key))
-            else:
-                flat[new_key] = value
-        return flat
-
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
-        checkpoint["vector_stats"] = self.datamodule.normalizer.get_vector_stats()
-        checkpoint["attribute_stats"] = self.datamodule.normalizer.get_attribute_stats()
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        if "vector_stats" in checkpoint:
-            self.datamodule.normalizer.vector_stats = checkpoint["vector_stats"]
-        if "attribute_stats" in checkpoint:
-            self.datamodule.normalizer.attribute_stats = checkpoint["attribute_stats"]
-
-        state_dict = checkpoint.get("state_dict")
-        if not state_dict:
-            return
-
-        model_is_compiled = hasattr(self.model, "_orig_mod")
-        normalized_state = {}
-        for key, value in state_dict.items():
-            if model_is_compiled:
-                if key.startswith("model.") and not key.startswith("model._orig_mod."):
-                    key = "model._orig_mod." + key[len("model.") :]
-            elif key.startswith("model._orig_mod."):
-                key = "model." + key[len("model._orig_mod.") :]
-            normalized_state[key] = value
-        checkpoint["state_dict"] = normalized_state
-
-    def configure_optimizers(self) -> Any:
-        optimizer = create_optimizer(self.model, self.config, "pretraining")
-        
-        total_steps = int(self.trainer.estimated_stepping_batches)
-        scheduler = create_scheduler(optimizer, self.config, total_steps, "pretraining")
-    
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-                "frequency": 1,
-            },
-        }
 
 def setup_pretraining(
     config: DictConfig,

@@ -6,7 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-from .batch import collate_align, collate_align_chunked, collate_align_packed, collate_pretrain
+from .batch import collate_align, collate_align_packed, collate_pretrain
 from .dataset import BeatmapDataset
 from .mining import MiningConfig, load_alignment_cache
 from .normalizer import BeatmapNormalizer
@@ -108,18 +108,25 @@ class BeatmapData(pl.LightningDataModule):
             self.data_config["val_split"],
         )
 
-    def _get_dataloader(
-        self, dataset, shuffle, collate_fn, sampler=None, drop_last=False
+    def _make_loader(
+        self, dataset, collate_fn, *, train=False, sampler=None, batch_sampler=None
     ):
-        num_workers = self._num_workers()
+        if batch_sampler is not None:
+            return DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=collate_fn,
+                **self._dataloader_kwargs(),
+            )
+
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=shuffle and sampler is None,
+            shuffle=train and sampler is None,
             sampler=sampler,
             collate_fn=collate_fn,
-            drop_last=drop_last,
-            **self._dataloader_kwargs(num_workers),
+            drop_last=train and self._drop_last_training_batches(),
+            **self._dataloader_kwargs(),
         )
 
     def _drop_last_training_batches(self) -> bool:
@@ -164,18 +171,11 @@ class BeatmapData(pl.LightningDataModule):
         mean_len = int(round(sum(lengths) / len(lengths)))
         return batch_size * length_bucket(mean_len, buckets)
 
-    def _get_bucketed_train_dataloader(self, dataset, collate_fn, sampler=None):
+    def _bucketed_loader(self, dataset, collate_fn, *, train=False, sampler=None):
         buckets = self._length_buckets()
         if not buckets:
-            return self._get_dataloader(
-                dataset,
-                True,
-                collate_fn,
-                sampler,
-                drop_last=self._drop_last_training_batches(),
-            )
+            return self._make_loader(dataset, collate_fn, train=train, sampler=sampler)
 
-        num_workers = self._num_workers()
         lengths = self._lengths(dataset)
         batch_sampler = LengthBucketBatchSampler(
             lengths,
@@ -184,36 +184,10 @@ class BeatmapData(pl.LightningDataModule):
             sampler=sampler,
             max_tokens=self._token_budget(lengths, buckets),
             seed=self.data_config.get("dataset_seed", 42),
-            drop_last=self._drop_last_training_batches(),
+            shuffle=train,
+            drop_last=train and self._drop_last_training_batches(),
         )
-        return DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            collate_fn=collate_fn,
-            **self._dataloader_kwargs(num_workers),
-        )
-
-    def _get_bucketed_val_dataloader(self, dataset, collate_fn):
-        buckets = self._length_buckets()
-        if not buckets:
-            return self._get_dataloader(dataset, False, collate_fn)
-
-        num_workers = self._num_workers()
-        lengths = self._lengths(dataset)
-        batch_sampler = LengthBucketBatchSampler(
-            lengths,
-            self.batch_size,
-            buckets,
-            max_tokens=self._token_budget(lengths, buckets),
-            seed=self.data_config.get("dataset_seed", 42),
-            shuffle=False,
-        )
-        return DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            collate_fn=collate_fn,
-            **self._dataloader_kwargs(num_workers),
-        )
+        return self._make_loader(dataset, collate_fn, batch_sampler=batch_sampler)
 
 
 class PretrainData(BeatmapData):
@@ -254,8 +228,8 @@ class PretrainData(BeatmapData):
             vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
-        return self._get_bucketed_train_dataloader(
-            self.train_dataset, collate, self._sampler
+        return self._bucketed_loader(
+            self.train_dataset, collate, train=True, sampler=self._sampler
         )
 
     def val_dataloader(self):
@@ -265,7 +239,7 @@ class PretrainData(BeatmapData):
             vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
-        return self._get_bucketed_val_dataloader(self.val_dataset, collate)
+        return self._bucketed_loader(self.val_dataset, collate)
 
 
 class AlignData(BeatmapData):
@@ -430,23 +404,11 @@ class AlignData(BeatmapData):
 
     def train_dataloader(self):
         align_config = self._alignment_config()
-        if align_config.get("use_packed_batches", True):
-            collate = partial(
-                collate_align_packed,
-                max_seq_len=self.data_config["max_seq_len"],
-                vector_dim=self.vector_dim,
-            )
-        else:
-            collate = partial(
-                collate_align_chunked,
-                max_seq_len=self.data_config["max_seq_len"],
-                vector_dim=self.vector_dim,
-                group_size=align_config.get("group_size", 4),
-                forward_length_buckets=align_config.get(
-                    "forward_length_buckets",
-                    [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
-                ),
-            )
+        collate = partial(
+            collate_align_packed,
+            max_seq_len=self.data_config["max_seq_len"],
+            vector_dim=self.vector_dim,
+        )
         if self.train_mining_lookup:
             buckets = self._length_buckets()
             lengths = self._lengths(self.train_dataset)
@@ -462,18 +424,8 @@ class AlignData(BeatmapData):
                 buckets=buckets,
                 drop_last=self._drop_last_training_batches(),
             )
-            return DataLoader(
-                self.train_dataset,
-                batch_sampler=sampler,
-                collate_fn=collate,
-                **self._dataloader_kwargs(),
-            )
-        return self._get_dataloader(
-            self.train_dataset,
-            True,
-            collate,
-            drop_last=self._drop_last_training_batches(),
-        )
+            return self._make_loader(self.train_dataset, collate, batch_sampler=sampler)
+        return self._make_loader(self.train_dataset, collate, train=True)
 
     def val_dataloader(self):
         collate = partial(
@@ -482,4 +434,4 @@ class AlignData(BeatmapData):
             vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
-        return self._get_bucketed_val_dataloader(self.val_dataset, collate)
+        return self._bucketed_loader(self.val_dataset, collate)

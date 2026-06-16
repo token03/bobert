@@ -1,6 +1,4 @@
-# hitobject.py
-from typing import NamedTuple, List, Dict, Any, Optional, Tuple
-import numpy as np
+from typing import NamedTuple, List, Dict
 from enum import Enum
 
 OSU_STAGE_WIDTH = 512
@@ -34,43 +32,10 @@ DURATION_BINS = [
 CANONICAL_BPM_MIN = 120.0
 CANONICAL_BPM_MAX = 240.0
 
-
-def canonicalize_bpm(bpm: float) -> float:
-    if not np.isfinite(bpm) or bpm <= 0:
-        return float("nan")
-
-    while bpm < CANONICAL_BPM_MIN:
-        bpm *= 2.0
-    while bpm >= CANONICAL_BPM_MAX:
-        bpm /= 2.0
-    return float(bpm)
-
-
-def canonicalize_bpm_array(bpm: np.ndarray) -> np.ndarray:
-    canonical = bpm.astype(np.float32, copy=True)
-    valid = np.isfinite(canonical) & (canonical > 0)
-    canonical[~valid] = np.nan
-
-    while np.any(valid & (canonical < CANONICAL_BPM_MIN)):
-        canonical[valid & (canonical < CANONICAL_BPM_MIN)] *= 2.0
-    while np.any(valid & (canonical >= CANONICAL_BPM_MAX)):
-        canonical[valid & (canonical >= CANONICAL_BPM_MAX)] /= 2.0
-
-    return canonical
-
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
     STANDARD = "standard"
     NONE = "none"
-
-
-def quantize_to_bins(values: np.ndarray, bins: List[float]) -> np.ndarray:
-    bins_arr = np.array(bins)
-    diffs = np.abs(values[:, np.newaxis] - bins_arr)
-    result = np.argmin(diffs, axis=1)
-    result[values <= 0] = 0
-    result[values >= bins_arr[-1]] = len(bins) - 1
-    return result
 
 
 OBJECT_TYPE_CIRCLE = 0
@@ -80,6 +45,43 @@ OBJECT_TYPE_SPINNER_START = 3
 OBJECT_TYPE_SPINNER_END = 4
 
 SLIDER_TYPE_INDEX = OBJECT_TYPE_SLIDER_HEAD
+
+
+class Feature(NamedTuple):
+    name: str
+    norm: NormalizationType
+    cardinality: int | None = None
+    slider_only: bool = False
+
+
+FEATURES = [
+    Feature("norm_x", NormalizationType.NONE),
+    Feature("norm_y", NormalizationType.NONE),
+    Feature("delta_x", NormalizationType.STANDARD),
+    Feature("delta_y", NormalizationType.STANDARD),
+    Feature("log_time_diff_ms", NormalizationType.STANDARD),
+    Feature("notes_per_second", NormalizationType.STANDARD),
+    Feature("velocity", NormalizationType.STANDARD),
+    Feature("relative_cos", NormalizationType.NONE),
+    Feature("relative_sin", NormalizationType.NONE),
+    Feature("rhythm_change", NormalizationType.STANDARD),
+    Feature("log_slider_pixel_length", NormalizationType.STANDARD, slider_only=True),
+    Feature("log_slider_repeats", NormalizationType.STANDARD, slider_only=True),
+    Feature("slider_tortuosity", NormalizationType.STANDARD, slider_only=True),
+    Feature("beat_in_measure", NormalizationType.CATEGORICAL, MAX_METER_CARDINALITY),
+    Feature("object_type", NormalizationType.CATEGORICAL, 5),
+    Feature("is_new_combo", NormalizationType.CATEGORICAL, 2),
+    Feature("time_diff_bin", NormalizationType.CATEGORICAL, len(DURATION_BINS)),
+    Feature("rhythmic_snap", NormalizationType.CATEGORICAL, 6),
+]
+
+CATEGORICAL_FEATURE_ORDER = (
+    "object_type",
+    "is_new_combo",
+    "beat_in_measure",
+    "time_diff_bin",
+    "rhythmic_snap",
+)
 
 
 class HitObject(NamedTuple):
@@ -110,18 +112,7 @@ class HitObject(NamedTuple):
 
     @staticmethod
     def get_slider_only_features() -> List[str]:
-        return ["log_slider_pixel_length", "log_slider_repeats", "slider_tortuosity"]
-
-    @staticmethod
-    def get_raw_field_names() -> List[str]:
-        return [
-            "x",
-            "y",
-            "slider_end_x",
-            "slider_end_y",
-            "slider_repeats",
-            "pixel_length",
-        ]
+        return [feature.name for feature in FEATURES if feature.slider_only]
 
     @classmethod
     def get_vector_dim(cls):
@@ -130,65 +121,37 @@ class HitObject(NamedTuple):
     @classmethod
     def get_feature_info(cls):
         field_names = cls.get_field_names()
-
-        slider_feature_names = cls.get_slider_only_features()
-
-        categorical_features = [
-            "object_type",
-            "is_new_combo",
-            "beat_in_measure",
-            "time_diff_bin",
-            "rhythmic_snap",
+        index = {name: i for i, name in enumerate(field_names)}
+        features = {feature.name: feature for feature in FEATURES}
+        continuous = [
+            feature
+            for feature in FEATURES
+            if feature.norm is not NormalizationType.CATEGORICAL
         ]
-
-        continuous_features = [f for f in field_names if f not in categorical_features]
-
-        cat_cardinalities = {
-            "object_type": 5,
-            "is_new_combo": 2,
-            "beat_in_measure": MAX_METER_CARDINALITY,
-            "time_diff_bin": len(DURATION_BINS),
-            "rhythmic_snap": 6,
-        }
 
         info = {
             "categorical": {
                 name: {
-                    "index": field_names.index(name),
-                    "cardinality": cat_cardinalities[name],
+                    "index": index[name],
+                    "cardinality": features[name].cardinality,
                 }
-                for name in categorical_features
+                for name in CATEGORICAL_FEATURE_ORDER
             },
             "continuous": {
-                name: field_names.index(name) for name in continuous_features
+                feature.name: index[feature.name] for feature in continuous
             },
-            "slider": {name: field_names.index(name) for name in slider_feature_names},
+            "slider": {
+                feature.name: index[feature.name]
+                for feature in FEATURES
+                if feature.slider_only
+            },
             "names": field_names,
         }
         return info
 
     @classmethod
     def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
-        return {
-            "norm_x": NormalizationType.NONE,
-            "norm_y": NormalizationType.NONE,
-            "delta_x": NormalizationType.STANDARD,
-            "delta_y": NormalizationType.STANDARD,
-            "log_time_diff_ms": NormalizationType.STANDARD,
-            "notes_per_second": NormalizationType.STANDARD,
-            "velocity": NormalizationType.STANDARD,
-            "relative_cos": NormalizationType.NONE,
-            "relative_sin": NormalizationType.NONE,
-            "rhythm_change": NormalizationType.STANDARD,
-            "log_slider_pixel_length": NormalizationType.STANDARD,
-            "log_slider_repeats": NormalizationType.STANDARD,
-            "slider_tortuosity": NormalizationType.STANDARD,
-            "object_type": NormalizationType.CATEGORICAL,
-            "is_new_combo": NormalizationType.CATEGORICAL,
-            "beat_in_measure": NormalizationType.CATEGORICAL,
-            "time_diff_bin": NormalizationType.CATEGORICAL,
-            "rhythmic_snap": NormalizationType.CATEGORICAL,
-        }
+        return {feature.name: feature.norm for feature in FEATURES}
 
 
 VECTOR_DIM = HitObject.get_vector_dim()
