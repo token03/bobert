@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from core.training.metrics import ContrastiveMetrics
+from core.model.checkpoint import normalize_checkpoint_state
 
 from .base import BobertLightningModule
 from .loss import alignment_loss_fn
@@ -142,19 +143,12 @@ def load_pretraining_weights(
     map_location: str | torch.device = "cpu",
 ) -> Dict[str, Any]:
     checkpoint_path, checkpoint = load_pretraining_checkpoint(checkpoint_path, map_location)
-    raw_state = checkpoint.get("state_dict", checkpoint)
-    state = {}
-
-    for key, value in raw_state.items():
-        for prefix in ("model._orig_mod.", "model.", "_orig_mod."):
-            if key.startswith(prefix):
-                key = key[len(prefix) :]
-                break
+    state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
+    for key, value in list(state.items()):
         if key.startswith("difficulty_head.pooler."):
+            del state[key]
             key = key.replace("difficulty_head.pooler.", "pooler.", 1)
-        if key.startswith("difficulty_head.head."):
-            key = key.replace("difficulty_head.head.", "difficulty_head.", 1)
-        state[key] = value
+            state[key] = value
 
     target = getattr(model, "_orig_mod", model)
     model_state = target.state_dict()

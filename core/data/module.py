@@ -6,7 +6,7 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
-from .batch import collate_align, collate_align_packed, collate_pretrain
+from .batch import collate_align, collate_pretrain
 from .dataset import BeatmapDataset
 from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
@@ -89,24 +89,28 @@ class BeatmapData(pl.LightningDataModule):
         )
 
     def _split_loaded_data(self, beatmap_data: List[Dict[str, Any]]):
-        all_data = [b["hitobjects"] for b in beatmap_data]
-        diff_attrs = {
-            k: [b["difficulty"][k] for b in beatmap_data]
-            for k in beatmap_data[0]["difficulty"].keys()
-        }
-        map_features = {
-            k: [b["map_features"][k] for b in beatmap_data]
-            for k in beatmap_data[0].get("map_features", {}).keys()
-        }
-        all_ids = [b["beatmap_id"] for b in beatmap_data]
-        return random_split_aligned(
-            {
-                "data": all_data,
-                "attrs": diff_attrs,
-                "map_features": map_features,
-                "ids": all_ids,
+        return random_split_aligned(self._unpack(beatmap_data), self.data_config["val_split"])
+
+    def _unpack(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "data": [row["hitobjects"] for row in rows],
+            "attrs": {
+                key: [row["difficulty"][key] for row in rows]
+                for key in rows[0]["difficulty"]
             },
-            self.data_config["val_split"],
+            "map_features": {
+                key: [row["map_features"][key] for row in rows]
+                for key in rows[0].get("map_features", {})
+            },
+            "ids": [row["beatmap_id"] for row in rows],
+        }
+
+    def _collate(self, fn, **kwargs):
+        return partial(
+            fn,
+            max_seq_len=self.max_seq_len,
+            vector_dim=self.vector_dim,
+            **kwargs,
         )
 
     def _make_loader(
@@ -220,10 +224,8 @@ class PretrainData(BeatmapData):
         )
 
     def train_dataloader(self):
-        collate = partial(
+        collate = self._collate(
             collate_pretrain,
-            max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
         return self._bucketed_loader(
@@ -231,10 +233,8 @@ class PretrainData(BeatmapData):
         )
 
     def val_dataloader(self):
-        collate = partial(
+        collate = self._collate(
             collate_pretrain,
-            max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
         return self._bucketed_loader(self.val_dataset, collate)
@@ -336,16 +336,8 @@ class AlignData(BeatmapData):
             )
         self.vector_dim = train_s["data"][0].shape[1]
 
-        all_data = [b["hitobjects"] for b in all_beatmap_data]
-        all_attrs = {
-            k: [b["difficulty"][k] for b in all_beatmap_data]
-            for k in all_beatmap_data[0]["difficulty"].keys()
-        }
-        all_map_features = {
-            k: [b["map_features"][k] for b in all_beatmap_data]
-            for k in all_beatmap_data[0].get("map_features", {}).keys()
-        }
-        all_ids = [b["beatmap_id"] for b in all_beatmap_data]
+        all_s = self._unpack(all_beatmap_data)
+        all_ids = all_s["ids"]
         train_anchor_indices = [
             idx for idx, bid in enumerate(all_ids) if int(bid) in self.train_anchor_ids
         ]
@@ -353,10 +345,10 @@ class AlignData(BeatmapData):
             raise RuntimeError("No sampled alignment anchors were found in the dataset.")
 
         self.train_dataset = BeatmapDataset(
-            all_data,
+            all_s["data"],
             self.normalizer,
-            all_attrs,
-            all_map_features,
+            all_s["attrs"],
+            all_s["map_features"],
             is_training=True,
             beatmap_ids=all_ids,
             alignment_targets=mining_targets,
@@ -396,10 +388,9 @@ class AlignData(BeatmapData):
 
     def train_dataloader(self):
         align_config = self.config["alignment"]
-        collate = partial(
-            collate_align_packed,
-            max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
+        collate = self._collate(
+            collate_align,
+            packed=True,
         )
         if self.train_mining_lookup:
             buckets = self._length_buckets()
@@ -420,10 +411,8 @@ class AlignData(BeatmapData):
         return self._make_loader(self.train_dataset, collate, train=True)
 
     def val_dataloader(self):
-        collate = partial(
+        collate = self._collate(
             collate_align,
-            max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
         return self._bucketed_loader(self.val_dataset, collate)

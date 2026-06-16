@@ -6,7 +6,6 @@ from typing import Any
 import torch
 from omegaconf import OmegaConf
 
-
 def normalize_checkpoint_state(
     state: dict[str, torch.Tensor],
     flatten_difficulty_head: bool = True,

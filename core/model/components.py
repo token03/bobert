@@ -295,9 +295,17 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.num_tokens = len(self.numeric_tokens) + len(self.categorical_tokens)
 
         for module_name, feature_names in self.numeric_tokens:
-            setattr(self, module_name, self._numeric_token(len(feature_names), d_feat))
+            setattr(
+                self,
+                module_name,
+                nn.Sequential(nn.Linear(len(feature_names), d_feat), nn.GELU()),
+            )
         for module_name, feature_name in self.categorical_tokens:
-            setattr(self, module_name, self._categorical_token(feature_name, d_feat))
+            setattr(
+                self,
+                module_name,
+                nn.Embedding(self.categorical[feature_name]["cardinality"], d_feat),
+            )
 
         self.feature_bias = nn.Parameter(torch.zeros(self.num_tokens, d_feat))
         self.object_mlp = nn.Sequential(
@@ -308,21 +316,14 @@ class HitObjectFeatureTokenizer(nn.Module):
         )
         self.out = nn.Linear(d_feat, d_model, bias=False)
 
-    def _numeric_token(self, input_dim: int, d_feat: int) -> nn.Sequential:
-        return nn.Sequential(nn.Linear(input_dim, d_feat), nn.GELU())
-
-    def _categorical_token(self, name: str, d_feat: int) -> nn.Embedding:
-        return nn.Embedding(self.categorical[name]["cardinality"], d_feat)
+    def _categorical_feature(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        info = self.categorical[name]
+        return x[..., info["index"]].long().clamp(0, info["cardinality"] - 1)
 
     def _continuous_features(
         self, x: torch.Tensor, names: Tuple[str, ...]
     ) -> torch.Tensor:
-        indices = [self.continuous[name] for name in names]
-        return x[..., indices]
-
-    def _categorical_feature(self, x: torch.Tensor, name: str) -> torch.Tensor:
-        info = self.categorical[name]
-        return x[..., info["index"]].long().clamp(0, info["cardinality"] - 1)
+        return x[..., [self.continuous[name] for name in names]]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         object_type = self._categorical_feature(x, "object_type")

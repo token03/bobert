@@ -25,15 +25,10 @@ def _resolve_path(path: str) -> str:
     return str(path_obj)
 
 
-def _parquet_source(path: str) -> str:
+def scan_dataset_parquet(path: str) -> pl.LazyFrame:
     path_obj = Path(path)
-    if path_obj.is_dir():
-        return str(path_obj / "**" / "*.parquet")
-    return str(path_obj)
-
-
-def _scan_parquet(path: str) -> pl.LazyFrame:
-    return pl.scan_parquet(_parquet_source(path))
+    source = path_obj / "**" / "*.parquet" if path_obj.is_dir() else path_obj
+    return pl.scan_parquet(str(source))
 
 
 def _best_supported_ratings_lf(
@@ -69,7 +64,7 @@ def _selected_beatmaps_lf(
     max_sr: Optional[float],
     require_ratings: bool,
 ) -> pl.LazyFrame:
-    beatmaps_lf = _scan_parquet(beatmaps_path)
+    beatmaps_lf = scan_dataset_parquet(beatmaps_path)
     wanted_cols = ["beatmap_id", "cs", "ar", "od", "hp_drain", "slider_multiplier"]
     available_cols = [
         col for col in wanted_cols if col in beatmaps_lf.collect_schema().names()
@@ -98,7 +93,7 @@ def _selected_beatmaps_lf(
             raise FileNotFoundError(f"Ratings file not found at '{ratings_path}'. ")
         return beatmaps_lf
 
-    ratings_lf = _best_supported_ratings_lf(_scan_parquet(ratings_path), rating_seq_len)
+    ratings_lf = _best_supported_ratings_lf(scan_dataset_parquet(ratings_path), rating_seq_len)
 
     if min_sr is not None:
         ratings_lf = ratings_lf.filter(pl.col("stars") >= min_sr)
@@ -110,11 +105,6 @@ def _selected_beatmaps_lf(
         on="beatmap_id",
         how="inner" if require_ratings else "left",
     )
-
-
-def _chunked(values: List[int], chunk_size: int):
-    for i in range(0, len(values), chunk_size):
-        yield values[i : i + chunk_size]
 
 
 def _sample_beatmap_ids(
@@ -198,13 +188,14 @@ def load_beatmap_dataset(
         "slider_end_y",
     ]
 
-    for chunk_ids in tqdm(
-        list(_chunked([int(x) for x in all_beatmap_ids], chunk_size)),
-        desc="Processing Chunks",
-    ):
+    chunks = [
+        all_beatmap_ids[i : i + chunk_size]
+        for i in range(0, len(all_beatmap_ids), chunk_size)
+    ]
+    for chunk_ids in tqdm(chunks, desc="Processing Chunks"):
         beatmaps_chunk = selected_beatmaps.filter(pl.col("beatmap_id").is_in(chunk_ids))
         hitobjects_chunk = (
-            _scan_parquet(hitobjects_path)
+            scan_dataset_parquet(hitobjects_path)
             .filter(pl.col("beatmap_id").is_in(chunk_ids))
             .select(hitobject_cols)
             .collect()

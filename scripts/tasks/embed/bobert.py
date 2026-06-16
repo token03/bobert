@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from core.config import load_config
-from core.data.batch import pack_batch
+from core.data.batch import batch_vectors
 from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.sampler import LengthBucketBatchSampler, length_bucket
@@ -54,13 +54,13 @@ class ExportDataset(Dataset):
 
 def collate_export(batch, max_seq_len: int, vector_dim: int):
     beatmap_ids, vectors, map_features = zip(*batch)
-    packed, cu_seqlens, max_seqlen = pack_batch(list(vectors), max_seq_len, vector_dim)
+    vector_batch = batch_vectors(vectors, max_seq_len, vector_dim, packed=True)
     return (
         torch.tensor(beatmap_ids, dtype=torch.long),
-        packed,
-        cu_seqlens,
+        vector_batch["packed_vectors"],
+        vector_batch["cu_seqlens"],
         torch.stack(list(map_features), dim=0),
-        max_seqlen,
+        vector_batch["max_seqlen"],
     )
 
 

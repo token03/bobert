@@ -6,22 +6,6 @@ from .beatmap import MAP_FEATURE_ATTRIBUTES
 from .sampler import length_bucket
 
 
-def pad_batch(
-    vectors: List[torch.Tensor],
-    max_seq_len: int,
-    vector_dim: int,
-    pad_to_len: int | None = None,
-):
-    batch = collate_vectors(
-        vectors,
-        max_seq_len,
-        vector_dim,
-        pad_to_len=pad_to_len,
-        packed=False,
-    )
-    return batch["vectors"], batch["attention_mask"], batch["cu_seqlens"]
-
-
 def rounded_pad_length(
     length: int, max_seq_len: int, buckets: Sequence[int] | None = None
 ) -> int:
@@ -31,16 +15,7 @@ def rounded_pad_length(
     return min(((length + 127) // 128) * 128, int(max_seq_len))
 
 
-def pack_batch(
-    vectors: List[torch.Tensor],
-    max_seq_len: int,
-    vector_dim: int,
-):
-    batch = collate_vectors(vectors, max_seq_len, vector_dim, packed=True)
-    return batch["packed_vectors"], batch["cu_seqlens"], batch["max_seqlen"]
-
-
-def collate_vectors(
+def batch_vectors(
     vectors: Sequence[torch.Tensor],
     max_seq_len: int,
     vector_dim: int,
@@ -168,7 +143,7 @@ def collate_pretrain(
 ):
     vectors, attrs = zip(*batch)
     max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
-    vector_batch = collate_vectors(
+    vector_batch = batch_vectors(
         vectors,
         max_seq_len,
         vector_dim,
@@ -186,40 +161,28 @@ def collate_align(
     batch: List[Tuple],
     max_seq_len: int,
     vector_dim: int,
+    *,
+    packed: bool = False,
     length_buckets: Sequence[int] | None = None,
 ):
     vectors, _, map_features, beatmap_ids, targets = zip(*batch)
+    labels = _alignment_labels(map_features, beatmap_ids, targets)
+    labels["use_contrastive"] = packed
+
+    if packed:
+        vector_batch = batch_vectors(vectors, max_seq_len, vector_dim, packed=True)
+        return {
+            **vector_batch,
+            "max_seqlen": torch.tensor(vector_batch["max_seqlen"], dtype=torch.long),
+            "labels": labels,
+            "batch_size": len(batch),
+        }
+
     max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
-    vector_batch = collate_vectors(
+    vector_batch = batch_vectors(
         vectors,
         max_seq_len,
         vector_dim,
         pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
     )
-    labels = _alignment_labels(map_features, beatmap_ids, targets)
-    labels["use_contrastive"] = False
-    return {
-        "vectors": vector_batch["vectors"],
-        "attention_mask": vector_batch["attention_mask"],
-        "cu_seqlens": vector_batch["cu_seqlens"],
-        "labels": labels,
-        "batch_size": len(batch),
-    }
-
-
-def collate_align_packed(
-    batch: List[Tuple],
-    max_seq_len: int,
-    vector_dim: int,
-):
-    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
-    vector_batch = collate_vectors(vectors, max_seq_len, vector_dim, packed=True)
-    labels = _alignment_labels(map_features, beatmap_ids, targets)
-    labels["use_contrastive"] = True
-    return {
-        "packed_vectors": vector_batch["packed_vectors"],
-        "cu_seqlens": vector_batch["cu_seqlens"],
-        "max_seqlen": torch.tensor(vector_batch["max_seqlen"], dtype=torch.long),
-        "labels": labels,
-        "batch_size": len(batch),
-    }
+    return {**vector_batch, "labels": labels, "batch_size": len(batch)}
