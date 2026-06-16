@@ -4,14 +4,14 @@ components:
   activation_checkpointing: false
 
 pretraining:
-  use_amp: false
+  precision: 32
 
 mining:
   use_faiss_gpu: false
 
 alignment:
   query_pool_use_flash: false
-  use_amp: false
+  precision: 32
 
 api:
   osu_api_version: "20241024"

@@ -12,13 +12,11 @@ from core.data.module import AlignData
 from core.model.bobert import BobertForAlignment
 from core.paths import ALIGN_DIR, MINING_CACHE_PATH, PRETRAIN_DIR
 from core.training.align import (
-    find_pretraining_checkpoint,
+    AlignmentModule,
     load_pretraining_normalizer,
     load_pretraining_weights,
-    setup_alignment,
-    train,
 )
-from core.training.setup import find_latest_checkpoint, find_latest_logger_version, setup_device
+from core.training.setup import create_trainer, find_latest_checkpoint, find_latest_logger_version, setup_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,7 +59,7 @@ def load_config(args: argparse.Namespace) -> DictConfig:
     if args.alignment_size is not None:
         config.alignment.alignment_size = args.alignment_size
     if args.epochs is not None:
-        config.alignment.num_epochs = args.epochs
+        config.alignment.epochs = args.epochs
     if args.compile_model is not None:
         config.components.compile_model = args.compile_model
     if args.overrides:
@@ -94,7 +92,7 @@ def maybe_build_cache(config: DictConfig, mode: str) -> None:
 def resolve_pretrain_checkpoint(args: argparse.Namespace) -> Path | None:
     if args.pretrain_ckpt:
         return Path(args.pretrain_ckpt)
-    return find_pretraining_checkpoint(PRETRAIN_DIR)
+    return find_latest_checkpoint(PRETRAIN_DIR)
 
 
 def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
@@ -153,12 +151,11 @@ def main() -> int:
         if resume_checkpoint is not None
         else None
     )
-    module, trainer = setup_alignment(
-        config, model, datamodule.normalizer, logger_version=logger_version
-    )
+    module = AlignmentModule(model, config, datamodule.normalizer)
+    trainer = create_trainer(config, "alignment", logger_version=logger_version)
 
     print("\nAlignment setup complete.")
-    print(f"Total epochs: {config.alignment.num_epochs}")
+    print(f"Total epochs: {config.alignment.epochs}")
     anchors_per_epoch = min(
         int(config.alignment.get("alignment_size") or len(datamodule.train_anchor_indices)),
         len(datamodule.train_anchor_indices),
@@ -173,11 +170,11 @@ def main() -> int:
         if logger_version is not None:
             print(f"Appending logs to: logs/version_{logger_version}")
 
-    train(
+    trainer.fit(
         module,
-        trainer,
-        datamodule,
+        datamodule=datamodule,
         ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
+        weights_only=False if resume_checkpoint is not None else None,
     )
 
     print("\nBoBERT alignment completed!")

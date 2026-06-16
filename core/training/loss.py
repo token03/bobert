@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import Dict, Any
 
 from core.data.beatmap import DIFFICULTY_ATTRIBUTES
-from core.data.hitobject import OBJECT_TYPE_SLIDER_HEAD, HitObject
+from core.data.hitobject import FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
 
 
 def mlm_loss_fn(
@@ -13,7 +13,7 @@ def mlm_loss_fn(
     if mask is not None and not torch.any(mask):
         return torch.tensor(0.0, device=targets.device)
 
-    feature_info = HitObject.get_feature_info()
+    feature_info = FEATURE_INFO
 
     cont_names = sorted(
         feature_info["continuous"].keys(), key=lambda k: feature_info["continuous"][k]

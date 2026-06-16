@@ -3,7 +3,14 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from .hitobject import HitObject, NormalizationType, OBJECT_TYPE_SLIDER_HEAD
+from .hitobject import (
+    FEATURE_INFO,
+    FIELD_NAMES,
+    NORMALIZATION_SPECS,
+    OBJECT_TYPE_SLIDER_HEAD,
+    SLIDER_ONLY_FEATURES,
+    NormalizationType,
+)
 
 
 class BeatmapNormalizer:
@@ -16,12 +23,12 @@ class BeatmapNormalizer:
         self.vector_stats = vector_stats
         self.attribute_stats = attribute_stats if attribute_stats is not None else {}
         self.epsilon = epsilon
-        self.vector_norm_specs = HitObject.get_normalization_specs()
+        self.vector_norm_specs = NORMALIZATION_SPECS
 
     def normalize_vectors(self, vectors: torch.Tensor) -> torch.Tensor:
         vectors = vectors.to(dtype=torch.float32)
         normalized_vectors = vectors.clone()
-        for i, field_name in enumerate(HitObject.get_field_names()):
+        for i, field_name in enumerate(FIELD_NAMES):
             if field_name not in self.vector_stats:
                 continue
             norm_type = self.vector_norm_specs[field_name]
@@ -72,10 +79,10 @@ class BeatmapNormalizer:
         difficulty_attributes: Dict[str, np.ndarray],
         epsilon: float = 1e-8,
     ) -> "BeatmapNormalizer":
-        vector_field_names = HitObject.get_field_names()
-        vector_norm_specs = HitObject.get_normalization_specs()
-        slider_only_features = set(HitObject.get_slider_only_features())
-        feature_info = HitObject.get_feature_info()
+        vector_field_names = FIELD_NAMES
+        vector_norm_specs = NORMALIZATION_SPECS
+        slider_only_features = set(SLIDER_ONLY_FEATURES)
+        feature_info = FEATURE_INFO
         object_type_idx = feature_info["categorical"]["object_type"]["index"]
 
         vector_stats = {}

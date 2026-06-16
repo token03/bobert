@@ -21,7 +21,7 @@ from .components import (
     RMSNorm,
     flash_apply_rotary_emb,
 )
-from ..data.hitobject import HitObject
+from ..data.hitobject import FEATURE_INFO
 
 T = TypeVar("T", bound="BobertModel")
 
@@ -64,7 +64,7 @@ class BobertModel(nn.Module):
         self.activation_checkpointing = activation_checkpointing
         self.global_attention_layers = set(global_attention_layers)
 
-        self.feature_info = HitObject.get_feature_info()
+        self.feature_info = FEATURE_INFO
         self.feature_tokenizer = HitObjectFeatureTokenizer(
             feature_info=self.feature_info,
             d_feat=feature_token_dim,
@@ -456,7 +456,7 @@ class BobertStatsMixerPooler(nn.Module):
 class BobertMaskedLMHead(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
-        self.feature_info = HitObject.get_feature_info()
+        self.feature_info = FEATURE_INFO
         num_continuous = len(self.feature_info["continuous"])
 
         self.continuous_head = nn.Linear(d_model, num_continuous)
@@ -575,16 +575,46 @@ class BobertForPretraining(nn.Module):
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
 
+    def _encode_vectors(
+        self,
+        *,
+        vectors: Optional[torch.Tensor] = None,
+        packed_vectors: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        if packed_vectors is not None:
+            if cu_seqlens is None or max_seqlen is None:
+                raise ValueError("packed encoding requires cu_seqlens and max_seqlen")
+            packed_input = self.bert.embed_sequences(packed_vectors)
+            packed_output = self.bert.encode(
+                packed_input,
+                attention_mask=None,
+                max_seqlen=max_seqlen,
+                cu_seqlens=cu_seqlens,
+            )
+            return packed_output, cu_seqlens, max_seqlen
+
+        if vectors is None or attention_mask is None:
+            raise ValueError("padded encoding requires vectors and attention_mask")
+        max_seqlen = vectors.shape[1]
+        packed_output, _ = self.bert(vectors, attention_mask, cu_seqlens)
+        if cu_seqlens is None:
+            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        return packed_output, cu_seqlens, max_seqlen
+
     def embed(
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        max_seqlen = x.shape[1]
-        packed_output, _ = self.bert(x, attention_mask, cu_seqlens)
-        if cu_seqlens is None:
-            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        packed_output, cu_seqlens, max_seqlen = self._encode_vectors(
+            vectors=x,
+            attention_mask=attention_mask,
+            cu_seqlens=cu_seqlens,
+        )
         return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
 
     def _get_embedding(
@@ -607,12 +637,10 @@ class BobertForPretraining(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
-        packed_input = self.bert.embed_sequences(packed_vectors)
-        packed_output = self.bert.encode(
-            packed_input,
-            attention_mask=None,
-            max_seqlen=max_seqlen,
+        packed_output, cu_seqlens, max_seqlen = self._encode_vectors(
+            packed_vectors=packed_vectors,
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
 
@@ -822,6 +850,35 @@ class BobertForAlignment(nn.Module):
         pooled = torch.cat(pieces, dim=-1)
         return pooled, F.normalize(self.retrieval_head(pooled), dim=-1)
 
+    def _encode_vectors(
+        self,
+        *,
+        vectors: Optional[torch.Tensor] = None,
+        packed_vectors: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        if packed_vectors is not None:
+            if cu_seqlens is None or max_seqlen is None:
+                raise ValueError("packed encoding requires cu_seqlens and max_seqlen")
+            packed_input = self.bert.embed_sequences(packed_vectors)
+            packed_output = self.bert.encode(
+                packed_input,
+                attention_mask=None,
+                max_seqlen=max_seqlen,
+                cu_seqlens=cu_seqlens,
+            )
+            return packed_output, cu_seqlens, max_seqlen
+
+        if vectors is None or attention_mask is None:
+            raise ValueError("padded encoding requires vectors and attention_mask")
+        max_seqlen = vectors.shape[1]
+        packed_output, _ = self.bert(vectors, attention_mask, cu_seqlens)
+        if cu_seqlens is None:
+            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        return packed_output, cu_seqlens, max_seqlen
+
     def forward(
         self,
         x: torch.Tensor,
@@ -829,10 +886,11 @@ class BobertForAlignment(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
         map_features: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        max_seqlen = x.shape[1]
-        packed_output, _ = self.bert(x, attention_mask, cu_seqlens)
-        if cu_seqlens is None:
-            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        packed_output, cu_seqlens, max_seqlen = self._encode_vectors(
+            vectors=x,
+            attention_mask=attention_mask,
+            cu_seqlens=cu_seqlens,
+        )
         pooled, retrieval_embedding = self._get_pooled_outputs(
             packed_output, cu_seqlens, max_seqlen, map_features
         )
@@ -849,12 +907,10 @@ class BobertForAlignment(nn.Module):
         max_seqlen: int,
         map_features: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        packed_input = self.bert.embed_sequences(packed_vectors)
-        packed_output = self.bert.encode(
-            packed_input,
-            attention_mask=None,
-            max_seqlen=max_seqlen,
+        packed_output, cu_seqlens, max_seqlen = self._encode_vectors(
+            packed_vectors=packed_vectors,
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         pooled, retrieval_embedding = self._get_pooled_outputs(
             packed_output, cu_seqlens, max_seqlen, map_features
@@ -872,10 +928,11 @@ class BobertForAlignment(nn.Module):
         cu_seqlens: Optional[torch.Tensor] = None,
         map_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        max_seqlen = x.shape[1]
-        packed_output, _ = self.bert(x, attention_mask, cu_seqlens)
-        if cu_seqlens is None:
-            cu_seqlens = self.bert._get_cu_seqlens(attention_mask)
+        packed_output, cu_seqlens, max_seqlen = self._encode_vectors(
+            vectors=x,
+            attention_mask=attention_mask,
+            cu_seqlens=cu_seqlens,
+        )
         _, retrieval_embedding = self._get_pooled_outputs(
             packed_output, cu_seqlens, max_seqlen, map_features
         )
@@ -888,12 +945,10 @@ class BobertForAlignment(nn.Module):
         max_seqlen: int,
         map_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        packed_input = self.bert.embed_sequences(packed_vectors)
-        packed_output = self.bert.encode(
-            packed_input,
-            attention_mask=None,
-            max_seqlen=max_seqlen,
+        packed_output, cu_seqlens, max_seqlen = self._encode_vectors(
+            packed_vectors=packed_vectors,
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         _, retrieval_embedding = self._get_pooled_outputs(
             packed_output, cu_seqlens, max_seqlen, map_features

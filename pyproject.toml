@@ -10,6 +10,7 @@ dependencies = [
     "cupy-cuda12x==14.0.1",
     "faiss-gpu-cu12>=1.14.1.post1",
     "flash-attn==2.8.3",
+    "fastapi>=0.116.0",
     "httpx>=0.28.1",
     "liger-kernel>=0.8.0",
     "matplotlib>=3.10.6",
@@ -33,11 +34,13 @@ dependencies = [
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
     "seaborn>=0.13.2",
+    "structlog>=25.5.0",
     "tensorboard>=2.20.0",
     "torch==2.11.0",
     "torchmetrics>=1.8.2",
     "tqdm>=4.67.1",
     "umap-learn>=0.5.9.post2",
+    "uvicorn[standard]>=0.35.0",
 ]
 
 [project.scripts]
@@ -55,7 +58,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["scripts", "core"]
+packages = ["backend", "scripts", "core"]
 
 [tool.uv]
 environments = [

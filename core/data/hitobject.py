@@ -1,4 +1,4 @@
-from typing import NamedTuple, List, Dict
+from typing import NamedTuple
 from enum import Enum
 
 OSU_STAGE_WIDTH = 512
@@ -30,8 +30,6 @@ DURATION_BINS = [
 ]
 
 CANONICAL_BPM_MIN = 120.0
-CANONICAL_BPM_MAX = 240.0
-
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
     STANDARD = "standard"
@@ -43,9 +41,6 @@ OBJECT_TYPE_SLIDER_HEAD = 1
 OBJECT_TYPE_SLIDER_END = 2
 OBJECT_TYPE_SPINNER_START = 3
 OBJECT_TYPE_SPINNER_END = 4
-
-SLIDER_TYPE_INDEX = OBJECT_TYPE_SLIDER_HEAD
-
 
 class Feature(NamedTuple):
     name: str
@@ -84,74 +79,25 @@ CATEGORICAL_FEATURE_ORDER = (
 )
 
 
-class HitObject(NamedTuple):
-    norm_x: float
-    norm_y: float
-    delta_x: float
-    delta_y: float
-    log_time_diff_ms: float
-    notes_per_second: float
-    velocity: float
-    relative_cos: float
-    relative_sin: float
-    rhythm_change: float
-
-    log_slider_pixel_length: float
-    log_slider_repeats: float
-    slider_tortuosity: float
-    beat_in_measure: float
-
-    object_type: int
-    is_new_combo: int
-    time_diff_bin: int
-    rhythmic_snap: int
-
-    @classmethod
-    def get_field_names(cls):
-        return list(cls._fields)
-
-    @staticmethod
-    def get_slider_only_features() -> List[str]:
-        return [feature.name for feature in FEATURES if feature.slider_only]
-
-    @classmethod
-    def get_vector_dim(cls):
-        return len(cls._fields)
-
-    @classmethod
-    def get_feature_info(cls):
-        field_names = cls.get_field_names()
-        index = {name: i for i, name in enumerate(field_names)}
-        features = {feature.name: feature for feature in FEATURES}
-        continuous = [
-            feature
-            for feature in FEATURES
-            if feature.norm is not NormalizationType.CATEGORICAL
-        ]
-
-        info = {
-            "categorical": {
-                name: {
-                    "index": index[name],
-                    "cardinality": features[name].cardinality,
-                }
-                for name in CATEGORICAL_FEATURE_ORDER
-            },
-            "continuous": {
-                feature.name: index[feature.name] for feature in continuous
-            },
-            "slider": {
-                feature.name: index[feature.name]
-                for feature in FEATURES
-                if feature.slider_only
-            },
-            "names": field_names,
+FIELD_NAMES = tuple(feature.name for feature in FEATURES)
+VECTOR_DIM = len(FIELD_NAMES)
+FEATURE_INDEX = {name: i for i, name in enumerate(FIELD_NAMES)}
+FEATURES_BY_NAME = {feature.name: feature for feature in FEATURES}
+SLIDER_ONLY_FEATURES = tuple(feature.name for feature in FEATURES if feature.slider_only)
+NORMALIZATION_SPECS = {feature.name: feature.norm for feature in FEATURES}
+FEATURE_INFO = {
+    "categorical": {
+        name: {
+            "index": FEATURE_INDEX[name],
+            "cardinality": FEATURES_BY_NAME[name].cardinality,
         }
-        return info
-
-    @classmethod
-    def get_normalization_specs(cls) -> Dict[str, NormalizationType]:
-        return {feature.name: feature.norm for feature in FEATURES}
-
-
-VECTOR_DIM = HitObject.get_vector_dim()
+        for name in CATEGORICAL_FEATURE_ORDER
+    },
+    "continuous": {
+        feature.name: FEATURE_INDEX[feature.name]
+        for feature in FEATURES
+        if feature.norm is not NormalizationType.CATEGORICAL
+    },
+    "slider": {name: FEATURE_INDEX[name] for name in SLIDER_ONLY_FEATURES},
+    "names": FIELD_NAMES,
+}

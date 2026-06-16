@@ -1,14 +1,12 @@
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 import torch
 import torch.nn as nn
-import pytorch_lightning as pl
 
 from core.training.metrics import ContrastiveMetrics
 
 from .base import BobertLightningModule
-from .setup import create_trainer
 from .loss import alignment_loss_fn
 from ..data.normalizer import BeatmapNormalizer
 
@@ -118,45 +116,11 @@ class AlignmentModule(BobertLightningModule):
             self.log(f"val_{key}", value)
         self.metrics.reset()
 
-def setup_alignment(
-    config: Dict[str, Any],
-    model: nn.Module,
-    normalizer: Optional[BeatmapNormalizer] = None,
-    logger_version: Optional[int] = None,
-) -> Tuple[AlignmentModule, pl.Trainer]:
-    module = AlignmentModule(model, config, normalizer)
-    trainer = create_trainer(config, "alignment", logger_version=logger_version)
-    return module, trainer
 
-
-def find_pretraining_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
-    checkpoint_dir = Path(checkpoint_dir)
-    search_dirs = [checkpoint_dir]
-    nested_checkpoint_dir = checkpoint_dir / "checkpoints"
-    if nested_checkpoint_dir != checkpoint_dir:
-        search_dirs.append(nested_checkpoint_dir)
-
-    for search_dir in search_dirs:
-        if not search_dir.exists():
-            continue
-
-        candidates = sorted(
-            search_dir.glob("last*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
-        )
-        candidates = candidates or sorted(
-            search_dir.glob("*.ckpt"), key=lambda p: p.stat().st_mtime, reverse=True
-        )
-        if candidates:
-            return candidates[0]
-
-    return None
-
-
-def load_pretraining_weights(
-    model: nn.Module,
+def load_pretraining_checkpoint(
     checkpoint_path: str | Path | None,
     map_location: str | torch.device = "cpu",
-) -> Dict[str, Any]:
+) -> tuple[Path, Dict[str, Any]]:
     if checkpoint_path is None:
         raise FileNotFoundError("No pretraining checkpoint found.")
 
@@ -170,6 +134,15 @@ def load_pretraining_weights(
             "Pretraining checkpoint does not contain vector_stats; "
             "alignment requires the pretraining normalizer."
         )
+    return checkpoint_path, checkpoint
+
+
+def load_pretraining_weights(
+    model: nn.Module,
+    checkpoint_path: str | Path | None,
+    map_location: str | torch.device = "cpu",
+) -> Dict[str, Any]:
+    checkpoint_path, checkpoint = load_pretraining_checkpoint(checkpoint_path, map_location)
     raw_state = checkpoint.get("state_dict", checkpoint)
     state = {}
 
@@ -217,34 +190,8 @@ def load_pretraining_normalizer(
     checkpoint_path: str | Path | None,
     map_location: str | torch.device = "cpu",
 ) -> BeatmapNormalizer:
-    if checkpoint_path is None:
-        raise FileNotFoundError("No pretraining checkpoint found.")
-
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(checkpoint_path)
-
-    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
-    if "vector_stats" not in checkpoint:
-        raise RuntimeError(
-            "Pretraining checkpoint does not contain vector_stats; "
-            "alignment requires the pretraining normalizer."
-        )
+    _, checkpoint = load_pretraining_checkpoint(checkpoint_path, map_location)
     return BeatmapNormalizer(
         vector_stats=checkpoint["vector_stats"],
         attribute_stats=checkpoint.get("attribute_stats", {}),
-    )
-
-
-def train(
-    module: AlignmentModule,
-    trainer: pl.Trainer,
-    datamodule: pl.LightningDataModule,
-    ckpt_path: Optional[str] = None,
-):
-    trainer.fit(
-        module,
-        datamodule,
-        ckpt_path=ckpt_path,
-        weights_only=False if ckpt_path is not None else None,
     )

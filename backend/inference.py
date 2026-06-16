@@ -52,8 +52,7 @@ class CpuInferencer:
         config.components.compile_dynamic = False
         config.components.activation_checkpointing = False
         config.alignment.query_pool_use_flash = False
-        if "use_amp" in config.alignment:
-            config.alignment.use_amp = False
+        config.alignment.precision = 32
 
         model = BobertForAlignment.from_config(config, self.device)
         model_state = model.state_dict()

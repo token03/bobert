@@ -1,11 +1,11 @@
 import torch
 
-from .hitobject import HitObject
+from .hitobject import FEATURE_INFO
 
 
 class BeatmapAugmenter:
     def __init__(self, flip_prob: float = 1.0):
-        feature_info = HitObject.get_feature_info()
+        feature_info = FEATURE_INFO
         self.norm_x_idx = feature_info["continuous"]["norm_x"]
         self.norm_y_idx = feature_info["continuous"]["norm_y"]
         self.delta_x_idx = feature_info["continuous"]["delta_x"]

@@ -1,19 +1,17 @@
 from contextlib import nullcontext
-from typing import Dict, Any, Optional, Tuple
+from typing import Tuple
 
 from omegaconf import DictConfig
 import torch
 import torch.nn as nn
-import pytorch_lightning as pl
 
 from core.data.module import PretrainData
 
 from .base import BobertLightningModule
-from .setup import create_trainer
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
 from ..data.beatmap import DIFFICULTY_ATTRIBUTES
-from ..data.hitobject import HitObject
+from ..data.hitobject import FEATURE_INFO, VECTOR_DIM
 
 
 class PretrainingModule(BobertLightningModule):
@@ -30,7 +28,7 @@ class PretrainingModule(BobertLightningModule):
         self.batch_size = config["pretraining"]["batch_size"]
         self.save_hyperparameters(ignore=["model", "datamodule"])
 
-        feature_info = HitObject.get_feature_info()
+        feature_info = FEATURE_INFO
         self.mlm_metrics = MLMMetrics(feature_info, self.device)
         self.difficulty_metrics = DifficultyMetrics(self.device)
 
@@ -86,7 +84,7 @@ class PretrainingModule(BobertLightningModule):
 
     def _create_preallocation_batch(self, max_seq_len: int) -> Tuple:
         batch_size = self._preallocation_batch_size(max_seq_len)
-        vector_dim = self.datamodule.vector_dim or HitObject.get_vector_dim()
+        vector_dim = self.datamodule.vector_dim or VECTOR_DIM
         vectors = torch.randn(
             batch_size,
             max_seq_len,
@@ -95,7 +93,7 @@ class PretrainingModule(BobertLightningModule):
             dtype=torch.float32,
         )
 
-        feature_info = HitObject.get_feature_info()
+        feature_info = FEATURE_INFO
         for info in feature_info["categorical"].values():
             vectors[..., info["index"]] = torch.randint(
                 info["cardinality"],
@@ -187,27 +185,3 @@ class PretrainingModule(BobertLightningModule):
 
         self.mlm_metrics.reset()
         self.difficulty_metrics.reset()
-
-def setup_pretraining(
-    config: DictConfig,
-    datamodule: PretrainData,
-    model: nn.Module,
-    logger_version: Optional[int] = None,
-) -> Tuple[PretrainingModule, pl.Trainer]:
-    module = PretrainingModule(model, config, datamodule)
-    trainer = create_trainer(config, "pretraining", logger_version=logger_version)
-
-    return module, trainer
-    
-def train(
-    module: PretrainingModule,
-    trainer: pl.Trainer,
-    datamodule: pl.LightningDataModule,
-    ckpt_path: Optional[str] = None,
-) -> None:
-    trainer.fit(
-        module,
-        datamodule=datamodule,
-        ckpt_path=ckpt_path,
-        weights_only=False if ckpt_path is not None else None,
-    )

@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from .batch import collate_align, collate_align_packed, collate_pretrain
 from .dataset import BeatmapDataset
-from .mining import MiningConfig, load_alignment_cache
+from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .source import load_beatmap_dataset
@@ -48,13 +48,17 @@ class BeatmapData(pl.LightningDataModule):
     ) -> List[Dict[str, Any]]:
         return load_beatmap_dataset(
             self.dataset_path,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
             ids_to_load=ids_to_load,
             sample_size=sample_size,
             dataset_seed=self.data_config.get("dataset_seed", 42),
             min_sr=self.data_config.get("min_sr"),
             max_sr=self.data_config.get("max_sr"),
         )
+
+    @property
+    def max_seq_len(self) -> int:
+        return int(self.data_config["max_seq_len"])
 
     def _create_datasets(self, train_s, val_s) -> Tuple[BeatmapDataset, BeatmapDataset]:
         raise NotImplementedError
@@ -156,15 +160,14 @@ class BeatmapData(pl.LightningDataModule):
         return kwargs
 
     def _lengths(self, dataset) -> List[int]:
-        max_seq_len = int(self.data_config["max_seq_len"])
-        return [min(int(vec.shape[0]), max_seq_len) for vec in dataset.beatmap_data]
+        return [min(int(vec.shape[0]), self.max_seq_len) for vec in dataset.beatmap_data]
 
     def _token_budget(
         self, lengths: List[int], buckets: List[int], batch_size: Optional[int] = None
     ) -> int:
         batch_size = int(batch_size or self.batch_size)
         if not lengths:
-            return batch_size * int(self.data_config["max_seq_len"])
+            return batch_size * self.max_seq_len
         mean_len = int(round(sum(lengths) / len(lengths)))
         return batch_size * length_bucket(mean_len, buckets)
 
@@ -207,21 +210,21 @@ class PretrainData(BeatmapData):
                 self.normalizer,
                 train_s["attrs"],
                 is_training=True,
-                max_seq_len=self.data_config["max_seq_len"],
+                max_seq_len=self.max_seq_len,
             ),
             BeatmapDataset(
                 val_s["data"],
                 self.normalizer,
                 val_s["attrs"],
                 is_training=False,
-                max_seq_len=self.data_config["max_seq_len"],
+                max_seq_len=self.max_seq_len,
             ),
         )
 
     def train_dataloader(self):
         collate = partial(
             collate_pretrain,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
             vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
@@ -232,7 +235,7 @@ class PretrainData(BeatmapData):
     def val_dataloader(self):
         collate = partial(
             collate_pretrain,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
             vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
@@ -248,14 +251,8 @@ class AlignData(BeatmapData):
         self.train_anchor_indices: List[int] = []
         self.train_anchor_ids: set[int] = set()
 
-    def _alignment_config(self):
-        return self.config["alignment"]
-
-    def _mining_config(self):
-        return MiningConfig.from_mapping(self.config["mining"])
-
     def _load_mining_targets(self) -> Dict[int, Dict[str, Any]]:
-        align_config = self._alignment_config()
+        align_config = self.config["alignment"]
         cache_path = MINING_CACHE_PATH
         if not os.path.exists(cache_path):
             return {}
@@ -365,7 +362,7 @@ class AlignData(BeatmapData):
             is_training=True,
             beatmap_ids=all_ids,
             alignment_targets=mining_targets,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
         )
         self.val_dataset = BeatmapDataset(
             val_s["data"],
@@ -375,7 +372,7 @@ class AlignData(BeatmapData):
             is_training=False,
             beatmap_ids=val_s["ids"],
             alignment_targets=mining_targets,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
         )
         self.train_mining_lookup = {
             int(bid): mining_targets[int(bid)]
@@ -389,7 +386,7 @@ class AlignData(BeatmapData):
             if int(bid) in mining_targets
         }
         anchors_per_epoch = min(
-            int(self._alignment_config().get("alignment_size") or len(train_anchor_indices)),
+            int(self.config["alignment"].get("alignment_size") or len(train_anchor_indices)),
             len(train_anchor_indices),
         )
         print(
@@ -400,10 +397,10 @@ class AlignData(BeatmapData):
         )
 
     def train_dataloader(self):
-        align_config = self._alignment_config()
+        align_config = self.config["alignment"]
         collate = partial(
             collate_align_packed,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
             vector_dim=self.vector_dim,
         )
         if self.train_mining_lookup:
@@ -427,7 +424,7 @@ class AlignData(BeatmapData):
     def val_dataloader(self):
         collate = partial(
             collate_align,
-            max_seq_len=self.data_config["max_seq_len"],
+            max_seq_len=self.max_seq_len,
             vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )

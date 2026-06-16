@@ -8,6 +8,16 @@ OBJECT_TYPE_SPINNER = 2
 
 MAX_TIME_MS = 36000000
 
+DIFFICULTY_KEYS = {
+    "hpdrainrate": "hp_drain",
+    "circlesize": "cs",
+    "overalldifficulty": "od",
+    "approachrate": "ar",
+    "slidermultiplier": "slider_multiplier",
+    "slidertickrate": "slider_tick",
+    "difficultyrating": "difficulty_rating",
+}
+
 
 class RawTimingPoint(NamedTuple):
     time: int
@@ -133,20 +143,8 @@ def parse_osu_file(
                     key = parts[0].strip().lower()
                     try:
                         val = float(parts[1].strip())
-                        if key == "hpdrainrate":
-                            data["hp_drain"] = val
-                        elif key == "circlesize":
-                            data["cs"] = val
-                        elif key == "overalldifficulty":
-                            data["od"] = val
-                        elif key == "approachrate":
-                            data["ar"] = val
-                        elif key == "slidermultiplier":
-                            data["slider_multiplier"] = val
-                        elif key == "slidertickrate":
-                            data["slider_tick"] = val
-                        elif key == "difficultyrating":
-                            data["difficulty_rating"] = val
+                        if key in DIFFICULTY_KEYS:
+                            data[DIFFICULTY_KEYS[key]] = val
                     except ValueError:
                         continue
             elif section == "timingpoints":
@@ -214,15 +212,14 @@ def parse_osu_file(
             is_slider = type_flags & 2
             is_spinner = type_flags & 8
 
-            obj_type = (
-                OBJECT_TYPE_CIRCLE
-                if is_circle
-                else OBJECT_TYPE_SLIDER
-                if is_slider
-                else OBJECT_TYPE_SPINNER
-                if is_spinner
-                else -1
-            )
+            if is_circle:
+                obj_type = OBJECT_TYPE_CIRCLE
+            elif is_slider:
+                obj_type = OBJECT_TYPE_SLIDER
+            elif is_spinner:
+                obj_type = OBJECT_TYPE_SPINNER
+            else:
+                obj_type = -1
             if obj_type == -1:
                 continue
 

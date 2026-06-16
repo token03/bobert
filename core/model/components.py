@@ -268,22 +268,36 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.feature_info = feature_info
         self.continuous = feature_info["continuous"]
         self.categorical = feature_info["categorical"]
-        self.num_tokens = 13
+        self.numeric_tokens = (
+            ("position", ("norm_x", "norm_y")),
+            ("delta", ("delta_x", "delta_y")),
+            ("timing", ("log_time_diff_ms",)),
+            ("density", ("notes_per_second",)),
+            ("velocity", ("velocity",)),
+            ("angle", ("relative_cos", "relative_sin")),
+            ("rhythm_change", ("rhythm_change",)),
+            (
+                "slider",
+                (
+                    "log_slider_pixel_length",
+                    "log_slider_repeats",
+                    "slider_tortuosity",
+                ),
+            ),
+        )
+        self.categorical_tokens = (
+            ("object_type", "object_type"),
+            ("combo", "is_new_combo"),
+            ("measure", "beat_in_measure"),
+            ("time_bin", "time_diff_bin"),
+            ("snap", "rhythmic_snap"),
+        )
+        self.num_tokens = len(self.numeric_tokens) + len(self.categorical_tokens)
 
-        self.position = self._numeric_token(2, d_feat)
-        self.delta = self._numeric_token(2, d_feat)
-        self.timing = self._numeric_token(1, d_feat)
-        self.density = self._numeric_token(1, d_feat)
-        self.velocity = self._numeric_token(1, d_feat)
-        self.angle = self._numeric_token(2, d_feat)
-        self.rhythm_change = self._numeric_token(1, d_feat)
-        self.slider = self._numeric_token(3, d_feat)
-
-        self.object_type = self._categorical_token("object_type", d_feat)
-        self.combo = self._categorical_token("is_new_combo", d_feat)
-        self.measure = self._categorical_token("beat_in_measure", d_feat)
-        self.time_bin = self._categorical_token("time_diff_bin", d_feat)
-        self.snap = self._categorical_token("rhythmic_snap", d_feat)
+        for module_name, feature_names in self.numeric_tokens:
+            setattr(self, module_name, self._numeric_token(len(feature_names), d_feat))
+        for module_name, feature_name in self.categorical_tokens:
+            setattr(self, module_name, self._categorical_token(feature_name, d_feat))
 
         self.feature_bias = nn.Parameter(torch.zeros(self.num_tokens, d_feat))
         self.object_mlp = nn.Sequential(
@@ -315,30 +329,12 @@ class HitObjectFeatureTokenizer(nn.Module):
 
         tokens = torch.stack(
             [
-                self.position(self._continuous_features(x, ("norm_x", "norm_y"))),
-                self.delta(self._continuous_features(x, ("delta_x", "delta_y"))),
-                self.timing(self._continuous_features(x, ("log_time_diff_ms",))),
-                self.density(self._continuous_features(x, ("notes_per_second",))),
-                self.velocity(self._continuous_features(x, ("velocity",))),
-                self.angle(
-                    self._continuous_features(x, ("relative_cos", "relative_sin"))
-                ),
-                self.rhythm_change(self._continuous_features(x, ("rhythm_change",))),
-                self.slider(
-                    self._continuous_features(
-                        x,
-                        (
-                            "log_slider_pixel_length",
-                            "log_slider_repeats",
-                            "slider_tortuosity",
-                        ),
-                    )
-                ),
-                self.object_type(object_type),
-                self.combo(self._categorical_feature(x, "is_new_combo")),
-                self.measure(self._categorical_feature(x, "beat_in_measure")),
-                self.time_bin(self._categorical_feature(x, "time_diff_bin")),
-                self.snap(self._categorical_feature(x, "rhythmic_snap")),
+                getattr(self, module_name)(self._continuous_features(x, feature_names))
+                for module_name, feature_names in self.numeric_tokens
+            ]
+            + [
+                getattr(self, module_name)(self._categorical_feature(x, feature_name))
+                for module_name, feature_name in self.categorical_tokens
             ],
             dim=-2,
         )

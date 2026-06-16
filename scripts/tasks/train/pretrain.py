@@ -11,8 +11,8 @@ from core.data.module import PretrainData
 from core.model.bobert import BobertForPretraining
 from core.paths import PRETRAIN_DIR
 from core.training import create_kde_sampler
-from core.training.pretrain import setup_pretraining, train
-from core.training.setup import find_latest_checkpoint, find_latest_logger_version, setup_device
+from core.training.pretrain import PretrainingModule
+from core.training.setup import create_trainer, find_latest_checkpoint, find_latest_logger_version, setup_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +52,7 @@ def load_config(args: argparse.Namespace) -> DictConfig:
     if args.batch_size is not None:
         config.pretraining.batch_size = args.batch_size
     if args.epochs is not None:
-        config.pretraining.num_epochs = args.epochs
+        config.pretraining.epochs = args.epochs
     if args.compile_model is not None:
         config.components.compile_model = args.compile_model
     if args.overrides:
@@ -110,12 +110,11 @@ def main() -> int:
         if resume_checkpoint is not None
         else None
     )
-    module, trainer = setup_pretraining(
-        config, datamodule, model, logger_version=logger_version
-    )
+    module = PretrainingModule(model, config, datamodule)
+    trainer = create_trainer(config, "pretraining", logger_version=logger_version)
 
     print("\nPretraining setup complete.")
-    print(f"Total epochs: {config.pretraining.num_epochs}")
+    print(f"Total epochs: {config.pretraining.epochs}")
     print(f"Training samples: {len(datamodule.train_dataset)}")
     print(f"Validation samples: {len(datamodule.val_dataset)}")
 
@@ -124,11 +123,11 @@ def main() -> int:
         if logger_version is not None:
             print(f"Appending logs to: logs/version_{logger_version}")
 
-    train(
+    trainer.fit(
         module,
-        trainer,
-        datamodule,
+        datamodule=datamodule,
         ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
+        weights_only=False if resume_checkpoint is not None else None,
     )
 
     print("\nBoBERT pretraining completed!")

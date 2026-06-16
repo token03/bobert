@@ -1,1 +1,1 @@
-from .hitobject import HitObject
+from .hitobject import FEATURE_INFO, FIELD_NAMES, VECTOR_DIM
