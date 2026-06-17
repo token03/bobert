@@ -1,4 +1,3 @@
-import csv
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -8,7 +7,6 @@ from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
-from pytorch_lightning.loggers.csv_logs import ExperimentWriter
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -58,27 +56,6 @@ def find_latest_logger_version(checkpoint_dir: str | Path) -> Optional[int]:
 
     return max(versions) if versions else None
 
-
-class AppendExperimentWriter(ExperimentWriter):
-    def _check_log_dir_exists(self) -> None:
-        return
-
-    def __init__(self, log_dir: str) -> None:
-        super().__init__(log_dir=log_dir)
-        if self._fs.isfile(self.metrics_file_path):
-            with self._fs.open(self.metrics_file_path, "r", newline="") as file:
-                self.metrics_keys = csv.DictReader(file).fieldnames or []
-
-
-class AppendCSVLogger(CSVLogger):
-    @property
-    def experiment(self):
-        if self._experiment is not None:
-            return self._experiment
-
-        self._fs.makedirs(self.root_dir, exist_ok=True)
-        self._experiment = AppendExperimentWriter(log_dir=self.log_dir)
-        return self._experiment
 
 def create_kde_sampler(
     difficulty_ratings: np.ndarray,
@@ -255,8 +232,7 @@ def create_trainer(
 
     precision = trainer_config.precision
 
-    csv_logger_cls = AppendCSVLogger if logger_version is not None else CSVLogger
-    csv_logger = csv_logger_cls(save_dir=logs_path, name="logs", version=logger_version)
+    csv_logger = CSVLogger(save_dir=logs_path, name="logs", version=logger_version)
     loggers = [
         csv_logger,
         TensorBoardLogger(save_dir=logs_path, name="logs", version=csv_logger.version),
