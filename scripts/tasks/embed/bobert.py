@@ -285,7 +285,6 @@ def export_embeddings(
                     ids_to_load=id_chunk,
                     min_sr=min_sr,
                     max_sr=None,
-                    require_ratings=min_sr is not None,
                 )
                 if not beatmaps:
                     continue

@@ -74,46 +74,48 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.local_window_size = local_window_size
         self.is_global = is_global
 
-    def forward(self, x, **kwargs):
-        cu_seqlens = kwargs.get("cu_seqlens")
-        max_seqlen = kwargs.get("max_seqlen")
-        rotary_freqs = kwargs.get("rotary_freqs")
-        rotary_is_varlen = kwargs.get("rotary_is_varlen", False)
-
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        rotary_freqs: torch.Tensor | Tuple[torch.Tensor, torch.Tensor],
+        rotary_is_varlen: bool,
+    ):
         total_tokens, _ = x.shape
 
         qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
         q, k, v = qkv.unbind(dim=1)
         qkv_for_flash = qkv
 
-        if rotary_freqs is not None:
-            can_use_flash_rope = (
-                rotary_is_varlen
-                and flash_apply_rotary_emb is not None
-                and x.device.type == "cuda"
+        can_use_flash_rope = (
+            rotary_is_varlen
+            and flash_apply_rotary_emb is not None
+            and x.device.type == "cuda"
+        )
+        if can_use_flash_rope:
+            cos, sin = rotary_freqs
+            q = flash_apply_rotary_emb(
+                q,
+                cos,
+                sin,
+                interleaved=True,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
             )
-            if can_use_flash_rope:
-                cos, sin = rotary_freqs
-                q = flash_apply_rotary_emb(
-                    q,
-                    cos,
-                    sin,
-                    interleaved=True,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
-                k = flash_apply_rotary_emb(
-                    k,
-                    cos,
-                    sin,
-                    interleaved=True,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
-                qkv_for_flash = None
-            else:
-                q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
-                k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
+            k = flash_apply_rotary_emb(
+                k,
+                cos,
+                sin,
+                interleaved=True,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+            qkv_for_flash = None
+        else:
+            q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
+            k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
 
         window_size = (
             (-1, -1)
@@ -164,11 +166,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 )
 
             outputs.append(out.transpose(0, 1).to(v.dtype))
-        return (
-            torch.cat(outputs, dim=0)
-            if outputs
-            else v.new_empty((0, self.n_heads, self.d_head))
-        )
+        return torch.cat(outputs, dim=0)
 
 
 class SwiGLU(nn.Module):
@@ -263,9 +261,6 @@ class HitObjectFeatureTokenizer(nn.Module):
         d_model: int,
     ):
         super().__init__()
-        if d_feat <= 0:
-            raise ValueError("d_feat must be positive")
-
         self.feature_info = feature_info
         self.continuous = feature_info["continuous"]
         self.categorical = feature_info["categorical"]
@@ -347,7 +342,7 @@ class HitObjectFeatureTokenizer(nn.Module):
         hard_gate[..., 7] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
         tokens = tokens * hard_gate.unsqueeze(-1)
 
-        pooled = tokens.sum(dim=-2) / hard_gate.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        pooled = tokens.sum(dim=-2) / hard_gate.sum(dim=-1, keepdim=True)
         pooled = pooled + self.object_mlp(tokens.flatten(-2))
         return self.out(pooled)
 
@@ -441,18 +436,16 @@ class SpanMasker(nn.Module):
         encoder_input = packed_embed.clone()
 
         random_positions = torch.nonzero(mask_random, as_tuple=True)[0]
-        if random_positions.numel() > 0:
-            random_indices = torch.randint(
-                packed_embed.shape[0],
-                (random_positions.numel(),),
-                device=packed_embed.device,
-            )
-            encoder_input[random_positions] = packed_embed[random_indices]
+        random_indices = torch.randint(
+            packed_embed.shape[0],
+            (random_positions.numel(),),
+            device=packed_embed.device,
+        )
+        encoder_input[random_positions] = packed_embed[random_indices]
 
         replace_positions = torch.nonzero(mask_replace, as_tuple=True)[0]
-        if replace_positions.numel() > 0:
-            encoder_input[replace_positions] = self.mask_token_embed.to(
-                packed_embed.dtype
-            ).view(1, -1)
+        encoder_input[replace_positions] = self.mask_token_embed.to(
+            packed_embed.dtype
+        ).view(1, -1)
 
         return encoder_input, is_masked

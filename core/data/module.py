@@ -1,4 +1,3 @@
-import os
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -102,28 +101,22 @@ class BeatmapData(pl.LightningDataModule):
             },
             "map_features": {
                 key: [row["map_features"][key] for row in rows]
-                for key in rows[0].get("map_features", {})
+                for key in rows[0]["map_features"]
             },
             "ids": [row["beatmap_id"] for row in rows],
         }
 
-    def _collate(self, fn, **kwargs):
-        return partial(
-            fn,
-            max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
-            **kwargs,
-        )
-
     def _make_loader(
         self, dataset, collate_fn, *, train=False, sampler=None, batch_sampler=None
     ):
+        num_workers = int(self.data_config.dataloader.num_workers)
+        dataloader_kwargs = self._dataloader_kwargs(num_workers)
         if batch_sampler is not None:
             return DataLoader(
                 dataset,
                 batch_sampler=batch_sampler,
                 collate_fn=collate_fn,
-                **self._dataloader_kwargs(),
+                **dataloader_kwargs,
             )
 
         return DataLoader(
@@ -132,12 +125,9 @@ class BeatmapData(pl.LightningDataModule):
             shuffle=train and sampler is None,
             sampler=sampler,
             collate_fn=collate_fn,
-            drop_last=train and self._drop_last_training_batches(),
-            **self._dataloader_kwargs(),
+            drop_last=train and bool(self.config.runtime.compile_model),
+            **dataloader_kwargs,
         )
-
-    def _drop_last_training_batches(self) -> bool:
-        return bool(self.config.runtime.compile_model)
 
     def _length_buckets(self) -> Optional[List[int]]:
         if not self.phase_config.trainer.use_length_buckets:
@@ -148,11 +138,12 @@ class BeatmapData(pl.LightningDataModule):
             return None
         return [int(bucket) for bucket in buckets]
 
-    def _num_workers(self) -> int:
-        return int(self.data_config.dataloader.num_workers)
-
     def _dataloader_kwargs(self, num_workers: Optional[int] = None) -> Dict[str, Any]:
-        num_workers = self._num_workers() if num_workers is None else int(num_workers)
+        num_workers = (
+            int(self.data_config.dataloader.num_workers)
+            if num_workers is None
+            else int(num_workers)
+        )
         kwargs = {
             "num_workers": num_workers,
             "pin_memory": bool(self.data_config.dataloader.pin_memory),
@@ -189,7 +180,7 @@ class BeatmapData(pl.LightningDataModule):
             max_tokens=self._token_budget(lengths, buckets),
             seed=self.data_config.dataset_seed,
             shuffle=train,
-            drop_last=train and self._drop_last_training_batches(),
+            drop_last=train and bool(self.config.runtime.compile_model),
         )
         return self._make_loader(dataset, collate_fn, batch_sampler=batch_sampler)
 
@@ -226,8 +217,10 @@ class PretrainData(BeatmapData):
         )
 
     def train_dataloader(self):
-        collate = self._collate(
+        collate = partial(
             collate_pretrain,
+            max_seq_len=self.max_seq_len,
+            vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
         return self._bucketed_loader(
@@ -235,8 +228,10 @@ class PretrainData(BeatmapData):
         )
 
     def val_dataloader(self):
-        collate = self._collate(
+        collate = partial(
             collate_pretrain,
+            max_seq_len=self.max_seq_len,
+            vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
         return self._bucketed_loader(self.val_dataset, collate)
@@ -245,18 +240,13 @@ class PretrainData(BeatmapData):
 class AlignData(BeatmapData):
     def __init__(self, config, dataset_path=None, normalizer=None):
         super().__init__(config, "alignment", dataset_path, normalizer)
-        self.mining_cache = None
         self.train_mining_lookup: Dict[int, Dict[str, Any]] = {}
-        self.val_mining_lookup: Dict[int, Dict[str, Any]] = {}
         self.train_anchor_indices: List[int] = []
         self.train_anchor_ids: set[int] = set()
 
     def _load_mining_targets(self) -> Dict[int, Dict[str, Any]]:
         align_config = self.config["alignment"]
         cache_path = MINING_CACHE_PATH
-        if not os.path.exists(cache_path):
-            return {}
-
         alignment_size = align_config.data.alignment_size
         anchor_cache = load_alignment_cache(
             cache_path,
@@ -272,13 +262,13 @@ class AlignData(BeatmapData):
         needed_ids = set(anchor_ids)
         for row in anchor_cache.iter_rows(named=True):
             for ids_key, _ in ALIGNMENT_POSITIVE_LIST_PAIRS:
-                needed_ids.update(int(bid) for bid in row.get(ids_key, []))
+                needed_ids.update(int(bid) for bid in row[ids_key])
 
         cache = load_alignment_cache(
             cache_path,
             ids_to_load=sorted(needed_ids),
-                min_sr=self.data_config.min_sr,
-                max_sr=self.data_config.max_sr,
+            min_sr=self.data_config.min_sr,
+            max_sr=self.data_config.max_sr,
         )
         targets = {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
         available_ids = set(targets)
@@ -289,7 +279,7 @@ class AlignData(BeatmapData):
             for ids_key, weights_key in ALIGNMENT_POSITIVE_LIST_PAIRS:
                 filtered = [
                     (int(bid), float(weight))
-                    for bid, weight in zip(target.get(ids_key, []), target.get(weights_key, []))
+                    for bid, weight in zip(target[ids_key], target[weights_key])
                     if int(bid) in available_ids
                 ]
                 if max_positive_ids is not None:
@@ -315,7 +305,7 @@ class AlignData(BeatmapData):
         train_s, val_s = self._split_loaded_data(all_beatmap_data)
         train_attrs_np = {
             k: np.array(v)
-            for attrs in (train_s["attrs"], train_s.get("map_features", {}))
+            for attrs in (train_s["attrs"], train_s["map_features"])
             for k, v in attrs.items()
         }
         if self.normalizer is None:
@@ -323,7 +313,7 @@ class AlignData(BeatmapData):
         else:
             attribute_stats = dict(self.normalizer.get_attribute_stats())
             map_features_np = {
-                k: np.array(v) for k, v in train_s.get("map_features", {}).items()
+                k: np.array(v) for k, v in train_s["map_features"].items()
             }
             attribute_stats.update(
                 BeatmapNormalizer.attribute_stats_from_data(
@@ -360,7 +350,7 @@ class AlignData(BeatmapData):
             val_s["data"],
             self.normalizer,
             val_s["attrs"],
-            val_s.get("map_features"),
+            val_s["map_features"],
             is_training=False,
             beatmap_ids=val_s["ids"],
             alignment_targets=mining_targets,
@@ -372,11 +362,6 @@ class AlignData(BeatmapData):
             if int(bid) in mining_targets
         }
         self.train_anchor_indices = train_anchor_indices
-        self.val_mining_lookup = {
-            int(bid): mining_targets[int(bid)]
-            for bid in val_s["ids"]
-            if int(bid) in mining_targets
-        }
         anchors_per_epoch = min(
             int(self.config.alignment.data.alignment_size or len(train_anchor_indices)),
             len(train_anchor_indices),
@@ -390,31 +375,33 @@ class AlignData(BeatmapData):
 
     def train_dataloader(self):
         align_config = self.config["alignment"]
-        collate = self._collate(
+        collate = partial(
             collate_align,
+            max_seq_len=self.max_seq_len,
+            vector_dim=self.vector_dim,
             packed=True,
         )
-        if self.train_mining_lookup:
-            buckets = self._length_buckets()
-            lengths = self._lengths(self.train_dataset)
-            sampler = AlignmentBatchSampler(
-                self.train_dataset.beatmap_ids,
-                self.train_mining_lookup,
-                self.batch_size,
-                group_size=align_config.data.group_size,
-                seed=align_config.data.seed,
-                anchor_indices=self.train_anchor_indices,
-                epoch_size=align_config.data.alignment_size,
-                lengths=lengths if buckets else None,
-                buckets=buckets,
-                drop_last=self._drop_last_training_batches(),
-            )
-            return self._make_loader(self.train_dataset, collate, batch_sampler=sampler)
-        return self._make_loader(self.train_dataset, collate, train=True)
+        buckets = self._length_buckets()
+        lengths = self._lengths(self.train_dataset)
+        sampler = AlignmentBatchSampler(
+            self.train_dataset.beatmap_ids,
+            self.train_mining_lookup,
+            self.batch_size,
+            group_size=align_config.data.group_size,
+            seed=align_config.data.seed,
+            anchor_indices=self.train_anchor_indices,
+            epoch_size=align_config.data.alignment_size,
+            lengths=lengths if buckets else None,
+            buckets=buckets,
+            drop_last=bool(self.config.runtime.compile_model),
+        )
+        return self._make_loader(self.train_dataset, collate, batch_sampler=sampler)
 
     def val_dataloader(self):
-        collate = self._collate(
+        collate = partial(
             collate_align,
+            max_seq_len=self.max_seq_len,
+            vector_dim=self.vector_dim,
             length_buckets=self._length_buckets(),
         )
         return self._bucketed_loader(self.val_dataset, collate)

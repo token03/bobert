@@ -120,9 +120,7 @@ class BobertModel(nn.Module):
             "total_parameters": total_params,
             "trainable_parameters": trainable_params,
             "model_size_mb": total_params * 4 / (1024 * 1024),
-            "parameter_efficiency": trainable_params / total_params
-            if total_params > 0
-            else 0,
+            "parameter_efficiency": trainable_params / total_params,
         }
 
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
@@ -240,13 +238,6 @@ class BobertProjectedStatsPooler(nn.Module):
         stats: Tuple[str, ...] = ("mean", "max", "std"),
     ):
         super().__init__()
-        if not stats:
-            raise ValueError("stats pooler requires at least one statistic")
-        valid_stats = {"mean", "max", "std"}
-        unknown_stats = set(stats) - valid_stats
-        if unknown_stats:
-            raise ValueError(f"unsupported pooling stats: {sorted(unknown_stats)}")
-
         self.d_model = d_model
         self.stat_dim = stat_dim
         self.stats = tuple(stats)
@@ -299,24 +290,19 @@ class BobertQueryAttentionPooler(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        num_queries: int = 8,
-        head_dim: Optional[int] = None,
-        output_dim: Optional[int] = None,
+        num_queries: int,
+        head_dim: int,
+        output_dim: int,
         dropout: float = 0.0,
         use_flash: bool = True,
     ):
         super().__init__()
-        if num_queries <= 0:
-            raise ValueError("num_queries must be positive")
-        if n_heads <= 0:
-            raise ValueError("n_heads must be positive")
-
         self.d_model = d_model
         self.n_heads = n_heads
         self.num_queries = num_queries
-        self.head_dim = head_dim or (d_model // n_heads)
+        self.head_dim = int(head_dim)
         self.inner_dim = self.n_heads * self.head_dim
-        self.output_dim = output_dim or self.inner_dim * self.num_queries
+        self.output_dim = int(output_dim)
         self.dropout = dropout
         self.use_flash = use_flash
 
@@ -343,9 +329,6 @@ class BobertQueryAttentionPooler(nn.Module):
     ) -> torch.Tensor:
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         batch_size = seqlens.numel()
-
-        if batch_size == 0:
-            return packed_output.new_zeros((0, self.output_dim))
 
         x = self.norm(packed_output)
         kv = self.kv(x).view(
@@ -419,16 +402,6 @@ class BobertQueryAttentionPooler(nn.Module):
         start = 0
         for seqlen in seqlens.tolist():
             end = start + seqlen
-            if seqlen == 0:
-                outputs.append(
-                    torch.zeros(
-                        (self.num_queries, self.n_heads, self.head_dim),
-                        device=device,
-                        dtype=k.dtype,
-                    )
-                )
-                continue
-
             k_i = k[start:end].transpose(0, 1).float()
             v_i = v[start:end].transpose(0, 1).float()
             out = F.scaled_dot_product_attention(
@@ -440,21 +413,12 @@ class BobertQueryAttentionPooler(nn.Module):
             outputs.append(out.transpose(0, 1).to(k.dtype))
             start = end
 
-        return (
-            torch.stack(outputs, dim=0)
-            if outputs
-            else k.new_empty(
-                (0, self.num_queries, self.n_heads, self.head_dim)
-            )
-        )
+        return torch.stack(outputs, dim=0)
 
 
 class BobertStatsMixerPooler(nn.Module):
     def __init__(self, pooler: nn.Module, output_dim: int):
         super().__init__()
-        if output_dim <= 0:
-            raise ValueError("output_dim must be positive")
-
         self.pooler = pooler
         input_dim = getattr(pooler, "output_dim")
         self.output_dim = output_dim
@@ -527,13 +491,8 @@ class BobertDifficultyHead(nn.Module):
 
 
 class BobertMapFeatureProjector(nn.Module):
-    def __init__(self, num_features: int, output_dim: int = 32):
+    def __init__(self, num_features: int, output_dim: int):
         super().__init__()
-        if num_features <= 0:
-            raise ValueError("num_features must be positive")
-        if output_dim <= 0:
-            raise ValueError("output_dim must be positive")
-
         self.output_dim = output_dim
         self.net = nn.Sequential(
             nn.LayerNorm(num_features),
@@ -667,35 +626,28 @@ class BobertForAlignment(nn.Module):
         bert_model: BobertModel,
         contrastive_pooler: nn.Module,
         aux_pooler: nn.Module,
-        embedding_dim: int = 128,
-        map_feature_dim: int = 32,
-        num_map_features: int = len(MAP_FEATURE_ATTRIBUTES),
-        map_feature_indices: Optional[Sequence[int]] = None,
+        embedding_dim: int,
+        map_feature_dim: int,
+        num_map_features: int,
+        map_feature_indices: Sequence[int],
     ):
         super().__init__()
         self.bert = bert_model
         self.pooler = aux_pooler
         self.contrastive_pooler = contrastive_pooler
         self.embedding_dim = embedding_dim
-        if map_feature_indices is None:
-            map_feature_indices = tuple(range(num_map_features))
-        else:
-            map_feature_indices = tuple(int(index) for index in map_feature_indices)
-            num_map_features = len(map_feature_indices)
+        map_feature_indices = tuple(int(index) for index in map_feature_indices)
+        num_map_features = len(map_feature_indices)
         self.register_buffer(
             "map_feature_indices",
             torch.tensor(map_feature_indices, dtype=torch.long),
             persistent=False,
         )
-        self.map_projector = (
-            BobertMapFeatureProjector(num_map_features, map_feature_dim)
-            if map_feature_dim > 0 and num_map_features > 0
-            else None
-        )
+        self.map_projector = BobertMapFeatureProjector(num_map_features, map_feature_dim)
 
         contrastive_dim = getattr(contrastive_pooler, "output_dim", bert_model.d_model)
         aux_dim = getattr(aux_pooler, "output_dim", bert_model.d_model)
-        map_dim = getattr(self.map_projector, "output_dim", 0)
+        map_dim = self.map_projector.output_dim
         self.retrieval_head = nn.Sequential(
             nn.LayerNorm(contrastive_dim + aux_dim + map_dim),
             nn.Linear(contrastive_dim + aux_dim + map_dim, embedding_dim),
@@ -786,21 +738,11 @@ class BobertForAlignment(nn.Module):
 
     def _project_map_features(
         self,
-        map_features: Optional[torch.Tensor],
+        map_features: torch.Tensor,
         reference: torch.Tensor,
     ) -> torch.Tensor:
-        if self.map_projector is None:
-            return reference.new_zeros((reference.shape[0], 0))
-        if map_features is None:
-            return reference.new_zeros((reference.shape[0], self.map_projector.output_dim))
-
         map_features = map_features.to(device=reference.device, dtype=reference.dtype)
         map_feature_indices = self.map_feature_indices.to(device=reference.device)
-        if map_features.shape[-1] <= int(map_feature_indices.max()):
-            raise ValueError(
-                f"expected at least {int(map_feature_indices.max()) + 1} map features, "
-                f"got {map_features.shape[-1]}"
-            )
         map_features = map_features.index_select(-1, map_feature_indices)
         return self.map_projector(map_features)
 
@@ -809,7 +751,7 @@ class BobertForAlignment(nn.Module):
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        map_features: Optional[torch.Tensor] = None,
+        map_features: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         contrastive_pooled = self.contrastive_pooler(
             packed_output,
@@ -821,10 +763,11 @@ class BobertForAlignment(nn.Module):
             cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        pieces = [contrastive_pooled, aux_pooled]
-        if self.map_projector is not None:
-            pieces.append(self._project_map_features(map_features, contrastive_pooled))
-
+        pieces = [
+            contrastive_pooled,
+            aux_pooled,
+            self._project_map_features(map_features, contrastive_pooled),
+        ]
         pooled = torch.cat(pieces, dim=-1)
         return pooled, F.normalize(self.retrieval_head(pooled), dim=-1)
 
@@ -833,7 +776,7 @@ class BobertForAlignment(nn.Module):
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        map_features: Optional[torch.Tensor] = None,
+        map_features: torch.Tensor,
     ) -> Dict[str, Any]:
         pooled, embedding = self._get_pooled_outputs(
             packed_output, cu_seqlens, max_seqlen, map_features
@@ -845,11 +788,12 @@ class BobertForAlignment(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cu_seqlens: Optional[torch.Tensor] = None,
-        map_features: Optional[torch.Tensor] = None,
+        *,
+        map_features: torch.Tensor,
     ) -> Dict[str, Any]:
         return self._outputs(
             *self.bert.encode_padded(x, attention_mask, cu_seqlens),
-            map_features,
+            map_features=map_features,
         )
 
     def forward_packed(
@@ -857,7 +801,7 @@ class BobertForAlignment(nn.Module):
         packed_vectors: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        map_features: Optional[torch.Tensor] = None,
+        map_features: torch.Tensor,
     ) -> Dict[str, Any]:
         return self._outputs(
             *self.bert.encode_packed(packed_vectors, cu_seqlens, max_seqlen),

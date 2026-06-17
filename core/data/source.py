@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,22 +9,7 @@ from .schema import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
 from .feature import build_feature_tensors, calculate_drain_times
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _resolve_path(path: str) -> str:
-    path_obj = Path(path).expanduser()
-    if path_obj.is_absolute() or path_obj.exists():
-        return str(path_obj)
-
-    project_path = PROJECT_ROOT / path_obj
-    if project_path.exists():
-        return str(project_path)
-
-    return str(path_obj)
-
-
-def scan_dataset_parquet(path: str) -> pl.LazyFrame:
+def scan_dataset_parquet(path: str | Path) -> pl.LazyFrame:
     path_obj = Path(path)
     source = path_obj / "**" / "*.parquet" if path_obj.is_dir() else path_obj
     return pl.scan_parquet(str(source))
@@ -56,55 +40,32 @@ def _best_supported_ratings_lf(
 
 
 def _selected_beatmaps_lf(
-    beatmaps_path: str,
-    ratings_path: str,
+    beatmaps_path: str | Path,
+    ratings_path: str | Path,
     ids_to_load: Optional[List[int]],
     rating_seq_len: Optional[int],
     min_sr: Optional[float],
     max_sr: Optional[float],
-    require_ratings: bool,
 ) -> pl.LazyFrame:
-    beatmaps_lf = scan_dataset_parquet(beatmaps_path)
-    wanted_cols = ["beatmap_id", "cs", "ar", "od", "hp_drain", "slider_multiplier"]
-    available_cols = [
-        col for col in wanted_cols if col in beatmaps_lf.collect_schema().names()
-    ]
-    beatmaps_lf = beatmaps_lf.select(available_cols).unique("beatmap_id")
-    defaults = {
-        "cs": 4.0,
-        "ar": 10.0,
-        "od": 5.0,
-        "hp_drain": 5.0,
-        "slider_multiplier": 1.4,
-    }
-    beatmaps_lf = beatmaps_lf.with_columns(
-        [
-            pl.lit(value).cast(pl.Float32).alias(name)
-            for name, value in defaults.items()
-            if name not in available_cols
-        ]
+    beatmaps_lf = (
+        scan_dataset_parquet(beatmaps_path)
+        .select(["beatmap_id", "cs", "ar", "od", "hp_drain", "slider_multiplier"])
+        .unique("beatmap_id")
     )
 
     if ids_to_load:
         beatmaps_lf = beatmaps_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
 
-    if not os.path.exists(ratings_path):
-        if require_ratings:
-            raise FileNotFoundError(f"Ratings file not found at '{ratings_path}'. ")
-        return beatmaps_lf
-
-    ratings_lf = _best_supported_ratings_lf(scan_dataset_parquet(ratings_path), rating_seq_len)
+    ratings_lf = _best_supported_ratings_lf(
+        scan_dataset_parquet(ratings_path), rating_seq_len
+    )
 
     if min_sr is not None:
         ratings_lf = ratings_lf.filter(pl.col("stars") >= min_sr)
     if max_sr is not None:
         ratings_lf = ratings_lf.filter(pl.col("stars") <= max_sr)
 
-    return beatmaps_lf.join(
-        ratings_lf,
-        on="beatmap_id",
-        how="inner" if require_ratings else "left",
-    )
+    return beatmaps_lf.join(ratings_lf, on="beatmap_id", how="inner")
 
 
 def _sample_beatmap_ids(
@@ -130,17 +91,16 @@ def load_beatmap_dataset(
     chunk_size: int = 5000,
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
-    require_ratings: bool = True,
 ) -> List[Dict[str, Any]]:
-    dataset_path = _resolve_path(dataset_path)
-    ratings_path = _resolve_path(ratings_path)
+    dataset_path = Path(dataset_path).expanduser()
+    ratings_path = Path(ratings_path).expanduser()
 
     rating_seq_len = max_seq_len if rating_seq_len is None else rating_seq_len
 
-    beatmaps_path = os.path.join(dataset_path, "beatmaps")
-    hitobjects_path = os.path.join(dataset_path, "hitobjects")
+    beatmaps_path = dataset_path / "beatmaps"
+    hitobjects_path = dataset_path / "hitobjects"
 
-    if not os.path.exists(beatmaps_path) or not os.path.exists(hitobjects_path):
+    if not beatmaps_path.exists() or not hitobjects_path.exists():
         raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
 
     if ids_to_load:
@@ -154,7 +114,6 @@ def load_beatmap_dataset(
         rating_seq_len,
         min_sr,
         max_sr,
-        require_ratings,
     ).collect()
 
     all_beatmap_ids = _sample_beatmap_ids(
@@ -171,7 +130,6 @@ def load_beatmap_dataset(
         f"Selected {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}..."
     )
     all_beatmap_data = []
-    missing_ratings_count = 0
 
     hitobject_cols = [
         "beatmap_id",
@@ -205,15 +163,9 @@ def load_beatmap_dataset(
             continue
 
         drain_times = calculate_drain_times(beatmaps_chunk, hitobjects_chunk)
-        beatmaps_chunk = beatmaps_chunk.join(drain_times, on="beatmap_id", how="left")
-        if "drain_time" not in beatmaps_chunk.columns:
-            beatmaps_chunk = beatmaps_chunk.with_columns(
-                pl.lit(0.0).cast(pl.Float32).alias("drain_time")
-            )
-        else:
-            beatmaps_chunk = beatmaps_chunk.with_columns(
-                pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
-            )
+        beatmaps_chunk = beatmaps_chunk.join(
+            drain_times, on="beatmap_id", how="left"
+        ).with_columns(pl.col("drain_time").fill_null(0.0).cast(pl.Float32))
 
         hitobject_data, ids, _ = build_feature_tensors(
             beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
@@ -229,59 +181,36 @@ def load_beatmap_dataset(
         for bid in ids:
             bid_int = int(bid)
             vectors = id_to_vectors[bid_int]
-            beatmap_row = beatmap_rows.get(bid_int)
-            if beatmap_row is None:
-                continue
+            beatmap_row = beatmap_rows[bid_int]
 
-            ratings = None
-            if "stars" in beatmap_row:
-                stars = beatmap_row.get("stars")
-                if stars is not None:
-                    ratings = {
-                        "stars": float(stars),
-                        "aim": float(beatmap_row.get("aim") or 0.0),
-                        "speed": float(beatmap_row.get("speed") or 0.0),
-                        "slider_factor": float(beatmap_row.get("slider_factor") or 0.0),
-                    }
-            if require_ratings and not ratings:
-                missing_ratings_count += 1
-                continue
+            ratings = {
+                "stars": float(beatmap_row["stars"]),
+                "aim": float(beatmap_row["aim"]),
+                "speed": float(beatmap_row["speed"]),
+                "slider_factor": float(beatmap_row["slider_factor"]),
+            }
 
             beatmap_attrs = {
-                "cs": beatmap_row.get("cs", 4.0),
-                "ar": beatmap_row.get("ar", 10.0),
-                "od": beatmap_row.get("od", 5.0),
-                "hp_drain": beatmap_row.get("hp_drain", 5.0),
-                "drain_time": beatmap_row.get("drain_time", 0.0),
-                "slider_multiplier": beatmap_row.get("slider_multiplier", 1.4),
+                "cs": beatmap_row["cs"],
+                "ar": beatmap_row["ar"],
+                "od": beatmap_row["od"],
+                "hp_drain": beatmap_row["hp_drain"],
+                "drain_time": beatmap_row["drain_time"],
+                "slider_multiplier": beatmap_row["slider_multiplier"],
             }
-            attrs = ratings or {}
-
-            if ratings:
-                sr = attrs.get("stars", 0.0)
-                if min_sr is not None and sr < min_sr:
-                    continue
-                if max_sr is not None and sr > max_sr:
-                    continue
 
             all_beatmap_data.append(
                 {
                     "beatmap_id": bid_int,
                     "hitobjects": vectors,
                     "difficulty": {
-                        k: attrs.get(k, 0.0) for k in DIFFICULTY_ATTRIBUTES
+                        k: ratings[k] for k in DIFFICULTY_ATTRIBUTES
                     },
                     "map_features": {
-                        k: float(beatmap_attrs.get(k, 0.0))
-                        for k in MAP_FEATURE_ATTRIBUTES
+                        k: float(beatmap_attrs[k]) for k in MAP_FEATURE_ATTRIBUTES
                     },
                 }
             )
-
-    if missing_ratings_count > 0:
-        print(
-            f"Warning: {missing_ratings_count} beatmaps skipped (not found in ratings.parquet)"
-        )
 
     print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")
     return all_beatmap_data

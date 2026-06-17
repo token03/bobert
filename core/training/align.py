@@ -66,7 +66,7 @@ class AlignmentModule(BobertLightningModule):
             batch["packed_vectors"],
             batch["cu_seqlens"],
             max_seqlen,
-            labels.get("map_features"),
+            labels["map_features"],
         )
         return predictions, labels
 
@@ -78,7 +78,7 @@ class AlignmentModule(BobertLightningModule):
             batch["vectors"],
             batch["attention_mask"],
             batch["cu_seqlens"],
-            labels.get("map_features"),
+            map_features=labels["map_features"],
         )
         return predictions, labels
 

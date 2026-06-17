@@ -24,7 +24,7 @@ class BeatmapDataset(Dataset):
         self.diff_attrs = difficulty_attributes
         self.map_features = map_features
         self.beatmap_ids = beatmap_ids
-        self.alignment_targets = alignment_targets or {}
+        self.alignment_targets = alignment_targets
         self.is_training = is_training
         self.max_seq_len = int(max_seq_len) if max_seq_len else None
 
@@ -60,17 +60,13 @@ class BeatmapDataset(Dataset):
             if self.diff_attrs
             else {}
         )
-        map_features = (
-            {
-                k: self.normalizer.normalize_attribute(k, v[idx])
-                for k, v in self.map_features.items()
-            }
-            if self.map_features
-            else {}
-        )
 
         if self.beatmap_ids is None:
             return vec, attrs
 
+        map_features = {
+            k: self.normalizer.normalize_attribute(k, v[idx])
+            for k, v in self.map_features.items()
+        }
         bid = int(self.beatmap_ids[idx])
-        return vec, attrs, map_features, bid, self.alignment_targets.get(bid, {})
+        return vec, attrs, map_features, bid, self.alignment_targets[bid]

@@ -7,11 +7,8 @@ from core.data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, OBJECT_TYPE_SL
 
 
 def mlm_loss_fn(
-    predictions: Dict[str, Any], targets: torch.Tensor, mask: torch.Tensor | None
+    predictions: Dict[str, Any], targets: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
-    if mask is not None and not torch.any(mask):
-        return torch.tensor(0.0, device=targets.device)
-
     feature_info = FEATURE_INFO
 
     cont_names = sorted(
@@ -19,9 +16,7 @@ def mlm_loss_fn(
     )
     cont_indices = [feature_info["continuous"][name] for name in cont_names]
 
-    masked_targets = targets if mask is None else targets[mask]
-    if masked_targets.shape[0] == 0:
-        return torch.tensor(0.0, device=targets.device)
+    masked_targets = targets[mask]
     cont_preds = predictions["continuous"]
     cont_targets = masked_targets[:, cont_indices]
 
@@ -92,11 +87,9 @@ def difficulty_loss_fn(
     beta = float(loss_config.difficulty_huber_beta)
 
     for key in DIFFICULTY_ATTRIBUTES:
-        if key in predictions and key in labels:
-            weight = per_attr_weights.get(key, 1.0)
-            loss = F.smooth_l1_loss(predictions[key], labels[key], beta=beta)
-            losses[f"{key}_loss"] = loss
-            unscaled_sum = unscaled_sum + weight * loss
+        loss = F.smooth_l1_loss(predictions[key], labels[key], beta=beta)
+        losses[f"{key}_loss"] = loss
+        unscaled_sum = unscaled_sum + per_attr_weights[key] * loss
 
     losses["difficulty_loss_unscaled"] = unscaled_sum
     losses["difficulty_loss"] = unscaled_sum * overall_weight
@@ -132,7 +125,7 @@ def contrastive_loss_fn(
     predictions: Dict[str, torch.Tensor], labels: Dict[str, Any], config: Dict[str, Any]
 ) -> Dict[str, torch.Tensor]:
     embeddings = predictions["embedding"]
-    if not labels.get("use_contrastive", True):
+    if not labels["use_contrastive"]:
         return {"contrastive_loss": torch.zeros((), device=embeddings.device)}
     group_size = int(config.alignment.data.group_size)
     temperature = float(config.alignment.loss.temperature)
@@ -147,33 +140,14 @@ def contrastive_loss_fn(
         torch.eye(batch_size, dtype=torch.bool, device=device), -1e9
     )
 
-    positive_weights = labels.get("positive_weights")
-    if positive_weights is not None:
-        positive_weights = positive_weights.to(device=device, dtype=logits.dtype)
-        positive_weights = positive_weights.masked_fill(
-            torch.eye(batch_size, dtype=torch.bool, device=device), 0.0
-        )
-    else:
-        group_positive_mask = torch.zeros(
-            batch_size, batch_size, dtype=torch.bool, device=device
-        )
-        for start in range(0, batch_size, group_size):
-            positive_indices = torch.arange(
-                start, start + min(2, group_size), device=device
-            )
-            group_positive_mask[
-                positive_indices[:, None], positive_indices[None, :]
-            ] = True
-        group_positive_mask.fill_diagonal_(False)
-        positive_weights = group_positive_mask.to(logits.dtype)
+    positive_weights = labels["positive_weights"].to(device=device, dtype=logits.dtype)
+    positive_weights = positive_weights.masked_fill(
+        torch.eye(batch_size, dtype=torch.bool, device=device), 0.0
+    )
 
-    ignore_contrastive = labels.get("ignore_contrastive")
-    if ignore_contrastive is not None:
-        ignore_contrastive = ignore_contrastive.to(device=device, dtype=torch.bool)
-        denominator_mask = ignore_contrastive & (positive_weights <= 0.0)
-        logits_for_denominator = logits.masked_fill(denominator_mask, -1e9)
-    else:
-        logits_for_denominator = logits
+    ignore_contrastive = labels["ignore_contrastive"].to(device=device, dtype=torch.bool)
+    denominator_mask = ignore_contrastive & (positive_weights <= 0.0)
+    logits_for_denominator = logits.masked_fill(denominator_mask, -1e9)
 
     log_prob = logits - torch.logsumexp(logits_for_denominator, dim=1, keepdim=True)
     positive_sums = positive_weights.sum(dim=1)
@@ -182,13 +156,9 @@ def contrastive_loss_fn(
         return {"contrastive_loss": torch.zeros((), device=device)}
 
     loss = -(log_prob * positive_weights).sum(dim=1) / positive_sums.clamp_min(1e-9)
-    anchor_weights = labels.get("anchor_weights")
-    if anchor_weights is not None:
-        anchor_weights = anchor_weights.to(device=device, dtype=loss.dtype)
-        valid_weights = anchor_weights[valid].clamp_min(0.0)
-        loss = (loss[valid] * valid_weights).sum() / valid_weights.sum().clamp_min(1e-9)
-    else:
-        loss = loss[valid].mean()
+    anchor_weights = labels["anchor_weights"].to(device=device, dtype=loss.dtype)
+    valid_weights = anchor_weights[valid].clamp_min(0.0)
+    loss = (loss[valid] * valid_weights).sum() / valid_weights.sum().clamp_min(1e-9)
 
     return {"contrastive_loss": loss}
 

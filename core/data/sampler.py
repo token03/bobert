@@ -174,8 +174,8 @@ class AlignmentBatchSampler(Sampler[List[int]]):
     def _sample_positives(
         self, mining: Dict[str, Any], rng: random.Random, count: int
     ) -> List[int]:
-        ids = [int(bid) for bid in mining.get("graph_positive_ids", [])]
-        weights = [float(w) for w in mining.get("graph_positive_weights", [])]
+        ids = [int(bid) for bid in mining["graph_positive_ids"]]
+        weights = [float(w) for w in mining["graph_positive_weights"]]
         candidates = [
             (bid, max(weight, 0.0))
             for bid, weight in zip(ids, weights)
@@ -215,11 +215,11 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         batch: List[int] = []
         for anchor_idx in anchor_indices:
             anchor_id = self.beatmap_ids[anchor_idx]
-            mining = self.mining_lookup.get(anchor_id, {})
+            mining = self.mining_lookup[anchor_id]
             positive_ids = self._sample_positives(
                 mining, rng, self.group_size - 1
             )
-            if len(positive_ids) != self.group_size - 1 or anchor_id in positive_ids:
+            if not positive_ids:
                 continue
             group = [anchor_idx] + [self.id_to_idx[bid] for bid in positive_ids]
             if self.lengths is not None and self.buckets is not None:
