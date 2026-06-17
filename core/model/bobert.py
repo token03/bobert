@@ -12,7 +12,7 @@ try:
 except ImportError:
     flash_attn_varlen_kvpacked_func = None
 
-from ..data.beatmap import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
+from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, MAP_FEATURE_ATTRIBUTES
 
 from .components import (
     SpanMasker,
@@ -21,7 +21,6 @@ from .components import (
     RMSNorm,
     flash_apply_rotary_emb,
 )
-from ..data.hitobject import FEATURE_INFO
 
 T = TypeVar("T", bound="BobertModel")
 

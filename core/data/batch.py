@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
 
-from .beatmap import MAP_FEATURE_ATTRIBUTES
+from .schema import MAP_FEATURE_ATTRIBUTES
 from .sampler import length_bucket
 
 

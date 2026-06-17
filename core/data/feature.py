@@ -5,7 +5,7 @@ import polars as pl
 import torch
 
 from .parser import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
-from .hitobject import (
+from .schema import (
     FIELD_NAMES,
     DURATION_BINS,
     OBJECT_TYPE_SLIDER_HEAD,

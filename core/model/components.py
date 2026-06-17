@@ -50,7 +50,7 @@ class RMSNorm(nn.Module):
         )
         return (output * self.weight).to(dtype=x.dtype)
 
-from ..data.hitobject import OBJECT_TYPE_SLIDER_HEAD
+from ..data.schema import OBJECT_TYPE_SLIDER_HEAD
 
 
 class MultiHeadAttentionWithRoPE(nn.Module):

@@ -6,7 +6,7 @@ from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import FBetaScore
 
-from core.data.beatmap import DIFFICULTY_ATTRIBUTES
+from core.data.schema import DIFFICULTY_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 
 
@@ -43,7 +43,7 @@ class MLMMetrics(nn.Module):
         mask: torch.Tensor,
         loss: Optional[float] = None,
     ):
-        from core.data.hitobject import OBJECT_TYPE_SLIDER_HEAD
+        from core.data.schema import OBJECT_TYPE_SLIDER_HEAD
 
         if loss is not None:
             self.loss_metric.update(loss)

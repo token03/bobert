@@ -3,8 +3,7 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from core.data.beatmap import DIFFICULTY_ATTRIBUTES
-from core.data.hitobject import FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
+from core.data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
 
 
 def mlm_loss_fn(

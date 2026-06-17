@@ -1,6 +1,22 @@
 from typing import NamedTuple
 from enum import Enum
 
+DIFFICULTY_ATTRIBUTES = [
+    "stars",
+    "aim",
+    "speed",
+    "slider_factor",
+]
+
+MAP_FEATURE_ATTRIBUTES = [
+    "ar",
+    "cs",
+    "od",
+    "hp_drain",
+    "drain_time",
+    "slider_multiplier",
+]
+
 OSU_STAGE_WIDTH = 512
 OSU_STAGE_HEIGHT = 384
 CENTER_X = OSU_STAGE_WIDTH / 2.0
@@ -30,6 +46,8 @@ DURATION_BINS = [
 ]
 
 CANONICAL_BPM_MIN = 120.0
+
+
 class NormalizationType(Enum):
     CATEGORICAL = "categorical"
     STANDARD = "standard"
@@ -41,6 +59,7 @@ OBJECT_TYPE_SLIDER_HEAD = 1
 OBJECT_TYPE_SLIDER_END = 2
 OBJECT_TYPE_SPINNER_START = 3
 OBJECT_TYPE_SPINNER_END = 4
+
 
 class Feature(NamedTuple):
     name: str

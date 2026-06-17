@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 from core.config import load_config
 from core.data.batch import batch_vectors
-from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
+from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file

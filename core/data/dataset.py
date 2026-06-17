@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.utils.data import Dataset
 
-from .hitobject import FEATURE_INFO
+from .schema import FEATURE_INFO
 from .normalizer import BeatmapNormalizer
 
 

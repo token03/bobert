@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import requests
-from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
+from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from scripts.common.osu import (
     API_TIERS,
     DOWNLOAD_HEADERS,

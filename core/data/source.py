@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from .beatmap import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
+from .schema import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
 from .feature import build_feature_tensors, calculate_drain_times
 
 

@@ -10,8 +10,7 @@ from core.data.module import PretrainData
 from .base import BobertLightningModule
 from .loss import pretrain_loss_fn
 from .metrics import MLMMetrics, DifficultyMetrics
-from ..data.beatmap import DIFFICULTY_ATTRIBUTES
-from ..data.hitobject import FEATURE_INFO, VECTOR_DIM
+from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, VECTOR_DIM
 
 
 class PretrainingModule(BobertLightningModule):

@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from core.config import load_config
 from core.data.batch import batch_vectors
-from core.data.beatmap import MAP_FEATURE_ATTRIBUTES
+from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.sampler import LengthBucketBatchSampler, length_bucket
 from core.data.source import load_beatmap_dataset
