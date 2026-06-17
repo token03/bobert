@@ -1,6 +1,14 @@
-from .setup import setup_device
-from .setup import create_optimizer, create_scheduler, create_kde_sampler, create_trainer
-from .metrics import MLMMetrics, DifficultyMetrics, ContrastiveMetrics
-from .loss import mlm_loss_fn, difficulty_loss_fn, pretrain_loss_fn, contrastive_loss_fn
-from .pretrain import PretrainingModule
-from .align import AlignmentModule
+from .align import AlignmentModule as AlignmentModule
+from .loss import contrastive_loss_fn as contrastive_loss_fn
+from .loss import difficulty_loss_fn as difficulty_loss_fn
+from .loss import mlm_loss_fn as mlm_loss_fn
+from .loss import pretrain_loss_fn as pretrain_loss_fn
+from .metrics import ContrastiveMetrics as ContrastiveMetrics
+from .metrics import DifficultyMetrics as DifficultyMetrics
+from .metrics import MLMMetrics as MLMMetrics
+from .pretrain import PretrainingModule as PretrainingModule
+from .setup import create_kde_sampler as create_kde_sampler
+from .setup import create_optimizer as create_optimizer
+from .setup import create_scheduler as create_scheduler
+from .setup import create_trainer as create_trainer
+from .setup import setup_device as setup_device

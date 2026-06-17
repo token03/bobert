@@ -1,10 +1,13 @@
 # components.py
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
 from rotary_embedding_torch import apply_rotary_emb
 from torch.utils.checkpoint import checkpoint
+
+from ..data.schema import OBJECT_TYPE_SLIDER_HEAD
 
 try:
     from flash_attn import flash_attn_varlen_qkvpacked_func
@@ -49,8 +52,6 @@ class RMSNorm(nn.Module):
             output.square().mean(dim=-1, keepdim=True) + self.eps
         )
         return (output * self.weight).to(dtype=x.dtype)
-
-from ..data.schema import OBJECT_TYPE_SLIDER_HEAD
 
 
 class MultiHeadAttentionWithRoPE(nn.Module):
@@ -346,9 +347,7 @@ class HitObjectFeatureTokenizer(nn.Module):
         hard_gate[..., 7] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
         tokens = tokens * hard_gate.unsqueeze(-1)
 
-        pooled = tokens.sum(dim=-2) / hard_gate.sum(
-            dim=-1, keepdim=True
-        ).clamp_min(1.0)
+        pooled = tokens.sum(dim=-2) / hard_gate.sum(dim=-1, keepdim=True).clamp_min(1.0)
         pooled = pooled + self.object_mlp(tokens.flatten(-2))
         return self.out(pooled)
 
@@ -385,7 +384,9 @@ class SpanMasker(nn.Module):
         max_k = max(1, int(seq_len * self.masking_ratio / self.mean_span_length * 1.5))
 
         probs = self.span_length_probs.expand(batch_size, -1)
-        span_length_indices = torch.multinomial(probs, num_samples=max_k, replacement=True)
+        span_length_indices = torch.multinomial(
+            probs, num_samples=max_k, replacement=True
+        )
         span_lengths = self.span_lengths_range[span_length_indices]
 
         cumsum_lengths = torch.cumsum(span_lengths, dim=1)

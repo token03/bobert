@@ -731,7 +731,6 @@ class BobertForAlignment(nn.Module):
 
         pooling_stats = tuple(alignment_config.pooling.stats)
         pooling_stat_dim = alignment_config.pooling.stat_dim
-        stats_output_dim = pooling_stat_dim * len(pooling_stats)
 
         aux_pooler = BobertProjectedStatsPooler(
             base_model.d_model,

@@ -57,7 +57,7 @@ def perform_eda(vertex_path, edge_path, beatmaps_path):
         print(f"Error: {beatmaps_path} not found.")
         return
 
-    print(f"--- EDA for Collections ---")
+    print("--- EDA for Collections ---")
     vertex_df = pd.read_parquet(vertex_path)
     edge_df = pd.read_parquet(edge_path)
 
@@ -127,7 +127,7 @@ def perform_eda(vertex_path, edge_path, beatmaps_path):
     n_collections = len(vertex_df)
     n_beatmaps = edge_df["beatmap_id"].nunique()
 
-    print(f"\n=== Matrix Dimensions ===")
+    print("\n=== Matrix Dimensions ===")
     print(f"Rows (Collections): {n_collections}")
     print(f"Cols (Beatmaps):    {n_beatmaps}")
 
@@ -219,7 +219,7 @@ def perform_eda(vertex_path, edge_path, beatmaps_path):
     )
 
     singular_values = svd.singular_values_
-    print(f"\nSingular Value Drop-off:")
+    print("\nSingular Value Drop-off:")
     print(f"Max SV: {singular_values[0]:.4f}")
     print(f"Min SV (at k={n_components}): {singular_values[-1]:.4f}")
     print(f"Condition Number (est): {singular_values[0] / singular_values[-1]:.4f}")
@@ -292,7 +292,7 @@ def analyze_rank_status_composition(edge_df, beatmaps_path):
     total_collections = len(collection_status)
 
     # Categorize collections by dominant status at multiple thresholds
-    print(f"\n--- Collections by Dominant Status ---")
+    print("\n--- Collections by Dominant Status ---")
     print(f"Total Collections: {total_collections:,}\n")
 
     for threshold in [0.9, 0.8, 0.7, 0.6]:
@@ -316,7 +316,7 @@ def analyze_rank_status_composition(edge_df, beatmaps_path):
         )
 
     # Mean percentages across all collections
-    print(f"--- Mean Status Percentages Across All Collections ---")
+    print("--- Mean Status Percentages Across All Collections ---")
     print(
         f"Ranked/Approved/Qual:     {collection_status['pct_ranked_approved_qual'].mean() * 100:5.2f}%"
     )
@@ -328,7 +328,7 @@ def analyze_rank_status_composition(edge_df, beatmaps_path):
     )
 
     # Distribution of ranked/approved/qualified percentage
-    print(f"\n--- Ranked/Approved/Qual Percentage Distribution ---")
+    print("\n--- Ranked/Approved/Qual Percentage Distribution ---")
     for threshold in [0.1, 0.25, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 0.95, 0.99]:
         count = (collection_status["pct_ranked_approved_qual"] >= threshold).sum()
         print(
@@ -366,7 +366,7 @@ def get_iqr_stats(series, name):
             f"Mode:                 {mode_result.mode[0]:.2f} (count: {mode_result.count[0]})"
         )
     except:
-        print(f"Mode:                 No unique mode")
+        print("Mode:                 No unique mode")
 
     # Whisker values
     lower_whisker = series[series >= lower_fence].min()
