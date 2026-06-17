@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.utils.data import Dataset
 
-from .augment import BeatmapAugmenter
+from .hitobject import FEATURE_INFO
 from .normalizer import BeatmapNormalizer
 
 
@@ -27,7 +27,6 @@ class BeatmapDataset(Dataset):
         self.alignment_targets = alignment_targets or {}
         self.is_training = is_training
         self.max_seq_len = int(max_seq_len) if max_seq_len else None
-        self.augmenter = BeatmapAugmenter() if is_training else None
 
     def __len__(self) -> int:
         return len(self.beatmap_data)
@@ -38,8 +37,19 @@ class BeatmapDataset(Dataset):
         if self.max_seq_len is not None and vec.shape[0] > self.max_seq_len:
             vec = vec[: self.max_seq_len]
 
-        if self.augmenter is not None:
-            vec = self.augmenter(vec)
+        if self.is_training:
+            aug_type = int(torch.randint(0, 4, (1,)).item())
+            flip_x = aug_type in (1, 3)
+            flip_y = aug_type in (2, 3)
+
+            if flip_x:
+                vec[:, FEATURE_INFO["continuous"]["norm_x"]] *= -1
+                vec[:, FEATURE_INFO["continuous"]["delta_x"]] *= -1
+            if flip_y:
+                vec[:, FEATURE_INFO["continuous"]["norm_y"]] *= -1
+                vec[:, FEATURE_INFO["continuous"]["delta_y"]] *= -1
+            if flip_x != flip_y:
+                vec[:, FEATURE_INFO["continuous"]["relative_sin"]] *= -1
 
         vec = self.normalizer.normalize_vectors(vec)
         attrs = (

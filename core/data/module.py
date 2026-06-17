@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 from .batch import collate_align, collate_pretrain
 from .dataset import BeatmapDataset
@@ -12,7 +12,6 @@ from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .source import load_beatmap_dataset
-from .split import random_split_aligned
 from core.paths import MINING_CACHE_PATH
 
 
@@ -89,7 +88,10 @@ class BeatmapData(pl.LightningDataModule):
         )
 
     def _split_loaded_data(self, beatmap_data: List[Dict[str, Any]]):
-        return random_split_aligned(self._unpack(beatmap_data), self.data_config["val_split"])
+        val_size = int(len(beatmap_data) * self.data_config["val_split"])
+        train_size = len(beatmap_data) - val_size
+        train_rows, val_rows = random_split(beatmap_data, [train_size, val_size])
+        return self._unpack(list(train_rows)), self._unpack(list(val_rows))
 
     def _unpack(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {
