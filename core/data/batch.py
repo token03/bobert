@@ -15,14 +15,12 @@ def rounded_pad_length(
     return min(((length + 127) // 128) * 128, int(max_seq_len))
 
 
-def batch_vectors(
+def _batch_lengths(
     vectors: Sequence[torch.Tensor],
     max_seq_len: int,
-    vector_dim: int,
     *,
     pad_to_len: int | None = None,
-    packed: bool = False,
-) -> Dict[str, torch.Tensor | int]:
+) -> tuple[int, list[int], torch.Tensor]:
     effective_max_seq_len = (
         min(int(pad_to_len), int(max_seq_len))
         if pad_to_len is not None
@@ -33,18 +31,39 @@ def batch_vectors(
     cu_seqlens = torch.nn.functional.pad(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
+    return effective_max_seq_len, lengths, cu_seqlens
 
-    if packed:
-        packed_vectors = torch.zeros(sum(lengths), vector_dim, dtype=torch.float32)
-        offset = 0
-        for vector, length in zip(vectors, lengths):
-            packed_vectors[offset : offset + length] = vector[:length]
-            offset += length
-        return {
-            "packed_vectors": packed_vectors,
-            "cu_seqlens": cu_seqlens,
-            "max_seqlen": max(lengths) if lengths else 0,
-        }
+
+def batch_packed_vectors(
+    vectors: Sequence[torch.Tensor],
+    max_seq_len: int,
+    vector_dim: int,
+) -> Dict[str, torch.Tensor | int]:
+    _, lengths, cu_seqlens = _batch_lengths(vectors, max_seq_len)
+    packed_vectors = torch.zeros(sum(lengths), vector_dim, dtype=torch.float32)
+    offset = 0
+    for vector, length in zip(vectors, lengths):
+        packed_vectors[offset : offset + length] = vector[:length]
+        offset += length
+    return {
+        "packed_vectors": packed_vectors,
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": max(lengths) if lengths else 0,
+    }
+
+
+def batch_padded_vectors(
+    vectors: Sequence[torch.Tensor],
+    max_seq_len: int,
+    vector_dim: int,
+    *,
+    pad_to_len: int | None = None,
+) -> Dict[str, torch.Tensor]:
+    effective_max_seq_len, lengths, cu_seqlens = _batch_lengths(
+        vectors,
+        max_seq_len,
+        pad_to_len=pad_to_len,
+    )
 
     max_len = effective_max_seq_len if pad_to_len is not None else max(lengths, default=0)
     padded = torch.zeros(len(vectors), max_len, vector_dim, dtype=torch.float32)
@@ -52,7 +71,11 @@ def batch_vectors(
     for i, (vector, length) in enumerate(zip(vectors, lengths)):
         padded[i, :length] = vector[:length]
         mask[i, :length] = True
-    return {"vectors": padded, "attention_mask": mask, "cu_seqlens": cu_seqlens}
+    return {
+            "vectors": padded, 
+            "attention_mask": mask, 
+            "cu_seqlens": cu_seqlens
+        }
 
 
 def stack_dicts(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
@@ -133,7 +156,7 @@ def collate_pretrain(
 ):
     vectors, attrs = zip(*batch)
     max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
-    vector_batch = batch_vectors(
+    vector_batch = batch_padded_vectors(
         vectors,
         max_seq_len,
         vector_dim,
@@ -156,7 +179,7 @@ def collate_align_train(
     labels = _alignment_labels(map_features, beatmap_ids, targets)
     labels["use_contrastive"] = True
 
-    vector_batch = batch_vectors(vectors, max_seq_len, vector_dim, packed=True)
+    vector_batch = batch_packed_vectors(vectors, max_seq_len, vector_dim)
     return {
         **vector_batch,
         "max_seqlen": torch.tensor(vector_batch["max_seqlen"], dtype=torch.long),
@@ -175,7 +198,7 @@ def collate_align_eval(
     labels["use_contrastive"] = False
 
     max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
-    vector_batch = batch_vectors(
+    vector_batch = batch_padded_vectors(
         vectors,
         max_seq_len,
         vector_dim,

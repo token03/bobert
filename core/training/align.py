@@ -70,9 +70,7 @@ class AlignmentModule(BobertLightningModule):
         )
         return predictions, labels
 
-    def _forward_batch(self, batch: Dict[str, Any]):
-        if "packed_vectors" in batch:
-            return self._forward_packed_batch(batch)
+    def _forward_eval_batch(self, batch: Dict[str, Any]):
         labels = batch["labels"]
         predictions = self(
             batch["vectors"],
@@ -83,7 +81,7 @@ class AlignmentModule(BobertLightningModule):
         return predictions, labels
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, labels = self._forward_batch(batch)
+        predictions, labels = self._forward_packed_batch(batch)
         loss_dict = alignment_loss_fn(predictions, labels, self.config)
 
         self.log_dict(
@@ -98,7 +96,7 @@ class AlignmentModule(BobertLightningModule):
         return loss_dict["total_loss"]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, labels = self._forward_batch(batch)
+        predictions, labels = self._forward_eval_batch(batch)
         loss_dict = alignment_loss_fn(predictions, labels, self.config)
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
         self.log(

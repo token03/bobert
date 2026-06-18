@@ -3,10 +3,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Dataset, random_split
 
 from .batch import collate_align_eval, collate_align_train, collate_pretrain
-from .dataset import BeatmapDataset
+from .dataset import AlignmentBeatmapDataset, PretrainBeatmapDataset
 from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
 from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
@@ -36,8 +36,8 @@ class BeatmapData(pl.LightningDataModule):
         self.batch_size = self.phase_config["trainer"]["batch_size"]
         self.vector_dim: Optional[int] = None
         self.normalizer: Optional[BeatmapNormalizer] = normalizer
-        self.train_dataset: Optional[BeatmapDataset] = None
-        self.val_dataset: Optional[BeatmapDataset] = None
+        self.train_dataset: Optional[Dataset] = None
+        self.val_dataset: Optional[Dataset] = None
 
     def _load_data(
         self,
@@ -58,7 +58,7 @@ class BeatmapData(pl.LightningDataModule):
     def max_seq_len(self) -> int:
         return int(self.data_config["max_seq_len"])
 
-    def _create_datasets(self, train_s, val_s) -> Tuple[BeatmapDataset, BeatmapDataset]:
+    def _create_datasets(self, train_s, val_s) -> Tuple[Dataset, Dataset]:
         raise NotImplementedError
 
     def _setup_sampler(self, train_attrs):
@@ -200,14 +200,14 @@ class PretrainData(BeatmapData):
 
     def _create_datasets(self, train_s, val_s):
         return (
-            BeatmapDataset(
+            PretrainBeatmapDataset(
                 train_s["data"],
                 self.normalizer,
                 train_s["attrs"],
                 is_training=True,
                 max_seq_len=self.max_seq_len,
             ),
-            BeatmapDataset(
+            PretrainBeatmapDataset(
                 val_s["data"],
                 self.normalizer,
                 val_s["attrs"],
@@ -336,7 +336,7 @@ class AlignData(BeatmapData):
         if not train_anchor_indices:
             raise RuntimeError("No sampled alignment anchors were found in the dataset.")
 
-        self.train_dataset = BeatmapDataset(
+        self.train_dataset = AlignmentBeatmapDataset(
             all_s["data"],
             self.normalizer,
             all_s["attrs"],
@@ -346,7 +346,7 @@ class AlignData(BeatmapData):
             alignment_targets=mining_targets,
             max_seq_len=self.max_seq_len,
         )
-        self.val_dataset = BeatmapDataset(
+        self.val_dataset = AlignmentBeatmapDataset(
             val_s["data"],
             self.normalizer,
             val_s["attrs"],
