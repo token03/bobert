@@ -98,7 +98,6 @@ alignment:
     grad_clip: 1.0
     precision: "bf16-mixed"
     save_checkpoints: true
-    use_length_buckets: false
 
   data:
     alignment_size: null

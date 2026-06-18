@@ -82,11 +82,11 @@ def _sample_beatmap_ids(
 
 def load_beatmap_dataset(
     dataset_path: str,
+    dataset_seed: int,
     max_seq_len: Optional[int] = None,
     rating_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
     sample_size: Optional[int] = None,
-    dataset_seed: int = 42,
     ratings_path: str = "./data/ratings.parquet",
     chunk_size: int = 5000,
     min_sr: Optional[float] = None,

@@ -59,8 +59,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self,
         d_model: int,
         n_heads: int,
-        local_window_size: int = 128,
-        is_global: bool = True,
+        local_window_size: int,
+        is_global: bool,
     ):
         super().__init__()
         assert d_model % n_heads == 0
@@ -201,10 +201,10 @@ class BobertEncoderLayer(nn.Module):
         d_model: int,
         n_heads: int,
         dim_feedforward: int,
-        dropout: float = 0.1,
-        is_global: bool = True,
-        local_window_size: int = 128,
-        activation_checkpointing: bool = False,
+        dropout: float,
+        is_global: bool,
+        local_window_size: int,
+        activation_checkpointing: bool,
     ):
         super().__init__()
         self.is_global = is_global

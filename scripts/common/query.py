@@ -263,8 +263,6 @@ class LazyEmbedder:
     def embed_osu(self, path: Path) -> np.ndarray:
         import torch
 
-        from core.data.batch import batch_vectors
-
         self.load()
         vectors, raw_map_features = beatmap_inputs_from_osu(
             path, self.config.data.max_seq_len
@@ -277,14 +275,11 @@ class LazyEmbedder:
             ],
             dtype=torch.float32,
         ).unsqueeze(0)
-        vector_dim = vectors.shape[1]
-        vector_batch = batch_vectors(
-            [vectors], self.config.data.max_seq_len, vector_dim
-        )
-
-        packed = vector_batch["packed_vectors"].to(self.device)
-        cu_seqlens = vector_batch["cu_seqlens"].to(self.device)
-        max_seqlen = vector_batch["max_seqlen"]
+        packed = vectors[: self.config.data.max_seq_len].contiguous()
+        max_seqlen = packed.shape[0]
+        cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
+        packed = packed.to(self.device)
+        cu_seqlens = cu_seqlens.to(self.device)
         map_features = map_features.to(self.device)
         amp_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
 

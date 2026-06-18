@@ -31,7 +31,7 @@ class PretrainingModule(BobertLightningModule):
         self.mlm_metrics = MLMMetrics(feature_info, self.device)
         self.difficulty_metrics = DifficultyMetrics(self.device)
 
-    def forward(self, vectors, attention_mask, cu_seqlens=None):
+    def forward(self, vectors, attention_mask, cu_seqlens):
         return self.model(vectors, attention_mask, cu_seqlens)
 
     def _shared_step(self, batch: Tuple):

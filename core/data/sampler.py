@@ -105,18 +105,16 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         beatmap_ids: List[int],
         mining_lookup: Dict[int, Dict[str, Any]],
         batch_size: int,
-        group_size: int = 4,
-        seed: int = 42,
-        anchor_indices: Optional[Sequence[int]] = None,
-        epoch_size: Optional[int] = None,
-        lengths: Optional[Sequence[int]] = None,
-        buckets: Optional[Sequence[int]] = None,
-        drop_last: bool = False,
+        anchor_indices: Sequence[int],
+        epoch_size: int,
+        group_size: int,
+        seed: int,
+        drop_last: bool,
     ):
         if batch_size % group_size != 0:
             raise ValueError("alignment batch_size must be divisible by group_size")
-        if epoch_size is not None and epoch_size <= 0:
-            raise ValueError("alignment epoch_size must be positive when provided")
+        if epoch_size <= 0:
+            raise ValueError("alignment epoch_size must be positive")
 
         self.beatmap_ids = [int(x) for x in beatmap_ids]
         self.mining_lookup = mining_lookup
@@ -124,51 +122,22 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         self.group_size = group_size
         self.seed = seed
         self.id_to_idx = {bid: i for i, bid in enumerate(self.beatmap_ids)}
-        self.anchor_indices = (
-            [int(idx) for idx in anchor_indices]
-            if anchor_indices is not None
-            else list(range(len(self.beatmap_ids)))
-        )
-        self.epoch_size = int(epoch_size) if epoch_size is not None else None
+        self.anchor_indices = [int(idx) for idx in anchor_indices]
+        self.epoch_size = int(epoch_size)
         self.groups_per_batch = batch_size // group_size
         self.epoch = 0
-        self.lengths = (
-            [int(length) for length in lengths] if lengths is not None else None
-        )
-        self.buckets = [int(bucket) for bucket in buckets] if buckets else None
         self.drop_last = drop_last
 
     def __len__(self) -> int:
         anchor_count = self._anchor_count()
-        if self.lengths is None or self.buckets is None:
-            if self.drop_last:
-                return max(1, anchor_count // self.groups_per_batch)
-            return max(1, math.ceil(anchor_count / self.groups_per_batch))
-
-        counts = {bucket: 0 for bucket in self.buckets}
-        for idx in self.anchor_indices:
-            counts[length_bucket(self.lengths[idx], self.buckets)] += 1
-        if anchor_count < len(self.anchor_indices):
-            scale = anchor_count / max(1, len(self.anchor_indices))
-            counts = {
-                bucket: int(round(count * scale))
-                for bucket, count in counts.items()
-            }
-
-        total = 0
-        for bucket, count in counts.items():
-            if self.drop_last:
-                total += count // self.groups_per_batch
-            else:
-                total += math.ceil(count / self.groups_per_batch)
-        return max(1, total)
+        if self.drop_last:
+            return anchor_count // self.groups_per_batch
+        return math.ceil(anchor_count / self.groups_per_batch)
 
     def set_epoch(self, epoch: int):
         self.epoch = int(epoch)
 
     def _anchor_count(self) -> int:
-        if self.epoch_size is None:
-            return len(self.anchor_indices)
         return min(self.epoch_size, len(self.anchor_indices))
 
     def _sample_positives(
@@ -209,9 +178,6 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         rng.shuffle(anchor_indices)
         anchor_indices = anchor_indices[: self._anchor_count()]
 
-        batches: Dict[int, List[int]] = (
-            {bucket: [] for bucket in self.buckets} if self.buckets else {}
-        )
         batch: List[int] = []
         for anchor_idx in anchor_indices:
             anchor_id = self.beatmap_ids[anchor_idx]
@@ -221,25 +187,11 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             )
             if not positive_ids:
                 continue
-            group = [anchor_idx] + [self.id_to_idx[bid] for bid in positive_ids]
-            if self.lengths is not None and self.buckets is not None:
-                group_len = max(self.lengths[idx] for idx in group)
-                bucket = length_bucket(group_len, self.buckets)
-                bucket_batch = batches[bucket]
-                bucket_batch.extend(group)
-                if len(bucket_batch) == self.batch_size:
-                    yield bucket_batch.copy()
-                    bucket_batch.clear()
-            else:
-                batch.extend(group)
-                if len(batch) == self.batch_size:
-                    yield batch
-                    batch = []
 
-        if self.lengths is not None and self.buckets is not None:
-            for bucket in self.buckets:
-                bucket_batch = batches[bucket]
-                if bucket_batch and not self.drop_last:
-                    yield bucket_batch.copy()
-        elif batch and not self.drop_last:
+            batch.extend([anchor_idx, *(self.id_to_idx[bid] for bid in positive_ids)])
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
+
+        if batch and not self.drop_last:
             yield batch

@@ -10,7 +10,6 @@ import torch
 from omegaconf import OmegaConf
 
 from core.config import load_config
-from core.data.batch import batch_vectors
 from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
@@ -89,16 +88,15 @@ class CpuInferencer:
             ],
             dtype=torch.float32,
         ).unsqueeze(0)
-        vector_dim = vectors.shape[1]
-        vector_batch = batch_vectors(
-            [vectors], self.config.data.max_seq_len, vector_dim
-        )
+        packed_vectors = vectors[: self.config.data.max_seq_len].contiguous()
+        max_seqlen = packed_vectors.shape[0]
+        cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
 
         with torch.inference_mode():
             embedding = self.model.embed_packed(
-                vector_batch["packed_vectors"].to(self.device),
-                vector_batch["cu_seqlens"].to(self.device),
-                vector_batch["max_seqlen"],
+                packed_vectors.to(self.device),
+                cu_seqlens.to(self.device),
+                max_seqlen,
                 map_features.to(self.device),
             )
 

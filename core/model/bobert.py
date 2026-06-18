@@ -50,11 +50,11 @@ class BobertModel(nn.Module):
         n_layers: int,
         dim_feedforward: int,
         local_attention_window: int,
-        global_attention_layers: Sequence[int] = (),
-        dropout: float = 0.1,
-        max_seq_len: int = 2048,
-        activation_checkpointing: bool = False,
-        feature_token_dim: int = 32,
+        global_attention_layers: Sequence[int],
+        dropout: float,
+        max_seq_len: int,
+        activation_checkpointing: bool,
+        feature_token_dim: int,
     ):
         super().__init__()
         self.d_model = d_model
@@ -126,33 +126,20 @@ class BobertModel(nn.Module):
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
         return self.feature_tokenizer(x)
 
-    def _get_cu_seqlens(self, attention_mask: torch.Tensor) -> torch.Tensor:
-        seqlens = attention_mask.sum(dim=-1, dtype=torch.int32)
-        return F.pad(torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0))
-
     def _embed(
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if cu_seqlens is None:
-            cu_seqlens = self._get_cu_seqlens(attention_mask)
-
-        packed_embed = self.embed_sequences(x[attention_mask])
-
-        return packed_embed, attention_mask, cu_seqlens
+        cu_seqlens: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.embed_sequences(x[attention_mask]), cu_seqlens
 
     def encode(
         self,
         packed_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
+        cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if cu_seqlens is None:
-            cu_seqlens = self._get_cu_seqlens(attention_mask)
-
         packed_output = packed_embeddings
         all_freqs = self.rotary_emb(
             torch.arange(max_seqlen, device=packed_embeddings.device),
@@ -189,17 +176,16 @@ class BobertModel(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        packed_embeddings, attention_mask, cu_seqlens = self._embed(
+        packed_embeddings, cu_seqlens = self._embed(
             x, attention_mask, cu_seqlens
         )
         max_seqlen = x.shape[1]
         packed_output = self.encode(
             packed_embeddings,
-            attention_mask,
-            max_seqlen=max_seqlen,
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         return packed_output, attention_mask
 
@@ -207,11 +193,15 @@ class BobertModel(nn.Module):
         self,
         vectors: torch.Tensor,
         attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         max_seqlen = vectors.shape[1]
-        packed_output, _ = self(vectors, attention_mask, cu_seqlens)
-        cu_seqlens = cu_seqlens if cu_seqlens is not None else self._get_cu_seqlens(attention_mask)
+        packed_input = self.embed_sequences(vectors[attention_mask])
+        packed_output = self.encode(
+            packed_input,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
         return packed_output, cu_seqlens, max_seqlen
 
     def encode_packed(
@@ -223,9 +213,8 @@ class BobertModel(nn.Module):
         packed_input = self.embed_sequences(packed_vectors)
         packed_output = self.encode(
             packed_input,
-            attention_mask=None,
-            max_seqlen=max_seqlen,
             cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
         return packed_output, cu_seqlens, max_seqlen
 
@@ -234,8 +223,8 @@ class BobertProjectedStatsPooler(nn.Module):
     def __init__(
         self,
         d_model: int,
-        stat_dim: int = 256,
-        stats: Tuple[str, ...] = ("mean", "max", "std"),
+        stat_dim: int,
+        stats: Tuple[str, ...],
     ):
         super().__init__()
         self.d_model = d_model
@@ -257,7 +246,7 @@ class BobertProjectedStatsPooler(nn.Module):
         self,
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: Optional[int] = None,
+        max_seqlen: int,
     ) -> torch.Tensor:
         lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         packed_float = packed_output.float()
@@ -293,8 +282,8 @@ class BobertQueryAttentionPooler(nn.Module):
         num_queries: int,
         head_dim: int,
         output_dim: int,
-        dropout: float = 0.0,
-        use_flash: bool = True,
+        dropout: float,
+        use_flash: bool,
     ):
         super().__init__()
         self.d_model = d_model
@@ -325,7 +314,7 @@ class BobertQueryAttentionPooler(nn.Module):
         self,
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: Optional[int] = None,
+        max_seqlen: int,
     ) -> torch.Tensor:
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         batch_size = seqlens.numel()
@@ -357,7 +346,7 @@ class BobertQueryAttentionPooler(nn.Module):
         kv: torch.Tensor,
         cu_seqlens: torch.Tensor,
         batch_size: int,
-        max_seqlen: Optional[int],
+        max_seqlen: int,
     ) -> torch.Tensor:
         q = (
             self.query.to(dtype=kv.dtype, device=kv.device)
@@ -371,9 +360,6 @@ class BobertQueryAttentionPooler(nn.Module):
             torch.arange(batch_size + 1, device=kv.device, dtype=torch.int32)
             * self.num_queries
         )
-
-        if max_seqlen is None:
-            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
 
         out = flash_attn_varlen_kvpacked_func(
             q,
@@ -433,7 +419,7 @@ class BobertStatsMixerPooler(nn.Module):
         self,
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: Optional[int] = None,
+        max_seqlen: int,
     ) -> torch.Tensor:
         return self.mixer(
             self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
@@ -479,9 +465,12 @@ class BobertDifficultyHead(nn.Module):
         )
 
     def forward(
-        self, packed_output: torch.Tensor, cu_seqlens: torch.Tensor
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
     ) -> Dict[str, torch.Tensor]:
-        pooled_output = self.pooler(packed_output, cu_seqlens)
+        pooled_output = self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
         difficulty_preds_raw = self.head(pooled_output)
 
         return {
@@ -559,7 +548,7 @@ class BobertForPretraining(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
         packed_output, cu_seqlens, max_seqlen = self.bert.encode_padded(
             x, attention_mask, cu_seqlens
@@ -595,9 +584,9 @@ class BobertForPretraining(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor,
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        packed_embed, attention_mask, cu_seqlens = self.bert._embed(
+        packed_embed, cu_seqlens = self.bert._embed(
             x, attention_mask, cu_seqlens
         )
         packed_targets = x[attention_mask]
@@ -608,12 +597,18 @@ class BobertForPretraining(nn.Module):
         max_seqlen = x.shape[1]
 
         packed_output = self.bert.encode(
-            packed_input, attention_mask, max_seqlen=max_seqlen, cu_seqlens=cu_seqlens
+            packed_input,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
 
         mlm_predictions = self.mlm_head(packed_output, is_masked)
 
-        difficulty_predictions = self.difficulty_head(packed_output, cu_seqlens)
+        difficulty_predictions = self.difficulty_head(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
 
         predictions = {"mlm": mlm_predictions, "difficulty": difficulty_predictions}
 
@@ -787,7 +782,7 @@ class BobertForAlignment(nn.Module):
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
-        cu_seqlens: Optional[torch.Tensor] = None,
+        cu_seqlens: torch.Tensor,
         *,
         map_features: torch.Tensor,
     ) -> Dict[str, Any]:

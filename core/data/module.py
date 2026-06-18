@@ -5,7 +5,7 @@ import numpy as np
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader, random_split
 
-from .batch import collate_align, collate_pretrain
+from .batch import collate_align_eval, collate_align_train, collate_pretrain
 from .dataset import BeatmapDataset
 from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
@@ -46,10 +46,10 @@ class BeatmapData(pl.LightningDataModule):
     ) -> List[Dict[str, Any]]:
         return load_beatmap_dataset(
             self.dataset_path,
+            dataset_seed=self.data_config.dataset_seed,
             max_seq_len=self.max_seq_len,
             ids_to_load=ids_to_load,
             sample_size=sample_size,
-            dataset_seed=self.data_config.dataset_seed,
             min_sr=self.data_config.min_sr,
             max_sr=self.data_config.max_sr,
         )
@@ -366,6 +366,7 @@ class AlignData(BeatmapData):
             int(self.config.alignment.data.alignment_size or len(train_anchor_indices)),
             len(train_anchor_indices),
         )
+        self.train_epoch_size = anchors_per_epoch
         print(
             f"Data split: {len(train_anchor_indices)} training anchor pool, "
             f"{anchors_per_epoch} anchors/epoch, "
@@ -376,13 +377,10 @@ class AlignData(BeatmapData):
     def train_dataloader(self):
         align_config = self.config["alignment"]
         collate = partial(
-            collate_align,
+            collate_align_train,
             max_seq_len=self.max_seq_len,
             vector_dim=self.vector_dim,
-            packed=True,
         )
-        buckets = self._length_buckets()
-        lengths = self._lengths(self.train_dataset)
         sampler = AlignmentBatchSampler(
             self.train_dataset.beatmap_ids,
             self.train_mining_lookup,
@@ -390,18 +388,15 @@ class AlignData(BeatmapData):
             group_size=align_config.data.group_size,
             seed=align_config.data.seed,
             anchor_indices=self.train_anchor_indices,
-            epoch_size=align_config.data.alignment_size,
-            lengths=lengths if buckets else None,
-            buckets=buckets,
+            epoch_size=self.train_epoch_size,
             drop_last=bool(self.config.runtime.compile_model),
         )
         return self._make_loader(self.train_dataset, collate, batch_sampler=sampler)
 
     def val_dataloader(self):
         collate = partial(
-            collate_align,
+            collate_align_eval,
             max_seq_len=self.max_seq_len,
             vector_dim=self.vector_dim,
-            length_buckets=self._length_buckets(),
         )
-        return self._bucketed_loader(self.val_dataset, collate)
+        return self._make_loader(self.val_dataset, collate)

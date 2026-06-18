@@ -102,7 +102,10 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
         f"missing={len(missing)} unexpected={len(unexpected)}"
     )
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
-    model.to(device).float().eval()
+    if device.type == "cuda":
+        model.to(device).bfloat16().eval()
+    else:
+        model.to(device).float().eval()
     return model, checkpoint
 
 
@@ -121,7 +124,10 @@ def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
     print(f"Loaded checkpoint: {checkpoint_path}")
     print(f"State load: missing={len(missing)} unexpected={len(unexpected)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
-    model.to(device).float().eval()
+    if device.type == "cuda":
+        model.to(device).bfloat16().eval()
+    else:
+        model.to(device).float().eval()
     return model, checkpoint
 
 
@@ -281,6 +287,7 @@ def export_embeddings(
             ):
                 beatmaps = load_beatmap_dataset(
                     str(dataset_dir),
+                    dataset_seed=seed,
                     max_seq_len=config.data.max_seq_len,
                     ids_to_load=id_chunk,
                     min_sr=min_sr,
