@@ -10,16 +10,6 @@ from torch.utils.checkpoint import checkpoint
 from ..data.schema import OBJECT_TYPE_SLIDER_HEAD
 
 try:
-    from flash_attn import flash_attn_varlen_qkvpacked_func
-except ImportError:
-    flash_attn_varlen_qkvpacked_func = None
-
-try:
-    from flash_attn.layers.rotary import apply_rotary_emb as flash_apply_rotary_emb
-except ImportError:
-    flash_apply_rotary_emb = None
-
-try:
     import torch.distributed.tensor  # noqa: F401
     from liger_kernel.transformers.functional import liger_rms_norm
 except (ImportError, AttributeError):
@@ -61,18 +51,26 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         n_heads: int,
         local_window_size: int,
         is_global: bool,
+        use_flash: bool,
     ):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
+        self.local_window_size = local_window_size
+        self.is_global = is_global
+        self.use_flash = use_flash
 
         self.wqkv = nn.Linear(d_model, d_model * 3, bias=False)
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
-        self.local_window_size = local_window_size
-        self.is_global = is_global
+        if use_flash:
+            from flash_attn import flash_attn_varlen_qkvpacked_func
+            from flash_attn.layers.rotary import apply_rotary_emb as flash_apply_rotary_emb
+
+            self.flash_attn = flash_attn_varlen_qkvpacked_func
+            self.flash_rope = flash_apply_rotary_emb
 
     def forward(
         self,
@@ -81,22 +79,15 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         rotary_freqs: torch.Tensor | Tuple[torch.Tensor, torch.Tensor],
-        rotary_is_varlen: bool,
     ):
         total_tokens, _ = x.shape
 
         qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
         q, k, v = qkv.unbind(dim=1)
-        qkv_for_flash = qkv
 
-        can_use_flash_rope = (
-            rotary_is_varlen
-            and flash_apply_rotary_emb is not None
-            and x.device.type == "cuda"
-        )
-        if can_use_flash_rope:
+        if self.use_flash:
             cos, sin = rotary_freqs
-            q = flash_apply_rotary_emb(
+            q = self.flash_rope(
                 q,
                 cos,
                 sin,
@@ -104,7 +95,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-            k = flash_apply_rotary_emb(
+            k = self.flash_rope(
                 k,
                 cos,
                 sin,
@@ -112,26 +103,19 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-            qkv_for_flash = None
-        else:
-            q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
-            k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
 
-        window_size = (
-            (-1, -1)
-            if self.is_global
-            else (self.local_window_size, self.local_window_size)
-        )
-        can_use_flash = (
-            flash_attn_varlen_qkvpacked_func is not None and x.device.type == "cuda"
-        )
-        if can_use_flash:
-            if qkv_for_flash is None:
-                qkv_for_flash = qkv.clone()
-                qkv_for_flash[:, 0] = q
-                qkv_for_flash[:, 1] = k
-            out = flash_attn_varlen_qkvpacked_func(
-                qkv_for_flash,
+            qkv_flash = qkv.clone()
+            qkv_flash[:, 0] = q
+            qkv_flash[:, 1] = k
+
+            window_size = (
+                (-1, -1)
+                if self.is_global
+                else (self.local_window_size, self.local_window_size)
+            )
+
+            out = self.flash_attn(
+                qkv_flash,
                 cu_seqlens,
                 max_seqlen,
                 dropout_p=0.0,
@@ -139,6 +123,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 window_size=window_size,
             )
         else:
+            q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
+            k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
             out = self._forward_torch(q, k, v, cu_seqlens)
         return self.wo(out.view(total_tokens, self.d_model))
 
@@ -205,6 +191,7 @@ class BobertEncoderLayer(nn.Module):
         is_global: bool,
         local_window_size: int,
         activation_checkpointing: bool,
+        use_flash: bool,
     ):
         super().__init__()
         self.is_global = is_global
@@ -215,6 +202,7 @@ class BobertEncoderLayer(nn.Module):
             n_heads,
             local_window_size=local_window_size,
             is_global=is_global,
+            use_flash=use_flash,
         )
 
         self.ffn = SwiGLU(d_model, dim_feedforward)
@@ -229,7 +217,6 @@ class BobertEncoderLayer(nn.Module):
         self,
         src: torch.Tensor,
         rotary_freqs: Optional[torch.Tensor | Tuple[torch.Tensor, torch.Tensor]] = None,
-        rotary_is_varlen: bool = False,
         cu_seqlens: torch.Tensor = None,
         max_seqlen: int = None,
     ) -> torch.Tensor:
@@ -238,7 +225,6 @@ class BobertEncoderLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_freqs=rotary_freqs,
-            rotary_is_varlen=rotary_is_varlen,
         )
 
         src = src + self.dropout1(src2)

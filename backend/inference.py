@@ -46,7 +46,6 @@ class CpuInferencer:
         config.runtime.compile_model = False
         config.runtime.compile_dynamic = False
         config.runtime.activation_checkpointing = False
-        config.alignment.query_pool.use_flash = False
         config.alignment.trainer.precision = "32"
         OmegaConf.set_struct(config, True)
 

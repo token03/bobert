@@ -83,8 +83,6 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
     config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
     OmegaConf.set_struct(config, False)
     config.runtime.compile_model = False
-    if device.type == "cpu":
-        config.alignment.query_pool.use_flash = False
     OmegaConf.set_struct(config, True)
 
     model = BobertForAlignment.from_config(config, device)

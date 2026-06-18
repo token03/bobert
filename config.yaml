@@ -133,7 +133,6 @@ alignment:
     head_dim: 32
     output_dim: 256
     dropout: 0.0
-    use_flash: true
 
   map_features:
     names: ["ar", "cs", "drain_time", "slider_multiplier"]

@@ -7,11 +7,6 @@ from typing import Tuple, Dict, Any, Type, TypeVar, Optional, Sequence
 
 from rotary_embedding_torch import RotaryEmbedding
 
-try:
-    from flash_attn import flash_attn_varlen_kvpacked_func
-except ImportError:
-    flash_attn_varlen_kvpacked_func = None
-
 from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, MAP_FEATURE_ATTRIBUTES
 
 from .components import (
@@ -19,7 +14,6 @@ from .components import (
     BobertEncoderLayer,
     HitObjectFeatureTokenizer,
     RMSNorm,
-    flash_apply_rotary_emb,
 )
 
 T = TypeVar("T", bound="BobertModel")
@@ -55,6 +49,7 @@ class BobertModel(nn.Module):
         max_seq_len: int,
         activation_checkpointing: bool,
         feature_token_dim: int,
+        use_flash: bool,
     ):
         super().__init__()
         self.d_model = d_model
@@ -62,6 +57,7 @@ class BobertModel(nn.Module):
         self.n_layers = n_layers
         self.activation_checkpointing = activation_checkpointing
         self.global_attention_layers = set(global_attention_layers)
+        self.use_flash = use_flash
 
         self.feature_info = FEATURE_INFO
         self.feature_tokenizer = HitObjectFeatureTokenizer(
@@ -80,6 +76,7 @@ class BobertModel(nn.Module):
                     is_global=i in self.global_attention_layers,
                     local_window_size=local_attention_window,
                     activation_checkpointing=activation_checkpointing,
+                    use_flash=use_flash,
                 )
                 for i in range(n_layers)
             ]
@@ -92,7 +89,7 @@ class BobertModel(nn.Module):
         )
 
     @classmethod
-    def from_config(cls: Type[T], config: DictConfig) -> T:
+    def from_config(cls: Type[T], config: DictConfig, *, use_flash: bool) -> T:
         model_config = config.model
         data_config = config.data
         runtime_config = config.runtime
@@ -110,6 +107,7 @@ class BobertModel(nn.Module):
             max_seq_len=data_config.max_seq_len,
             activation_checkpointing=runtime_config.activation_checkpointing,
             feature_token_dim=model_config.feature_token_dim,
+            use_flash=use_flash,
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -145,10 +143,7 @@ class BobertModel(nn.Module):
             torch.arange(max_seqlen, device=packed_embeddings.device),
             seq_len=max_seqlen,
         )
-        use_flash_rope = (
-            flash_apply_rotary_emb is not None and packed_embeddings.device.type == "cuda"
-        )
-        if use_flash_rope:
+        if self.use_flash:
             rotary_freqs = (all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin())
         else:
             total_tokens = packed_embeddings.shape[0]
@@ -163,7 +158,6 @@ class BobertModel(nn.Module):
             packed_output = layer(
                 packed_output,
                 rotary_freqs=rotary_freqs,
-                rotary_is_varlen=use_flash_rope,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
@@ -295,6 +289,11 @@ class BobertQueryAttentionPooler(nn.Module):
         self.dropout = dropout
         self.use_flash = use_flash
 
+        if use_flash:
+            from flash_attn import flash_attn_varlen_kvpacked_func
+
+            self.flash_attn = flash_attn_varlen_kvpacked_func
+
         self.norm = nn.LayerNorm(d_model)
         self.query = nn.Parameter(torch.empty(num_queries, n_heads, self.head_dim))
         self.kv = nn.Linear(d_model, 2 * self.inner_dim, bias=False)
@@ -324,15 +323,7 @@ class BobertQueryAttentionPooler(nn.Module):
             packed_output.shape[0], 2, self.n_heads, self.head_dim
         )
 
-        can_use_flash = (
-            self.use_flash
-            and flash_attn_varlen_kvpacked_func is not None
-            and packed_output.device.type == "cuda"
-            and kv.dtype in (torch.float16, torch.bfloat16)
-            and not torch.any(seqlens == 0)
-        )
-
-        if can_use_flash:
+        if self.use_flash:
             pooled = self._forward_flash(kv, cu_seqlens, batch_size, max_seqlen)
         else:
             k, v = kv.unbind(dim=1)
@@ -361,7 +352,7 @@ class BobertQueryAttentionPooler(nn.Module):
             * self.num_queries
         )
 
-        out = flash_attn_varlen_kvpacked_func(
+        out = self.flash_attn(
             q,
             kv,
             cu_seqlens_q,
@@ -514,7 +505,8 @@ class BobertForPretraining(nn.Module):
     def from_config(
         cls, config: DictConfig, device: torch.device
     ) -> "BobertForPretraining":
-        base_model = BobertModel.from_config(config)
+        use_flash = device.type == "cuda"
+        base_model = BobertModel.from_config(config, use_flash=use_flash)
         pretraining_config = config.pretraining
 
         masking_strategy = SpanMasker(
@@ -673,7 +665,8 @@ class BobertForAlignment(nn.Module):
     def from_config(
         cls, config: DictConfig, device: torch.device
     ) -> "BobertForAlignment":
-        base_model = BobertModel.from_config(config)
+        use_flash = device.type == "cuda"
+        base_model = BobertModel.from_config(config, use_flash=use_flash)
         alignment_config = config.alignment
 
         pooling_stats = tuple(alignment_config.pooling.stats)
@@ -695,7 +688,7 @@ class BobertForAlignment(nn.Module):
             head_dim=alignment_config.query_pool.head_dim,
             output_dim=alignment_config.query_pool.output_dim,
             dropout=alignment_config.query_pool.dropout,
-            use_flash=alignment_config.query_pool.use_flash,
+            use_flash=use_flash,
         )
         map_feature_names = alignment_config.map_features.names
         unknown_map_features = [
