@@ -16,12 +16,9 @@ from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
-from core.model.checkpoint import (
-    configure_from_checkpoint,
-    normalize_checkpoint_state,
-)
 from core.model.bobert import BobertForAlignment, BobertForPretraining
 from core.paths import ALIGN_DIR, PRETRAIN_DIR
+from core.training.setup import setup_checkpoint
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
@@ -78,26 +75,15 @@ def find_checkpoint(path: str | Path | None, checkpoint_dir: str | Path) -> Path
 
 def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
-    config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
+    config, state = setup_checkpoint(config, checkpoint, "alignment")
     OmegaConf.set_struct(config, False)
     config.runtime.compile_model = False
     OmegaConf.set_struct(config, True)
 
     model = BobertForAlignment.from_config(config, device)
-    model_state = model.state_dict()
-    compatible_state = {
-        key: value
-        for key, value in state.items()
-        if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
-    }
-    skipped = sorted(set(state) - set(compatible_state))
-    missing, unexpected = model.load_state_dict(compatible_state, strict=False)
+    model.load_state_dict(state, strict=True)
     print(f"Loaded checkpoint: {checkpoint_path}")
-    print(
-        f"State load: loaded={len(compatible_state)} skipped={len(skipped)} "
-        f"missing={len(missing)} unexpected={len(unexpected)}"
-    )
+    print(f"State load: loaded={len(state)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
     if device.type == "cuda":
         model.to(device).bfloat16().eval()
@@ -108,18 +94,15 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
 
 def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state = normalize_checkpoint_state(
-        checkpoint.get("state_dict", checkpoint), flatten_difficulty_head=False
-    )
-    config = configure_from_checkpoint(config, checkpoint, state, alignment=False)
+    config, state = setup_checkpoint(config, checkpoint, "pretraining")
     OmegaConf.set_struct(config, False)
     config.runtime.compile_model = False
     OmegaConf.set_struct(config, True)
 
     model = BobertForPretraining.from_config(config, device)
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    model.load_state_dict(state, strict=True)
     print(f"Loaded checkpoint: {checkpoint_path}")
-    print(f"State load: missing={len(missing)} unexpected={len(unexpected)}")
+    print(f"State load: loaded={len(state)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
     if device.type == "cuda":
         model.to(device).bfloat16().eval()

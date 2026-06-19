@@ -15,7 +15,7 @@ from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file
 from core.model.bobert import BobertForAlignment
-from core.model.checkpoint import configure_from_checkpoint, normalize_checkpoint_state
+from core.training.setup import setup_checkpoint
 
 
 MIN_OBJECTS_PER_MAP = 1
@@ -40,8 +40,7 @@ class CpuInferencer:
 
         config = load_config(self.config_path)
         checkpoint = torch.load(self.model_path, map_location="cpu", weights_only=False)
-        state = normalize_checkpoint_state(checkpoint.get("state_dict", checkpoint))
-        config = configure_from_checkpoint(config, checkpoint, state, alignment=True)
+        config, state = setup_checkpoint(config, checkpoint, "alignment")
         OmegaConf.set_struct(config, False)
         config.runtime.compile_model = False
         config.runtime.compile_dynamic = False
@@ -50,13 +49,7 @@ class CpuInferencer:
         OmegaConf.set_struct(config, True)
 
         model = BobertForAlignment.from_config(config, self.device)
-        model_state = model.state_dict()
-        compatible_state = {
-            key: value
-            for key, value in state.items()
-            if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
-        }
-        model.load_state_dict(compatible_state, strict=False)
+        model.load_state_dict(state, strict=True)
         model.to(self.device).float().eval()
 
         self.config = config

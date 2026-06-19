@@ -1,8 +1,8 @@
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
@@ -51,6 +51,81 @@ def find_latest_logger_version(checkpoint_dir: str | Path) -> Optional[int]:
             versions.append(int(path.name.removeprefix("version_")))
 
     return max(versions) if versions else None
+
+
+def model_spec_from_config(config: DictConfig, phase: str) -> dict[str, Any]:
+    spec = {
+        "data": {
+            "max_seq_len": config.data.max_seq_len,
+        },
+        "model": OmegaConf.to_container(config.model, resolve=True),
+    }
+    if phase == "alignment":
+        spec["alignment"] = {
+            "embedding_dim": config.alignment.embedding_dim,
+            "pooling": OmegaConf.to_container(config.alignment.pooling, resolve=True),
+            "query_pool": OmegaConf.to_container(config.alignment.query_pool, resolve=True),
+            "map_features": OmegaConf.to_container(config.alignment.map_features, resolve=True),
+        }
+    elif phase == "pretraining":
+        spec["pretraining"] = {
+            "pooling": OmegaConf.to_container(config.pretraining.pooling, resolve=True),
+            "masking": OmegaConf.to_container(config.pretraining.masking, resolve=True),
+        }
+    else:
+        raise ValueError(f"Unsupported checkpoint phase: {phase}")
+    return spec
+
+
+def setup_checkpoint(config: DictConfig, checkpoint: dict[str, Any], phase: str):
+    if "state_dict" not in checkpoint:
+        raise RuntimeError("BoBERT checkpoint must contain a state_dict.")
+
+    model_spec = checkpoint.get("model_spec")
+    if model_spec is None:
+        raise RuntimeError("BoBERT checkpoint must contain model_spec metadata.")
+    if OmegaConf.is_config(model_spec):
+        model_spec = OmegaConf.to_container(model_spec, resolve=True)
+
+    OmegaConf.set_struct(config, False)
+    config.data.max_seq_len = model_spec["data"]["max_seq_len"]
+    config.model = OmegaConf.merge(config.model, OmegaConf.create(model_spec["model"]))
+    if phase == "alignment":
+        phase_spec = model_spec["alignment"]
+        config.alignment.embedding_dim = phase_spec["embedding_dim"]
+        config.alignment.pooling = OmegaConf.merge(
+            config.alignment.pooling, OmegaConf.create(phase_spec["pooling"])
+        )
+        config.alignment.query_pool = OmegaConf.merge(
+            config.alignment.query_pool, OmegaConf.create(phase_spec["query_pool"])
+        )
+        config.alignment.map_features = OmegaConf.merge(
+            config.alignment.map_features, OmegaConf.create(phase_spec["map_features"])
+        )
+    elif phase == "pretraining":
+        phase_spec = model_spec["pretraining"]
+        config.pretraining.pooling = OmegaConf.merge(
+            config.pretraining.pooling, OmegaConf.create(phase_spec["pooling"])
+        )
+        config.pretraining.masking = OmegaConf.merge(
+            config.pretraining.masking, OmegaConf.create(phase_spec["masking"])
+        )
+    else:
+        raise ValueError(f"Unsupported checkpoint phase: {phase}")
+    OmegaConf.resolve(config)
+    OmegaConf.set_struct(config, True)
+    return config, checkpoint["state_dict"]
+
+
+def strip_checkpoint_state(state: dict[str, Any]) -> dict[str, Any]:
+    stripped = {}
+    for key, value in state.items():
+        for prefix in ("model._orig_mod.", "model.", "_orig_mod."):
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                break
+        stripped[key] = value.detach().cpu() if isinstance(value, torch.Tensor) else value
+    return stripped
 
 
 def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimizer:

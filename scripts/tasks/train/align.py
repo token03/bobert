@@ -12,7 +12,7 @@ from core.data.mining import MiningConfig, build_cache
 from core.data.module import AlignData
 from core.model.bobert import BobertForAlignment
 from core.paths import ALIGN_DIR, MINING_CACHE_PATH, PRETRAIN_DIR
-from core.training.align import (
+from core.training.tasks import (
     AlignmentModule,
     load_pretraining_normalizer,
     load_pretraining_weights,
