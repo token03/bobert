@@ -15,17 +15,6 @@ UMAP_NEIGHBORS = 5
 RANDOM_STATE = 42
 
 
-def _load_gpu_backend():
-    try:
-        import cupy as cp
-        from cuml.manifold import UMAP
-        from cuml.neighbors import NearestNeighbors
-
-        return cp, UMAP, NearestNeighbors
-    except Exception:
-        return None, None, None
-
-
 def _resolve_path(path: str | Path) -> Path:
     return resolve_path(path)
 
@@ -36,6 +25,21 @@ def _sample_df(df: pd.DataFrame, limit: int | None, seed: int) -> pd.DataFrame:
     return df.sample(n=limit, random_state=seed).reset_index(drop=True)
 
 
+def _nearest_neighbors_faiss(matrix: np.ndarray, n_neighbors: int, use_gpu: bool):
+    import faiss
+
+    matrix = np.ascontiguousarray(matrix.astype(np.float32, copy=False))
+    index = faiss.IndexFlatIP(matrix.shape[1])
+    gpu_resources = None
+    if use_gpu:
+        gpu_resources = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(gpu_resources, 0, index)
+    index.add(matrix)
+    similarities, indices = index.search(matrix, n_neighbors + 1)
+    distances = np.clip(1.0 - similarities, 0.0, 2.0).astype(np.float32, copy=False)
+    return distances, indices.astype(np.int32, copy=False)
+
+
 def _nearest_neighbors_cpu(matrix: np.ndarray, n_neighbors: int):
     from sklearn.neighbors import NearestNeighbors
 
@@ -44,7 +48,12 @@ def _nearest_neighbors_cpu(matrix: np.ndarray, n_neighbors: int):
     return knn.kneighbors(matrix)
 
 
-def _umap_cpu(matrix: np.ndarray, n_neighbors: int, random_state: int):
+def _umap_cpu(
+    matrix: np.ndarray,
+    n_neighbors: int,
+    random_state: int,
+    precomputed_knn: tuple[np.ndarray, np.ndarray, None] | None = None,
+):
     from umap import UMAP
 
     reducer = UMAP(
@@ -53,6 +62,7 @@ def _umap_cpu(matrix: np.ndarray, n_neighbors: int, random_state: int):
         min_dist=0.0,
         metric="cosine",
         random_state=random_state,
+        precomputed_knn=precomputed_knn,
     )
     return reducer.fit_transform(matrix)
 
@@ -115,32 +125,26 @@ def process(
     matrix_cpu = np.stack(df["embedding"].values).astype(np.float32)
     matrix_cpu /= np.clip(np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None)
 
-    cp, UMAP, NearestNeighbors = _load_gpu_backend() if use_gpu else (None, None, None)
-    if cp is not None:
-        print("Using GPU UMAP/KNN backend")
-        matrix_gpu = cp.asarray(matrix_cpu)
-
-        print(f"Calculating {n_export_neighbors} nearest neighbors (GPU)...")
-        knn_cuml = NearestNeighbors(
-            n_neighbors=n_export_neighbors + 1, metric="cosine", output_type="cupy"
+    try:
+        backend = "GPU" if use_gpu else "CPU"
+        print(f"Calculating {n_export_neighbors} nearest neighbors (FAISS {backend})...")
+        kn_dists, kn_indices = _nearest_neighbors_faiss(
+            matrix_cpu, max(n_export_neighbors, umap_neighbors), use_gpu=use_gpu
         )
-        knn_cuml.fit(matrix_gpu)
-        kn_dists, kn_indices = knn_cuml.kneighbors(matrix_gpu)
+        cpu_indices = kn_indices[:, 1 : n_export_neighbors + 1]
+        cpu_dists = kn_dists[:, 1 : n_export_neighbors + 1]
 
-        print("Running UMAP (GPU)...")
-        reducer = UMAP(
-            n_components=2,
-            n_neighbors=umap_neighbors,
-            min_dist=0.0,
-            metric="cosine",
-            random_state=random_state,
-            output_type="numpy",
+        print("Running UMAP (CPU, FAISS precomputed neighbors)...")
+        embedding_2d = _umap_cpu(
+            matrix_cpu,
+            umap_neighbors,
+            random_state,
+            precomputed_knn=(kn_indices, kn_dists, None),
         )
-        embedding_2d = reducer.fit_transform(matrix_gpu)
-        cpu_indices = cp.asnumpy(kn_indices[:, 1:])
-        cpu_dists = cp.asnumpy(kn_dists[:, 1:])
-        del matrix_gpu, kn_dists, kn_indices
-    else:
+    except Exception as exc:
+        if use_gpu:
+            raise
+        print(f"FAISS backend unavailable ({exc}); falling back to sklearn KNN")
         print("Using CPU UMAP/KNN backend")
         print(f"Calculating {n_export_neighbors} nearest neighbors (CPU)...")
         cpu_dists, cpu_indices = _nearest_neighbors_cpu(matrix_cpu, n_export_neighbors)

@@ -6,8 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    "cuml-cu12==26.2.0",
-    "cupy-cuda12x==14.0.1",
     "faiss-gpu-cu12>=1.14.1.post1",
     "flash-attn==2.8.3",
     "fastapi>=0.116.0",
@@ -78,4 +76,3 @@ explicit = true
 torch = { index = "pytorch-cu128" }
 muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
-cuml-cu12 = { index = "nvidia" }
