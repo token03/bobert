@@ -6,13 +6,14 @@ from pathlib import Path
 import torch
 
 from core.config import load_config
-from core.model.bobert import BobertForAlignment, BobertForPretraining
-from core.paths import ALIGN_DIR, PRETRAIN_DIR
-from core.training.setup import (
-    find_latest_checkpoint,
+from core.model.bobert import (
+    BobertForAlignment,
+    BobertForPretraining,
     setup_checkpoint,
     strip_checkpoint_state,
 )
+from core.paths import ALIGN_DIR, PRETRAIN_DIR
+from core.training.setup import find_latest_checkpoint
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 

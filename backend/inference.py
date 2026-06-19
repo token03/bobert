@@ -14,8 +14,7 @@ from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file
-from core.model.bobert import BobertForAlignment
-from core.training.setup import setup_checkpoint
+from core.model.bobert import BobertForAlignment, setup_checkpoint
 
 
 MIN_OBJECTS_PER_MAP = 1

@@ -14,9 +14,8 @@ from .metrics import ContrastiveMetrics, DifficultyMetrics, MLMMetrics
 from .setup import (
     create_optimizer,
     create_scheduler,
-    model_spec_from_config,
-    strip_checkpoint_state,
 )
+from ..model.bobert import model_spec_from_config, strip_checkpoint_state
 from ..data.normalizer import BeatmapNormalizer
 from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, VECTOR_DIM
 

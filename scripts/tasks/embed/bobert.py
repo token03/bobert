@@ -16,9 +16,8 @@ from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
-from core.model.bobert import BobertForAlignment, BobertForPretraining
+from core.model.bobert import BobertForAlignment, BobertForPretraining, setup_checkpoint
 from core.paths import ALIGN_DIR, PRETRAIN_DIR
-from core.training.setup import setup_checkpoint
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
