@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-import numpy as np
 from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
@@ -12,9 +11,6 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from pytorch_optimizer import get_wsd_schedule
-from torch.utils.data import WeightedRandomSampler
-from scipy.ndimage import gaussian_filter1d
-from scipy.interpolate import interp1d
 from muon import SingleDeviceMuonWithAuxAdam
 
 from core.paths import ALIGN_DIR, PRETRAIN_DIR
@@ -55,63 +51,6 @@ def find_latest_logger_version(checkpoint_dir: str | Path) -> Optional[int]:
             versions.append(int(path.name.removeprefix("version_")))
 
     return max(versions) if versions else None
-
-
-def create_kde_sampler(
-    difficulty_ratings: np.ndarray,
-    bandwidth: float = 0.5,
-    num_bins: int = 100,
-    strength: float = 0.1,
-) -> WeightedRandomSampler:
-    difficulty_ratings_array = np.asarray(difficulty_ratings)
-
-    min_rating, max_rating = (
-        difficulty_ratings_array.min(),
-        difficulty_ratings_array.max(),
-    )
-    bin_edges = np.linspace(min_rating - 0.5, max_rating + 0.5, num_bins + 1)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-
-    hist, _ = np.histogram(difficulty_ratings_array, bins=bin_edges, density=True)
-
-    sigma = bandwidth * num_bins / (max_rating - min_rating + 1.0)
-    smoothed_hist = gaussian_filter1d(hist, sigma=sigma, mode="reflect")
-
-    interp_func = interp1d(
-        bin_centers,
-        smoothed_hist,
-        kind="linear",
-        bounds_error=False,
-        fill_value=(smoothed_hist[0], smoothed_hist[-1]),
-    )
-
-    density_values = interp_func(difficulty_ratings_array)
-
-    clip_threshold = np.percentile(density_values, 5)
-
-    density_values = np.maximum(density_values, clip_threshold)
-
-    log_w = -strength * np.log(density_values)
-    log_w = log_w - np.max(log_w)
-    sample_weights = np.exp(log_w)
-
-    split_point = np.median(difficulty_ratings_array)
-    
-    floor_weight = sample_weights.min()
-    
-    left_mask = difficulty_ratings_array < split_point
-    sample_weights[left_mask] = floor_weight
-
-    sample_weights = sample_weights / np.sum(sample_weights) * len(sample_weights)
-    sample_weights = torch.from_numpy(sample_weights).double()
-
-    print(
-        f"KDE sampling - Min weight: {sample_weights.min():.4f}, Max weight: {sample_weights.max():.4f}"
-    )
-
-    return WeightedRandomSampler(
-        weights=sample_weights, num_samples=len(sample_weights), replacement=True
-    )
 
 
 def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimizer:

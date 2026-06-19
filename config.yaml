@@ -77,11 +77,6 @@ pretraining:
     speed_weight: 1.0
     slider_factor_weight: 1.0
 
-  sampling:
-    kde_bandwidth: 0.2
-    num_bins: 100
-    strength: 0.5
-
 mining:
   top_k: 32
   candidate_k: 512
@@ -91,6 +86,8 @@ mining:
   use_faiss_gpu: true
 
 alignment:
+  embedding_dim: 256
+
   trainer:
     epochs: 1
     batch_size: 128
@@ -140,5 +137,3 @@ alignment:
 
   loss:
     temperature: 0.10
-
-  embedding_dim: 256

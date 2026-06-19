@@ -7,7 +7,6 @@ from .metrics import ContrastiveMetrics as ContrastiveMetrics
 from .metrics import DifficultyMetrics as DifficultyMetrics
 from .metrics import MLMMetrics as MLMMetrics
 from .pretrain import PretrainingModule as PretrainingModule
-from .setup import create_kde_sampler as create_kde_sampler
 from .setup import create_optimizer as create_optimizer
 from .setup import create_scheduler as create_scheduler
 from .setup import create_trainer as create_trainer

@@ -11,7 +11,6 @@ from core.config import load_config as load_bobert_config
 from core.data.module import PretrainData
 from core.model.bobert import BobertForPretraining
 from core.paths import PRETRAIN_DIR
-from core.training import create_kde_sampler
 from core.training.pretrain import PretrainingModule
 from core.training.setup import create_trainer, find_latest_checkpoint, find_latest_logger_version, setup_device
 
@@ -87,14 +86,7 @@ def main() -> int:
 
     torch.set_float32_matmul_precision("high")
 
-    sampler_fn = lambda stars: create_kde_sampler(
-        stars,
-        bandwidth=config.pretraining.sampling.kde_bandwidth,
-        num_bins=config.pretraining.sampling.num_bins,
-        strength=config.pretraining.sampling.strength,
-    )
-
-    datamodule = PretrainData(config, sampler_fn=sampler_fn)
+    datamodule = PretrainData(config)
     datamodule.prepare_data()
     datamodule.setup()
 

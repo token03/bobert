@@ -1,6 +1,6 @@
 import math
 import random
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Sized
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 from torch.utils.data import Sampler
 
@@ -18,7 +18,6 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         lengths: Sequence[int],
         batch_size: int,
         buckets: Sequence[int],
-        sampler: Optional[Iterable[int]] = None,
         max_tokens: Optional[int] = None,
         seed: Optional[int] = None,
         drop_last: bool = False,
@@ -32,7 +31,6 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         self.lengths = [int(length) for length in lengths]
         self.batch_size = int(batch_size)
         self.buckets = [int(bucket) for bucket in buckets]
-        self.sampler = sampler
         self.max_tokens = int(max_tokens) if max_tokens else None
         self.seed = seed
         self.drop_last = drop_last
@@ -44,14 +42,8 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         for length in self.lengths:
             counts[length_bucket(length, self.buckets)] += 1
 
-        sample_count = len(self.lengths)
-        if isinstance(self.sampler, Sized):
-            sample_count = len(self.sampler)
-        scale = sample_count / max(1, len(self.lengths))
-
         total = 0
         for bucket, count in counts.items():
-            count = int(round(count * scale))
             limit = self._bucket_batch_size(bucket)
             if self.drop_last:
                 total += count // limit
@@ -68,11 +60,6 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         return size
 
     def _indices(self) -> Iterator[int]:
-        if self.sampler is not None:
-            for idx in self.sampler:
-                yield int(idx)
-            return
-
         indices = list(range(len(self.lengths)))
         rng = random.Random(None if self.seed is None else self.seed + self.epoch)
         if self.shuffle:
