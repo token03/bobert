@@ -12,10 +12,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from core.config import load_config
-from core.data.batch import batch_packed_vectors
+from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
-from core.data.sampler import LengthBucketBatchSampler, length_bucket
 from core.data.source import load_beatmap_dataset
 from core.model.checkpoint import (
     configure_from_checkpoint,
@@ -181,7 +180,11 @@ def chunked(values: list[int], chunk_size: int):
 
 
 def bucket_batch_sampler(
-    beatmaps: list[dict], batch_size: int, max_seq_len: int, buckets: list[int] | None
+    beatmaps: list[dict],
+    batch_size: int,
+    max_seq_len: int,
+    buckets: list[int],
+    seed: int,
 ):
     if not buckets:
         return None
@@ -191,12 +194,11 @@ def bucket_batch_sampler(
         return None
 
     mean_len = int(round(sum(lengths) / len(lengths)))
-    max_tokens = batch_size * length_bucket(mean_len, buckets)
     return LengthBucketBatchSampler(
         lengths,
         batch_size,
-        buckets,
-        max_tokens=max_tokens,
+        max_tokens=batch_size * mean_len,
+        seed=seed,
         shuffle=False,
     )
 
@@ -301,6 +303,7 @@ def export_embeddings(
                     batch_size,
                     config.data.max_seq_len,
                     [int(bucket) for bucket in config.data.length_buckets],
+                    seed,
                 )
                 loader_kwargs = {
                     "shuffle": False,

@@ -5,7 +5,7 @@ from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 
-from core.data.module import PretrainData
+from core.data.module import PretrainData, preallocation_batch_size
 
 from .base import BobertLightningModule
 from .loss import pretrain_loss_fn
@@ -118,16 +118,13 @@ class PretrainingModule(BobertLightningModule):
 
     def _preallocation_batch_size(self, max_seq_len: int) -> int:
         phase_batch_size = int(self.config.pretraining.trainer.batch_size)
-        buckets = self.datamodule._length_buckets()
-        if not buckets or self.datamodule.train_dataset is None:
+        if self.datamodule.train_dataset is None:
             return phase_batch_size
-
-        lengths = self.datamodule._lengths(self.datamodule.train_dataset)
-        max_tokens = self.datamodule._token_budget(lengths, buckets)
-        batch_size = max(1, min(phase_batch_size, max_tokens // int(max_seq_len)))
-        if batch_size >= 8:
-            batch_size = max(8, (batch_size // 8) * 8)
-        return batch_size
+        return preallocation_batch_size(
+            self.datamodule.train_dataset,
+            phase_batch_size,
+            max_seq_len,
+        )
 
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
         _, _, _, _, loss_dict = self._shared_step(batch)

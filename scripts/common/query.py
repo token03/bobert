@@ -203,7 +203,7 @@ def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
         raise ValueError(f"Could not engineer hitobject features for {path}")
 
     expanded_count = vectors[0].shape[0]
-    truncate_len = min(expanded_count, max_seq_len or expanded_count)
+    truncate_len = min(expanded_count, max_seq_len)
     row = beatmaps_df.row(0, named=True)
     map_features = {
         name: float(row.get(name, 0.0) or 0.0) for name in MAP_FEATURE_ATTRIBUTES

@@ -6,10 +6,15 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 from core.paths import MINING_CACHE_PATH
 
-from .batch import collate_align_eval, collate_align_train, collate_pretrain
+from .batch import (
+    AlignmentBatchSampler,
+    LengthBucketBatchSampler,
+    collate_align_eval,
+    collate_align_train,
+    collate_pretrain,
+)
 from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
-from .sampler import AlignmentBatchSampler, LengthBucketBatchSampler, length_bucket
 from .schema import FEATURE_INFO
 from .source import load_beatmap_dataset
 
@@ -156,9 +161,13 @@ def length_buckets(data_config, phase_config):
     return [int(bucket) for bucket in data_config.length_buckets]
 
 
-def token_budget(lengths, buckets, batch_size):
+def lengths(dataset):
+    return [min(int(vec.shape[0]), dataset.max_seq_len) for vec in dataset.beatmap_data]
+
+
+def token_budget(lengths, batch_size):
     mean_len = int(round(sum(lengths) / len(lengths)))
-    return int(batch_size) * length_bucket(mean_len, buckets)
+    return int(batch_size) * mean_len
 
 
 def bucketed_loader(dataset, collate_fn, datamodule, train):
@@ -173,21 +182,22 @@ def bucketed_loader(dataset, collate_fn, datamodule, train):
             train,
         )
 
-    lengths = [min(int(vec.shape[0]), datamodule.max_seq_len) for vec in dataset.beatmap_data]
+    sample_lengths = lengths(dataset)
     batch_sampler = LengthBucketBatchSampler(
-        lengths,
+        sample_lengths,
         datamodule.batch_size,
-        buckets,
-        max_tokens=token_budget(
-            lengths,
-            buckets,
-            datamodule.batch_size,
-        ),
+        max_tokens=token_budget(sample_lengths, datamodule.batch_size),
         seed=datamodule.data_config.dataset_seed,
         shuffle=train,
         drop_last=train and bool(datamodule.config.runtime.compile_model),
     )
     return make_batch_loader(dataset, collate_fn, datamodule.data_config, batch_sampler)
+
+
+def preallocation_batch_size(dataset, batch_size, max_seq_len):
+    sample_lengths = lengths(dataset)
+    max_tokens = token_budget(sample_lengths, batch_size)
+    return max(1, min(int(batch_size), max_tokens // int(max_seq_len)))
 
 
 class PretrainData(pl.LightningDataModule):
