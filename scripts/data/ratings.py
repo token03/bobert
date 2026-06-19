@@ -273,7 +273,7 @@ def calculate_missing_ratings(
 
     batches = list(chunked(tasks_to_run, batch_size))
     worker_fn = importlib.import_module(
-        "scripts.tasks.data.ratings"
+        "scripts.data.ratings"
     )._calculate_difficulty_attributes_batch_worker
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
         future_to_task = {

@@ -228,7 +228,7 @@ def process(
     print("Done.")
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Create visualizer UMAP files from beatmap embeddings")
     parser.add_argument(
         "--embeddings",
@@ -256,3 +256,7 @@ if __name__ == "__main__":
         umap_neighbors=args.umap_neighbors,
         random_state=args.seed,
     )
+
+
+if __name__ == "__main__":
+    main()

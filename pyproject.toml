@@ -42,14 +42,8 @@ dependencies = [
 ]
 
 [project.scripts]
-collections = "scripts.collections:main"
-data = "scripts.data:main"
-eda = "scripts.eda:main"
-embed = "scripts.embed:main"
-fetch = "scripts.fetch:main"
-query = "scripts.query:main"
-train = "scripts.train:main"
-viz = "scripts.viz:main"
+bobert = "scripts.cli:main"
+recommend = "scripts.query.recommend:main"
 
 [build-system]
 requires = ["hatchling"]

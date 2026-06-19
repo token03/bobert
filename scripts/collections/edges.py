@@ -44,7 +44,7 @@ class BaseEdgeFetcher(ABC):
         """
         if not self.vertex_path.exists():
             print(
-                "[yellow]No vertex data found. Please run `uv run python -m scripts.collections vertices` first.[/yellow]"
+                "[yellow]No vertex data found. Please run `uv run bobert collections vertices` first.[/yellow]"
             )
             return {}
 

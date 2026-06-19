@@ -10,7 +10,7 @@ import tqdm
 
 from scripts.common.osu import get_api_tiers, get_sharded_path, is_valid_osu_file
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
-from scripts.tasks.fetch.maps import fetch_missing_beatmaps
+from scripts.fetch.maps import fetch_missing_beatmaps
 
 BEATMAPS_DIR = DATA_DIR / "beatmaps"
 DATASET_BEATMAPS_DIR = DATA_DIR / "dataset" / "beatmaps"

@@ -176,7 +176,7 @@ def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
     from core.data.feature import build_feature_tensors
     from core.data.feature import calculate_drain_times
     from core.data.parser import parse_osu_file
-    from scripts.tasks.data.dataset import (
+    from scripts.data.dataset import (
         extract_beatmap_record,
         extract_hitobject_records,
         validate_beatmap,
@@ -234,7 +234,7 @@ class LazyEmbedder:
         from core.config import load_config
         from core.data.normalizer import BeatmapNormalizer
         from core.paths import ALIGN_DIR, PRETRAIN_DIR
-        from scripts.tasks.embed.bobert import (
+        from scripts.bobert.embed import (
             find_checkpoint,
             load_alignment_model,
             load_pretraining_model,
