@@ -16,7 +16,7 @@ data/**/*.csv
 data/*.tar.gz
 cache/*
 
-experiments/
+runs/
 *.pth
 
 visualizer/*/*.parquet

@@ -11,7 +11,7 @@ __pycache__/
 data/
 cache/
 .cache/
-experiments/
+runs/
 visualizer/
 node_modules/
 tests/

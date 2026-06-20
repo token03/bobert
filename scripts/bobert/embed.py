@@ -360,7 +360,7 @@ def main():
     parser.add_argument(
         "--pretrain",
         action="store_true",
-        help="Use experiments/pretrain instead of experiments/align",
+        help="Use runs/pretrain instead of runs/align",
     )
     parser.add_argument(
         "--dataset", default=None, help="Defaults to config.data.dataset_path"
