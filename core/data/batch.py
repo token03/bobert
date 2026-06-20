@@ -3,6 +3,8 @@ import random
 from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
+from torch.nn.functional import pad
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Sampler
 
 from .schema import MAP_FEATURE_ATTRIBUTES
@@ -143,9 +145,7 @@ class AlignmentBatchSampler(Sampler[List[int]]):
         for anchor_idx in anchor_indices:
             anchor_id = self.beatmap_ids[anchor_idx]
             mining = self.mining_lookup[anchor_id]
-            positive_ids = self._sample_positives(
-                mining, rng, self.group_size - 1
-            )
+            positive_ids = self._sample_positives(mining, rng, self.group_size - 1)
             if not positive_ids:
                 continue
 
@@ -158,9 +158,7 @@ class AlignmentBatchSampler(Sampler[List[int]]):
             yield batch
 
 
-def rounded_pad_length(
-    length: int, max_seq_len: int, buckets: Sequence[int]
-) -> int:
+def rounded_pad_length(length: int, max_seq_len: int, buckets: Sequence[int]) -> int:
     length = min(int(length), int(max_seq_len))
     for bucket in buckets:
         if length <= bucket:
@@ -186,29 +184,24 @@ def _batch_lengths(
 def batch_packed_vectors(
     vectors: Sequence[torch.Tensor],
     max_seq_len: int,
-    vector_dim: int,
 ) -> Dict[str, torch.Tensor | int]:
     _, lengths, cu_seqlens = _batch_lengths(
         vectors,
         max_seq_len,
         pad_to_len=max_seq_len,
     )
-    packed_vectors = torch.zeros(sum(lengths), vector_dim, dtype=torch.float32)
-    offset = 0
-    for vector, length in zip(vectors, lengths):
-        packed_vectors[offset : offset + length] = vector[:length]
-        offset += length
     return {
-        "packed_vectors": packed_vectors,
+        "packed_vectors": torch.cat(
+            [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
+        ),
         "cu_seqlens": cu_seqlens,
-        "max_seqlen": max(lengths) if lengths else 0,
+        "max_seqlen": max(lengths),
     }
 
 
 def batch_padded_vectors(
     vectors: Sequence[torch.Tensor],
     max_seq_len: int,
-    vector_dim: int,
     *,
     pad_to_len: int,
 ) -> Dict[str, torch.Tensor]:
@@ -218,12 +211,15 @@ def batch_padded_vectors(
         pad_to_len=pad_to_len,
     )
 
-    max_len = effective_max_seq_len
-    padded = torch.zeros(len(vectors), max_len, vector_dim, dtype=torch.float32)
-    mask = torch.zeros(len(vectors), max_len, dtype=torch.bool)
-    for i, (vector, length) in enumerate(zip(vectors, lengths)):
-        padded[i, :length] = vector[:length]
-        mask[i, :length] = True
+    padded = pad_sequence(
+        [vector[:length] for vector, length in zip(vectors, lengths)], batch_first=True
+    )
+    padded = pad(padded, (0, 0, 0, effective_max_seq_len - padded.shape[1]))
+
+    seqlens = torch.tensor(lengths, device=padded.device)
+    mask = torch.arange(effective_max_seq_len, device=padded.device).unsqueeze(
+        0
+    ) < seqlens.unsqueeze(1)
     return {
         "vectors": padded,
         "attention_mask": mask,
@@ -248,24 +244,20 @@ def stack_map_features(dict_list: List[Dict[str, Any]]) -> torch.Tensor:
     )
 
 
-def pad_int_lists(values: Sequence[Sequence[Any]], fill_value: int = -1) -> torch.Tensor:
-    max_len = max((len(value) for value in values), default=0)
-    tensor = torch.full((len(values), max_len), fill_value, dtype=torch.long)
-    for i, value in enumerate(values):
-        length = len(value)
-        if length:
-            tensor[i, :length] = torch.tensor(value, dtype=torch.long)
-    return tensor
+def pad_int_lists(
+    values: Sequence[Sequence[int]], fill_value: int = -1
+) -> torch.Tensor:
+    return pad_sequence(
+        [torch.tensor(value, dtype=torch.long) for value in values],
+        batch_first=True,
+        padding_value=fill_value,
+    )
 
 
-def pad_float_lists(values: Sequence[Sequence[Any]]) -> torch.Tensor:
-    max_len = max((len(value) for value in values), default=0)
-    tensor = torch.zeros((len(values), max_len), dtype=torch.float32)
-    for i, value in enumerate(values):
-        length = len(value)
-        if length:
-            tensor[i, :length] = torch.tensor(value, dtype=torch.float32)
-    return tensor
+def pad_float_lists(values: Sequence[Sequence[float]]) -> torch.Tensor:
+    return pad_sequence(
+        [torch.tensor(value, dtype=torch.float32) for value in values], batch_first=True
+    )
 
 
 def _alignment_labels(
@@ -299,7 +291,6 @@ def _alignment_labels(
 def collate_pretrain(
     batch: List[Tuple[torch.Tensor, Dict[str, float]]],
     max_seq_len: int,
-    vector_dim: int,
     length_buckets: Sequence[int],
 ):
     vectors, attrs = zip(*batch)
@@ -307,7 +298,6 @@ def collate_pretrain(
     vector_batch = batch_padded_vectors(
         vectors,
         max_seq_len,
-        vector_dim,
         pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
     )
     return (
@@ -321,13 +311,12 @@ def collate_pretrain(
 def collate_align_train(
     batch: List[Tuple],
     max_seq_len: int,
-    vector_dim: int,
 ):
     vectors, _, map_features, beatmap_ids, targets = zip(*batch)
     labels = _alignment_labels(map_features, beatmap_ids, targets)
     labels["use_contrastive"] = True
 
-    vector_batch = batch_packed_vectors(vectors, max_seq_len, vector_dim)
+    vector_batch = batch_packed_vectors(vectors, max_seq_len)
     return {
         **vector_batch,
         "max_seqlen": torch.tensor(vector_batch["max_seqlen"], dtype=torch.long),
@@ -339,7 +328,6 @@ def collate_align_train(
 def collate_align_eval(
     batch: List[Tuple],
     max_seq_len: int,
-    vector_dim: int,
 ):
     vectors, _, map_features, beatmap_ids, targets = zip(*batch)
     labels = _alignment_labels(map_features, beatmap_ids, targets)
@@ -349,7 +337,6 @@ def collate_align_eval(
     vector_batch = batch_padded_vectors(
         vectors,
         max_seq_len,
-        vector_dim,
         pad_to_len=rounded_pad_length(max_len, max_seq_len, []),
     )
     return {**vector_batch, "labels": labels, "batch_size": len(batch)}

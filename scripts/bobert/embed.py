@@ -48,9 +48,9 @@ class ExportDataset(Dataset):
         )
 
 
-def collate_export(batch, max_seq_len: int, vector_dim: int):
+def collate_export(batch, max_seq_len: int):
     beatmap_ids, vectors, map_features = zip(*batch)
-    vector_batch = batch_packed_vectors(vectors, max_seq_len, vector_dim)
+    vector_batch = batch_packed_vectors(vectors, max_seq_len)
     return (
         torch.tensor(beatmap_ids, dtype=torch.long),
         vector_batch["packed_vectors"],
@@ -279,7 +279,6 @@ def export_embeddings(
                 if not beatmaps:
                     continue
 
-                vector_dim = beatmaps[0]["hitobjects"].shape[1]
                 dataset = ExportDataset(beatmaps, normalizer)
                 batch_sampler = bucket_batch_sampler(
                     beatmaps,
@@ -293,7 +292,7 @@ def export_embeddings(
                     "num_workers": 0,
                     "pin_memory": device.type == "cuda",
                     "collate_fn": lambda batch: collate_export(
-                        batch, config.data.max_seq_len, vector_dim
+                        batch, config.data.max_seq_len
                     ),
                 }
                 if batch_sampler is None:

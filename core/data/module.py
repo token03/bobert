@@ -239,7 +239,6 @@ class PretrainData(pl.LightningDataModule):
         collate = partial(
             collate_pretrain,
             max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
             length_buckets=length_buckets(self.data_config, self.phase_config),
         )
         return bucketed_loader(self.train_dataset, collate, self, True)
@@ -248,7 +247,6 @@ class PretrainData(pl.LightningDataModule):
         collate = partial(
             collate_pretrain,
             max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
             length_buckets=length_buckets(self.data_config, self.phase_config),
         )
         return bucketed_loader(self.val_dataset, collate, self, False)
@@ -352,7 +350,9 @@ class AlignData(pl.LightningDataModule):
             if int(bid) in mining_targets
         }
         self.train_epoch_size = min(
-            int(self.phase_config.data.alignment_size or len(self.train_anchor_indices)),
+            int(
+                self.phase_config.data.alignment_size or len(self.train_anchor_indices)
+            ),
             len(self.train_anchor_indices),
         )
         print(
@@ -366,7 +366,6 @@ class AlignData(pl.LightningDataModule):
         collate = partial(
             collate_align_train,
             max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
         )
         sampler = AlignmentBatchSampler(
             self.train_dataset.beatmap_ids,
@@ -384,7 +383,6 @@ class AlignData(pl.LightningDataModule):
         collate = partial(
             collate_align_eval,
             max_seq_len=self.max_seq_len,
-            vector_dim=self.vector_dim,
         )
         return make_loader(
             self.val_dataset,
