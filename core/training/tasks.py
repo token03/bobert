@@ -1,5 +1,4 @@
 from contextlib import nullcontext
-from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from omegaconf import DictConfig
@@ -15,7 +14,12 @@ from .setup import (
     create_optimizer,
     create_scheduler,
 )
-from ..model.bobert import model_spec_from_config, strip_checkpoint_state
+from ..model.checkpoint import (
+    add_normalizer_to_checkpoint,
+    model_spec_from_config,
+    normalize_lightning_state_dict,
+    restore_normalizer_from_checkpoint,
+)
 from ..data.normalizer import BeatmapNormalizer
 from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, VECTOR_DIM
 
@@ -47,34 +51,19 @@ class BobertLightningModule(pl.LightningModule):
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         checkpoint["model_spec"] = model_spec_from_config(self.config, self.phase)
-        normalizer = self.checkpoint_normalizer()
-        if normalizer is None:
-            return
-        checkpoint["vector_stats"] = normalizer.get_vector_stats()
-        checkpoint["attribute_stats"] = normalizer.get_attribute_stats()
+        add_normalizer_to_checkpoint(checkpoint, self.checkpoint_normalizer())
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        normalizer = self.checkpoint_normalizer()
-        if normalizer is not None:
-            if "vector_stats" in checkpoint:
-                normalizer.vector_stats = checkpoint["vector_stats"]
-            if "attribute_stats" in checkpoint:
-                normalizer.attribute_stats = checkpoint["attribute_stats"]
+        restore_normalizer_from_checkpoint(checkpoint, self.checkpoint_normalizer())
 
         state_dict = checkpoint.get("state_dict")
         if not state_dict:
             return
 
         model_is_compiled = hasattr(self.model, "_orig_mod")
-        normalized_state = {}
-        for key, value in state_dict.items():
-            if model_is_compiled:
-                if key.startswith("model.") and not key.startswith("model._orig_mod."):
-                    key = "model._orig_mod." + key[len("model.") :]
-            elif key.startswith("model._orig_mod."):
-                key = "model." + key[len("model._orig_mod.") :]
-            normalized_state[key] = value
-        checkpoint["state_dict"] = normalized_state
+        checkpoint["state_dict"] = normalize_lightning_state_dict(
+            state_dict, model_is_compiled
+        )
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config, self.phase)
@@ -363,74 +352,3 @@ class AlignmentModule(BobertLightningModule):
         for key, value in results.items():
             self.log(f"val_{key}", value)
         self.metrics.reset()
-
-
-def load_pretraining_checkpoint(
-    checkpoint_path: str | Path | None,
-    map_location: str | torch.device = "cpu",
-) -> tuple[Path, Dict[str, Any]]:
-    if checkpoint_path is None:
-        raise FileNotFoundError("No pretraining checkpoint found.")
-
-    checkpoint_path = Path(checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(checkpoint_path)
-
-    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
-    if "vector_stats" not in checkpoint:
-        raise RuntimeError(
-            "Pretraining checkpoint does not contain vector_stats; "
-            "alignment requires the pretraining normalizer."
-        )
-    return checkpoint_path, checkpoint
-
-
-def load_pretraining_weights(
-    model: nn.Module,
-    checkpoint_path: str | Path | None,
-    map_location: str | torch.device = "cpu",
-    ) -> Dict[str, Any]:
-    checkpoint_path, checkpoint = load_pretraining_checkpoint(checkpoint_path, map_location)
-    state = strip_checkpoint_state(checkpoint["state_dict"])
-    for key, value in list(state.items()):
-        if key.startswith("difficulty_head.pooler."):
-            del state[key]
-            key = key.replace("difficulty_head.pooler.", "pooler.", 1)
-            state[key] = value
-
-    target = getattr(model, "_orig_mod", model)
-    model_state = target.state_dict()
-    compatible_state = {
-        key: value
-        for key, value in state.items()
-        if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
-    }
-    missing, unexpected = target.load_state_dict(compatible_state, strict=False)
-    skipped = sorted(set(state) - set(compatible_state))
-    tokenizer_keys = {key for key in model_state if key.startswith("bert.feature_tokenizer.")}
-    missing_tokenizer_keys = sorted(tokenizer_keys - set(compatible_state))
-    if missing_tokenizer_keys:
-        raise RuntimeError(
-            "Pretraining checkpoint does not contain compatible feature tokenizer weights; "
-            "alignment requires a pretrained tokenizer."
-        )
-
-    return {
-        "checkpoint_path": checkpoint_path,
-        "loaded": len(compatible_state),
-        "skipped": len(skipped),
-        "missing": len(missing),
-        "unexpected": len(unexpected),
-        "loaded_tokenizer": len(tokenizer_keys),
-    }
-
-
-def load_pretraining_normalizer(
-    checkpoint_path: str | Path | None,
-    map_location: str | torch.device = "cpu",
-) -> BeatmapNormalizer:
-    _, checkpoint = load_pretraining_checkpoint(checkpoint_path, map_location)
-    return BeatmapNormalizer(
-        vector_stats=checkpoint["vector_stats"],
-        attribute_stats=checkpoint.get("attribute_stats", {}),
-    )

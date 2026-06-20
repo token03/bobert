@@ -11,12 +11,9 @@ from core.config import load_config as load_bobert_config
 from core.data.mining import MiningConfig, build_cache
 from core.data.module import AlignData
 from core.model.bobert import BobertForAlignment
+from core.model.checkpoint import load_pretraining_normalizer, load_pretraining_weights
 from core.paths import ALIGN_DIR, MINING_CACHE_PATH, PRETRAIN_DIR
-from core.training.tasks import (
-    AlignmentModule,
-    load_pretraining_normalizer,
-    load_pretraining_weights,
-)
+from core.training.tasks import AlignmentModule
 from core.training.setup import create_trainer, find_latest_checkpoint, find_latest_logger_version, setup_device
 
 

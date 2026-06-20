@@ -16,7 +16,8 @@ from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
-from core.model.bobert import BobertForAlignment, BobertForPretraining, setup_checkpoint
+from core.model.bobert import BobertForAlignment, BobertForPretraining
+from core.model.checkpoint import load_checkpoint, setup_checkpoint
 from core.paths import ALIGN_DIR, PRETRAIN_DIR
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
@@ -73,7 +74,7 @@ def find_checkpoint(path: str | Path | None, checkpoint_dir: str | Path) -> Path
 
 
 def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config, state = setup_checkpoint(config, checkpoint, "alignment")
     OmegaConf.set_struct(config, False)
     config.runtime.compile_model = False
@@ -92,7 +93,7 @@ def load_alignment_model(config, checkpoint_path: Path, device: torch.device):
 
 
 def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config, state = setup_checkpoint(config, checkpoint, "pretraining")
     OmegaConf.set_struct(config, False)
     config.runtime.compile_model = False

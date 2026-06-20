@@ -232,7 +232,7 @@ class LazyEmbedder:
         import torch
 
         from core.config import load_config
-        from core.data.normalizer import BeatmapNormalizer
+        from core.model.checkpoint import normalizer_from_checkpoint
         from core.paths import ALIGN_DIR, PRETRAIN_DIR
         from scripts.bobert.embed import (
             find_checkpoint,
@@ -255,10 +255,7 @@ class LazyEmbedder:
         ckpt_path = find_checkpoint(self.checkpoint_path, checkpoint_dir)
         loader = load_pretraining_model if self.pretrain else load_alignment_model
         self.model, checkpoint = loader(self.config, ckpt_path, self.device)
-        self.normalizer = BeatmapNormalizer(
-            vector_stats=checkpoint["vector_stats"],
-            attribute_stats=checkpoint.get("attribute_stats", {}),
-        )
+        self.normalizer = normalizer_from_checkpoint(checkpoint)
 
     def embed_osu(self, path: Path) -> np.ndarray:
         import torch

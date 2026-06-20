@@ -14,7 +14,8 @@ from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file
-from core.model.bobert import BobertForAlignment, setup_checkpoint
+from core.model.bobert import BobertForAlignment
+from core.model.checkpoint import load_checkpoint, normalizer_from_checkpoint, setup_checkpoint
 
 
 MIN_OBJECTS_PER_MAP = 1
@@ -38,7 +39,7 @@ class CpuInferencer:
             raise FileNotFoundError(f"model not found: {self.model_path}")
 
         config = load_config(self.config_path)
-        checkpoint = torch.load(self.model_path, map_location="cpu", weights_only=False)
+        checkpoint = load_checkpoint(self.model_path, map_location="cpu")
         config, state = setup_checkpoint(config, checkpoint, "alignment")
         OmegaConf.set_struct(config, False)
         config.runtime.compile_model = False
@@ -53,10 +54,7 @@ class CpuInferencer:
 
         self.config = config
         self.model = model
-        self.normalizer = BeatmapNormalizer(
-            vector_stats=checkpoint["vector_stats"],
-            attribute_stats=checkpoint.get("attribute_stats", {}),
-        )
+        self.normalizer = normalizer_from_checkpoint(checkpoint)
 
     def embed_osu_bytes(self, content: bytes) -> np.ndarray:
         self.load()

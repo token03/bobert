@@ -1,5 +1,5 @@
 # components.py
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from rotary_embedding_torch import apply_rotary_emb
 from torch.utils.checkpoint import checkpoint
 
-from ..data.schema import OBJECT_TYPE_SLIDER_HEAD
+from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
 
 try:
     import torch.distributed.tensor  # noqa: F401
@@ -181,7 +181,7 @@ class SwiGLU(nn.Module):
         return self.w2(hidden)
 
 
-class BobertEncoderLayer(nn.Module):
+class EncoderLayer(nn.Module):
     def __init__(
         self,
         d_model: int,
@@ -435,3 +435,276 @@ class SpanMasker(nn.Module):
         ).view(1, -1)
 
         return encoder_input, is_masked
+
+
+class ProjectedStatsPooler(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        stat_dim: int,
+        stats: Tuple[str, ...],
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.stat_dim = stat_dim
+        self.stats = tuple(stats)
+        self.output_dim = stat_dim * len(self.stats)
+        self.projections = nn.ModuleDict(
+            {
+                name: nn.Sequential(
+                    nn.LayerNorm(d_model),
+                    nn.Linear(d_model, stat_dim),
+                    nn.GELU(),
+                )
+                for name in self.stats
+            }
+        )
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        packed_float = packed_output.float()
+        pooled = {}
+
+        if "mean" in self.stats or "std" in self.stats:
+            pooled["mean"] = torch.segment_reduce(
+                packed_float, reduce="mean", lengths=lengths
+            )
+            pooled["mean"] = pooled["mean"].masked_fill(lengths[:, None] == 0, 0.0)
+
+        if "std" in self.stats:
+            mean_sq = torch.segment_reduce(
+                packed_float.square(), reduce="mean", lengths=lengths
+            )
+            mean_sq = mean_sq.masked_fill(lengths[:, None] == 0, 0.0)
+            pooled["std"] = (mean_sq - pooled["mean"].square()).clamp_min(0.0).sqrt()
+
+        if "max" in self.stats:
+            pooled["max"] = torch.segment_reduce(
+                packed_float, reduce="amax", lengths=lengths
+            )
+
+        projected = [self.projections[name](pooled[name]) for name in self.stats]
+        return torch.cat(projected, dim=-1).to(packed_output.dtype)
+
+
+class QueryAttentionPooler(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        num_queries: int,
+        head_dim: int,
+        output_dim: int,
+        dropout: float,
+        use_flash: bool,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.num_queries = num_queries
+        self.head_dim = int(head_dim)
+        self.inner_dim = self.n_heads * self.head_dim
+        self.output_dim = int(output_dim)
+        self.dropout = dropout
+        self.use_flash = use_flash
+
+        if use_flash:
+            from flash_attn import flash_attn_varlen_kvpacked_func
+
+            self.flash_attn = flash_attn_varlen_kvpacked_func
+
+        self.norm = nn.LayerNorm(d_model)
+        self.query = nn.Parameter(torch.empty(num_queries, n_heads, self.head_dim))
+        self.kv = nn.Linear(d_model, 2 * self.inner_dim, bias=False)
+        self.out = nn.Sequential(
+            nn.LayerNorm(self.num_queries * self.inner_dim),
+            nn.Linear(self.num_queries * self.inner_dim, self.output_dim),
+            nn.GELU(),
+        )
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.query, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.kv.weight)
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        batch_size = seqlens.numel()
+
+        x = self.norm(packed_output)
+        kv = self.kv(x).view(
+            packed_output.shape[0], 2, self.n_heads, self.head_dim
+        )
+
+        if self.use_flash:
+            pooled = self._forward_flash(kv, cu_seqlens, batch_size, max_seqlen)
+        else:
+            k, v = kv.unbind(dim=1)
+            pooled = self._forward_torch(k, v, seqlens, batch_size)
+
+        pooled = pooled.reshape(batch_size, self.num_queries * self.inner_dim)
+        return self.out(pooled).to(packed_output.dtype)
+
+    def _forward_flash(
+        self,
+        kv: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        batch_size: int,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        q = (
+            self.query.to(dtype=kv.dtype, device=kv.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1, -1, -1)
+            .reshape(batch_size * self.num_queries, self.n_heads, self.head_dim)
+            .contiguous()
+        )
+
+        cu_seqlens_q = (
+            torch.arange(batch_size + 1, device=kv.device, dtype=torch.int32)
+            * self.num_queries
+        )
+
+        out = self.flash_attn(
+            q,
+            kv,
+            cu_seqlens_q,
+            cu_seqlens,
+            self.num_queries,
+            max_seqlen,
+            dropout_p=self.dropout if self.training else 0.0,
+            causal=False,
+        )
+
+        return out.reshape(batch_size, self.num_queries, self.n_heads, self.head_dim)
+
+    def _forward_torch(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        seqlens: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        device = k.device
+        q = self.query.to(device=device, dtype=k.dtype)
+
+        outputs = []
+        start = 0
+        for seqlen in seqlens.tolist():
+            end = start + seqlen
+            k_i = k[start:end].transpose(0, 1).float()
+            v_i = v[start:end].transpose(0, 1).float()
+            out = F.scaled_dot_product_attention(
+                q.transpose(0, 1).float(),
+                k_i,
+                v_i,
+                dropout_p=0.0,
+            )
+            outputs.append(out.transpose(0, 1).to(k.dtype))
+            start = end
+
+        return torch.stack(outputs, dim=0)
+
+
+class StatsMixerPooler(nn.Module):
+    def __init__(self, pooler: nn.Module, output_dim: int):
+        super().__init__()
+        self.pooler = pooler
+        input_dim = getattr(pooler, "output_dim")
+        self.output_dim = output_dim
+        self.mixer = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, output_dim),
+            nn.GELU(),
+            nn.Linear(output_dim, output_dim),
+        )
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        return self.mixer(
+            self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+        )
+
+
+class MaskedLMHead(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.feature_info = FEATURE_INFO
+        num_continuous = len(self.feature_info["continuous"])
+
+        self.continuous_head = nn.Linear(d_model, num_continuous)
+        self.categorical_heads = nn.ModuleDict(
+            {
+                name: nn.Linear(d_model, info["cardinality"])
+                for name, info in self.feature_info["categorical"].items()
+            }
+        )
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        is_masked: torch.Tensor,
+    ) -> Dict[str, Any]:
+        masked_packed_indices = torch.nonzero(is_masked, as_tuple=True)[0]
+        masked_output = packed_output[masked_packed_indices]
+
+        continuous_preds = self.continuous_head(masked_output)
+        categorical_preds = {
+            name: head(masked_output) for name, head in self.categorical_heads.items()
+        }
+
+        return {"continuous": continuous_preds, "categorical": categorical_preds}
+
+
+class DifficultyHead(nn.Module):
+    def __init__(self, d_model: int, pooler: nn.Module):
+        super().__init__()
+        self.pooler = pooler
+        self.head = nn.Linear(
+            getattr(pooler, "output_dim", d_model), len(DIFFICULTY_ATTRIBUTES)
+        )
+
+    def forward(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> Dict[str, torch.Tensor]:
+        pooled_output = self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+        difficulty_preds_raw = self.head(pooled_output)
+
+        return {
+            name: difficulty_preds_raw[:, i]
+            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
+        }
+
+
+class MapFeatureProjector(nn.Module):
+    def __init__(self, num_features: int, output_dim: int):
+        super().__init__()
+        self.output_dim = output_dim
+        self.net = nn.Sequential(
+            nn.LayerNorm(num_features),
+            nn.Linear(num_features, output_dim),
+            nn.GELU(),
+            nn.Linear(output_dim, output_dim),
+            nn.GELU(),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.net(features)

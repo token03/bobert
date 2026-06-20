@@ -9,6 +9,9 @@ from core.config import load_config
 from core.model.bobert import (
     BobertForAlignment,
     BobertForPretraining,
+)
+from core.model.checkpoint import (
+    load_checkpoint,
     setup_checkpoint,
     strip_checkpoint_state,
 )
@@ -56,7 +59,7 @@ def main() -> int:
         args.output or ("data/bobert-pretrain.pt" if args.pretrain else "data/bobert.pt")
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     state = strip_checkpoint_state(checkpoint["state_dict"])
     model_spec = checkpoint.get("model_spec")
     if model_spec is None:
