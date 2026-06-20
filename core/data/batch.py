@@ -248,55 +248,50 @@ def stack_map_features(dict_list: List[Dict[str, Any]]) -> torch.Tensor:
     )
 
 
+def pad_int_lists(values: Sequence[Sequence[Any]], fill_value: int = -1) -> torch.Tensor:
+    max_len = max((len(value) for value in values), default=0)
+    tensor = torch.full((len(values), max_len), fill_value, dtype=torch.long)
+    for i, value in enumerate(values):
+        length = len(value)
+        if length:
+            tensor[i, :length] = torch.tensor(value, dtype=torch.long)
+    return tensor
+
+
+def pad_float_lists(values: Sequence[Sequence[Any]]) -> torch.Tensor:
+    max_len = max((len(value) for value in values), default=0)
+    tensor = torch.zeros((len(values), max_len), dtype=torch.float32)
+    for i, value in enumerate(values):
+        length = len(value)
+        if length:
+            tensor[i, :length] = torch.tensor(value, dtype=torch.float32)
+    return tensor
+
+
 def _alignment_labels(
     map_features: Tuple[Dict[str, Any], ...],
     beatmap_ids: Tuple[int, ...],
     targets: Tuple[Dict[str, Any], ...],
 ):
-    id_to_batch = {int(bid): i for i, bid in enumerate(beatmap_ids)}
-    positive_weights = torch.zeros(len(targets), len(targets), dtype=torch.float32)
-    anchor_weights = torch.tensor(
-        [float(target["anchor_weight"]) for target in targets],
-        dtype=torch.float32,
-    )
-    beatmapset_ids = torch.tensor(
-        [int(target["beatmapset_id"]) for target in targets], dtype=torch.long
-    )
-    valid_sets = beatmapset_ids >= 0
-    same_set = beatmapset_ids[:, None] == beatmapset_ids[None, :]
-    song_keys = [str(target["song_key"]) for target in targets]
-    same_song = torch.zeros(len(targets), len(targets), dtype=torch.bool)
-    parsed_song_keys = [set(key.split("|")) - {""} for key in song_keys]
-    for i, left in enumerate(parsed_song_keys):
-        if not left:
-            continue
-        for j, right in enumerate(parsed_song_keys):
-            same_song[i, j] = bool(left & right)
-
-    ignore_contrastive = (
-        same_set & valid_sets[:, None] & valid_sets[None, :]
-    ) | same_song
-    ignore_contrastive.fill_diagonal_(False)
-
-    for i, target in enumerate(targets):
-        for bid in target["ignore_ids"]:
-            j = id_to_batch.get(int(bid))
-            if j is not None and j != i:
-                ignore_contrastive[i, j] = True
-        for bid, weight in zip(
-            target["graph_positive_ids"], target["graph_positive_weights"]
-        ):
-            j = id_to_batch.get(int(bid))
-            if j is not None and j != i:
-                existing = float(positive_weights[i, j])
-                new_weight = max(float(weight), 0.0)
-                positive_weights[i, j] = 1.0 - (1.0 - existing) * (1.0 - new_weight)
-                ignore_contrastive[i, j] = True
-
     return {
-        "positive_weights": positive_weights,
-        "ignore_contrastive": ignore_contrastive,
-        "anchor_weights": anchor_weights,
+        "beatmap_ids": torch.tensor(beatmap_ids, dtype=torch.long),
+        "beatmapset_ids": torch.tensor(
+            [int(target["beatmapset_id"]) for target in targets], dtype=torch.long
+        ),
+        "song_ids": torch.tensor(
+            [int(target["song_id"]) for target in targets], dtype=torch.long
+        ),
+        "graph_positive_ids": pad_int_lists(
+            [target["graph_positive_ids"] for target in targets]
+        ),
+        "graph_positive_weights": pad_float_lists(
+            [target["graph_positive_weights"] for target in targets]
+        ),
+        "ignore_ids": pad_int_lists([target["ignore_ids"] for target in targets]),
+        "anchor_weights": torch.tensor(
+            [float(target["anchor_weight"]) for target in targets],
+            dtype=torch.float32,
+        ),
         "map_features": stack_map_features(list(map_features)),
     }
 

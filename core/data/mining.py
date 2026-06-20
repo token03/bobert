@@ -61,12 +61,11 @@ class MiningConfig:
 class MiningTable:
     beatmap_ids: np.ndarray
     beatmapset_ids: np.ndarray
+    song_ids: np.ndarray
     stars: np.ndarray
     aim: np.ndarray
     speed: np.ndarray
     slider_factor: np.ndarray
-    song_lookup_keys: list[tuple[str, ...]]
-    song_lookup_key_sets: list[frozenset[str]]
     artist_keys: np.ndarray
     artist_key_sets: list[frozenset[str]]
     mapper_ids: np.ndarray
@@ -281,17 +280,16 @@ def _load_table(
 
 
 def _to_table(meta: pl.DataFrame) -> MiningTable:
-    song_lookup_keys = [_song_lookup_keys(song_key) for song_key in _song_keys(meta)]
+    song_ids = _song_ids(meta)
     artist_keys = _metadata_key_pairs(meta, "artist", "artist_unicode")
     return MiningTable(
         beatmap_ids=meta["beatmap_id"].to_numpy().astype(np.int64),
         beatmapset_ids=meta["beatmapset_id"].to_numpy().astype(np.int64),
+        song_ids=song_ids,
         stars=meta["stars"].to_numpy().astype(np.float32),
         aim=meta["aim"].to_numpy().astype(np.float32),
         speed=meta["speed"].to_numpy().astype(np.float32),
         slider_factor=meta["slider_factor"].to_numpy().astype(np.float32),
-        song_lookup_keys=song_lookup_keys,
-        song_lookup_key_sets=[frozenset(keys) for keys in song_lookup_keys],
         artist_keys=artist_keys,
         artist_key_sets=[frozenset(key for key in keys if key) for keys in artist_keys],
         mapper_ids=_mapper_id_sets(meta),
@@ -331,19 +329,18 @@ def _metadata_key_pairs(meta: pl.DataFrame, romanized: str, unicode: str) -> np.
     )
 
 
-def _song_keys(meta: pl.DataFrame) -> np.ndarray:
+def _song_ids(meta: pl.DataFrame) -> np.ndarray:
     artists = _metadata_key_pairs(meta, "artist", "artist_unicode")
     titles = _metadata_key_pairs(meta, "title", "title_unicode")
-    return np.array(
-        [
-            (
-                (artist[0], title[0]) if artist[0] and title[0] else ("", ""),
-                (artist[1], title[1]) if artist[1] and title[1] else ("", ""),
-            )
-            for artist, title in zip(artists, titles)
-        ],
-        dtype=object,
-    )
+    romanized_keys = [
+        (artist[0], title[0]) if artist[0] and title[0] else None
+        for artist, title in zip(artists, titles)
+    ]
+    key_to_id = {
+        key: idx
+        for idx, key in enumerate(sorted({key for key in romanized_keys if key}))
+    }
+    return np.array([key_to_id.get(key, -1) for key in romanized_keys], dtype=np.int64)
 
 
 def _parse_owner_ids(value: object) -> frozenset[int]:
@@ -465,18 +462,6 @@ def _topk_faiss(
     return np.vstack(all_indices)
 
 
-def _song_lookup_keys(song_key: object) -> tuple[str, ...]:
-    keys = []
-    if isinstance(song_key, np.ndarray):
-        values = song_key.tolist()
-    else:
-        values = song_key
-    for pair in values:
-        if pair[0] and pair[1]:
-            keys.append(f"{pair[0]}\x1f{pair[1]}")
-    return tuple(dict.fromkeys(keys))
-
-
 def _has_overlap(a: frozenset, b: frozenset) -> bool:
     return bool(a and b and a & b)
 
@@ -540,7 +525,10 @@ def _support_matrix(neighbors: np.ndarray, size: int) -> tuple[sparse.csr_matrix
 def _metadata_match(table: MiningTable, left: int, right: int) -> bool:
     return (
         table.beatmapset_ids[left] == table.beatmapset_ids[right]
-        or _has_overlap(table.song_lookup_key_sets[left], table.song_lookup_key_sets[right])
+        or (
+            table.song_ids[left] >= 0
+            and table.song_ids[left] == table.song_ids[right]
+        )
         or _has_overlap(table.artist_key_sets[left], table.artist_key_sets[right])
         or _has_overlap(table.mapper_ids[left], table.mapper_ids[right])
     )
@@ -559,7 +547,7 @@ def _build_rows(
         "speed": [],
         "slider_factor": [],
         "beatmapset_id": [],
-        "song_key": [],
+        "song_id": [],
         "graph_positive_ids": [],
         "graph_positive_weights": [],
         "ignore_ids": [],
@@ -654,7 +642,7 @@ def _build_row(
     columns["speed"].append(float(table.speed[row_idx]))
     columns["slider_factor"].append(float(table.slider_factor[row_idx]))
     columns["beatmapset_id"].append(int(table.beatmapset_ids[row_idx]))
-    columns["song_key"].append("|".join(table.song_lookup_keys[row_idx]))
+    columns["song_id"].append(int(table.song_ids[row_idx]))
     columns["graph_positive_ids"].append(positive_ids)
     columns["graph_positive_weights"].append(positive_weights)
     ignore = set(graph_effective[row_idx]) | set(pretrain_eff(row_idx))
