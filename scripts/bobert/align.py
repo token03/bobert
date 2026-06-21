@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-path")
     parser.add_argument("--pretrain-ckpt")
     parser.add_argument("--resume-ckpt")
+    parser.add_argument("--load-chunk-size", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--alignment-size", type=int)
     parser.add_argument("--epochs", type=int)
@@ -53,6 +54,8 @@ def load_config(args: argparse.Namespace) -> DictConfig:
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
+    if args.load_chunk_size is not None:
+        config.data.load_chunk_size = args.load_chunk_size
     if args.batch_size is not None:
         config.alignment.trainer.batch_size = args.batch_size
     if args.alignment_size is not None:

@@ -36,9 +36,10 @@ MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
 MODE_CANDIDATES = "candidates"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
+DEFAULT_EMBEDDINGS_PATH = Path("data/embeddings.parquet")
 DEFAULT_COMPARE_EMBEDDINGS_PATH = Path("data/embeddings-compare.parquet")
 DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
-DEFAULT_CHECKPOINT_PATH = Path("data/bobert-compare.pt")
+DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
 DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 CANDIDATE_LIMIT = 8
 
@@ -478,7 +479,7 @@ def load_query_data(args: argparse.Namespace, mode: str):
         or (
             DEFAULT_PRETRAIN_EMBEDDINGS_PATH
             if args.pretrain
-            else DEFAULT_COMPARE_EMBEDDINGS_PATH
+            else DEFAULT_EMBEDDINGS_PATH
         )
     )
     beatmap_ids, embeddings, id_to_index = load_embeddings(

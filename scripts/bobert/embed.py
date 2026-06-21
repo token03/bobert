@@ -251,6 +251,11 @@ def export_embeddings(
         model, checkpoint = load_pretraining_model(config, ckpt_path, device)
     else:
         model, checkpoint = load_alignment_model(config, ckpt_path, device)
+    with torch.inference_mode():
+        model.bert.rotary_emb(
+            torch.arange(config.data.max_seq_len, device=device),
+            seq_len=config.data.max_seq_len,
+        )
     normalizer = BeatmapNormalizer(
         vector_stats=checkpoint["vector_stats"],
         attribute_stats=checkpoint.get("attribute_stats", {}),
@@ -371,8 +376,8 @@ def main():
     )
     parser.add_argument("--min_sr", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--load-chunk-size", type=int, default=20000)
-    parser.add_argument("--flush-size", type=int, default=20000)
+    parser.add_argument("--load-chunk-size", type=int, default=100000)
+    parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
     args = parser.parse_args()

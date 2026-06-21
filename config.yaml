@@ -3,6 +3,7 @@ data:
   dataset_seed: 42
 
   max_seq_len: 4096
+  load_chunk_size: 10000
   length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
 
@@ -28,10 +29,10 @@ model:
   feature_token_dim: 32
 
 runtime:
-  compile_model: true
+  compile_model: false
   compile_mode: "default"
   compile_dynamic: true
-  activation_checkpointing: true
+  activation_checkpointing: false
 
 pretraining:
   trainer:
@@ -44,7 +45,7 @@ pretraining:
     use_length_buckets: true
 
   data:
-    pretrain_size: 60000
+    pretrain_size: 300000
 
   optimizer:
     adam_lr: 2e-4

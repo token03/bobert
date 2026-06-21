@@ -9,6 +9,7 @@ MODEL_COMMANDS = {
     "embed": "scripts.bobert.embed",
     "pretrain": "scripts.bobert.pretrain",
     "strip": "scripts.bobert.strip",
+    "recommend": "scripts.query.recommend",
 }
 
 GROUP_COMMANDS = {

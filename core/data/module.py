@@ -95,6 +95,7 @@ def load_data(data_config, max_seq_len, ids_to_load, sample_size):
         max_seq_len=max_seq_len,
         ids_to_load=ids_to_load,
         sample_size=sample_size,
+        chunk_size=int(getattr(data_config, "load_chunk_size", 5000)),
         min_sr=data_config.min_sr,
         max_sr=data_config.max_sr,
     )

@@ -150,12 +150,15 @@ def load_beatmap_dataset(
         all_beatmap_ids[i : i + chunk_size]
         for i in range(0, len(all_beatmap_ids), chunk_size)
     ]
+    hitobjects_lf = scan_dataset_parquet(hitobjects_path).select(hitobject_cols)
     for chunk_ids in tqdm(chunks, desc="Processing Chunks"):
         beatmaps_chunk = selected_beatmaps.filter(pl.col("beatmap_id").is_in(chunk_ids))
+        lo = int(chunk_ids[0])
+        hi = int(chunk_ids[-1])
         hitobjects_chunk = (
-            scan_dataset_parquet(hitobjects_path)
+            hitobjects_lf
+            .filter(pl.col("beatmap_id").is_between(lo, hi))
             .filter(pl.col("beatmap_id").is_in(chunk_ids))
-            .select(hitobject_cols)
             .collect()
         )
 
@@ -171,44 +174,41 @@ def load_beatmap_dataset(
             beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
             hitobjects_chunk,
             max_seq_len=max_seq_len,
+            return_original_counts=False,
         )
 
-        id_to_vectors = {int(bid): vec for bid, vec in zip(ids, hitobject_data)}
-        beatmap_rows = {
-            int(row["beatmap_id"]): row for row in beatmaps_chunk.to_dicts()
+        meta_cols = ["beatmap_id", *DIFFICULTY_ATTRIBUTES, *MAP_FEATURE_ATTRIBUTES]
+        meta = beatmaps_chunk.select(meta_cols)
+        meta_by_id = {
+            int(bid): index
+            for index, bid in enumerate(meta["beatmap_id"].to_numpy())
+        }
+        meta_arrays = {
+            col: meta[col].to_numpy()
+            for col in meta_cols
+            if col != "beatmap_id"
         }
 
-        for bid in ids:
+        for bid, vectors in zip(ids, hitobject_data):
             bid_int = int(bid)
-            vectors = id_to_vectors[bid_int]
-            beatmap_row = beatmap_rows[bid_int]
+            meta_index = meta_by_id[bid_int]
 
             ratings = {
-                "stars": float(beatmap_row["stars"]),
-                "aim": float(beatmap_row["aim"]),
-                "speed": float(beatmap_row["speed"]),
-                "slider_factor": float(beatmap_row["slider_factor"]),
+                key: float(meta_arrays[key][meta_index])
+                for key in DIFFICULTY_ATTRIBUTES
             }
 
             beatmap_attrs = {
-                "cs": beatmap_row["cs"],
-                "ar": beatmap_row["ar"],
-                "od": beatmap_row["od"],
-                "hp_drain": beatmap_row["hp_drain"],
-                "drain_time": beatmap_row["drain_time"],
-                "slider_multiplier": beatmap_row["slider_multiplier"],
+                key: float(meta_arrays[key][meta_index])
+                for key in MAP_FEATURE_ATTRIBUTES
             }
 
             all_beatmap_data.append(
                 {
                     "beatmap_id": bid_int,
                     "hitobjects": vectors,
-                    "difficulty": {
-                        k: ratings[k] for k in DIFFICULTY_ATTRIBUTES
-                    },
-                    "map_features": {
-                        k: float(beatmap_attrs[k]) for k in MAP_FEATURE_ATTRIBUTES
-                    },
+                    "difficulty": ratings,
+                    "map_features": beatmap_attrs,
                 }
             )
 

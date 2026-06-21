@@ -159,9 +159,16 @@ def _rhythmic_snap_expr(beat_fraction: pl.Expr) -> pl.Expr:
 
 def _expand_sliders_and_spinners(
     df: pl.DataFrame,
+    *,
+    return_original_counts: bool = False,
 ) -> Tuple[pl.DataFrame, Dict[int, int]]:
-    counts_df = df.group_by("beatmap_id", maintain_order=True).len()
-    original_counts = dict(zip(counts_df["beatmap_id"].to_list(), counts_df["len"].to_list()))
+    if return_original_counts:
+        counts_df = df.group_by("beatmap_id", maintain_order=True).len()
+        original_counts = dict(
+            zip(counts_df["beatmap_id"].to_list(), counts_df["len"].to_list())
+        )
+    else:
+        original_counts = {}
 
     cols_to_zero = [
         col
@@ -170,36 +177,46 @@ def _expand_sliders_and_spinners(
     ]
     zero_exprs = [pl.lit(0).cast(df.schema[col]).alias(col) for col in cols_to_zero]
 
-    slider_ends = df.filter(pl.col("object_type") == OBJECT_TYPE_SLIDER).with_columns(
-        pl.lit(OBJECT_TYPE_SLIDER_END)
+    df = df.with_row_index("_row_order")
+    is_slider = pl.col("object_type") == OBJECT_TYPE_SLIDER
+    is_spinner = pl.col("object_type") == OBJECT_TYPE_SPINNER
+
+    ends = df.filter(is_slider | is_spinner).with_columns(
+        pl.when(is_slider)
+        .then(pl.lit(OBJECT_TYPE_SLIDER_END))
+        .otherwise(pl.lit(OBJECT_TYPE_SPINNER_END))
         .cast(df.schema["object_type"])
         .alias("object_type"),
         pl.col("end_time").cast(df.schema["time"]).alias("time"),
-        pl.coalesce("slider_end_x", "x").cast(df.schema["x"]).alias("x"),
-        pl.coalesce("slider_end_y", "y").cast(df.schema["y"]).alias("y"),
+        pl.when(is_slider)
+        .then(pl.coalesce("slider_end_x", "x"))
+        .otherwise(pl.col("x"))
+        .cast(df.schema["x"])
+        .alias("x"),
+        pl.when(is_slider)
+        .then(pl.coalesce("slider_end_y", "y"))
+        .otherwise(pl.col("y"))
+        .cast(df.schema["y"])
+        .alias("y"),
+        pl.lit(1, dtype=pl.Int8).alias("_event_order"),
         *zero_exprs,
     )
 
-    spinner_ends = df.filter(pl.col("object_type") == OBJECT_TYPE_SPINNER).with_columns(
-        pl.lit(OBJECT_TYPE_SPINNER_END)
-        .cast(df.schema["object_type"])
-        .alias("object_type"),
-        pl.col("end_time").cast(df.schema["time"]).alias("time"),
-        *zero_exprs,
-    )
-
-    df = df.with_columns(
-        pl.when(pl.col("object_type") == OBJECT_TYPE_SLIDER)
+    starts = df.with_columns(
+        pl.when(is_slider)
         .then(pl.lit(OBJECT_TYPE_SLIDER_HEAD))
-        .when(pl.col("object_type") == OBJECT_TYPE_SPINNER)
+        .when(is_spinner)
         .then(pl.lit(OBJECT_TYPE_SPINNER_START))
         .otherwise(pl.col("object_type"))
         .cast(df.schema["object_type"])
-        .alias("object_type")
+        .alias("object_type"),
+        pl.lit(0, dtype=pl.Int8).alias("_event_order"),
     )
 
-    df_combined = pl.concat([df, slider_ends, spinner_ends], how="vertical").sort(
-        ["beatmap_id", "time"], maintain_order=True
+    df_combined = (
+        pl.concat([starts, ends], how="vertical")
+        .sort(["beatmap_id", "time", "_event_order", "_row_order"])
+        .drop("_event_order", "_row_order")
     )
 
     return df_combined, original_counts
@@ -208,25 +225,36 @@ def _expand_sliders_and_spinners(
 def _filter_invalid_maps(
     beatmaps_df: pl.DataFrame, hitobjects_df: pl.DataFrame
 ) -> Tuple[pl.DataFrame, pl.DataFrame]:
-    hitobjects_df = hitobjects_df.filter(
+    valid_hitobjects = hitobjects_df.filter(
         pl.col("x").is_between(0, OSU_STAGE_WIDTH)
         & pl.col("y").is_between(0, OSU_STAGE_HEIGHT)
     )
 
-    high_bpm_maps = hitobjects_df.filter(pl.col("bpm") > 1000)["beatmap_id"].unique()
-    if not high_bpm_maps.is_empty():
-        beatmaps_df = beatmaps_df.filter(~pl.col("beatmap_id").is_in(high_bpm_maps))
-        hitobjects_df = hitobjects_df.filter(~pl.col("beatmap_id").is_in(high_bpm_maps))
-
     good_maps = (
-        hitobjects_df.group_by("beatmap_id")
-        .len()
-        .filter(pl.col("len") >= 10)["beatmap_id"]
+        valid_hitobjects.group_by("beatmap_id")
+        .agg(
+            pl.len().alias("_n"),
+            (pl.col("bpm") > 1000).any().alias("_has_bad_bpm"),
+        )
+        .filter((pl.col("_n") >= 10) & ~pl.col("_has_bad_bpm"))
+        .select("beatmap_id")
     )
-    beatmaps_df = beatmaps_df.filter(pl.col("beatmap_id").is_in(good_maps))
-    hitobjects_df = hitobjects_df.filter(pl.col("beatmap_id").is_in(good_maps))
 
-    return beatmaps_df, hitobjects_df
+    return (
+        beatmaps_df.join(good_maps, on="beatmap_id", how="semi"),
+        valid_hitobjects.join(good_maps, on="beatmap_id", how="semi"),
+    )
+
+
+def _truncate_expanded(df: pl.DataFrame, max_seq_len: Optional[int]) -> pl.DataFrame:
+    if max_seq_len is None:
+        return df
+
+    return (
+        df.with_columns(pl.col("beatmap_id").cum_count().over("beatmap_id").alias("_pos"))
+        .filter(pl.col("_pos") <= int(max_seq_len) + 1)
+        .drop("_pos")
+    )
 
 
 def _apply_geometric_features(df: pl.DataFrame) -> pl.DataFrame:
@@ -402,20 +430,20 @@ def _finalize_vectors(
     df: pl.DataFrame, split_indices: np.ndarray, max_seq_len: Optional[int] = None
 ) -> List[torch.Tensor]:
     all_vectors_np = np.nan_to_num(
-        df.select(FIELD_NAMES).to_numpy().astype(np.float32),
+        df.select(FIELD_NAMES).to_numpy().astype(np.float32, copy=False),
         nan=0.0,
         posinf=0.0,
         neginf=0.0,
-    )
+    ).astype(np.float16, copy=False)
     vector_arrays = np.split(all_vectors_np, split_indices)
     if max_seq_len is not None:
         max_seq_len = int(max_seq_len)
         return [
-            torch.from_numpy(vectors[:max_seq_len].astype(np.float16, copy=True))
+            torch.from_numpy(np.ascontiguousarray(vectors[:max_seq_len]))
             for vectors in vector_arrays
         ]
     return [
-        torch.from_numpy(vectors.astype(np.float16, copy=True))
+        torch.from_numpy(np.ascontiguousarray(vectors))
         for vectors in vector_arrays
     ]
 
@@ -424,18 +452,22 @@ def build_feature_tensors(
     beatmaps_df: pl.DataFrame,
     hitobjects_df: pl.DataFrame,
     max_seq_len: Optional[int] = None,
+    return_original_counts: bool = True,
 ) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]]:
     beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)
 
     if beatmaps_df.is_empty() or hitobjects_df.is_empty():
         return [], np.array([]), {}
 
-    df = hitobjects_df.join(beatmaps_df, on="beatmap_id", how="inner")
-    df, original_counts = _expand_sliders_and_spinners(df)
+    valid_ids = beatmaps_df.select("beatmap_id").unique()
+    df = hitobjects_df.join(valid_ids, on="beatmap_id", how="semi")
+    df, original_counts = _expand_sliders_and_spinners(
+        df, return_original_counts=return_original_counts
+    )
+    df = _truncate_expanded(df, max_seq_len)
 
     ids = df["beatmap_id"].to_numpy()
-    id_diff = ids[:-1] != ids[1:]
-    split_indices = np.where(id_diff)[0] + 1
+    split_indices = np.flatnonzero(ids[:-1] != ids[1:]) + 1
 
     df = _apply_geometric_features(df)
     df = _apply_temporal_features(df, split_indices)
