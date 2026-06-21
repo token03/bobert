@@ -158,12 +158,6 @@ def load_pretraining_weights(
 ) -> dict[str, Any]:
     checkpoint_path, checkpoint = load_pretraining_checkpoint(checkpoint_path, map_location)
     state = strip_checkpoint_state(checkpoint["state_dict"])
-    for key, value in list(state.items()):
-        if key.startswith("difficulty_head.pooler."):
-            del state[key]
-            key = key.replace("difficulty_head.pooler.", "pooler.", 1)
-            state[key] = value
-
     target = getattr(model, "_orig_mod", model)
     model_state = target.state_dict()
     compatible_state = {

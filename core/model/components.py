@@ -437,18 +437,20 @@ class SpanMasker(nn.Module):
         return encoder_input, is_masked
 
 
-class ProjectedStatsPooler(nn.Module):
+class StatsPooler(nn.Module):
     def __init__(
         self,
         d_model: int,
         stat_dim: int,
         stats: Tuple[str, ...],
+        output_dim: int,
     ):
         super().__init__()
         self.d_model = d_model
         self.stat_dim = stat_dim
         self.stats = tuple(stats)
-        self.output_dim = stat_dim * len(self.stats)
+        input_dim = stat_dim * len(self.stats)
+        self.output_dim = int(output_dim)
         self.projections = nn.ModuleDict(
             {
                 name: nn.Sequential(
@@ -458,6 +460,12 @@ class ProjectedStatsPooler(nn.Module):
                 )
                 for name in self.stats
             }
+        )
+        self.mixer = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, self.output_dim),
+            nn.GELU(),
+            nn.Linear(self.output_dim, self.output_dim),
         )
 
     def forward(
@@ -489,7 +497,7 @@ class ProjectedStatsPooler(nn.Module):
             )
 
         projected = [self.projections[name](pooled[name]) for name in self.stats]
-        return torch.cat(projected, dim=-1).to(packed_output.dtype)
+        return self.mixer(torch.cat(projected, dim=-1)).to(packed_output.dtype)
 
 
 class QueryAttentionPooler(nn.Module):
@@ -617,30 +625,6 @@ class QueryAttentionPooler(nn.Module):
         return torch.stack(outputs, dim=0)
 
 
-class StatsMixerPooler(nn.Module):
-    def __init__(self, pooler: nn.Module, output_dim: int):
-        super().__init__()
-        self.pooler = pooler
-        input_dim = getattr(pooler, "output_dim")
-        self.output_dim = output_dim
-        self.mixer = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Linear(input_dim, output_dim),
-            nn.GELU(),
-            nn.Linear(output_dim, output_dim),
-        )
-
-    def forward(
-        self,
-        packed_output: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> torch.Tensor:
-        return self.mixer(
-            self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
-        )
-
-
 class MaskedLMHead(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
@@ -672,20 +656,11 @@ class MaskedLMHead(nn.Module):
 
 
 class DifficultyHead(nn.Module):
-    def __init__(self, d_model: int, pooler: nn.Module):
+    def __init__(self, input_dim: int):
         super().__init__()
-        self.pooler = pooler
-        self.head = nn.Linear(
-            getattr(pooler, "output_dim", d_model), len(DIFFICULTY_ATTRIBUTES)
-        )
+        self.head = nn.Linear(input_dim, len(DIFFICULTY_ATTRIBUTES))
 
-    def forward(
-        self,
-        packed_output: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> Dict[str, torch.Tensor]:
-        pooled_output = self.pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+    def forward(self, pooled_output: torch.Tensor) -> Dict[str, torch.Tensor]:
         difficulty_preds_raw = self.head(pooled_output)
 
         return {

@@ -123,11 +123,8 @@ def contrastive_loss_fn(
     if not labels["use_contrastive"]:
         return {"contrastive_loss": torch.zeros((), device=device)}
 
-    group_size = int(config.alignment.data.group_size)
     temperature = float(config.alignment.loss.temperature)
     batch_size = embeddings.shape[0]
-    if batch_size < group_size or batch_size % group_size != 0:
-        return {"contrastive_loss": torch.zeros((), device=device)}
 
     beatmap_ids = labels["beatmap_ids"].to(device=device, dtype=torch.long)
     beatmapset_ids = labels["beatmapset_ids"].to(device=device, dtype=torch.long)

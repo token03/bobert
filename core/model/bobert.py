@@ -14,11 +14,10 @@ from .components import (
     HitObjectFeatureTokenizer,
     MapFeatureProjector,
     MaskedLMHead,
-    ProjectedStatsPooler,
     QueryAttentionPooler,
     RMSNorm,
     SpanMasker,
-    StatsMixerPooler,
+    StatsPooler,
 )
 
 
@@ -225,12 +224,14 @@ class BobertForPretraining(nn.Module):
         bert_model: BobertEncoder,
         masker: SpanMasker,
         mlm_head: MaskedLMHead,
+        stats_pooler: StatsPooler,
         difficulty_head: DifficultyHead,
     ):
         super().__init__()
         self.bert = bert_model
         self.masker = masker
         self.mlm_head = mlm_head
+        self.stats_pooler = stats_pooler
         self.difficulty_head = difficulty_head
         self.is_compiled = False
 
@@ -251,14 +252,15 @@ class BobertForPretraining(nn.Module):
         mlm_head = MaskedLMHead(base_model.d_model)
 
         pooling_stats = tuple(pretraining_config.pooling.stats)
-        pooler = ProjectedStatsPooler(
+        stats_pooler = StatsPooler(
             base_model.d_model,
             stat_dim=pretraining_config.pooling.stat_dim,
             stats=pooling_stats,
+            output_dim=pretraining_config.pooling.stats_mixer_dim,
         )
-        difficulty_head = DifficultyHead(base_model.d_model, pooler)
+        difficulty_head = DifficultyHead(stats_pooler.output_dim)
 
-        model = cls(base_model, masking_strategy, mlm_head, difficulty_head)
+        model = cls(base_model, masking_strategy, mlm_head, stats_pooler, difficulty_head)
         model = model.to(device)
 
         if config.runtime.compile_model:
@@ -286,13 +288,8 @@ class BobertForPretraining(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
-        pooler = self.difficulty_head.pooler
-        pooled = pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
-        pieces = []
-        for stat in ("mean", "max", "std"):
-            start = pooler.stats.index(stat) * pooler.stat_dim
-            pieces.append(pooled[:, start : start + pooler.stat_dim])
-        return F.normalize(torch.cat(pieces, dim=-1), dim=-1).to(torch.float16)
+        pooled = self.stats_pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
+        return F.normalize(pooled, dim=-1).to(torch.float16)
 
     def embed_packed(
         self,
@@ -329,11 +326,12 @@ class BobertForPretraining(nn.Module):
 
         mlm_predictions = self.mlm_head(packed_output, is_masked)
 
-        difficulty_predictions = self.difficulty_head(
+        pooled_output = self.stats_pooler(
             packed_output,
             cu_seqlens,
             max_seqlen=max_seqlen,
         )
+        difficulty_predictions = self.difficulty_head(pooled_output)
 
         predictions = {"mlm": mlm_predictions, "difficulty": difficulty_predictions}
 
@@ -345,7 +343,7 @@ class BobertForAlignment(nn.Module):
         self,
         bert_model: BobertEncoder,
         contrastive_pooler: nn.Module,
-        aux_pooler: nn.Module,
+        stats_pooler: StatsPooler,
         embedding_dim: int,
         map_feature_dim: int,
         num_map_features: int,
@@ -353,7 +351,7 @@ class BobertForAlignment(nn.Module):
     ):
         super().__init__()
         self.bert = bert_model
-        self.pooler = aux_pooler
+        self.stats_pooler = stats_pooler
         self.contrastive_pooler = contrastive_pooler
         self.embedding_dim = embedding_dim
         map_feature_indices = tuple(int(index) for index in map_feature_indices)
@@ -366,7 +364,7 @@ class BobertForAlignment(nn.Module):
         self.map_projector = MapFeatureProjector(num_map_features, map_feature_dim)
 
         contrastive_dim = getattr(contrastive_pooler, "output_dim", bert_model.d_model)
-        aux_dim = getattr(aux_pooler, "output_dim", bert_model.d_model)
+        aux_dim = stats_pooler.output_dim
         map_dim = self.map_projector.output_dim
         self.retrieval_head = nn.Sequential(
             nn.LayerNorm(contrastive_dim + aux_dim + map_dim),
@@ -405,14 +403,12 @@ class BobertForAlignment(nn.Module):
         pooling_stats = tuple(alignment_config.pooling.stats)
         pooling_stat_dim = alignment_config.pooling.stat_dim
 
-        aux_pooler = ProjectedStatsPooler(
+        stats_pooler = StatsPooler(
             base_model.d_model,
             stat_dim=pooling_stat_dim,
             stats=pooling_stats,
+            output_dim=alignment_config.pooling.stats_mixer_dim,
         )
-        stats_mixer_dim = alignment_config.pooling.stats_mixer_dim
-        if stats_mixer_dim is not None:
-            aux_pooler = StatsMixerPooler(aux_pooler, int(stats_mixer_dim))
 
         contrastive_pooler = QueryAttentionPooler(
             d_model=base_model.d_model,
@@ -438,7 +434,7 @@ class BobertForAlignment(nn.Module):
         model = cls(
             base_model,
             contrastive_pooler=contrastive_pooler,
-            aux_pooler=aux_pooler,
+            stats_pooler=stats_pooler,
             embedding_dim=alignment_config.embedding_dim,
             map_feature_dim=alignment_config.map_features.dim,
             num_map_features=len(map_feature_indices),
@@ -479,7 +475,7 @@ class BobertForAlignment(nn.Module):
             cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        aux_pooled = self.pooler(
+        aux_pooled = self.stats_pooler(
             packed_output,
             cu_seqlens,
             max_seqlen=max_seqlen,

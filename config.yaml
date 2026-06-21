@@ -63,6 +63,7 @@ pretraining:
   pooling:
     stats: ["mean", "max", "std"]
     stat_dim: 256
+    stats_mixer_dim: 384
 
   masking:
     ratio: 0.25
