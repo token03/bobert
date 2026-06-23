@@ -190,8 +190,6 @@ class PretrainingModule(BobertLightningModule):
 
     def _preallocation_batch_size(self, max_seq_len: int) -> int:
         phase_batch_size = int(self.config.pretraining.trainer.batch_size)
-        if self.datamodule.train_dataset is None:
-            return phase_batch_size
         return preallocation_batch_size(
             self.datamodule.train_dataset,
             phase_batch_size,

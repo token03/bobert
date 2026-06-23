@@ -90,8 +90,6 @@ def main() -> int:
     torch.set_float32_matmul_precision("high")
 
     datamodule = PretrainData(config)
-    datamodule.prepare_data()
-    datamodule.setup()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BobertForPretraining.from_config(config, device)
@@ -115,8 +113,6 @@ def main() -> int:
 
     print("\nPretraining setup complete.")
     print(f"Total epochs: {config.pretraining.trainer.epochs}")
-    print(f"Training samples: {len(datamodule.train_dataset)}")
-    print(f"Validation samples: {len(datamodule.val_dataset)}")
 
     if resume_checkpoint is not None:
         print(f"Resuming from checkpoint: {resume_checkpoint}")
