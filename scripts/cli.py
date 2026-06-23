@@ -10,14 +10,15 @@ MODEL_COMMANDS = {
     "pretrain": "scripts.bobert.pretrain",
     "strip": "scripts.bobert.strip",
     "recommend": "scripts.query.recommend",
+    "graph": "scripts.data.graph",
+    "mining": "scripts.data.mining",
 }
 
 GROUP_COMMANDS = {
     ("collections", "edges"): "scripts.collections.edges",
+    ("collections", "tournaments"): "scripts.collections.tournaments",
     ("collections", "vertices"): "scripts.collections.vertices",
     ("data", "dataset"): "scripts.data.dataset",
-    ("data", "graph"): "scripts.data.graph",
-    ("data", "mining-cache"): "scripts.data.mining",
     ("data", "ratings"): "scripts.data.ratings",
     ("data", "shard"): "scripts.data.shard",
     ("data", "umap"): "scripts.data.umap",
@@ -29,6 +30,7 @@ GROUP_COMMANDS = {
 
 ALIASES = {
     ("collections", "edge"): ("collections", "edges"),
+    ("collections", "tournament"): ("collections", "tournaments"),
     ("collections", "vertex"): ("collections", "vertices"),
     ("data", "lightgcn"): ("data", "graph"),
 }

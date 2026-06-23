@@ -280,6 +280,7 @@ def export_embeddings(
                     ids_to_load=id_chunk,
                     min_sr=min_sr,
                     max_sr=None,
+                    chunk_size=int(load_chunk_size / 10),  
                 )
                 if not beatmaps:
                     continue
@@ -375,7 +376,7 @@ def main():
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
     parser.add_argument("--min_sr", type=float, default=None)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--load-chunk-size", type=int, default=100000)
     parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)

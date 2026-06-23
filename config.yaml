@@ -88,10 +88,10 @@ mining:
   use_faiss_gpu: true
 
 alignment:
-  embedding_dim: 256
+  embedding_dim: 384
 
   trainer:
-    epochs: 1
+    epochs: 3
     batch_size: 128
     grad_accum: 1
     grad_clip: 1.0
@@ -123,14 +123,14 @@ alignment:
 
   pooling:
     stats: ["mean", "max", "std"]
-    stat_dim: 256
+    stat_dim: 384
     stats_mixer_dim: 384
 
   query_pool:
-    num_queries: 1
+    num_queries: 16
     heads: 8
     head_dim: 32
-    output_dim: 256
+    output_dim: 384
     dropout: 0.0
 
   map_features:

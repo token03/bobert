@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from core.data.mining import load_alignment_cache
+from core.data.mining import EPS, WHITEN_EIGENVALUE_FLOOR, load_alignment_cache
 from core.paths import MINING_CACHE_PATH
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
@@ -65,25 +65,38 @@ class QueryContext:
 @dataclass
 class EmbeddingTransform:
     mean: np.ndarray
-    top_pc: np.ndarray
+    eigenvectors: np.ndarray
+    scale: np.ndarray
+
+    @staticmethod
+    def normalize(embeddings: np.ndarray) -> np.ndarray:
+        x = embeddings.astype(np.float32, copy=False)
+        norms = np.linalg.norm(x, axis=1, keepdims=True)
+        return x / np.maximum(norms, 1e-12)
 
     @classmethod
     def fit(cls, embeddings: np.ndarray) -> EmbeddingTransform:
-        mean = embeddings.mean(axis=0, keepdims=True).astype(np.float32)
-        centered = embeddings - mean
+        x = cls.normalize(embeddings).astype(np.float64, copy=False)
+        mean = x.mean(axis=0, keepdims=True)
+        centered = x - mean
         covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
         eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        top_pc = eigenvectors[:, np.argmax(eigenvalues)][None, :]
-        return cls(mean=mean, top_pc=top_pc.astype(np.float32))
+        floor = max(float(eigenvalues.max()) * WHITEN_EIGENVALUE_FLOOR, EPS)
+        scale = 1.0 / np.sqrt(np.clip(eigenvalues, floor, None))
+        return cls(
+            mean=mean.astype(np.float32),
+            eigenvectors=eigenvectors.astype(np.float32),
+            scale=scale.astype(np.float32),
+        )
 
     def apply(self, embeddings: np.ndarray) -> np.ndarray:
         was_vector = embeddings.ndim == 1
         x = embeddings[None, :] if was_vector else embeddings
-        x = x - self.mean
-        x = x - (x @ self.top_pc.T) @ self.top_pc
-        norms = np.linalg.norm(x, axis=1, keepdims=True)
-        x = x / np.maximum(norms, 1e-12)
-        return x[0].astype(np.float32) if was_vector else x.astype(np.float32)
+        x = self.normalize(x)
+        x = (x - self.mean) @ self.eigenvectors
+        x = x * self.scale
+        x = self.normalize(x)
+        return x[0] if was_vector else x
 
 
 def metadata_set_id(row: dict | None) -> int | None:
