@@ -128,8 +128,6 @@ def main() -> int:
 
     pretrain_normalizer = load_pretraining_normalizer(pretrain_checkpoint)
     datamodule = AlignData(config, normalizer=pretrain_normalizer)
-    datamodule.prepare_data()
-    datamodule.setup("fit")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BobertForAlignment.from_config(config, device)
@@ -161,14 +159,6 @@ def main() -> int:
 
     print("\nAlignment setup complete.")
     print(f"Total epochs: {config.alignment.trainer.epochs}")
-    anchors_per_epoch = min(
-        int(config.alignment.data.alignment_size or len(datamodule.train_anchor_indices)),
-        len(datamodule.train_anchor_indices),
-    )
-    print(f"Training anchor pool: {len(datamodule.train_anchor_indices)}")
-    print(f"Training anchors/epoch: {anchors_per_epoch}")
-    print(f"Training candidate pool: {len(datamodule.train_dataset)}")
-    print(f"Validation samples: {len(datamodule.val_dataset)}")
 
     if resume_checkpoint is not None:
         print(f"Resuming from checkpoint: {resume_checkpoint}")
