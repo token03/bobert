@@ -14,7 +14,6 @@ from tqdm import tqdm
 
 SUPPORT_NEIGHBOR_CAP = 128
 EPS = 1e-12
-WHITEN_EIGENVALUE_FLOOR = 1e-4
 CACHE_LIST_COLUMNS = [
     "graph_positive_ids",
     "graph_positive_weights",
@@ -31,6 +30,7 @@ class MiningConfig:
     use_faiss_gpu: bool
     min_sr: float | None
     max_sr: float | None
+    max_candidate_star_delta: float | None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> "MiningConfig":
@@ -54,6 +54,11 @@ class MiningConfig:
             use_faiss_gpu=bool(config["use_faiss_gpu"]),
             min_sr=None if config["min_sr"] is None else float(config["min_sr"]),
             max_sr=None if config["max_sr"] is None else float(config["max_sr"]),
+            max_candidate_star_delta=(
+                None
+                if config["max_candidate_star_delta"] is None
+                else float(config["max_candidate_star_delta"])
+            ),
         )
 
 
@@ -293,10 +298,10 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         artist_keys=artist_keys,
         artist_key_sets=[frozenset(key for key in keys if key) for keys in artist_keys],
         mapper_ids=_mapper_id_sets(meta),
-        graph=_whiten_centered_rows(
+        graph=_centered_rows(
             np.stack(meta["graph_embedding"].to_list()).astype(np.float32)
         ),
-        pretrain=_whiten_centered_rows(
+        pretrain=_centered_rows(
             np.stack(meta["pretrain_embedding"].to_list()).astype(np.float32)
         ),
     )
@@ -397,21 +402,13 @@ def _normalize_rows(x: np.ndarray) -> np.ndarray:
     return x / np.clip(norm, 1e-9, None)
 
 
-def _whiten_centered_rows(
-    x: np.ndarray,
-    eigenvalue_floor: float = WHITEN_EIGENVALUE_FLOOR,
-) -> np.ndarray:
+def _centered_rows(x: np.ndarray) -> np.ndarray:
     x = _normalize_rows(x).astype(np.float64, copy=False)
     if x.shape[0] <= 1 or x.shape[1] == 0:
         return x.astype(np.float32, copy=False)
 
     centered = x - x.mean(axis=0, keepdims=True)
-    covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-    floor = max(float(eigenvalues.max()) * eigenvalue_floor, EPS)
-    scale = 1.0 / np.sqrt(np.clip(eigenvalues, floor, None))
-    whitened = (centered @ eigenvectors) * scale
-    return _normalize_rows(whitened.astype(np.float32, copy=False))
+    return _normalize_rows(centered.astype(np.float32, copy=False))
 
 
 def _topk_faiss(
@@ -577,6 +574,7 @@ def _build_rows(
             columns,
             row_idx,
             cfg.top_k,
+            cfg.max_candidate_star_delta,
         )
 
     return columns
@@ -594,10 +592,19 @@ def _build_row(
     columns: dict[str, list],
     row_idx: int,
     top_k: int,
+    max_candidate_star_delta: float | None,
 ) -> None:
     candidates = []
     graph_forward_ranks = []
     for rg_ij, cid in enumerate(_clean_neighbors(graph_idx[row_idx], row_idx), start=1):
+        if table.beatmapset_ids[row_idx] == table.beatmapset_ids[cid]:
+            continue
+        if (
+            max_candidate_star_delta is not None
+            and abs(float(table.stars[row_idx] - table.stars[cid]))
+            > max_candidate_star_delta
+        ):
+            continue
         candidates.append(cid)
         graph_forward_ranks.append(rg_ij)
 

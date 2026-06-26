@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from pytorch_optimizer import get_wsd_schedule
 from muon import SingleDeviceMuonWithAuxAdam
 
-from core.paths import ALIGN_DIR, PRETRAIN_DIR
+from core.paths import ADAPTER_DIR, ALIGN_DIR, PRETRAIN_DIR
 
 
 def setup_device() -> str:
@@ -65,9 +65,10 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
 
     muon_params = []
 
-    for p in model.bert.layers.parameters():
-        if p.requires_grad and p.ndim >= 2:
-            muon_params.append(p)
+    if hasattr(model, "bert"):
+        for p in model.bert.layers.parameters():
+            if p.requires_grad and p.ndim >= 2:
+                muon_params.append(p)
 
     muon_param_ids = {id(p) for p in muon_params}
 
@@ -145,7 +146,12 @@ def create_trainer(
     logger_version: Optional[int] = None,
 ) -> pl.Trainer:
     trainer_config = config[phase].trainer
-    base_dir = PRETRAIN_DIR if phase == "pretraining" else ALIGN_DIR
+    base_dirs = {
+        "pretraining": PRETRAIN_DIR,
+        "alignment": ALIGN_DIR,
+        "adapter": ADAPTER_DIR,
+    }
+    base_dir = base_dirs[phase]
 
     checkpoint_path = os.path.join(str(base_dir), "checkpoints")
     logs_path = str(base_dir)

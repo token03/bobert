@@ -218,13 +218,18 @@ class LazyEmbedder:
         checkpoint_path: Path | None,
         device: str | None = None,
         pretrain: bool = False,
+        adapter: bool = False,
+        adapter_checkpoint_path: Path | None = None,
     ):
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
         self.device_name = device
         self.pretrain = pretrain
+        self.adapter = adapter
+        self.adapter_checkpoint_path = adapter_checkpoint_path
         self.config = None
         self.model = None
+        self.adapter_model = None
         self.normalizer = None
         self.device = None
 
@@ -233,9 +238,10 @@ class LazyEmbedder:
 
         from core.config import load_config
         from core.model.checkpoint import normalizer_from_checkpoint
-        from core.paths import ALIGN_DIR, PRETRAIN_DIR
+        from core.paths import ADAPTER_DIR, ALIGN_DIR, PRETRAIN_DIR
         from scripts.bobert.embed import (
             find_checkpoint,
+            load_adapter_model,
             load_alignment_model,
             load_pretraining_model,
         )
@@ -247,14 +253,19 @@ class LazyEmbedder:
         self.device = torch.device(
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        checkpoint_dir = (
-            PRETRAIN_DIR
-            if self.pretrain
-            else ALIGN_DIR
-        )
+        checkpoint_dir = PRETRAIN_DIR if self.pretrain or self.adapter else ALIGN_DIR
         ckpt_path = find_checkpoint(self.checkpoint_path, checkpoint_dir)
-        loader = load_pretraining_model if self.pretrain else load_alignment_model
+        loader = (
+            load_pretraining_model
+            if self.pretrain or self.adapter
+            else load_alignment_model
+        )
         self.model, checkpoint = loader(self.config, ckpt_path, self.device)
+        if self.adapter:
+            adapter_ckpt = find_checkpoint(self.adapter_checkpoint_path, ADAPTER_DIR)
+            self.adapter_model, _ = load_adapter_model(
+                self.config, adapter_ckpt, self.device
+            )
         self.normalizer = normalizer_from_checkpoint(checkpoint)
 
     def embed_osu(self, path: Path) -> np.ndarray:
@@ -286,7 +297,7 @@ class LazyEmbedder:
                 dtype=amp_dtype,
                 enabled=self.device.type == "cuda",
             ):
-                if self.pretrain:
+                if self.pretrain or self.adapter:
                     embedding = self.model.embed_packed(
                         packed, cu_seqlens, max_seqlen
                     )
@@ -295,7 +306,12 @@ class LazyEmbedder:
                         packed, cu_seqlens, max_seqlen, map_features
                     )
 
+            if self.adapter:
+                embedding = self.adapter_model(embedding)["embedding"]
+
         embedding = embedding.float().cpu().numpy()[0]
+        if self.pretrain:
+            return embedding.astype(np.float32)
         norm = np.linalg.norm(embedding)
         return (embedding / max(norm, 1e-12)).astype(np.float32)
 

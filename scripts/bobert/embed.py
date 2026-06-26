@@ -16,9 +16,10 @@ from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
+from core.model.adapter import EmbeddingAdapter
 from core.model.bobert import BobertForAlignment, BobertForPretraining
 from core.model.checkpoint import load_checkpoint, setup_checkpoint, strip_checkpoint_state
-from core.paths import ALIGN_DIR, PRETRAIN_DIR
+from core.paths import ADAPTER_DIR, ALIGN_DIR, PRETRAIN_DIR
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
@@ -48,6 +49,18 @@ class ExportDataset(Dataset):
         )
 
 
+class AdapterExportDataset(Dataset):
+    def __init__(self, beatmap_ids: np.ndarray, embeddings: np.ndarray):
+        self.beatmap_ids = beatmap_ids.astype(np.int64, copy=False)
+        self.embeddings = embeddings.astype(np.float32, copy=False)
+
+    def __len__(self):
+        return len(self.beatmap_ids)
+
+    def __getitem__(self, idx):
+        return int(self.beatmap_ids[idx]), torch.from_numpy(self.embeddings[idx])
+
+
 def collate_export(batch, max_seq_len: int):
     beatmap_ids, vectors, map_features = zip(*batch)
     vector_batch = batch_packed_vectors(vectors, max_seq_len)
@@ -58,6 +71,11 @@ def collate_export(batch, max_seq_len: int):
         torch.stack(list(map_features), dim=0),
         vector_batch["max_seqlen"],
     )
+
+
+def collate_adapter_export(batch):
+    beatmap_ids, embeddings = zip(*batch)
+    return torch.tensor(beatmap_ids, dtype=torch.long), torch.stack(embeddings, dim=0)
 
 
 def find_checkpoint(path: str | Path | None, checkpoint_dir: str | Path) -> Path:
@@ -104,6 +122,20 @@ def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
     print(f"Loaded checkpoint: {checkpoint_path}")
     print(f"State load: loaded={len(state)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")
+    if device.type == "cuda":
+        model.to(device).bfloat16().eval()
+    else:
+        model.to(device).float().eval()
+    return model, checkpoint
+
+
+def load_adapter_model(config, checkpoint_path: Path, device: torch.device):
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
+    config, state = setup_checkpoint(config, checkpoint, "adapter")
+    model = EmbeddingAdapter.from_config(config, device)
+    model.load_state_dict(strip_checkpoint_state(state), strict=True)
+    print(f"Loaded checkpoint: {checkpoint_path}")
+    print(f"State load: loaded={len(state)}")
     if device.type == "cuda":
         model.to(device).bfloat16().eval()
     else:
@@ -214,6 +246,80 @@ def flush_embeddings(
     beatmap_ids.clear()
     embedding_batches.clear()
     return writer, row_count
+
+
+def export_adapter_embeddings(
+    config_path: Path,
+    checkpoint_path: Path | None,
+    input_path: Path | None,
+    output_path: Path,
+    limit: int | None,
+    batch_size: int,
+    flush_size: int,
+    seed: int,
+    device_name: str | None,
+):
+    config = load_config(config_path)
+    if flush_size <= 0:
+        raise ValueError("flush_size must be positive")
+
+    input_path = resolve_path(input_path or config.adapter.embeddings_path)
+    embeddings_df = pl.read_parquet(input_path, columns=["beatmap_id", "embedding"])
+    if limit is not None and limit > 0 and embeddings_df.height > limit:
+        embeddings_df = embeddings_df.sample(n=limit, seed=seed)
+
+    beatmap_ids = embeddings_df["beatmap_id"].to_numpy().astype(np.int64)
+    embeddings = np.asarray(embeddings_df["embedding"].to_list(), dtype=np.float32)
+    print(f"Adapting {len(beatmap_ids):,} embeddings from {input_path}")
+
+    ckpt_path = find_checkpoint(checkpoint_path, ADAPTER_DIR)
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model, _checkpoint = load_adapter_model(config, ckpt_path, device)
+    dataset = AdapterExportDataset(beatmap_ids, embeddings)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=device.type == "cuda",
+        collate_fn=collate_adapter_export,
+    )
+
+    amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    writer = None
+    buffered_ids: list[int] = []
+    buffered_embeddings: list[np.ndarray] = []
+    saved_count = 0
+
+    try:
+        with torch.inference_mode():
+            for batch_ids, batch_embeddings in tqdm(loader, desc="Adapting"):
+                batch_embeddings = batch_embeddings.to(device, non_blocking=True)
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=amp_dtype,
+                    enabled=device.type == "cuda",
+                ):
+                    adapted = model(batch_embeddings)["embedding"]
+
+                buffered_ids.extend(int(bid) for bid in batch_ids.tolist())
+                buffered_embeddings.append(adapted.float().cpu().numpy())
+
+                if len(buffered_ids) >= flush_size:
+                    writer, flushed_count = flush_embeddings(
+                        writer, output_path, buffered_ids, buffered_embeddings
+                    )
+                    saved_count += flushed_count
+
+        writer, flushed_count = flush_embeddings(
+            writer, output_path, buffered_ids, buffered_embeddings
+        )
+        saved_count += flushed_count
+    finally:
+        if writer is not None:
+            writer.close()
+
+    print(f"Saved {saved_count:,} adapter embeddings to {output_path}")
 
 
 def export_embeddings(
@@ -369,6 +475,16 @@ def main():
         help="Use runs/pretrain instead of runs/align",
     )
     parser.add_argument(
+        "--adapter",
+        action="store_true",
+        help="Apply runs/adapter to data/embeddings-pretrain.parquet",
+    )
+    parser.add_argument(
+        "--input",
+        default=None,
+        help="Input parquet for --adapter; defaults to config.adapter.embeddings_path",
+    )
+    parser.add_argument(
         "--dataset", default=None, help="Defaults to config.data.dataset_path"
     )
     parser.add_argument("--output", default=None)
@@ -382,6 +498,25 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
     args = parser.parse_args()
+
+    if args.adapter and args.pretrain:
+        raise SystemExit("Error: --adapter and --pretrain are mutually exclusive")
+
+    if args.adapter:
+        export_adapter_embeddings(
+            config_path=resolve_path(args.config),
+            checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+            input_path=Path(args.input) if args.input else None,
+            output_path=resolve_path(
+                args.output or PROJECT_ROOT / "data" / "embeddings-adapter.parquet"
+            ),
+            limit=args.limit,
+            batch_size=args.batch_size,
+            flush_size=args.flush_size,
+            seed=args.seed,
+            device_name=args.device,
+        )
+        return
 
     export_embeddings(
         config_path=resolve_path(args.config),

@@ -3,15 +3,14 @@ import json
 import os
 import warnings
 
-import numpy as np
 import pandas as pd
-import polars as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from core.data.mining import _whiten_centered_rows
+from core.data.mining import _centered_rows
+from scripts.collections.ngram import tokenize
 from scripts.common.collections import deduplicate_collections
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
@@ -24,15 +23,17 @@ warnings.filterwarnings(
 
 
 COLLECTION_EDGES_PATH = COLLECTIONS_DIR / "edges.parquet"
+COLLECTION_VERTICES_PATH = COLLECTIONS_DIR / "vertices.parquet"
 COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
+COLLECTION_NGRAMS_PATH = COLLECTIONS_DIR / "ngrams.txt"
 GRAPH_EMBEDDINGS_PATH = DATA_DIR / "graph.parquet"
-PRETRAIN_EMBEDDINGS_PATH = DATA_DIR / "embeddings-pretrain.parquet"
 
 MIN_MAPS_IN_COLLECTION = 16
 MIN_COLLECTIONS_PER_MAP = 8
-COLLECTION_SET_STAR_DELTA = 1
+COLLECTION_SET_STAR_DELTA = 0.5
 JACCARD_THRESHOLD = 0.9
-MIN_COLLECTION_QUALITY = 0.25
+COLLECTION_SIZE_PENALTY = 0.5
+POPULAR_BEATMAP_PENALTY = 0.5
 
 EMBEDDING_DIM = 64
 NUM_LAYERS = 2
@@ -82,12 +83,6 @@ def load_and_process_data(source_filter=None):
         "max"
     )
     df = df[df["stars"] >= top_stars - COLLECTION_SET_STAR_DELTA].copy()
-    pretrain_ids = set(
-        pl.read_parquet(PRETRAIN_EMBEDDINGS_PATH, columns=["beatmap_id"])["beatmap_id"]
-        .cast(pl.Int64)
-        .to_list()
-    )
-    df = df[df["beatmap_id"].astype(int).isin(pretrain_ids)].copy()
 
     col_counts = df.groupby("collection_key")["beatmap_id"].count()
     valid_cols = col_counts[col_counts >= MIN_MAPS_IN_COLLECTION].index
@@ -95,27 +90,17 @@ def load_and_process_data(source_filter=None):
 
     df = deduplicate_collections(df, JACCARD_THRESHOLD)
     df = df.drop_duplicates(["collection_key", "beatmap_id"]).copy()
-    collection_quality = collection_reliability(df)
-    collection_sizes = df.groupby("collection_key")["beatmap_id"].count().to_dict()
-    valid_cols = [
-        ckey
-        for ckey, q in collection_quality.items()
-        if collection_sizes[ckey] >= MIN_MAPS_IN_COLLECTION
-        and q >= MIN_COLLECTION_QUALITY
-    ]
+    valid_cols = ngram_collections(df)
     df = df[df["collection_key"].isin(valid_cols)].copy()
 
     df = prune_graph_edges(df)
-    collection_quality = {
-        ckey: collection_quality[ckey] for ckey in df["collection_key"].unique()
-    }
 
     unique_collections = sorted(df["collection_key"].unique())
     unique_beatmaps = sorted(df["beatmap_id"].unique())
     col_to_idx = {ckey: i for i, ckey in enumerate(unique_collections)}
     bm_to_idx = {bid: i for i, bid in enumerate(unique_beatmaps)}
 
-    return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, collection_quality
+    return df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx
 
 
 def prune_graph_edges(df):
@@ -134,7 +119,7 @@ def prune_graph_edges(df):
             return df
 
 
-def compute_weighted_normalized_adj(user_indices, item_indices, edge_weights, num_users, num_items):
+def compute_normalized_adj(user_indices, item_indices, edge_weights, num_users, num_items):
     num_nodes = num_users + num_items
 
     row = torch.cat([user_indices, item_indices + num_users])
@@ -159,24 +144,33 @@ def compute_weighted_normalized_adj(user_indices, item_indices, edge_weights, nu
     return adj
 
 
-def collection_reliability(df):
-    pretrain = pd.read_parquet(PRETRAIN_EMBEDDINGS_PATH, columns=["beatmap_id", "embedding"])
-    emb = torch.from_numpy(
-        _whiten_centered_rows(
-            np.stack(pretrain["embedding"].to_numpy()).astype("float32")
-        )
-    )
-    emb_lookup = dict(zip(pretrain["beatmap_id"].astype(int), emb))
+def load_ngrams():
+    ngrams = set()
+    with open(COLLECTION_NGRAMS_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                ngrams.add(tuple(line.split()))
+    return ngrams
 
-    values = []
-    for collection_key, group in df.groupby("collection_key"):
-        rows = [emb_lookup[int(bid)] for bid in group["beatmap_id"]]
-        x = torch.stack(rows, dim=0)
-        r = float(x.mean(dim=0).norm())
-        mu = len(rows) ** -0.5
-        q = max(0.0, min(1.0, (r - mu) / max(1.0 - mu, 1e-6)))
-        values.append((collection_key, q))
-    return dict(values)
+
+def ngram_collections(df):
+    ngrams = load_ngrams()
+    vertices = pd.read_parquet(
+        COLLECTION_VERTICES_PATH,
+        columns=["collection_id", "source", "name"],
+    )
+    vertices["collection_key"] = list(zip(vertices["collection_id"], vertices["source"]))
+    names = dict(zip(vertices["collection_key"], vertices["name"]))
+
+    valid_cols = []
+    for collection_key in df["collection_key"].drop_duplicates():
+        tokens = tokenize(names.get(collection_key, ""))
+        title_ngrams = set((token,) for token in tokens)
+        title_ngrams.update(tuple(tokens[i : i + 2]) for i in range(len(tokens) - 1))
+        if title_ngrams & ngrams:
+            valid_cols.append(collection_key)
+    return valid_cols
 
 
 def build_collection_items(df, col_to_idx, bm_to_idx, num_users):
@@ -209,13 +203,12 @@ def sample_bpr_batch(
     collection_items,
     collection_offsets,
     collection_lengths,
-    collection_weights,
     item_degrees,
     degree_items,
     degree_offsets,
     degree_positions,
 ):
-    batch_users = torch.multinomial(collection_weights, BPR_BATCH_SIZE, replacement=True)
+    batch_users = torch.randint(0, collection_lengths.numel(), (BPR_BATCH_SIZE,), device=DEVICE)
     local = (torch.rand(BPR_BATCH_SIZE, device=DEVICE) * collection_lengths[batch_users]).long()
     batch_pos = collection_items[collection_offsets[batch_users] + local]
 
@@ -280,8 +273,8 @@ def train(source_filter=None):
         torch.set_float32_matmul_precision("high")
 
     print(f"--- Setting up ({DEVICE}) ---")
-    df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx, collection_quality = (
-        load_and_process_data(source_filter)
+    df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx = load_and_process_data(
+        source_filter
     )
     num_users = len(unique_collections)
     num_items = len(unique_beatmaps)
@@ -293,28 +286,28 @@ def train(source_filter=None):
     item_indices = torch.tensor(
         df["beatmap_id"].map(bm_to_idx).values, dtype=torch.long, device=DEVICE
     )
-    edge_weights = torch.tensor(
-        [
-            max(collection_quality[ckey], 1e-6)
-            for ckey in df["collection_key"]
-        ],
-        dtype=torch.float32,
-        device=DEVICE,
-    )
+    item_degrees = torch.bincount(item_indices, minlength=num_items).clamp_min(1)
+    collection_sizes = df.groupby("collection_key")["beatmap_id"].transform("count")
     collection_weights = torch.tensor(
-        [max(collection_quality[ckey], 1e-6) for ckey in unique_collections],
+        collection_sizes.pow(-COLLECTION_SIZE_PENALTY).values,
         dtype=torch.float32,
         device=DEVICE,
     )
-    collection_weights = collection_weights / collection_weights.sum()
+    popularity_weights = (item_degrees[item_indices].float() / MIN_COLLECTIONS_PER_MAP).pow(
+        -POPULAR_BEATMAP_PENALTY
+    )
+    edge_weights = collection_weights * popularity_weights
     collection_items, collection_offsets, collection_lengths = build_collection_items(
         df, col_to_idx, bm_to_idx, num_users
     )
-    item_degrees = torch.bincount(item_indices, minlength=num_items).clamp_min(1)
     degree_items, degree_offsets, degree_positions = build_degree_sampler(item_degrees)
 
-    print("Building coherence-weighted normalized adjacency...")
-    sparse_adj = compute_weighted_normalized_adj(
+    print(
+        "Building collection/popularity-penalized normalized adjacency "
+        f"(COLLECTION_SIZE_PENALTY={COLLECTION_SIZE_PENALTY}, "
+        f"POPULAR_BEATMAP_PENALTY={POPULAR_BEATMAP_PENALTY})..."
+    )
+    sparse_adj = compute_normalized_adj(
         user_indices, item_indices, edge_weights, num_users, num_items
     )
 
@@ -336,7 +329,6 @@ def train(source_filter=None):
             collection_items,
             collection_offsets,
             collection_lengths,
-            collection_weights,
             item_degrees,
             degree_items,
             degree_offsets,
@@ -376,7 +368,7 @@ def train(source_filter=None):
         _, item_emb = model(sparse_adj)
         item_emb = F.normalize(item_emb, dim=-1)
 
-    item_emb_np = _whiten_centered_rows(item_emb.cpu().numpy())
+    item_emb_np = _centered_rows(item_emb.cpu().numpy())
     pd.DataFrame(
         [
             {"beatmap_id": beatmap_id, "embedding": item_emb_np[idx].tolist()}

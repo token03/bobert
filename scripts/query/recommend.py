@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from core.data.mining import EPS, WHITEN_EIGENVALUE_FLOOR, load_alignment_cache
+from core.data.mining import load_alignment_cache
 from core.paths import MINING_CACHE_PATH
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
@@ -37,9 +37,11 @@ MODE_GRAPH = "graph"
 MODE_CANDIDATES = "candidates"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
 DEFAULT_EMBEDDINGS_PATH = Path("data/embeddings.parquet")
+DEFAULT_ADAPTER_EMBEDDINGS_PATH = Path("data/embeddings-adapter.parquet")
 DEFAULT_COMPARE_EMBEDDINGS_PATH = Path("data/embeddings-compare.parquet")
 DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
 DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
+DEFAULT_ADAPTER_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 CANDIDATE_LIMIT = 8
 
@@ -65,8 +67,6 @@ class QueryContext:
 @dataclass
 class EmbeddingTransform:
     mean: np.ndarray
-    eigenvectors: np.ndarray
-    scale: np.ndarray
 
     @staticmethod
     def normalize(embeddings: np.ndarray) -> np.ndarray:
@@ -78,23 +78,13 @@ class EmbeddingTransform:
     def fit(cls, embeddings: np.ndarray) -> EmbeddingTransform:
         x = cls.normalize(embeddings).astype(np.float64, copy=False)
         mean = x.mean(axis=0, keepdims=True)
-        centered = x - mean
-        covariance = centered.T @ centered / max(centered.shape[0] - 1, 1)
-        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-        floor = max(float(eigenvalues.max()) * WHITEN_EIGENVALUE_FLOOR, EPS)
-        scale = 1.0 / np.sqrt(np.clip(eigenvalues, floor, None))
-        return cls(
-            mean=mean.astype(np.float32),
-            eigenvectors=eigenvectors.astype(np.float32),
-            scale=scale.astype(np.float32),
-        )
+        return cls(mean=mean.astype(np.float32))
 
     def apply(self, embeddings: np.ndarray) -> np.ndarray:
         was_vector = embeddings.ndim == 1
         x = embeddings[None, :] if was_vector else embeddings
         x = self.normalize(x)
-        x = (x - self.mean) @ self.eigenvectors
-        x = x * self.scale
+        x = x - self.mean
         x = self.normalize(x)
         return x[0] if was_vector else x
 
@@ -231,6 +221,29 @@ def iter_neighbors(beatmap_id: int, query_embedding: np.ndarray, ctx: QueryConte
             )
 
 
+def pair_rank(
+    query_id: int,
+    target_id: int,
+    query_embedding: np.ndarray,
+    ctx: QueryContext,
+) -> int | None:
+    target_idx = ctx.id_to_index.get(target_id)
+    if target_idx is None:
+        return None
+
+    similarities = ctx.embeddings @ query_embedding.astype(np.float32, copy=False)
+    target_similarity = similarities[target_idx]
+    rank = int(np.count_nonzero(similarities > target_similarity)) + 1
+    query_idx = ctx.id_to_index.get(query_id)
+    if query_idx is not None and similarities[query_idx] > target_similarity:
+        rank -= 1
+    return rank
+
+
+def format_rank(rank: int | None) -> str:
+    return "n/a" if rank is None else f"#{rank:,}"
+
+
 def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
     if ctx.mode == MODE_GRAPH:
         graph_a = get_embedding(raw_input_a, ctx, fixed_label="graph")
@@ -254,7 +267,14 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
 
     console.print()
     console.print(table)
-    console.print(f"[bold]Similarity:[/bold] [green]{similarity:.6f}[/green]\n")
+    console.print(f"[bold]Similarity:[/bold] [green]{similarity:.6f}[/green]")
+    rank_ab = pair_rank(beatmap_id_a, beatmap_id_b, embedding_a, ctx)
+    rank_ba = pair_rank(beatmap_id_b, beatmap_id_a, embedding_b, ctx)
+    console.print(
+        "[bold]Rank:[/bold] "
+        f"A -> B [cyan]{format_rank(rank_ab)}[/cyan], "
+        f"B -> A [cyan]{format_rank(rank_ba)}[/cyan]\n"
+    )
 
 
 def graph_recommend(raw_input: str, ctx: QueryContext):
@@ -410,6 +430,7 @@ def parse_args():
     )
     parser.add_argument("--embeddings", default=None)
     parser.add_argument("--pretrain", action="store_true")
+    parser.add_argument("--adapter", action="store_true")
     parser.add_argument(
         "--graph",
         action="store_true",
@@ -431,7 +452,15 @@ def parse_args():
     parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Defaults to data/bobert-compare.pt or data/bobert-pretrain.pt with --pretrain",
+        help=(
+            "Defaults to data/bobert.pt, data/bobert-pretrain.pt with --pretrain, "
+            "or latest runs/adapter with --adapter"
+        ),
+    )
+    parser.add_argument(
+        "--pretrain-checkpoint",
+        default=None,
+        help="Pretraining checkpoint used only for lazy --adapter queries",
     )
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--include-same-set", action="store_true")
@@ -444,6 +473,12 @@ def validate_args(args: argparse.Namespace):
         raise SystemExit("Error: provide at most two beatmap ids or URLs")
     if args.graph and args.candidates:
         raise SystemExit("Error: --graph and --candidates are mutually exclusive")
+    if args.adapter and args.pretrain:
+        raise SystemExit("Error: --adapter and --pretrain are mutually exclusive")
+    if args.adapter and (args.graph or args.candidates):
+        raise SystemExit(
+            "Error: --adapter is mutually exclusive with --graph and --candidates"
+        )
 
 
 def query_mode(args: argparse.Namespace) -> str:
@@ -487,14 +522,12 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
         return beatmap_ids, embeddings, id_to_index, {}
-    embeddings_path = resolve_path(
-        args.embeddings
-        or (
-            DEFAULT_PRETRAIN_EMBEDDINGS_PATH
-            if args.pretrain
-            else DEFAULT_EMBEDDINGS_PATH
-        )
-    )
+    default_embeddings_path = DEFAULT_EMBEDDINGS_PATH
+    if args.pretrain:
+        default_embeddings_path = DEFAULT_PRETRAIN_EMBEDDINGS_PATH
+    elif args.adapter:
+        default_embeddings_path = DEFAULT_ADAPTER_EMBEDDINGS_PATH
+    embeddings_path = resolve_path(args.embeddings or default_embeddings_path)
     beatmap_ids, embeddings, id_to_index = load_embeddings(
         embeddings_path,
         dtype=np.float16,
@@ -515,13 +548,35 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         embedding_transform = EmbeddingTransform.fit(embeddings)
         embeddings = embedding_transform.apply(embeddings)
     checkpoint_path = resolve_path(
-        args.checkpoint
-        or (DEFAULT_PRETRAIN_CHECKPOINT_PATH if args.pretrain else DEFAULT_CHECKPOINT_PATH)
+        args.pretrain_checkpoint
+        or (
+            DEFAULT_PRETRAIN_CHECKPOINT_PATH
+            if args.pretrain
+            else DEFAULT_ADAPTER_PRETRAIN_CHECKPOINT_PATH
+            if args.adapter
+            else DEFAULT_CHECKPOINT_PATH
+        )
     )
+    adapter_checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
+    if not args.adapter:
+        checkpoint_path = resolve_path(
+            args.checkpoint
+            or (
+                DEFAULT_PRETRAIN_CHECKPOINT_PATH
+                if args.pretrain
+                else DEFAULT_CHECKPOINT_PATH
+            )
+        )
     embedder = (
         None
         if mode != MODE_DEFAULT
-        else LazyEmbedder(resolve_path(args.config), checkpoint_path, pretrain=args.pretrain)
+        else LazyEmbedder(
+            resolve_path(args.config),
+            checkpoint_path,
+            pretrain=args.pretrain,
+            adapter=args.adapter,
+            adapter_checkpoint_path=adapter_checkpoint_path,
+        )
     )
 
     return QueryContext(

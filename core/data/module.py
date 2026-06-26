@@ -1,5 +1,7 @@
 from functools import partial
+from pathlib import Path
 import numpy as np
+import polars as pl_df
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
@@ -9,6 +11,8 @@ from core.paths import MINING_CACHE_PATH
 from .batch import (
     AlignmentBatchSampler,
     LengthBucketBatchSampler,
+    collate_adapter_eval,
+    collate_adapter_train,
     collate_align_eval,
     collate_align_train,
     collate_pretrain,
@@ -86,6 +90,20 @@ class BeatmapDataset(Dataset):
         }
         bid = int(self.beatmap_ids[idx])
         return vec, attrs, map_features, bid, self.alignment_targets[bid]
+
+
+class AdapterEmbeddingDataset(Dataset):
+    def __init__(self, embeddings, beatmap_ids, alignment_targets):
+        self.embeddings = embeddings
+        self.beatmap_ids = [int(bid) for bid in beatmap_ids]
+        self.alignment_targets = alignment_targets
+
+    def __len__(self):
+        return len(self.beatmap_ids)
+
+    def __getitem__(self, idx):
+        bid = self.beatmap_ids[idx]
+        return self.embeddings[idx], bid, self.alignment_targets[bid]
 
 
 def load_data(data_config, max_seq_len, ids_to_load, sample_size):
@@ -389,6 +407,134 @@ class AlignData(pl.LightningDataModule):
             self.val_dataset,
             self.batch_size,
             collate,
+            self.data_config,
+            self.config.runtime.compile_model,
+            False,
+        )
+
+
+class AdapterData(pl.LightningDataModule):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.data_config = config.data
+        self.phase_config = config.adapter
+        self.batch_size = self.phase_config.trainer.batch_size
+
+    def _load_mining_targets(self):
+        anchor_cache = load_alignment_cache(
+            MINING_CACHE_PATH,
+            alignment_size=self.phase_config.data.alignment_size,
+            random_seed=self.phase_config.data.seed,
+            min_sr=self.data_config.min_sr,
+            max_sr=self.data_config.max_sr,
+        )
+        anchor_ids = {int(bid) for bid in anchor_cache["beatmap_id"].to_list()}
+
+        needed_ids = set(anchor_ids)
+        for row in anchor_cache.iter_rows(named=True):
+            for ids_key, _ in ALIGNMENT_POSITIVE_LIST_PAIRS:
+                needed_ids.update(int(bid) for bid in row[ids_key])
+
+        cache = load_alignment_cache(
+            MINING_CACHE_PATH,
+            ids_to_load=sorted(needed_ids),
+            min_sr=self.data_config.min_sr,
+            max_sr=self.data_config.max_sr,
+        )
+        targets = {int(row["beatmap_id"]): row for row in cache.iter_rows(named=True)}
+        return targets, anchor_ids
+
+    def _load_embeddings(self, ids_to_load):
+        embeddings_path = Path(self.phase_config.embeddings_path)
+        ids_to_load = [int(bid) for bid in ids_to_load]
+        embeddings = (
+            pl_df.scan_parquet(str(embeddings_path))
+            .filter(pl_df.col("beatmap_id").is_in(ids_to_load))
+            .select(["beatmap_id", "embedding"])
+            .collect()
+        )
+        beatmap_ids = [int(bid) for bid in embeddings["beatmap_id"].to_list()]
+        embedding_array = np.asarray(embeddings["embedding"].to_list(), dtype=np.float32)
+        normalized = embedding_array / np.maximum(
+            np.linalg.norm(embedding_array, axis=1, keepdims=True), 1e-12
+        )
+        self.input_mean = torch.tensor(
+            normalized.mean(axis=0, keepdims=True), dtype=torch.float32
+        )
+        embedding_tensor = torch.tensor(embedding_array, dtype=torch.float32)
+        return beatmap_ids, embedding_tensor
+
+    def setup(self, stage=None):
+        mining_targets, anchor_ids = self._load_mining_targets()
+        beatmap_ids, embeddings = self._load_embeddings(mining_targets)
+        available_ids = set(beatmap_ids)
+        max_positive_ids = self.phase_config.data.max_positive_ids_per_type
+
+        for target in mining_targets.values():
+            for ids_key, weights_key in ALIGNMENT_POSITIVE_LIST_PAIRS:
+                filtered = [
+                    (int(bid), float(weight))
+                    for bid, weight in zip(target[ids_key], target[weights_key])
+                    if int(bid) in available_ids
+                ]
+                if max_positive_ids:
+                    filtered = filtered[: int(max_positive_ids)]
+                target[ids_key] = [bid for bid, _ in filtered]
+                target[weights_key] = [weight for _, weight in filtered]
+
+        dataset = AdapterEmbeddingDataset(embeddings, beatmap_ids, mining_targets)
+        val_size = int(len(dataset) * self.data_config.val_split)
+        indices = np.arange(len(dataset))
+        rng = np.random.default_rng(self.data_config.dataset_seed)
+        rng.shuffle(indices)
+        val_indices = indices[:val_size].tolist()
+
+        self.train_dataset = dataset
+        self.val_dataset = AdapterEmbeddingDataset(
+            embeddings[list(val_indices)],
+            [beatmap_ids[idx] for idx in val_indices],
+            mining_targets,
+        )
+        self.train_anchor_indices = [
+            idx for idx, bid in enumerate(beatmap_ids) if int(bid) in anchor_ids
+        ]
+        self.train_mining_lookup = {
+            int(bid): mining_targets[int(bid)]
+            for bid in beatmap_ids
+            if int(bid) in mining_targets
+        }
+        self.train_epoch_size = min(
+            int(self.phase_config.data.alignment_size or len(self.train_anchor_indices)),
+            len(self.train_anchor_indices),
+        )
+        print(
+            f"Adapter data: {len(self.train_anchor_indices)} training anchor pool, "
+            f"{self.train_epoch_size} anchors/epoch, "
+            f"{len(self.train_dataset)} training candidates, "
+            f"{len(self.val_dataset)} validation"
+        )
+
+    def train_dataloader(self):
+        sampler = AlignmentBatchSampler(
+            self.train_dataset.beatmap_ids,
+            self.train_mining_lookup,
+            self.batch_size,
+            group_size=self.phase_config.data.group_size,
+            seed=self.phase_config.data.seed,
+            anchor_indices=self.train_anchor_indices,
+            epoch_size=self.train_epoch_size,
+            drop_last=bool(self.config.runtime.compile_model),
+        )
+        return make_batch_loader(
+            self.train_dataset, collate_adapter_train, self.data_config, sampler
+        )
+
+    def val_dataloader(self):
+        return make_loader(
+            self.val_dataset,
+            self.batch_size,
+            collate_adapter_eval,
             self.data_config,
             self.config.runtime.compile_model,
             False,

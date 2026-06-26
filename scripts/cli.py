@@ -5,6 +5,7 @@ import sys
 
 
 MODEL_COMMANDS = {
+    "adapter": "scripts.bobert.adapter",
     "align": "scripts.bobert.align",
     "embed": "scripts.bobert.embed",
     "pretrain": "scripts.bobert.pretrain",
@@ -16,9 +17,11 @@ MODEL_COMMANDS = {
 
 GROUP_COMMANDS = {
     ("collections", "edges"): "scripts.collections.edges",
+    ("collections", "ngram"): "scripts.collections.ngram",
     ("collections", "tournaments"): "scripts.collections.tournaments",
     ("collections", "vertices"): "scripts.collections.vertices",
     ("data", "dataset"): "scripts.data.dataset",
+    ("data", "motifs"): "scripts.data.motifs",
     ("data", "ratings"): "scripts.data.ratings",
     ("data", "shard"): "scripts.data.shard",
     ("data", "umap"): "scripts.data.umap",

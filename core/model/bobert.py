@@ -288,8 +288,11 @@ class BobertForPretraining(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
-        pooled = self.stats_pooler(packed_output, cu_seqlens, max_seqlen=max_seqlen)
-        return F.normalize(pooled, dim=-1).to(torch.float16)
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        pooled = torch.segment_reduce(
+            packed_output.float(), reduce="mean", lengths=lengths
+        )
+        return pooled.masked_fill(lengths[:, None] == 0, 0.0)
 
     def embed_packed(
         self,

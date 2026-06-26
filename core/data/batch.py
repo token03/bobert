@@ -261,11 +261,11 @@ def pad_float_lists(values: Sequence[Sequence[float]]) -> torch.Tensor:
 
 
 def _alignment_labels(
-    map_features: Tuple[Dict[str, Any], ...],
+    map_features: Tuple[Dict[str, Any], ...] | None,
     beatmap_ids: Tuple[int, ...],
     targets: Tuple[Dict[str, Any], ...],
 ):
-    return {
+    labels = {
         "beatmap_ids": torch.tensor(beatmap_ids, dtype=torch.long),
         "beatmapset_ids": torch.tensor(
             [int(target["beatmapset_id"]) for target in targets], dtype=torch.long
@@ -284,8 +284,10 @@ def _alignment_labels(
             [float(target["anchor_weight"]) for target in targets],
             dtype=torch.float32,
         ),
-        "map_features": stack_map_features(list(map_features)),
     }
+    if map_features is not None:
+        labels["map_features"] = stack_map_features(list(map_features))
+    return labels
 
 
 def collate_pretrain(
@@ -340,3 +342,25 @@ def collate_align_eval(
         pad_to_len=rounded_pad_length(max_len, max_seq_len, []),
     )
     return {**vector_batch, "labels": labels, "batch_size": len(batch)}
+
+
+def collate_adapter_train(batch: List[Tuple]):
+    embeddings, beatmap_ids, targets = zip(*batch)
+    labels = _alignment_labels(None, beatmap_ids, targets)
+    labels["use_contrastive"] = True
+    return {
+        "embeddings": torch.stack(embeddings, dim=0),
+        "labels": labels,
+        "batch_size": len(batch),
+    }
+
+
+def collate_adapter_eval(batch: List[Tuple]):
+    embeddings, beatmap_ids, targets = zip(*batch)
+    labels = _alignment_labels(None, beatmap_ids, targets)
+    labels["use_contrastive"] = False
+    return {
+        "embeddings": torch.stack(embeddings, dim=0),
+        "labels": labels,
+        "batch_size": len(batch),
+    }

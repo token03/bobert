@@ -27,6 +27,8 @@ def model_spec_from_config(config: DictConfig, phase: str) -> dict[str, Any]:
             "pooling": OmegaConf.to_container(config.pretraining.pooling, resolve=True),
             "masking": OmegaConf.to_container(config.pretraining.masking, resolve=True),
         }
+    elif phase == "adapter":
+        spec["adapter"] = OmegaConf.to_container(config.adapter, resolve=True)
     else:
         raise ValueError(f"Unsupported checkpoint phase: {phase}")
     return spec
@@ -64,6 +66,10 @@ def setup_checkpoint(config: DictConfig, checkpoint: dict[str, Any], phase: str)
         )
         config.pretraining.masking = OmegaConf.merge(
             config.pretraining.masking, OmegaConf.create(phase_spec["masking"])
+        )
+    elif phase == "adapter":
+        config.adapter = OmegaConf.merge(
+            config.adapter, OmegaConf.create(model_spec["adapter"])
         )
     else:
         raise ValueError(f"Unsupported checkpoint phase: {phase}")
@@ -163,7 +169,9 @@ def load_pretraining_weights(
     compatible_state = {
         key: value
         for key, value in state.items()
-        if key in model_state and tuple(model_state[key].shape) == tuple(value.shape)
+        if key.startswith("bert.")
+        and key in model_state
+        and tuple(model_state[key].shape) == tuple(value.shape)
     }
     missing, unexpected = target.load_state_dict(compatible_state, strict=False)
     skipped = sorted(set(state) - set(compatible_state))

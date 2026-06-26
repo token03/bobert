@@ -29,10 +29,10 @@ model:
   feature_token_dim: 32
 
 runtime:
-  compile_model: false
+  compile_model: true
   compile_mode: "default"
   compile_dynamic: true
-  activation_checkpointing: false
+  activation_checkpointing: true
 
 pretraining:
   trainer:
@@ -45,7 +45,7 @@ pretraining:
     use_length_buckets: true
 
   data:
-    pretrain_size: 300000
+    pretrain_size: 60000
 
   optimizer:
     adam_lr: 2e-4
@@ -82,6 +82,7 @@ pretraining:
 mining:
   top_k: 32
   candidate_k: 512
+  max_candidate_star_delta: 0.5
   block_size: 256
   alignment_size: null
   random_seed: 42
@@ -91,8 +92,8 @@ alignment:
   embedding_dim: 384
 
   trainer:
-    epochs: 3
-    batch_size: 128
+    epochs: 1
+    batch_size: 256
     grad_accum: 1
     grad_clip: 1.0
     precision: "bf16-mixed"
@@ -136,6 +137,43 @@ alignment:
   map_features:
     names: ["ar", "cs", "drain_time", "slider_multiplier"]
     dim: 32
+
+  loss:
+    temperature: 0.10
+
+adapter:
+  embedding_dim: 384
+  hidden_dim: 768
+  dropout: 0.0
+  embeddings_path: "./data/embeddings-pretrain.parquet"
+
+  trainer:
+    epochs: 3
+    batch_size: 2048
+    grad_accum: 1
+    grad_clip: 1.0
+    precision: "bf16-mixed"
+    save_checkpoints: true
+
+  data:
+    alignment_size: null
+    max_positive_ids_per_type: null
+    seed: 42
+    group_size: 4
+
+  optimizer:
+    adam_lr: 1e-3
+    adam_wd: 0.05
+    adam_betas: [0.9, 0.95]
+    muon_lr: 0.0
+    muon_wd: 0.0
+
+  scheduler:
+    adam_min_lr: 1e-5
+    warmup_ratio: 0.03
+    stable_ratio: 0.50
+    cooldown: "cosine"
+    num_cycles: 0.5
 
   loss:
     temperature: 0.10

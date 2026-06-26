@@ -116,14 +116,17 @@ def pretrain_loss_fn(
 
 
 def contrastive_loss_fn(
-    predictions: Dict[str, torch.Tensor], labels: Dict[str, Any], config: Dict[str, Any]
+    predictions: Dict[str, torch.Tensor],
+    labels: Dict[str, Any],
+    config: Dict[str, Any],
+    phase: str = "alignment",
 ) -> Dict[str, torch.Tensor]:
     embeddings = predictions["embedding"]
     device = embeddings.device
     if not labels["use_contrastive"]:
         return {"contrastive_loss": torch.zeros((), device=device)}
 
-    temperature = float(config.alignment.loss.temperature)
+    temperature = float(config[phase].loss.temperature)
     batch_size = embeddings.shape[0]
 
     beatmap_ids = labels["beatmap_ids"].to(device=device, dtype=torch.long)
@@ -138,19 +141,39 @@ def contrastive_loss_fn(
     logits = logits.masked_fill(diagonal, -1e9)
     graph_positive_weights = graph_positive_weights.to(dtype=logits.dtype)
 
+    sorted_ids, sorted_indices = torch.sort(beatmap_ids)
+
     positive_weights = torch.zeros(
         batch_size, batch_size, device=device, dtype=logits.dtype
     )
     if graph_positive_ids.shape[1] > 0:
-        batch_id_lookup = beatmap_ids.view(1, batch_size, 1)
-        positive_id_lookup = graph_positive_ids.view(batch_size, 1, -1)
-        positive_id_matches = batch_id_lookup == positive_id_lookup
-        positive_weight_lookup = graph_positive_weights.view(batch_size, 1, -1)
-        positive_weights = 1.0 - (
-            1.0
-            - positive_id_matches.to(logits.dtype)
-            * positive_weight_lookup.clamp_min(0.0)
-        ).prod(dim=2)
+        lookup_ids = graph_positive_ids.clamp_min(0)
+        lookup_positions = torch.searchsorted(sorted_ids, lookup_ids)
+        in_bounds = lookup_positions < batch_size
+        safe_positions = lookup_positions.clamp_max(batch_size - 1)
+        positive_matches = (
+            in_bounds
+            & (graph_positive_ids >= 0)
+            & (sorted_ids[safe_positions] == graph_positive_ids)
+        )
+        if torch.any(positive_matches):
+            rows = (
+                torch.arange(batch_size, device=device)[:, None]
+                .expand_as(graph_positive_ids)[positive_matches]
+            )
+            cols = sorted_indices[safe_positions[positive_matches]]
+            values = 1.0 - graph_positive_weights[positive_matches].clamp_min(0.0)
+            positive_keep = torch.ones(
+                batch_size * batch_size, device=device, dtype=logits.dtype
+            )
+            positive_keep.scatter_reduce_(
+                0,
+                rows * batch_size + cols,
+                values.to(logits.dtype),
+                reduce="prod",
+                include_self=True,
+            )
+            positive_weights = 1.0 - positive_keep.view(batch_size, batch_size)
     positive_weights = positive_weights.masked_fill(diagonal, 0.0)
 
     valid_sets = beatmapset_ids >= 0
@@ -167,9 +190,20 @@ def contrastive_loss_fn(
         batch_size, batch_size, device=device, dtype=torch.bool
     )
     if ignore_ids.shape[1] > 0:
-        batch_id_lookup = beatmap_ids.view(1, batch_size, 1)
-        ignore_id_lookup = ignore_ids.view(batch_size, 1, -1)
-        mined_ignore_mask = (batch_id_lookup == ignore_id_lookup).any(dim=2)
+        lookup_ids = ignore_ids.clamp_min(0)
+        lookup_positions = torch.searchsorted(sorted_ids, lookup_ids)
+        in_bounds = lookup_positions < batch_size
+        safe_positions = lookup_positions.clamp_max(batch_size - 1)
+        ignore_matches = (
+            in_bounds & (ignore_ids >= 0) & (sorted_ids[safe_positions] == ignore_ids)
+        )
+        if torch.any(ignore_matches):
+            rows = (
+                torch.arange(batch_size, device=device)[:, None]
+                .expand_as(ignore_ids)[ignore_matches]
+            )
+            cols = sorted_indices[safe_positions[ignore_matches]]
+            mined_ignore_mask[rows, cols] = True
 
     ignore_contrastive = same_known_set | same_known_song | mined_ignore_mask
     ignore_contrastive = ignore_contrastive.masked_fill(diagonal, False)
@@ -197,7 +231,8 @@ def alignment_loss_fn(
     predictions: Dict[str, Any],
     labels: Dict[str, Any],
     config: DictConfig,
+    phase: str = "alignment",
 ) -> Dict[str, torch.Tensor]:
-    losses = contrastive_loss_fn(predictions, labels, config)
+    losses = contrastive_loss_fn(predictions, labels, config, phase=phase)
     losses["total_loss"] = losses["contrastive_loss"]
     return losses

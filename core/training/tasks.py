@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
-from core.data.module import PretrainData, preallocation_batch_size
+from core.data.module import AdapterData, PretrainData, preallocation_batch_size
 
 from .loss import alignment_loss_fn, pretrain_loss_fn
 from .metrics import ContrastiveMetrics, DifficultyMetrics, MLMMetrics
@@ -335,6 +335,66 @@ class AlignmentModule(BobertLightningModule):
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         predictions, labels = self._forward_eval_batch(batch)
         loss_dict = alignment_loss_fn(predictions, labels, self.config)
+        self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
+        self.log(
+            "val_loss",
+            loss_dict["total_loss"],
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=self.batch_size,
+        )
+        return loss_dict["total_loss"]
+
+    def on_validation_epoch_end(self):
+        results = self.metrics.compute()
+        for key, value in results.items():
+            self.log(f"val_{key}", value)
+        self.metrics.reset()
+
+
+class AdapterModule(BobertLightningModule):
+    def __init__(
+        self,
+        model: nn.Module,
+        config: Dict[str, Any],
+        datamodule: AdapterData,
+    ):
+        super().__init__("adapter")
+        self.model = model
+        self.config = config
+        self.datamodule = datamodule
+        self.batch_size = config.adapter.trainer.batch_size
+        self.metrics = ContrastiveMetrics(torch.device("cpu"))
+        self.save_hyperparameters(ignore=["model", "datamodule"])
+
+    def forward(self, embeddings):
+        return self.model(embeddings)
+
+    def on_fit_start(self):
+        input_mean = getattr(self.datamodule, "input_mean", None)
+        if input_mean is not None and hasattr(self.model, "set_input_mean"):
+            self.model.set_input_mean(input_mean)
+
+    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        predictions = self(batch["embeddings"])
+        loss_dict = alignment_loss_fn(
+            predictions, batch["labels"], self.config, phase="adapter"
+        )
+        self.log_dict(
+            {
+                "train_loss": loss_dict["total_loss"],
+                "train_contrastive_loss": loss_dict["contrastive_loss"],
+            },
+            prog_bar=True,
+            batch_size=self.batch_size,
+        )
+        return loss_dict["total_loss"]
+
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        predictions = self(batch["embeddings"])
+        loss_dict = alignment_loss_fn(
+            predictions, batch["labels"], self.config, phase="adapter"
+        )
         self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
         self.log(
             "val_loss",
