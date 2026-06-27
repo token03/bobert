@@ -266,6 +266,12 @@ def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
         )
     ]
     merged_df = pl.concat(frames, how="vertical")
+    if table_name == "hitobjects":
+        merged_df = merged_df.sort(["beatmap_id", "time"])
+    elif table_name == "curvepoints":
+        merged_df = merged_df.sort(["beatmap_id", "hitobject_time", "point_index"])
+    elif table_name == "beatmaps":
+        merged_df = merged_df.sort("beatmap_id")
     os.makedirs(output_path, exist_ok=True)
     merged_df.write_parquet(os.path.join(output_path, "part-0.parquet"))
 

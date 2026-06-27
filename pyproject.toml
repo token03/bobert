@@ -13,6 +13,7 @@ dependencies = [
     "liger-kernel>=0.8.0",
     "matplotlib>=3.10.6",
     "muon-optimizer",
+    "numba>=0.61.2",
     "numpy>=2.2,<2.3",
     "omegaconf>=2.3.0",
     "ossapi>=5.3.3",

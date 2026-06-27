@@ -23,6 +23,7 @@ GROUP_COMMANDS = {
     ("data", "dataset"): "scripts.data.dataset",
     ("data", "motifs"): "scripts.data.motifs",
     ("data", "ratings"): "scripts.data.ratings",
+    ("data", "rff"): "scripts.data.rff",
     ("data", "shard"): "scripts.data.shard",
     ("data", "umap"): "scripts.data.umap",
     ("eda", "collections"): "scripts.eda.collections",

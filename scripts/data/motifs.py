@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import math
+import multiprocessing as mp
 import os
 import shutil
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Iterable
 import numpy as np
 import polars as pl
 import yaml
+from numba import njit
 from tqdm import tqdm
 
 from core.data.parser import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
@@ -29,20 +31,22 @@ BREAK_BOUNDARY = "boundary"
 BREAK_RHYTHM = "rhythm"
 BREAK_SPINNER = "spinner"
 BREAK_GAP = "gap"
+RHYTHM_CODES = {"1/2": 0, "1/3": 1, "1/4": 2, "1/6": 3}
+BREAK_CODES = {BREAK_BOUNDARY: 0, BREAK_RHYTHM: 1, BREAK_SPINNER: 2, BREAK_GAP: 3}
 EPS = 1e-6
 
 
 CONTAINER_SCHEMA = {
     "beatmap_id": pl.Int64,
     "container_id": pl.Int32,
-    "rhythm_class": pl.String,
+    "rhythm_class": pl.Int8,
     "start_onset_idx": pl.Int32,
     "end_onset_idx": pl.Int32,
     "n_onsets": pl.Int32,
     "start_time": pl.Int32,
     "end_time": pl.Int32,
-    "break_before": pl.String,
-    "break_after": pl.String,
+    "break_before": pl.Int8,
+    "break_after": pl.Int8,
     "slider_frac": pl.Float32,
     "median_spacing": pl.Float32,
     "spacing_iqr_ratio": pl.Float32,
@@ -57,7 +61,7 @@ WINDOW_SCHEMA = {
     "end_onset_idx": pl.Int32,
     "window_len": pl.Int8,
     "container_len": pl.Int32,
-    "rhythm_class": pl.String,
+    "rhythm_class": pl.Int8,
     "spacing_median": pl.Float32,
     "spacing_iqr_ratio": pl.Float32,
     "spacing_max_ratio": pl.Float32,
@@ -75,6 +79,25 @@ WINDOW_SCHEMA = {
     "max_slider_occupancy": pl.Float32,
     "slider_exit_disruption": pl.Float32,
 }
+WINDOW_DESCRIPTOR_COLUMNS = tuple(list(WINDOW_SCHEMA)[7:])
+SPACING_MEDIAN_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("spacing_median")
+SPACING_IQR_RATIO_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("spacing_iqr_ratio")
+LINEARITY_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("linearity")
+SPACING_OUTLIER_Z_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("spacing_outlier_z")
+SLIDER_FRAC_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("slider_frac")
+HITOBJECT_COLUMNS = [
+    "beatmap_id",
+    "x",
+    "y",
+    "time",
+    "object_type",
+    "end_time",
+    "pixel_length",
+    "bpm",
+    "slider_repeats",
+    "slider_end_x",
+    "slider_end_y",
+]
 
 
 def load_config(config_path: str) -> dict:
@@ -83,8 +106,6 @@ def load_config(config_path: str) -> dict:
 
 
 def _f32(value: float) -> float:
-    if not math.isfinite(value):
-        return 0.0
     return float(value)
 
 
@@ -330,12 +351,269 @@ def _window_descriptors(
     }
 
 
+@njit(cache=True)
+def _quantile_sorted_jit(values: np.ndarray, quantile: float) -> float:
+    size = values.size
+    if size == 0:
+        return 0.0
+    if size == 1:
+        return float(values[0])
+    position = (size - 1) * quantile
+    lower = int(position)
+    upper = lower + 1
+    if upper >= size:
+        upper = size - 1
+    fraction = position - lower
+    return float(values[lower] * (1.0 - fraction) + values[upper] * fraction)
+
+
+@njit(cache=True)
+def _sorted_slice(values: np.ndarray, start_idx: int, end_idx: int) -> np.ndarray:
+    size = end_idx - start_idx
+    out = np.empty(size, dtype=np.float64)
+    for i in range(size):
+        out[i] = values[start_idx + i]
+    return np.sort(out)
+
+
+@njit(cache=True)
+def _iqr_slice_jit(values: np.ndarray, start_idx: int, end_idx: int) -> float:
+    size = end_idx - start_idx
+    if size <= 0:
+        return 0.0
+    sorted_values = _sorted_slice(values, start_idx, end_idx)
+    return _quantile_sorted_jit(sorted_values, 0.75) - _quantile_sorted_jit(sorted_values, 0.25)
+
+
+@njit(cache=True)
+def _spacing_descriptors_jit(distances: np.ndarray, start_idx: int, end_idx: int) -> tuple[float, float, float, float, float, float]:
+    size = end_idx - start_idx
+    if size <= 0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    sorted_distances = _sorted_slice(distances, start_idx, end_idx)
+    median = _quantile_sorted_jit(sorted_distances, 0.5)
+    iqr_ratio = (_quantile_sorted_jit(sorted_distances, 0.75) - _quantile_sorted_jit(sorted_distances, 0.25)) / (median + EPS)
+    max_distance = float(sorted_distances[size - 1])
+    max_ratio = max_distance / (median + EPS)
+
+    total = 0.0
+    for i in range(size):
+        total += distances[start_idx + i]
+    mean = total / size
+
+    if size >= 2:
+        x_mean = (size - 1) * 0.5
+        numerator = 0.0
+        denominator = 0.0
+        for i in range(size):
+            x = i - x_mean
+            numerator += x * (distances[start_idx + i] - mean)
+            denominator += x * x
+        trend = (numerator / (denominator + EPS)) / (median + EPS)
+    else:
+        trend = 0.0
+
+    deviations = np.empty(size, dtype=np.float64)
+    deviation_sum = 0.0
+    for i in range(size):
+        deviation = abs(distances[start_idx + i] - median)
+        deviations[i] = deviation
+        deviation_sum += deviation
+    sorted_deviations = np.sort(deviations)
+    mad = _quantile_sorted_jit(sorted_deviations, 0.5)
+
+    outlier_z = -1.0e308
+    for i in range(size):
+        z = (distances[start_idx + i] - median) / (mad + EPS)
+        if z > outlier_z:
+            outlier_z = z
+    localized = (max_distance - median) / (deviation_sum + EPS)
+    return median, iqr_ratio, max_ratio, trend, outlier_z, localized
+
+
+@njit(cache=True)
+def _linearity_jit(points: np.ndarray, start_idx: int, end_idx: int) -> float:
+    n_points = end_idx - start_idx + 1
+    if n_points < 3:
+        return 1.0
+
+    x_sum = 0.0
+    y_sum = 0.0
+    for idx in range(start_idx, end_idx + 1):
+        x_sum += points[idx, 0]
+        y_sum += points[idx, 1]
+    x_mean = x_sum / n_points
+    y_mean = y_sum / n_points
+
+    xx = 0.0
+    xy = 0.0
+    yy = 0.0
+    for idx in range(start_idx, end_idx + 1):
+        dx = points[idx, 0] - x_mean
+        dy = points[idx, 1] - y_mean
+        xx += dx * dx
+        xy += dx * dy
+        yy += dy * dy
+
+    denom = n_points - 1
+    xx /= denom
+    xy /= denom
+    yy /= denom
+    trace = xx + yy
+    discriminant = math.sqrt(max((xx - yy) * (xx - yy) + 4.0 * xy * xy, 0.0))
+    largest = 0.5 * (trace + discriminant)
+    smallest = 0.5 * (trace - discriminant)
+    if largest <= EPS:
+        return 0.0
+    return 1.0 - smallest / (largest + EPS)
+
+
+@njit(cache=True)
+def _area_ratio_jit(points: np.ndarray, start_idx: int, end_idx: int, spacing_median: float) -> float:
+    n_points = end_idx - start_idx + 1
+    if n_points < 3:
+        return 0.0
+    total = 0.0
+    for idx in range(start_idx, end_idx):
+        total += points[idx, 0] * points[idx + 1, 1] - points[idx, 1] * points[idx + 1, 0]
+    total += points[end_idx, 0] * points[start_idx, 1] - points[end_idx, 1] * points[start_idx, 0]
+    area = 0.5 * abs(total)
+    return area / (((spacing_median + EPS) ** 2) * n_points)
+
+
+@njit(cache=True)
+def _window_descriptors_precomputed_jit(
+    start_idx: int,
+    end_idx: int,
+    points: np.ndarray,
+    distances: np.ndarray,
+    abs_turns: np.ndarray,
+    turn_signs: np.ndarray,
+    slider_prefix: np.ndarray,
+    slider_occupancy: np.ndarray,
+    slider_exit_delta: np.ndarray,
+) -> tuple[float, ...]:
+    spacing_median, spacing_iqr_ratio, spacing_max_ratio, spacing_trend, spacing_outlier_z, localized_anomaly_ratio = _spacing_descriptors_jit(distances, start_idx, end_idx)
+
+    turn_start = start_idx
+    turn_end = end_idx - 1
+    turn_count = turn_end - turn_start
+    if turn_count > 0:
+        turn_sum = 0.0
+        for idx in range(turn_start, turn_end):
+            turn_sum += abs_turns[idx]
+        mean_abs_turn = turn_sum / turn_count
+        turn_iqr = _iqr_slice_jit(abs_turns, turn_start, turn_end)
+    else:
+        mean_abs_turn = 0.0
+        turn_iqr = 0.0
+
+    sign_sum = 0.0
+    sign_count = 0
+    alternations = 0
+    previous_sign = 0.0
+    has_previous = False
+    for idx in range(turn_start, turn_end):
+        sign = turn_signs[idx]
+        if sign != 0.0:
+            sign_sum += sign
+            sign_count += 1
+            if has_previous and sign != previous_sign:
+                alternations += 1
+            previous_sign = sign
+            has_previous = True
+    if sign_count > 0:
+        turn_sign_consistency = abs(sign_sum / sign_count)
+        turn_alternation = alternations / (sign_count - 1) if sign_count > 1 else 0.0
+    else:
+        turn_sign_consistency = 0.0
+        turn_alternation = 0.0
+
+    path_length = 0.0
+    for idx in range(start_idx, end_idx):
+        path_length += distances[idx]
+    if end_idx > start_idx:
+        dx = points[end_idx, 0] - points[start_idx, 0]
+        dy = points[end_idx, 1] - points[start_idx, 1]
+        closure_ratio = math.sqrt(dx * dx + dy * dy) / (path_length + EPS)
+    else:
+        closure_ratio = 0.0
+
+    slider_count = int(slider_prefix[end_idx + 1] - slider_prefix[start_idx])
+    slider_frac = slider_count / (end_idx - start_idx + 1)
+    max_slider_occupancy = 0.0
+    max_slider_exit_delta = 0.0
+    for idx in range(start_idx, end_idx):
+        if slider_occupancy[idx] > max_slider_occupancy:
+            max_slider_occupancy = slider_occupancy[idx]
+        if slider_exit_delta[idx] > max_slider_exit_delta:
+            max_slider_exit_delta = slider_exit_delta[idx]
+
+    return (
+        spacing_median,
+        spacing_iqr_ratio,
+        spacing_max_ratio,
+        spacing_trend,
+        _linearity_jit(points, start_idx, end_idx),
+        _area_ratio_jit(points, start_idx, end_idx, spacing_median),
+        mean_abs_turn,
+        turn_iqr,
+        turn_sign_consistency,
+        turn_alternation,
+        closure_ratio,
+        spacing_outlier_z,
+        localized_anomaly_ratio,
+        slider_frac,
+        max_slider_occupancy,
+        max_slider_exit_delta / (spacing_median + EPS),
+    )
+
+
+def _window_descriptors_precomputed(
+    start_idx: int,
+    end_idx: int,
+    points: np.ndarray,
+    distances: np.ndarray,
+    abs_turns: np.ndarray,
+    turn_signs: np.ndarray,
+    slider_prefix: np.ndarray,
+    slider_occupancy: np.ndarray,
+    slider_exit_delta: np.ndarray,
+) -> tuple[float, ...]:
+    return _window_descriptors_precomputed_jit(
+        start_idx,
+        end_idx,
+        points,
+        distances,
+        abs_turns,
+        turn_signs,
+        slider_prefix,
+        slider_occupancy,
+        slider_exit_delta,
+    )
+
+
+def _new_record_columns(schema: dict[str, pl.DataType]) -> dict[str, list]:
+    return {name: [] for name in schema}
+
+
+def _extend_record_columns(target: dict[str, list], source: dict[str, list]) -> None:
+    for name, values in source.items():
+        target[name].extend(values)
+
+
+def _record_count(records: dict[str, list]) -> int:
+    first = next(iter(records.values()), [])
+    return len(first)
+
+
 def _process_beatmap(
     df: pl.DataFrame,
     tolerance: float,
     max_gap_ms: float,
     max_context_len: int | None,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[dict[str, list], dict[str, list]]:
     beatmap_id = int(df["beatmap_id"][0])
     time_all = df["time"].to_numpy().astype(np.int64)
     if time_all.size > 1 and np.any(time_all[1:] < time_all[:-1]):
@@ -371,7 +649,7 @@ def _process_beatmap(
 
     onset_rows = np.flatnonzero(onset_mask)
     if onset_rows.size < 3:
-        return [], []
+        return _new_record_columns(CONTAINER_SCHEMA), _new_record_columns(WINDOW_SCHEMA)
 
     onset_indices = np.arange(all_onset_rows.size, dtype=np.int32)
     if max_context_len is not None and max_context_len > 0:
@@ -390,47 +668,81 @@ def _process_beatmap(
     end_points = np.column_stack([end_x, end_y])
     end_points[~is_slider] = points[~is_slider]
 
+    vectors = points[1:] - points[:-1]
+    distances = np.sqrt(vectors[:, 0] * vectors[:, 0] + vectors[:, 1] * vectors[:, 1])
+    if vectors.shape[0] >= 2:
+        v0 = vectors[:-1]
+        v1 = vectors[1:]
+        lengths = np.sqrt(v0[:, 0] * v0[:, 0] + v0[:, 1] * v0[:, 1]) * np.sqrt(v1[:, 0] * v1[:, 0] + v1[:, 1] * v1[:, 1])
+        dot = v0[:, 0] * v1[:, 0] + v0[:, 1] * v1[:, 1]
+        cos = np.divide(dot, lengths, out=np.ones_like(dot), where=lengths > EPS)
+        abs_turns = np.arccos(np.clip(cos, -1.0, 1.0))
+        cross = v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
+        turn_signs = np.zeros_like(cross, dtype=np.float64)
+        turn_signs[cross > EPS] = 1.0
+        turn_signs[cross < -EPS] = -1.0
+    else:
+        abs_turns = np.array([], dtype=np.float64)
+        turn_signs = np.array([], dtype=np.float64)
+
+    slider_prefix = np.concatenate(([0], np.cumsum(is_slider, dtype=np.int32)))
+    slider_occupancy = np.zeros(times.shape[0], dtype=np.float64)
+    slider_exit_delta = np.zeros(times.shape[0], dtype=np.float64)
+    if times.size > 1:
+        valid_slider_edges = is_slider[:-1]
+        next_dt = (times[1:] - times[:-1]).astype(np.float64)
+        duration = (end_times[:-1] - times[:-1]).astype(np.float64)
+        slider_occupancy[:-1] = np.divide(
+            duration,
+            next_dt + EPS,
+            out=np.zeros_like(duration),
+            where=valid_slider_edges & (next_dt > 0),
+        )
+        next_points = points[1:]
+        head_delta = next_points - points[:-1]
+        end_delta = next_points - end_points[:-1]
+        head_dist = np.sqrt(head_delta[:, 0] * head_delta[:, 0] + head_delta[:, 1] * head_delta[:, 1])
+        end_dist = np.sqrt(end_delta[:, 0] * end_delta[:, 0] + end_delta[:, 1] * end_delta[:, 1])
+        slider_exit_delta[:-1] = np.where(valid_slider_edges, np.abs(end_dist - head_dist), 0.0)
+
     dt = (times[1:] - times[:-1]).astype(np.float64)
     rhythm = _classify_rhythms(dt, bpm[1:], tolerance)
     break_reasons = _edge_break_reasons(times, rhythm, spinner_starts, spinner_ends, max_gap_ms)
 
-    containers = []
-    windows = []
+    containers = _new_record_columns(CONTAINER_SCHEMA)
+    windows = _new_record_columns(WINDOW_SCHEMA)
     container_id = 0
     for start_idx, end_idx, rhythm_class, break_before, break_after in _iter_containers(rhythm, break_reasons):
         n_onsets = end_idx - start_idx + 1
         if n_onsets <= 2:
             continue
 
-        container_points = points[start_idx : end_idx + 1]
-        container_times = times[start_idx : end_idx + 1]
-        container_slider = is_slider[start_idx : end_idx + 1]
-        descriptors = _window_descriptors(
-            container_points,
-            container_times,
-            container_slider,
-            end_points[start_idx : end_idx + 1],
-            end_times[start_idx : end_idx + 1],
+        descriptors = _window_descriptors_precomputed(
+            start_idx,
+            end_idx,
+            points,
+            distances,
+            abs_turns,
+            turn_signs,
+            slider_prefix,
+            slider_occupancy,
+            slider_exit_delta,
         )
-        containers.append(
-            {
-                "beatmap_id": beatmap_id,
-                "container_id": container_id,
-                "rhythm_class": rhythm_class,
-                "start_onset_idx": int(onset_indices[start_idx]),
-                "end_onset_idx": int(onset_indices[end_idx]),
-                "n_onsets": n_onsets,
-                "start_time": int(times[start_idx]),
-                "end_time": int(times[end_idx]),
-                "break_before": break_before,
-                "break_after": break_after,
-                "slider_frac": descriptors["slider_frac"],
-                "median_spacing": descriptors["spacing_median"],
-                "spacing_iqr_ratio": descriptors["spacing_iqr_ratio"],
-                "linearity": descriptors["linearity"],
-                "cut_score_max": descriptors["spacing_outlier_z"],
-            }
-        )
+        containers["beatmap_id"].append(beatmap_id)
+        containers["container_id"].append(container_id)
+        containers["rhythm_class"].append(RHYTHM_CODES[rhythm_class])
+        containers["start_onset_idx"].append(int(onset_indices[start_idx]))
+        containers["end_onset_idx"].append(int(onset_indices[end_idx]))
+        containers["n_onsets"].append(n_onsets)
+        containers["start_time"].append(int(times[start_idx]))
+        containers["end_time"].append(int(times[end_idx]))
+        containers["break_before"].append(BREAK_CODES[break_before])
+        containers["break_after"].append(BREAK_CODES[break_after])
+        containers["slider_frac"].append(descriptors[SLIDER_FRAC_INDEX])
+        containers["median_spacing"].append(descriptors[SPACING_MEDIAN_INDEX])
+        containers["spacing_iqr_ratio"].append(descriptors[SPACING_IQR_RATIO_INDEX])
+        containers["linearity"].append(descriptors[LINEARITY_INDEX])
+        containers["cut_score_max"].append(descriptors[SPACING_OUTLIER_Z_INDEX])
 
         for window_len in WINDOW_LENGTHS[rhythm_class]:
             if window_len > n_onsets:
@@ -438,31 +750,32 @@ def _process_beatmap(
             for local_start in range(0, n_onsets - window_len + 1):
                 window_start = start_idx + local_start
                 window_end = window_start + window_len - 1
-                desc = _window_descriptors(
-                    points[window_start : window_end + 1],
-                    times[window_start : window_end + 1],
-                    is_slider[window_start : window_end + 1],
-                    end_points[window_start : window_end + 1],
-                    end_times[window_start : window_end + 1],
+                desc = _window_descriptors_precomputed(
+                    window_start,
+                    window_end,
+                    points,
+                    distances,
+                    abs_turns,
+                    turn_signs,
+                    slider_prefix,
+                    slider_occupancy,
+                    slider_exit_delta,
                 )
-                windows.append(
-                    {
-                        "beatmap_id": beatmap_id,
-                        "container_id": container_id,
-                        "start_onset_idx": int(onset_indices[window_start]),
-                        "end_onset_idx": int(onset_indices[window_end]),
-                        "window_len": window_len,
-                        "container_len": n_onsets,
-                        "rhythm_class": rhythm_class,
-                        **desc,
-                    }
-                )
+                windows["beatmap_id"].append(beatmap_id)
+                windows["container_id"].append(container_id)
+                windows["start_onset_idx"].append(int(onset_indices[window_start]))
+                windows["end_onset_idx"].append(int(onset_indices[window_end]))
+                windows["window_len"].append(window_len)
+                windows["container_len"].append(n_onsets)
+                windows["rhythm_class"].append(RHYTHM_CODES[rhythm_class])
+                for name, value in zip(WINDOW_DESCRIPTOR_COLUMNS, desc):
+                    windows[name].append(value)
         container_id += 1
 
     return containers, windows
 
 
-def _process_beatmap_worker(args: tuple[pl.DataFrame, float, float, int | None]) -> tuple[list[dict], list[dict]]:
+def _process_beatmap_worker(args: tuple[pl.DataFrame, float, float, int | None]) -> tuple[dict[str, list], dict[str, list]]:
     return _process_beatmap(*args)
 
 
@@ -470,12 +783,45 @@ def _empty_df(schema: dict[str, pl.DataType]) -> pl.DataFrame:
     return pl.DataFrame(schema=schema)
 
 
-def _records_df(records: list[dict], schema: dict[str, pl.DataType]) -> pl.DataFrame:
-    if not records:
+def _records_df(records: dict[str, list], schema: dict[str, pl.DataType]) -> pl.DataFrame:
+    if _record_count(records) == 0:
         return _empty_df(schema)
     float_cols = [name for name, dtype in schema.items() if dtype == pl.Float32]
     return pl.DataFrame(records, schema=schema).with_columns(
         [pl.col(name).fill_nan(0).fill_null(0.0) for name in float_cols]
+    )
+
+
+def _process_chunk_worker(
+    args: tuple[int, list[int], str, str, float, float, int | None]
+) -> tuple[int, str, str, int, int]:
+    part_idx, chunk_ids, hitobjects_path, output_dir, tolerance, max_gap_ms, max_context_len = args
+    lf = scan_dataset_parquet(hitobjects_path).select(HITOBJECT_COLUMNS)
+    chunk = (
+        lf.filter(pl.col("beatmap_id").is_between(int(chunk_ids[0]), int(chunk_ids[-1])))
+        .filter(pl.col("beatmap_id").is_in(chunk_ids))
+        .collect()
+        .sort(["beatmap_id", "time"])
+    )
+
+    container_records = _new_record_columns(CONTAINER_SCHEMA)
+    window_records = _new_record_columns(WINDOW_SCHEMA)
+    for group in chunk.partition_by("beatmap_id", maintain_order=True):
+        containers, windows = _process_beatmap(group, tolerance, max_gap_ms, max_context_len)
+        _extend_record_columns(container_records, containers)
+        _extend_record_columns(window_records, windows)
+
+    output_path = Path(output_dir)
+    container_file = output_path / f"container-part-{part_idx}.parquet"
+    window_file = output_path / f"windows-part-{part_idx}.parquet"
+    _records_df(container_records, CONTAINER_SCHEMA).write_parquet(container_file)
+    _records_df(window_records, WINDOW_SCHEMA).write_parquet(window_file)
+    return (
+        part_idx,
+        str(container_file),
+        str(window_file),
+        _record_count(container_records),
+        _record_count(window_records),
     )
 
 
@@ -502,72 +848,59 @@ def build_motifs(
         shutil.rmtree(output_path)
     output_path.mkdir(parents=True)
 
-    cols = [
-        "beatmap_id",
-        "x",
-        "y",
-        "time",
-        "object_type",
-        "end_time",
-        "pixel_length",
-        "bpm",
-        "slider_repeats",
-        "slider_end_x",
-        "slider_end_y",
-    ]
-    lf = scan_dataset_parquet(hitobjects_path).select(cols)
+    lf = scan_dataset_parquet(hitobjects_path).select(HITOBJECT_COLUMNS)
     beatmap_ids = lf.select("beatmap_id").unique().sort("beatmap_id").collect()["beatmap_id"].to_list()
     if limit_beatmaps is not None and limit_beatmaps > 0:
         beatmap_ids = beatmap_ids[:limit_beatmaps]
 
-    container_parts = []
-    window_parts = []
     chunks = [beatmap_ids[i : i + chunk_size] for i in range(0, len(beatmap_ids), chunk_size)]
-    for part_idx, chunk_ids in enumerate(tqdm(chunks, desc="Building motifs", unit="chunk")):
-        if not chunk_ids:
-            continue
-        chunk = (
-            lf.filter(pl.col("beatmap_id").is_between(int(chunk_ids[0]), int(chunk_ids[-1])))
-            .filter(pl.col("beatmap_id").is_in(chunk_ids))
-            .collect()
-            .sort(["beatmap_id", "time"])
-        )
-        container_records = []
-        window_records = []
-        groups = chunk.partition_by("beatmap_id", maintain_order=True)
-        if workers > 1 and len(groups) > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                results = executor.map(
-                    _process_beatmap_worker,
-                    ((group, tolerance, max_gap_ms, max_context_len) for group in groups),
-                    chunksize=8,
-                )
-                for containers, windows in results:
-                    container_records.extend(containers)
-                    window_records.extend(windows)
-        else:
-            for group in groups:
-                containers, windows = _process_beatmap(group, tolerance, max_gap_ms, max_context_len)
-                container_records.extend(containers)
-                window_records.extend(windows)
+    tasks = [
+        (part_idx, chunk_ids, str(hitobjects_path), str(output_path), tolerance, max_gap_ms, max_context_len)
+        for part_idx, chunk_ids in enumerate(chunks)
+        if chunk_ids
+    ]
 
-        container_file = output_path / f"container-part-{part_idx}.parquet"
-        window_file = output_path / f"windows-part-{part_idx}.parquet"
-        _records_df(container_records, CONTAINER_SCHEMA).write_parquet(container_file)
-        _records_df(window_records, WINDOW_SCHEMA).write_parquet(window_file)
-        container_parts.append(container_file)
-        window_parts.append(window_file)
+    results = []
+    if workers > 1 and len(tasks) > 1:
+        os.environ.setdefault("POLARS_MAX_THREADS", "1")
+        context_name = "forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn"
+        context = mp.get_context(context_name)
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=context,
+        ) as executor:
+            futures = [executor.submit(_process_chunk_worker, task) for task in tasks]
+            for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc="Building motifs",
+                unit="chunk",
+            ):
+                results.append(future.result())
+    else:
+        for task in tqdm(tasks, desc="Building motifs", unit="chunk"):
+            results.append(_process_chunk_worker(task))
 
-    containers = pl.concat([pl.read_parquet(path) for path in container_parts], how="vertical") if container_parts else _empty_df(CONTAINER_SCHEMA)
-    windows = pl.concat([pl.read_parquet(path) for path in window_parts], how="vertical") if window_parts else _empty_df(WINDOW_SCHEMA)
-    containers.write_parquet(output_path / "container.parquet")
-    windows.write_parquet(output_path / "windows.parquet")
+    results.sort(key=lambda item: item[0])
+    container_parts = [Path(container_file) for _part_idx, container_file, _window_file, _container_count, _window_count in results]
+    window_parts = [Path(window_file) for _part_idx, _container_file, window_file, _container_count, _window_count in results]
+
+    container_count = sum(item[3] for item in results)
+    window_count = sum(item[4] for item in results)
+    if container_parts:
+        pl.scan_parquet(container_parts).sink_parquet(output_path / "container.parquet")
+    else:
+        _empty_df(CONTAINER_SCHEMA).write_parquet(output_path / "container.parquet")
+    if window_parts:
+        pl.scan_parquet(window_parts).sink_parquet(output_path / "windows.parquet")
+    else:
+        _empty_df(WINDOW_SCHEMA).write_parquet(output_path / "windows.parquet")
 
     for path in [*container_parts, *window_parts]:
         os.remove(path)
 
-    print(f"Wrote {containers.height:,} containers to {output_path / 'container.parquet'}")
-    print(f"Wrote {windows.height:,} windows to {output_path / 'windows.parquet'}")
+    print(f"Wrote {container_count:,} containers to {output_path / 'container.parquet'}")
+    print(f"Wrote {window_count:,} windows to {output_path / 'windows.parquet'}")
 
 
 def main() -> None:
