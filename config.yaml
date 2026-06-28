@@ -62,8 +62,8 @@ pretraining:
     num_cycles: 0.5
 
   pooling:
-    stats: ["mean", "max", "std"]
-    stat_dim: 256
+    stats: ["mean"]
+    stat_dim: 384
     stats_mixer_dim: 384
 
   masking:

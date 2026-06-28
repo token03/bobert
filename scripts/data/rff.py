@@ -23,9 +23,6 @@ RHYTHM_WINDOW_STRATA = (
     (1, 3),
     (1, 4),
     (1, 5),
-    (1, 6),
-    (1, 7),
-    (1, 8),
     (2, 3),
     (2, 4),
     (2, 5),
@@ -33,13 +30,6 @@ RHYTHM_WINDOW_STRATA = (
     (2, 7),
     (2, 8),
     (2, 16),
-    (3, 3),
-    (3, 4),
-    (3, 5),
-    (3, 6),
-    (3, 7),
-    (3, 8),
-    (3, 16),
 )
 DESCRIPTOR_COLUMNS = (
     "spacing_median",
@@ -301,12 +291,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build random Fourier motif signatures from motif windows.")
     parser.add_argument("--motifs-dir", type=str, default=DEFAULT_MOTIFS_DIR)
     parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--rff-dim", type=int, default=16)
+    parser.add_argument("--rff-dim", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=500_000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--bandwidth-scale", type=float, default=0.5)
+    parser.add_argument("--bandwidth-scale", type=float, default=1.0)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
-    parser.add_argument("--no-l2-normalize", action="store_true")
+    parser.add_argument("--l2-normalize", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -318,7 +308,7 @@ def main() -> None:
         seed=args.seed,
         bandwidth_scale=args.bandwidth_scale,
         device_name=args.device,
-        l2_normalize=not args.no_l2_normalize,
+        l2_normalize=args.l2_normalize,
         overwrite=args.overwrite,
     )
 
