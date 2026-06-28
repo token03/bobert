@@ -43,21 +43,17 @@ RHYTHM_WINDOW_STRATA = (
 )
 DESCRIPTOR_COLUMNS = (
     "spacing_median",
-    "spacing_iqr_ratio",
+    "min_spacing_ratio",
     "spacing_max_ratio",
     "spacing_trend",
     "linearity",
     "area_ratio",
     "mean_abs_turn",
-    "turn_iqr",
     "turn_sign_consistency",
-    "turn_alternation",
     "closure_ratio",
-    "spacing_outlier_z",
     "localized_anomaly_ratio",
     "slider_frac",
     "max_slider_occupancy",
-    "slider_exit_disruption",
 )
 READ_COLUMNS = (
     "beatmap_id",
@@ -77,9 +73,14 @@ def _resolve_device(device: str) -> torch.device:
 
 def _descriptor_expr(name: str) -> pl.Expr:
     expr = pl.col(name).cast(pl.Float64)
-    if name == "spacing_outlier_z":
-        expr = expr.clip(-20.0, 20.0)
-    if name in {"slider_exit_disruption", "max_slider_occupancy"}:
+    if name == "spacing_median":
+        expr = expr.clip(0.0, 640.0).log1p()
+    if name in {"spacing_max_ratio", "area_ratio"}:
+        expr = expr.clip(0.0, 64.0).log1p()
+    if name == "spacing_trend":
+        expr = expr.clip(-64.0, 64.0)
+        expr = pl.when(expr < 0.0).then(-(-expr).log1p()).otherwise(expr.log1p())
+    if name == "max_slider_occupancy":
         expr = expr.clip(0.0, 20.0).log1p()
     return expr.alias(name)
 
@@ -136,11 +137,16 @@ def _load_beatmap_ids(windows_path: Path) -> np.ndarray:
 
 
 def _transform_descriptors(values: np.ndarray) -> None:
-    outlier_idx = DESCRIPTOR_COLUMNS.index("spacing_outlier_z")
-    values[:, outlier_idx] = np.clip(values[:, outlier_idx], -20.0, 20.0)
-    for name in ("slider_exit_disruption", "max_slider_occupancy"):
+    index = DESCRIPTOR_COLUMNS.index("spacing_median")
+    values[:, index] = np.log1p(np.clip(values[:, index], 0.0, 640.0))
+    for name in ("spacing_max_ratio", "area_ratio"):
         index = DESCRIPTOR_COLUMNS.index(name)
-        values[:, index] = np.log1p(np.clip(values[:, index], 0.0, 20.0))
+        values[:, index] = np.log1p(np.clip(values[:, index], 0.0, 64.0))
+    index = DESCRIPTOR_COLUMNS.index("spacing_trend")
+    clipped = np.clip(values[:, index], -64.0, 64.0)
+    values[:, index] = np.sign(clipped) * np.log1p(np.abs(clipped))
+    index = DESCRIPTOR_COLUMNS.index("max_slider_occupancy")
+    values[:, index] = np.log1p(np.clip(values[:, index], 0.0, 20.0))
 
 
 def build_rff_signatures(

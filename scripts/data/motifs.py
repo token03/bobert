@@ -49,9 +49,7 @@ CONTAINER_SCHEMA = {
     "break_after": pl.Int8,
     "slider_frac": pl.Float32,
     "median_spacing": pl.Float32,
-    "spacing_iqr_ratio": pl.Float32,
     "linearity": pl.Float32,
-    "cut_score_max": pl.Float32,
 }
 
 WINDOW_SCHEMA = {
@@ -63,27 +61,21 @@ WINDOW_SCHEMA = {
     "container_len": pl.Int32,
     "rhythm_class": pl.Int8,
     "spacing_median": pl.Float32,
-    "spacing_iqr_ratio": pl.Float32,
+    "min_spacing_ratio": pl.Float32,
     "spacing_max_ratio": pl.Float32,
     "spacing_trend": pl.Float32,
     "linearity": pl.Float32,
     "area_ratio": pl.Float32,
     "mean_abs_turn": pl.Float32,
-    "turn_iqr": pl.Float32,
     "turn_sign_consistency": pl.Float32,
-    "turn_alternation": pl.Float32,
     "closure_ratio": pl.Float32,
-    "spacing_outlier_z": pl.Float32,
     "localized_anomaly_ratio": pl.Float32,
     "slider_frac": pl.Float32,
     "max_slider_occupancy": pl.Float32,
-    "slider_exit_disruption": pl.Float32,
 }
 WINDOW_DESCRIPTOR_COLUMNS = tuple(list(WINDOW_SCHEMA)[7:])
 SPACING_MEDIAN_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("spacing_median")
-SPACING_IQR_RATIO_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("spacing_iqr_ratio")
 LINEARITY_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("linearity")
-SPACING_OUTLIER_Z_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("spacing_outlier_z")
 SLIDER_FRAC_INDEX = WINDOW_DESCRIPTOR_COLUMNS.index("slider_frac")
 HITOBJECT_COLUMNS = [
     "beatmap_id",
@@ -95,8 +87,6 @@ HITOBJECT_COLUMNS = [
     "pixel_length",
     "bpm",
     "slider_repeats",
-    "slider_end_x",
-    "slider_end_y",
 ]
 
 
@@ -120,13 +110,6 @@ def _quantile_sorted(values: np.ndarray, quantile: float) -> float:
     upper = min(lower + 1, size - 1)
     fraction = position - lower
     return float(values[lower] * (1.0 - fraction) + values[upper] * fraction)
-
-
-def _iqr(values: np.ndarray) -> float:
-    if values.size == 0:
-        return 0.0
-    sorted_values = np.sort(values)
-    return _quantile_sorted(sorted_values, 0.75) - _quantile_sorted(sorted_values, 0.25)
 
 
 def _linearity(points: np.ndarray) -> float:
@@ -225,13 +208,13 @@ def _iter_containers(rhythm: np.ndarray, break_reasons: np.ndarray) -> Iterable[
         edge_start = next_edge
 
 
-def _spacing_descriptors(distances: np.ndarray) -> tuple[float, float, float, float, float, float]:
+def _spacing_descriptors(distances: np.ndarray) -> tuple[float, float, float, float, float]:
     if distances.size == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     sorted_distances = np.sort(distances)
     median = _quantile_sorted(sorted_distances, 0.5)
-    iqr_ratio = (_quantile_sorted(sorted_distances, 0.75) - _quantile_sorted(sorted_distances, 0.25)) / (median + EPS)
+    min_ratio = float(sorted_distances[0]) / (median + EPS)
     max_distance = float(sorted_distances[-1])
     max_ratio = max_distance / (median + EPS)
 
@@ -244,15 +227,13 @@ def _spacing_descriptors(distances: np.ndarray) -> tuple[float, float, float, fl
         trend = 0.0
 
     deviations = np.abs(distances - median)
-    mad = _quantile_sorted(np.sort(deviations), 0.5)
-    outlier_z = float(np.max((distances - median) / (mad + EPS)))
     localized = float((max_distance - median) / (np.sum(deviations) + EPS))
-    return _f32(median), _f32(iqr_ratio), _f32(max_ratio), _f32(trend), _f32(outlier_z), _f32(localized)
+    return _f32(median), _f32(min_ratio), _f32(max_ratio), _f32(trend), _f32(localized)
 
 
-def _turn_descriptors(vectors: np.ndarray) -> tuple[float, float, float, float]:
+def _turn_descriptors(vectors: np.ndarray) -> tuple[float, float]:
     if vectors.shape[0] < 2:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0
 
     v0 = vectors[:-1]
     v1 = vectors[1:]
@@ -268,13 +249,11 @@ def _turn_descriptors(vectors: np.ndarray) -> tuple[float, float, float, float]:
     nonzero = signs[signs != 0]
     if nonzero.size > 0:
         consistency = abs(float(np.sum(nonzero) / nonzero.size))
-        alternation = float(np.mean(nonzero[1:] != nonzero[:-1])) if nonzero.size > 1 else 0.0
     else:
         consistency = 0.0
-        alternation = 0.0
 
     abs_turns = np.abs(turns)
-    return _f32(float(np.sum(abs_turns) / abs_turns.size)), _f32(_iqr(abs_turns)), _f32(consistency), _f32(alternation)
+    return _f32(float(np.sum(abs_turns) / abs_turns.size)), _f32(consistency)
 
 
 def _area_ratio(points: np.ndarray, spacing_median: float) -> float:
@@ -290,17 +269,13 @@ def _area_ratio(points: np.ndarray, spacing_median: float) -> float:
 def _slider_descriptors(
     is_slider: np.ndarray,
     times: np.ndarray,
-    points: np.ndarray,
-    end_points: np.ndarray,
     end_times: np.ndarray,
-    spacing_median: float,
-) -> tuple[float, float, float]:
+) -> tuple[float, float]:
     if is_slider.size == 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0
 
     slider_frac = float(np.count_nonzero(is_slider) / is_slider.size)
     occupancy = 0.0
-    disruption = 0.0
     for i in np.flatnonzero(is_slider):
         if i + 1 >= times.size:
             continue
@@ -308,46 +283,35 @@ def _slider_descriptors(
         duration = float(end_times[i] - times[i])
         if next_dt > 0:
             occupancy = max(occupancy, duration / (next_dt + EPS))
-
-        head_dist = math.hypot(points[i + 1, 0] - points[i, 0], points[i + 1, 1] - points[i, 1])
-        end_dist = math.hypot(points[i + 1, 0] - end_points[i, 0], points[i + 1, 1] - end_points[i, 1])
-        disruption = max(disruption, abs(end_dist - head_dist) / (spacing_median + EPS))
-    return _f32(slider_frac), _f32(occupancy), _f32(disruption)
+    return _f32(slider_frac), _f32(occupancy)
 
 
 def _window_descriptors(
     points: np.ndarray,
     times: np.ndarray,
     is_slider: np.ndarray,
-    end_points: np.ndarray,
     end_times: np.ndarray,
 ) -> dict[str, float]:
     vectors = points[1:] - points[:-1]
     distances = np.sqrt(vectors[:, 0] * vectors[:, 0] + vectors[:, 1] * vectors[:, 1])
-    spacing_median, spacing_iqr_ratio, spacing_max_ratio, spacing_trend, spacing_outlier_z, localized_anomaly_ratio = _spacing_descriptors(distances)
-    mean_abs_turn, turn_iqr, turn_sign_consistency, turn_alternation = _turn_descriptors(vectors)
+    spacing_median, min_spacing_ratio, spacing_max_ratio, spacing_trend, localized_anomaly_ratio = _spacing_descriptors(distances)
+    mean_abs_turn, turn_sign_consistency = _turn_descriptors(vectors)
     path_length = float(np.sum(distances))
     closure_ratio = math.hypot(points[-1, 0] - points[0, 0], points[-1, 1] - points[0, 1]) / (path_length + EPS) if points.shape[0] > 1 else 0.0
-    slider_frac, max_slider_occupancy, slider_exit_disruption = _slider_descriptors(
-        is_slider, times, points, end_points, end_times, spacing_median
-    )
+    slider_frac, max_slider_occupancy = _slider_descriptors(is_slider, times, end_times)
     return {
         "spacing_median": spacing_median,
-        "spacing_iqr_ratio": spacing_iqr_ratio,
+        "min_spacing_ratio": min_spacing_ratio,
         "spacing_max_ratio": spacing_max_ratio,
         "spacing_trend": spacing_trend,
         "linearity": _f32(_linearity(points)),
         "area_ratio": _area_ratio(points, spacing_median),
         "mean_abs_turn": mean_abs_turn,
-        "turn_iqr": turn_iqr,
         "turn_sign_consistency": turn_sign_consistency,
-        "turn_alternation": turn_alternation,
         "closure_ratio": _f32(closure_ratio),
-        "spacing_outlier_z": spacing_outlier_z,
         "localized_anomaly_ratio": localized_anomaly_ratio,
         "slider_frac": slider_frac,
         "max_slider_occupancy": max_slider_occupancy,
-        "slider_exit_disruption": slider_exit_disruption,
     }
 
 
@@ -377,23 +341,14 @@ def _sorted_slice(values: np.ndarray, start_idx: int, end_idx: int) -> np.ndarra
 
 
 @njit(cache=True)
-def _iqr_slice_jit(values: np.ndarray, start_idx: int, end_idx: int) -> float:
+def _spacing_descriptors_jit(distances: np.ndarray, start_idx: int, end_idx: int) -> tuple[float, float, float, float, float]:
     size = end_idx - start_idx
     if size <= 0:
-        return 0.0
-    sorted_values = _sorted_slice(values, start_idx, end_idx)
-    return _quantile_sorted_jit(sorted_values, 0.75) - _quantile_sorted_jit(sorted_values, 0.25)
-
-
-@njit(cache=True)
-def _spacing_descriptors_jit(distances: np.ndarray, start_idx: int, end_idx: int) -> tuple[float, float, float, float, float, float]:
-    size = end_idx - start_idx
-    if size <= 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     sorted_distances = _sorted_slice(distances, start_idx, end_idx)
     median = _quantile_sorted_jit(sorted_distances, 0.5)
-    iqr_ratio = (_quantile_sorted_jit(sorted_distances, 0.75) - _quantile_sorted_jit(sorted_distances, 0.25)) / (median + EPS)
+    min_ratio = float(sorted_distances[0]) / (median + EPS)
     max_distance = float(sorted_distances[size - 1])
     max_ratio = max_distance / (median + EPS)
 
@@ -414,22 +369,12 @@ def _spacing_descriptors_jit(distances: np.ndarray, start_idx: int, end_idx: int
     else:
         trend = 0.0
 
-    deviations = np.empty(size, dtype=np.float64)
     deviation_sum = 0.0
     for i in range(size):
         deviation = abs(distances[start_idx + i] - median)
-        deviations[i] = deviation
         deviation_sum += deviation
-    sorted_deviations = np.sort(deviations)
-    mad = _quantile_sorted_jit(sorted_deviations, 0.5)
-
-    outlier_z = -1.0e308
-    for i in range(size):
-        z = (distances[start_idx + i] - median) / (mad + EPS)
-        if z > outlier_z:
-            outlier_z = z
     localized = (max_distance - median) / (deviation_sum + EPS)
-    return median, iqr_ratio, max_ratio, trend, outlier_z, localized
+    return median, min_ratio, max_ratio, trend, localized
 
 
 @njit(cache=True)
@@ -492,9 +437,8 @@ def _window_descriptors_precomputed_jit(
     turn_signs: np.ndarray,
     slider_prefix: np.ndarray,
     slider_occupancy: np.ndarray,
-    slider_exit_delta: np.ndarray,
 ) -> tuple[float, ...]:
-    spacing_median, spacing_iqr_ratio, spacing_max_ratio, spacing_trend, spacing_outlier_z, localized_anomaly_ratio = _spacing_descriptors_jit(distances, start_idx, end_idx)
+    spacing_median, min_spacing_ratio, spacing_max_ratio, spacing_trend, localized_anomaly_ratio = _spacing_descriptors_jit(distances, start_idx, end_idx)
 
     turn_start = start_idx
     turn_end = end_idx - 1
@@ -504,31 +448,20 @@ def _window_descriptors_precomputed_jit(
         for idx in range(turn_start, turn_end):
             turn_sum += abs_turns[idx]
         mean_abs_turn = turn_sum / turn_count
-        turn_iqr = _iqr_slice_jit(abs_turns, turn_start, turn_end)
     else:
         mean_abs_turn = 0.0
-        turn_iqr = 0.0
 
     sign_sum = 0.0
     sign_count = 0
-    alternations = 0
-    previous_sign = 0.0
-    has_previous = False
     for idx in range(turn_start, turn_end):
         sign = turn_signs[idx]
         if sign != 0.0:
             sign_sum += sign
             sign_count += 1
-            if has_previous and sign != previous_sign:
-                alternations += 1
-            previous_sign = sign
-            has_previous = True
     if sign_count > 0:
         turn_sign_consistency = abs(sign_sum / sign_count)
-        turn_alternation = alternations / (sign_count - 1) if sign_count > 1 else 0.0
     else:
         turn_sign_consistency = 0.0
-        turn_alternation = 0.0
 
     path_length = 0.0
     for idx in range(start_idx, end_idx):
@@ -543,30 +476,23 @@ def _window_descriptors_precomputed_jit(
     slider_count = int(slider_prefix[end_idx + 1] - slider_prefix[start_idx])
     slider_frac = slider_count / (end_idx - start_idx + 1)
     max_slider_occupancy = 0.0
-    max_slider_exit_delta = 0.0
     for idx in range(start_idx, end_idx):
         if slider_occupancy[idx] > max_slider_occupancy:
             max_slider_occupancy = slider_occupancy[idx]
-        if slider_exit_delta[idx] > max_slider_exit_delta:
-            max_slider_exit_delta = slider_exit_delta[idx]
 
     return (
         spacing_median,
-        spacing_iqr_ratio,
+        min_spacing_ratio,
         spacing_max_ratio,
         spacing_trend,
         _linearity_jit(points, start_idx, end_idx),
         _area_ratio_jit(points, start_idx, end_idx, spacing_median),
         mean_abs_turn,
-        turn_iqr,
         turn_sign_consistency,
-        turn_alternation,
         closure_ratio,
-        spacing_outlier_z,
         localized_anomaly_ratio,
         slider_frac,
         max_slider_occupancy,
-        max_slider_exit_delta / (spacing_median + EPS),
     )
 
 
@@ -579,7 +505,6 @@ def _window_descriptors_precomputed(
     turn_signs: np.ndarray,
     slider_prefix: np.ndarray,
     slider_occupancy: np.ndarray,
-    slider_exit_delta: np.ndarray,
 ) -> tuple[float, ...]:
     return _window_descriptors_precomputed_jit(
         start_idx,
@@ -590,7 +515,6 @@ def _window_descriptors_precomputed(
         turn_signs,
         slider_prefix,
         slider_occupancy,
-        slider_exit_delta,
     )
 
 
@@ -623,8 +547,6 @@ def _process_beatmap(
     x_all = df["x"].to_numpy().astype(np.float64)
     y_all = df["y"].to_numpy().astype(np.float64)
     bpm_all = df["bpm"].to_numpy().astype(np.float64)
-    slider_end_x_all = df["slider_end_x"].to_numpy().astype(np.float64)
-    slider_end_y_all = df["slider_end_y"].to_numpy().astype(np.float64)
     object_types = df["object_type"].to_numpy()
 
     expanded_widths = np.zeros(df.height, dtype=np.int32)
@@ -663,10 +585,6 @@ def _process_beatmap(
     object_type = object_types[onset_rows]
     is_slider = object_type == OBJECT_TYPE_SLIDER
     end_times = end_time_all[onset_rows]
-    end_x = slider_end_x_all[onset_rows]
-    end_y = slider_end_y_all[onset_rows]
-    end_points = np.column_stack([end_x, end_y])
-    end_points[~is_slider] = points[~is_slider]
 
     vectors = points[1:] - points[:-1]
     distances = np.sqrt(vectors[:, 0] * vectors[:, 0] + vectors[:, 1] * vectors[:, 1])
@@ -687,7 +605,6 @@ def _process_beatmap(
 
     slider_prefix = np.concatenate(([0], np.cumsum(is_slider, dtype=np.int32)))
     slider_occupancy = np.zeros(times.shape[0], dtype=np.float64)
-    slider_exit_delta = np.zeros(times.shape[0], dtype=np.float64)
     if times.size > 1:
         valid_slider_edges = is_slider[:-1]
         next_dt = (times[1:] - times[:-1]).astype(np.float64)
@@ -698,12 +615,6 @@ def _process_beatmap(
             out=np.zeros_like(duration),
             where=valid_slider_edges & (next_dt > 0),
         )
-        next_points = points[1:]
-        head_delta = next_points - points[:-1]
-        end_delta = next_points - end_points[:-1]
-        head_dist = np.sqrt(head_delta[:, 0] * head_delta[:, 0] + head_delta[:, 1] * head_delta[:, 1])
-        end_dist = np.sqrt(end_delta[:, 0] * end_delta[:, 0] + end_delta[:, 1] * end_delta[:, 1])
-        slider_exit_delta[:-1] = np.where(valid_slider_edges, np.abs(end_dist - head_dist), 0.0)
 
     dt = (times[1:] - times[:-1]).astype(np.float64)
     rhythm = _classify_rhythms(dt, bpm[1:], tolerance)
@@ -726,7 +637,6 @@ def _process_beatmap(
             turn_signs,
             slider_prefix,
             slider_occupancy,
-            slider_exit_delta,
         )
         containers["beatmap_id"].append(beatmap_id)
         containers["container_id"].append(container_id)
@@ -740,9 +650,7 @@ def _process_beatmap(
         containers["break_after"].append(BREAK_CODES[break_after])
         containers["slider_frac"].append(descriptors[SLIDER_FRAC_INDEX])
         containers["median_spacing"].append(descriptors[SPACING_MEDIAN_INDEX])
-        containers["spacing_iqr_ratio"].append(descriptors[SPACING_IQR_RATIO_INDEX])
         containers["linearity"].append(descriptors[LINEARITY_INDEX])
-        containers["cut_score_max"].append(descriptors[SPACING_OUTLIER_Z_INDEX])
 
         for window_len in WINDOW_LENGTHS[rhythm_class]:
             if window_len > n_onsets:
@@ -759,7 +667,6 @@ def _process_beatmap(
                     turn_signs,
                     slider_prefix,
                     slider_occupancy,
-                    slider_exit_delta,
                 )
                 windows["beatmap_id"].append(beatmap_id)
                 windows["container_id"].append(container_id)
@@ -913,7 +820,7 @@ def main() -> None:
     parser.add_argument("--tolerance", type=float, default=0.10)
     parser.add_argument("--max-gap-ms", type=float, default=2000.0)
     parser.add_argument("--max-context-len", type=int, default=None)
-    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
