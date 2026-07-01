@@ -340,6 +340,35 @@ class SpanMasker(nn.Module):
         self.mean_span_length = mean_span_length
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, d_model))
 
+        continuous = FEATURE_INFO["continuous"]
+        feature_count = len(FEATURE_INFO["names"])
+        left_angle = torch.tensor(
+            [continuous["relative_cos"], continuous["relative_sin"]],
+            dtype=torch.long,
+        )
+        right_delta_velocity = torch.tensor(
+            [continuous["delta_x"], continuous["delta_y"], continuous["velocity"]],
+            dtype=torch.long,
+        )
+        right_angle = torch.tensor(
+            [continuous["relative_cos"], continuous["relative_sin"]],
+            dtype=torch.long,
+        )
+        for name, indices in (
+            ("left_angle", left_angle),
+            ("right_delta_velocity", right_delta_velocity),
+            ("right_angle", right_angle),
+        ):
+            mask = torch.zeros(feature_count, dtype=torch.bool)
+            mask[indices] = True
+            self.register_buffer(f"{name}_indices", indices, persistent=False)
+            self.register_buffer(f"{name}_mask", mask, persistent=False)
+        self.border_feature_groups = (
+            ("left", "left_angle"),
+            ("right", "right_delta_velocity"),
+            ("right", "right_angle"),
+        )
+
         min_len = max(2, int(mean_span_length / 2))
         max_len = int(mean_span_length * 2)
 
@@ -410,10 +439,93 @@ class SpanMasker(nn.Module):
 
         return final_mask
 
-    def forward(
-        self, packed_embed: torch.Tensor, attention_mask: torch.Tensor
+    def _border_mask(
+        self,
+        padded_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
+        side: str,
+    ) -> torch.Tensor:
+        border = torch.zeros_like(padded_mask)
+        if side == "left":
+            border[:, :-1] = (
+                attention_mask[:, :-1] & ~padded_mask[:, :-1] & padded_mask[:, 1:]
+            )
+        else:
+            border[:, 1:] = (
+                padded_mask[:, :-1] & attention_mask[:, 1:] & ~padded_mask[:, 1:]
+            )
+        return border
+
+    def _corrupt_border_group(
+        self,
+        encoder_x: torch.Tensor,
+        source_x: torch.Tensor,
+        source_mask: torch.Tensor,
+        border: torch.Tensor,
+        feature_group: str,
+    ) -> None:
+        corrupt = border & (torch.rand(border.shape, device=encoder_x.device) < 0.9)
+        random_replace = corrupt & (
+            torch.rand(border.shape, device=encoder_x.device) < (1.0 / 9.0)
+        )
+        zero_replace = corrupt & ~random_replace
+
+        features = getattr(self, f"{feature_group}_indices")
+        feature_mask = getattr(self, f"{feature_group}_mask")
+        encoder_x.masked_fill_(
+            zero_replace.unsqueeze(-1) & feature_mask.view(1, 1, -1),
+            0,
+        )
+
+        random_positions = torch.nonzero(random_replace, as_tuple=True)
+        if random_positions[0].numel() == 0:
+            return
+
+        valid_positions = torch.nonzero(source_mask, as_tuple=True)
+        source = torch.randint(
+            valid_positions[0].numel(),
+            (random_positions[0].numel(),),
+            device=encoder_x.device,
+        )
+        encoder_x[
+            random_positions[0][:, None],
+            random_positions[1][:, None],
+            features[None, :],
+        ] = source_x[
+            valid_positions[0][source][:, None],
+            valid_positions[1][source][:, None],
+            features[None, :],
+        ]
+
+    def corrupt_inputs(
+        self, x: torch.Tensor, attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        is_masked = self._generate_mask(attention_mask)[attention_mask]
+        padded_mask = self._generate_mask(attention_mask)
+        encoder_x = x.clone()
+        source_mask = attention_mask & ~padded_mask
+        borders = {
+            side: self._border_mask(padded_mask, attention_mask, side)
+            for side in ("left", "right")
+        }
+        for side, feature_group in self.border_feature_groups:
+            self._corrupt_border_group(
+                encoder_x,
+                x,
+                source_mask,
+                borders[side],
+                feature_group,
+            )
+        return encoder_x, padded_mask
+
+    def forward(
+        self,
+        packed_embed: torch.Tensor,
+        attention_mask: torch.Tensor,
+        padded_mask: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if padded_mask is None:
+            padded_mask = self._generate_mask(attention_mask)
+        is_masked = padded_mask[attention_mask]
 
         rand_for_split = torch.rand(packed_embed.shape[0], device=packed_embed.device)
         mask_replace = is_masked & (rand_for_split < 0.8)
