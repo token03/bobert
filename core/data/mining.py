@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 import re
 from typing import Any, Mapping
@@ -20,6 +19,8 @@ CACHE_LIST_COLUMNS = [
     "ignore_ids",
     "graph_embedding",
 ]
+
+
 @dataclass(frozen=True)
 class MiningConfig:
     top_k: int
@@ -75,7 +76,6 @@ class MiningTable:
     artist_key_sets: list[frozenset[str]]
     mapper_ids: np.ndarray
     graph: np.ndarray
-    pretrain: np.ndarray
 
     @property
     def size(self) -> int:
@@ -200,17 +200,7 @@ def build_cache(
         metric="ip",
         use_gpu=cfg.use_faiss_gpu,
     )
-    pretrain_idx = _topk_faiss(
-        table.pretrain,
-        query_indices,
-        candidate_k=cfg.candidate_k,
-        block_size=cfg.block_size,
-        desc="Pretrain neighbors",
-        metric="ip",
-        use_gpu=cfg.use_faiss_gpu,
-    )
-
-    rows = _build_rows(table, graph_idx, pretrain_idx, cfg)
+    rows = _build_rows(table, graph_idx, cfg)
 
     cache = pl.DataFrame(rows).filter(pl.col("graph_positive_ids").list.len() > 0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -228,9 +218,6 @@ def _load_table(
 
     graph = pl.read_parquet(data_dir / "graph.parquet").rename(
         {"embedding": "graph_embedding"}
-    )
-    pretrain = pl.read_parquet(data_dir / "embeddings-pretrain.parquet").rename(
-        {"embedding": "pretrain_embedding"}
     )
     ratings = pl.read_parquet(data_dir / "ratings.parquet")
     beatmaps = pl.read_parquet(
@@ -253,7 +240,6 @@ def _load_table(
 
     meta = (
         graph.select(["beatmap_id", "graph_embedding"])
-        .join(pretrain.select(["beatmap_id", "pretrain_embedding"]), on="beatmap_id", how="inner")
         .join(beatmaps, on="beatmap_id", how="inner")
         .join(ratings, on="beatmap_id", how="inner")
         .filter(pl.col("mode") == "osu")
@@ -300,9 +286,6 @@ def _to_table(meta: pl.DataFrame) -> MiningTable:
         mapper_ids=_mapper_id_sets(meta),
         graph=_centered_rows(
             np.stack(meta["graph_embedding"].to_list()).astype(np.float32)
-        ),
-        pretrain=_centered_rows(
-            np.stack(meta["pretrain_embedding"].to_list()).astype(np.float32)
         ),
     )
 
@@ -482,11 +465,12 @@ def _effective_neighbors(ids: list[int]) -> tuple[list[int], dict[int, float], f
     return ids[:eff_k], probs, max(0.0, confidence)
 
 
-def _forward_lookup(row: np.ndarray, anchor: int) -> dict[int, int]:
-    return {cid: rank for rank, cid in enumerate(_clean_neighbors(row, anchor), start=1)}
-
-
-def _reverse_ranks(neighbors: np.ndarray, candidates: np.ndarray, target: int, default: int) -> np.ndarray:
+def _reverse_ranks(
+    neighbors: np.ndarray,
+    candidates: np.ndarray,
+    target: int,
+    default: int,
+) -> np.ndarray:
     matches = neighbors[candidates] == target
     found = matches.any(axis=1)
     ranks = np.full(candidates.shape[0], default, dtype=np.float32)
@@ -495,7 +479,10 @@ def _reverse_ranks(neighbors: np.ndarray, candidates: np.ndarray, target: int, d
     return ranks
 
 
-def _support_matrix(neighbors: np.ndarray, size: int) -> tuple[sparse.csr_matrix, list[tuple[int, ...]], np.ndarray]:
+def _support_matrix(
+    neighbors: np.ndarray,
+    size: int,
+) -> tuple[sparse.csr_matrix, list[tuple[int, ...]], np.ndarray]:
     rows = []
     cols = []
     data = []
@@ -534,7 +521,6 @@ def _metadata_match(table: MiningTable, left: int, right: int) -> bool:
 def _build_rows(
     table: MiningTable,
     graph_idx: np.ndarray,
-    pretrain_idx: np.ndarray,
     cfg: MiningConfig,
 ) -> dict[str, list]:
     columns: dict[str, list] = {
@@ -555,21 +541,13 @@ def _build_rows(
     default_rank = cfg.candidate_k + 1
     support_index, graph_effective, graph_confidence = _support_matrix(graph_idx, table.size)
 
-    @lru_cache(maxsize=8192)
-    def pretrain_eff(row_idx: int) -> tuple[int, ...]:
-        ids = _clean_neighbors(pretrain_idx[row_idx], row_idx)
-        eff, _, _ = _effective_neighbors(ids)
-        return tuple(eff)
-
     for row_idx in tqdm(range(table.size), desc="Building mining rows", unit="rows"):
         _build_row(
             table,
             graph_idx,
-            pretrain_idx,
             default_rank,
             graph_effective,
             graph_confidence,
-            pretrain_eff,
             support_index,
             columns,
             row_idx,
@@ -583,11 +561,9 @@ def _build_rows(
 def _build_row(
     table: MiningTable,
     graph_idx: np.ndarray,
-    pretrain_idx: np.ndarray,
     default_rank: int,
     graph_effective: list[tuple[int, ...]],
     graph_confidence: np.ndarray,
-    pretrain_eff,
     support_index: sparse.csr_matrix,
     columns: dict[str, list],
     row_idx: int,
@@ -611,20 +587,18 @@ def _build_row(
     positives: list[tuple[int, float]] = []
     if candidates:
         candidate_arr = np.asarray(candidates, dtype=np.int32)
-        pretrain_forward = _forward_lookup(pretrain_idx[row_idx], row_idx)
 
         rg_ij = np.asarray(graph_forward_ranks, dtype=np.float32)
         rg_ji = _reverse_ranks(graph_idx, candidate_arr, row_idx, default_rank)
-        re_ij = np.asarray(
-            [pretrain_forward.get(int(cid), default_rank) for cid in candidate_arr],
-            dtype=np.float32,
-        )
-        re_ji = _reverse_ranks(pretrain_idx, candidate_arr, row_idx, default_rank)
         m_graph = 1.0 / np.sqrt(rg_ij * rg_ji)
-        m_pretrain = 1.0 / np.sqrt(re_ij * re_ji)
-        surprise = np.maximum(0.0, np.log(m_graph / np.clip(m_pretrain, 1e-12, None)))
-        support = support_index[row_idx].dot(support_index[candidate_arr].T).toarray().ravel().astype(np.float32)
-        utility = m_graph * np.sqrt(m_pretrain) * np.log1p(surprise) * support
+        support = (
+            support_index[row_idx]
+            .dot(support_index[candidate_arr].T)
+            .toarray()
+            .ravel()
+            .astype(np.float32)
+        )
+        utility = m_graph * support
         keep = utility > 0.0
         positives = [
             (int(table.beatmap_ids[cid]), float(weight))
@@ -640,8 +614,9 @@ def _build_row(
     else:
         positive_ids = []
         positive_weights = []
-    surprise_weight = float(np.log1p(max((w for _, w in positives), default=0.0)))
-    anchor_weight = float(graph_confidence[row_idx]) * surprise_weight
+    anchor_weight = float(graph_confidence[row_idx]) * float(
+        np.log1p(max((w for _, w in positives), default=0.0))
+    )
 
     columns["beatmap_id"].append(int(table.beatmap_ids[row_idx]))
     columns["stars"].append(float(table.stars[row_idx]))
@@ -652,15 +627,10 @@ def _build_row(
     columns["song_id"].append(int(table.song_ids[row_idx]))
     columns["graph_positive_ids"].append(positive_ids)
     columns["graph_positive_weights"].append(positive_weights)
-    ignore = set(graph_effective[row_idx]) | set(pretrain_eff(row_idx))
+    ignore = set(graph_effective[row_idx])
     ignore.update(
         cid
         for cid in _clean_neighbors(graph_idx[row_idx], row_idx)
-        if _metadata_match(table, row_idx, cid)
-    )
-    ignore.update(
-        cid
-        for cid in _clean_neighbors(pretrain_idx[row_idx], row_idx)
         if _metadata_match(table, row_idx, cid)
     )
     columns["ignore_ids"].append([int(table.beatmap_ids[cid]) for cid in sorted(ignore)])

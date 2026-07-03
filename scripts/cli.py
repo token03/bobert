@@ -8,6 +8,7 @@ MODEL_COMMANDS = {
     "adapter": "scripts.bobert.adapter",
     "align": "scripts.bobert.align",
     "embed": "scripts.bobert.embed",
+    "eval": "scripts.bobert.eval",
     "pretrain": "scripts.bobert.pretrain",
     "strip": "scripts.bobert.strip",
     "recommend": "scripts.query.recommend",

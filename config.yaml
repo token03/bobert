@@ -29,10 +29,10 @@ model:
   feature_token_dim: 32
 
 runtime:
-  compile_model: true
+  compile_model: false
   compile_mode: "default"
   compile_dynamic: true
-  activation_checkpointing: true
+  activation_checkpointing: false
 
 pretraining:
   trainer:
@@ -82,7 +82,7 @@ pretraining:
 mining:
   top_k: 32
   candidate_k: 512
-  max_candidate_star_delta: 0.5
+  max_candidate_star_delta: 0.25
   block_size: 256
   alignment_size: null
   random_seed: 42
@@ -93,7 +93,7 @@ alignment:
 
   trainer:
     epochs: 1
-    batch_size: 256
+    batch_size: 128
     grad_accum: 1
     grad_clip: 1.0
     precision: "bf16-mixed"
@@ -123,7 +123,7 @@ alignment:
     trainable_layers: 0
 
   pooling:
-    stats: ["mean", "max", "std"]
+    stats: ["mean"]
     stat_dim: 384
     stats_mixer_dim: 384
 
