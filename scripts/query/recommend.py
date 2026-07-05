@@ -8,6 +8,7 @@ import numpy as np
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from tqdm import tqdm
 
 from core.data.mining import load_alignment_cache
 from core.paths import MINING_CACHE_PATH
@@ -30,6 +31,7 @@ from scripts.common.query import (
     load_metadata,
     metadata_by_id,
 )
+from scripts.bobert.col import ColIndex
 
 console = Console()
 MODE_DEFAULT = "default"
@@ -43,6 +45,7 @@ DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
 DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
 DEFAULT_ADAPTER_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
+DEFAULT_COL_INDEX_PATH = Path("data/col")
 CANDIDATE_LIMIT = 8
 
 
@@ -60,8 +63,12 @@ class QueryContext:
     allow_download: bool
     mode: str = MODE_DEFAULT
     embedding_transform: EmbeddingTransform | None = None
+    col_index: ColIndex | None = None
+    maxsim: bool = False
+    candidate_k: int = 500
     candidates_lookup: dict[int, dict] = field(default_factory=dict)
     cache: dict[int, np.ndarray] = field(default_factory=dict)
+    col_cache: dict[int, np.ndarray] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +99,27 @@ class EmbeddingTransform:
 def metadata_set_id(row: dict | None) -> int | None:
     value = clean_value((row or {}).get("beatmapset_id"), None)
     return int(value) if value is not None else None
+
+
+def symmetric_maxsim(query: np.ndarray, candidate: np.ndarray) -> float:
+    sim = query.astype(np.float32, copy=False) @ candidate.astype(np.float32, copy=False).T
+    return float(0.5 * (sim.max(axis=1).mean() + sim.max(axis=0).mean()))
+
+
+def get_col_tokens(raw_input: str, ctx: QueryContext):
+    if ctx.col_index is None:
+        raise ValueError("Col index is not loaded")
+    beatmap_id = extract_beatmap_id(raw_input)
+    if beatmap_id in ctx.col_cache:
+        return beatmap_id, ctx.col_cache[beatmap_id]
+    tokens = ctx.col_index.reconstruct_id(beatmap_id)
+    if tokens is None:
+        if ctx.embedder is None:
+            raise ValueError(f"{beatmap_id} is not available in the loaded col index")
+        osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
+        tokens = ctx.embedder.embed_col_osu(osu_path)
+    ctx.col_cache[beatmap_id] = tokens
+    return beatmap_id, tokens
 
 
 def refresh_missing_metadata(
@@ -255,10 +283,17 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
     else:
         beatmap_id_a, embedding_a = get_embedding(raw_input_a, ctx)
         beatmap_id_b, embedding_b = get_embedding(raw_input_b, ctx)
-    similarity = float(
-        embedding_a.astype(np.float32, copy=False)
-        @ embedding_b.astype(np.float32, copy=False)
-    )
+    if ctx.maxsim:
+        _col_id_a, tokens_a = get_col_tokens(raw_input_a, ctx)
+        _col_id_b, tokens_b = get_col_tokens(raw_input_b, ctx)
+        similarity = symmetric_maxsim(tokens_a, tokens_b)
+        similarity_label = "MaxSim"
+    else:
+        similarity = float(
+            embedding_a.astype(np.float32, copy=False)
+            @ embedding_b.astype(np.float32, copy=False)
+        )
+        similarity_label = "Similarity"
 
     table = Table(show_header=True, header_style="bold magenta")
     add_map_columns(table, side=True)
@@ -267,7 +302,7 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
 
     console.print()
     console.print(table)
-    console.print(f"[bold]Similarity:[/bold] [green]{similarity:.6f}[/green]")
+    console.print(f"[bold]{similarity_label}:[/bold] [green]{similarity:.6f}[/green]")
     rank_ab = pair_rank(beatmap_id_a, beatmap_id_b, embedding_a, ctx)
     rank_ba = pair_rank(beatmap_id_b, beatmap_id_a, embedding_b, ctx)
     console.print(
@@ -362,14 +397,28 @@ def recommend(raw_input: str, ctx: QueryContext):
         results.append((candidate_id, similarity, row))
         if candidate_set_id is not None:
             seen_set_ids.add(candidate_set_id)
-        if len(results) >= ctx.top_k:
+        target_count = ctx.candidate_k if ctx.maxsim else ctx.top_k
+        if len(results) >= target_count:
             break
+
+    if ctx.maxsim:
+        _query_id, query_tokens = get_col_tokens(raw_input, ctx)
+        reranked = []
+        for candidate_id, _similarity, row in tqdm(results, desc="MaxSim", leave=False):
+            candidate_tokens = ctx.col_index.reconstruct_id(candidate_id)
+            if candidate_tokens is None:
+                continue
+            reranked.append((candidate_id, symmetric_maxsim(query_tokens, candidate_tokens), row))
+        results = sorted(reranked, key=lambda item: item[1], reverse=True)[: ctx.top_k]
 
     print_query_table(beatmap_id, ctx, query_row)
     if query_set_id is not None and not ctx.include_same_set:
         console.print(f"[dim]Excluding same beatmapset: {query_set_id}[/dim]")
 
-    print_result_table(refresh_missing_metadata(results, ctx))
+    print_result_table(
+        refresh_missing_metadata(results, ctx),
+        score="MaxSim" if ctx.maxsim else "Sim",
+    )
     console.print()
 
 
@@ -463,6 +512,9 @@ def parse_args():
         help="Pretraining checkpoint used only for lazy --adapter queries",
     )
     parser.add_argument("--top-k", type=int, default=40)
+    parser.add_argument("--maxsim", action="store_true")
+    parser.add_argument("--col-index", default=str(DEFAULT_COL_INDEX_PATH))
+    parser.add_argument("--candidate-k", type=int, default=500)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
     return parser.parse_args()
@@ -479,6 +531,10 @@ def validate_args(args: argparse.Namespace):
         raise SystemExit(
             "Error: --adapter is mutually exclusive with --graph and --candidates"
         )
+    if args.maxsim and not args.pretrain:
+        raise SystemExit("Error: --maxsim requires --pretrain")
+    if args.maxsim and (args.graph or args.candidates or args.adapter):
+        raise SystemExit("Error: --maxsim only supports default --pretrain queries")
 
 
 def query_mode(args: argparse.Namespace) -> str:
@@ -578,6 +634,7 @@ def build_context(args: argparse.Namespace) -> QueryContext:
             adapter_checkpoint_path=adapter_checkpoint_path,
         )
     )
+    col_index = ColIndex(resolve_path(args.col_index)) if args.maxsim else None
 
     return QueryContext(
         beatmap_ids=beatmap_ids,
@@ -592,6 +649,9 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         allow_download=not args.no_download,
         mode=mode,
         embedding_transform=embedding_transform,
+        col_index=col_index,
+        maxsim=args.maxsim,
+        candidate_k=args.candidate_k,
         candidates_lookup=candidates_lookup,
     )
 

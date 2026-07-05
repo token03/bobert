@@ -91,6 +91,7 @@ def load_beatmap_dataset(
     chunk_size: int = 5000,
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
+    include_beat_ids: bool = False,
 ) -> List[Dict[str, Any]]:
     dataset_path = Path(dataset_path).expanduser()
     ratings_path = Path(ratings_path).expanduser()
@@ -170,12 +171,17 @@ def load_beatmap_dataset(
             drain_times, on="beatmap_id", how="left"
         ).with_columns(pl.col("drain_time").fill_null(0.0).cast(pl.Float32))
 
-        hitobject_data, ids, _ = build_feature_tensors(
+        features = build_feature_tensors(
             beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
             hitobjects_chunk,
             max_seq_len=max_seq_len,
             return_original_counts=False,
+            return_beat_ids=include_beat_ids,
         )
+        if include_beat_ids:
+            hitobject_data, ids, _, beat_ids = features
+        else:
+            hitobject_data, ids, _ = features
 
         meta_cols = ["beatmap_id", *DIFFICULTY_ATTRIBUTES, *MAP_FEATURE_ATTRIBUTES]
         meta = beatmaps_chunk.select(meta_cols)
@@ -189,7 +195,7 @@ def load_beatmap_dataset(
             if col != "beatmap_id"
         }
 
-        for bid, vectors in zip(ids, hitobject_data):
+        for index, (bid, vectors) in enumerate(zip(ids, hitobject_data)):
             bid_int = int(bid)
             meta_index = meta_by_id[bid_int]
 
@@ -203,14 +209,16 @@ def load_beatmap_dataset(
                 for key in MAP_FEATURE_ATTRIBUTES
             }
 
-            all_beatmap_data.append(
-                {
-                    "beatmap_id": bid_int,
-                    "hitobjects": vectors,
-                    "difficulty": ratings,
-                    "map_features": beatmap_attrs,
-                }
-            )
+            item = {
+                "beatmap_id": bid_int,
+                "hitobjects": vectors,
+                "difficulty": ratings,
+                "map_features": beatmap_attrs,
+            }
+            if include_beat_ids:
+                item["beat_ids"] = beat_ids[index][: vectors.shape[0]]
+
+            all_beatmap_data.append(item)
 
     print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")
     return all_beatmap_data

@@ -453,10 +453,13 @@ def build_feature_tensors(
     hitobjects_df: pl.DataFrame,
     max_seq_len: Optional[int] = None,
     return_original_counts: bool = True,
-) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]]:
+    return_beat_ids: bool = False,
+) -> Tuple[List[torch.Tensor], np.ndarray, Dict[int, int]] | Tuple[List[torch.Tensor], np.ndarray, Dict[int, int], List[np.ndarray]]:
     beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)
 
     if beatmaps_df.is_empty() or hitobjects_df.is_empty():
+        if return_beat_ids:
+            return [], np.array([]), {}, []
         return [], np.array([]), {}
 
     valid_ids = beatmaps_df.select("beatmap_id").unique()
@@ -471,9 +474,17 @@ def build_feature_tensors(
 
     df = _apply_geometric_features(df)
     df = _apply_temporal_features(df, split_indices)
+    beat_ids = None
+    if return_beat_ids:
+        beat_ids = [
+            ids.astype(np.int64, copy=False)
+            for ids in np.split(df["beat_id"].to_numpy(), split_indices)
+        ]
     df = _apply_object_specific_features(df)
 
     final_data = _finalize_vectors(df, split_indices, max_seq_len)
     unique_ids = ids[np.concatenate(([0], split_indices))]
 
+    if return_beat_ids:
+        return final_data, unique_ids, original_counts, beat_ids
     return final_data, unique_ids, original_counts

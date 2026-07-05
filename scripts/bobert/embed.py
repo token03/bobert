@@ -386,7 +386,7 @@ def export_embeddings(
                     ids_to_load=id_chunk,
                     min_sr=min_sr,
                     max_sr=None,
-                    chunk_size=int(load_chunk_size / 10),  
+                    chunk_size=max(1, int(load_chunk_size / 10)),
                 )
                 if not beatmaps:
                     continue
@@ -501,7 +501,6 @@ def main():
 
     if args.adapter and args.pretrain:
         raise SystemExit("Error: --adapter and --pretrain are mutually exclusive")
-
     if args.adapter:
         export_adapter_embeddings(
             config_path=resolve_path(args.config),
