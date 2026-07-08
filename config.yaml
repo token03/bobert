@@ -36,7 +36,7 @@ runtime:
 
 pretraining:
   trainer:
-    epochs: 30
+    epochs: 6
     batch_size: 32
     grad_accum: 4
     grad_clip: 1.0

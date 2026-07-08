@@ -369,8 +369,8 @@ class SpanMasker(nn.Module):
             ("right", "right_angle"),
         )
 
-        min_len = max(2, int(mean_span_length / 2))
-        max_len = int(mean_span_length * 2)
+        min_len = 1
+        max_len = max(1, int(mean_span_length * 2))
 
         lengths = torch.arange(min_len, max_len + 1, dtype=torch.float32)
         std = mean_span_length / 3.0
@@ -387,57 +387,65 @@ class SpanMasker(nn.Module):
         batch_size, seq_len = attention_mask.shape
         device = attention_mask.device
 
-        valid_lengths = attention_mask.sum(dim=1)
+        final_mask = torch.zeros_like(attention_mask)
+        valid_lengths = attention_mask.sum(dim=1).long()
+        target_counts = (valid_lengths.float() * self.masking_ratio).round().long()
+        max_target = int(target_counts.max().item()) if target_counts.numel() else 0
+        if max_target == 0:
+            return final_mask
 
-        target_mask_count = (valid_lengths * self.masking_ratio * 1.12).round().long()
-
-        max_k = max(1, int(seq_len * self.masking_ratio / self.mean_span_length * 1.5))
-
-        probs = self.span_length_probs.expand(batch_size, -1)
         span_length_indices = torch.multinomial(
-            probs, num_samples=max_k, replacement=True
+            self.span_length_probs.expand(batch_size, -1),
+            num_samples=max_target,
+            replacement=True,
         )
-        span_lengths = self.span_lengths_range[span_length_indices]
+        sampled_lengths = self.span_lengths_range[span_length_indices]
+        cumsum_lengths = sampled_lengths.cumsum(dim=1)
+        num_spans = (cumsum_lengths < target_counts.unsqueeze(1)).sum(dim=1) + 1
 
-        cumsum_lengths = torch.cumsum(span_lengths, dim=1)
+        capacity = (valid_lengths - target_counts + 1).clamp_min(1)
+        num_spans = torch.minimum(num_spans, capacity)
+        max_spans = int(num_spans.max().item())
+        span_slots = torch.arange(max_spans, device=device).view(1, -1)
+        span_active = span_slots < num_spans.unsqueeze(1)
 
-        mask = cumsum_lengths >= target_mask_count.unsqueeze(1)
-        first_indices = mask.long().argmax(dim=1)
-        all_false = ~mask.any(dim=1)
-        first_indices = torch.where(
-            all_false, torch.tensor(max_k - 1, device=device), first_indices
-        )
-        num_spans = (first_indices + 1).clamp(min=1, max=max_k)
+        span_lengths = sampled_lengths[:, :max_spans].clone()
+        span_lengths = span_lengths * span_active.long()
+        span_sums = span_lengths.sum(dim=1)
+        overflow = (span_sums - target_counts).clamp_min(0)
+        last_span = (num_spans - 1).clamp_min(0)
+        span_lengths.scatter_add_(1, last_span[:, None], -overflow[:, None])
 
-        scores = torch.rand(batch_size, seq_len, device=device)
-        scores.masked_fill_(~attention_mask, -1.0)
-        _, top_indices = torch.topk(scores, k=max_k, dim=1)
+        masked_counts = span_lengths.sum(dim=1)
+        extra_gaps = (
+            valid_lengths - masked_counts - (num_spans - 1).clamp_min(0)
+        ).clamp_min(0)
 
-        range_k = torch.arange(max_k, device=device)
-        span_count_mask = range_k < num_spans.unsqueeze(1)
+        gap_slots = torch.arange(max_spans + 1, device=device).view(1, -1)
+        gap_active = gap_slots <= num_spans.unsqueeze(1)
+        gap_weights = torch.rand(batch_size, max_spans + 1, device=device)
+        gap_weights = gap_weights.masked_fill(~gap_active, 0.0)
+        gap_weights = gap_weights / gap_weights.sum(dim=1, keepdim=True).clamp_min(1e-9)
+        gaps = (gap_weights * extra_gaps.unsqueeze(1)).floor().long()
+        if max_spans > 1:
+            interior_gap = (span_slots[:, 1:] < num_spans.unsqueeze(1)).long()
+            gaps[:, 1:max_spans] += interior_gap
+
+        previous_lengths = torch.zeros_like(span_lengths)
+        previous_lengths[:, 1:] = span_lengths[:, :-1].cumsum(dim=1)
+        starts = gaps[:, :max_spans].cumsum(dim=1) + previous_lengths
 
         offsets = torch.arange(self.max_span_len, device=device).view(1, 1, -1)
-        span_active_mask = (
-            offsets < span_lengths.unsqueeze(-1)
-        ) & span_count_mask.unsqueeze(-1)
-
-        indices_to_mask = top_indices.unsqueeze(-1) + offsets
-        indices_to_mask.clamp_(0, seq_len - 1)
-
-        batch_idx = (
+        span_indices = starts.unsqueeze(-1) + offsets
+        token_active = span_active.unsqueeze(-1) & (offsets < span_lengths.unsqueeze(-1))
+        batch_indices = (
             torch.arange(batch_size, device=device)
             .view(-1, 1, 1)
-            .expand_as(indices_to_mask)
+            .expand_as(span_indices)
         )
-        flat_batch_idx = batch_idx[span_active_mask]
-        flat_indices_to_mask = indices_to_mask[span_active_mask]
+        final_mask[batch_indices[token_active], span_indices[token_active]] = True
 
-        prelim_mask = torch.zeros_like(attention_mask)
-        prelim_mask[flat_batch_idx, flat_indices_to_mask] = True
-
-        final_mask = prelim_mask & attention_mask
-
-        return final_mask
+        return final_mask & attention_mask
 
     def _border_mask(
         self,

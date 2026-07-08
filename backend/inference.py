@@ -15,7 +15,12 @@ from core.data.feature import build_feature_tensors, calculate_drain_times
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file
 from core.model.bobert import BobertForAlignment
-from core.model.checkpoint import load_checkpoint, normalizer_from_checkpoint, setup_checkpoint
+from core.model.checkpoint import (
+    load_checkpoint,
+    load_state_for_inference,
+    normalizer_from_checkpoint,
+    setup_checkpoint,
+)
 
 
 MIN_OBJECTS_PER_MAP = 1
@@ -49,7 +54,7 @@ class CpuInferencer:
         OmegaConf.set_struct(config, True)
 
         model = BobertForAlignment.from_config(config, self.device)
-        model.load_state_dict(state, strict=True)
+        load_state_for_inference(model, state)
         model.to(self.device).float().eval()
 
         self.config = config

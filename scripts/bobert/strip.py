@@ -12,6 +12,7 @@ from core.model.bobert import (
 )
 from core.model.checkpoint import (
     load_checkpoint,
+    load_state_for_inference,
     setup_checkpoint,
     strip_checkpoint_state,
 )
@@ -47,7 +48,10 @@ def verify_checkpoint(config_path: Path, checkpoint: dict, phase: str) -> None:
     config, state = setup_checkpoint(load_config(config_path), checkpoint, phase)
     model_cls = BobertForPretraining if phase == "pretraining" else BobertForAlignment
     model = model_cls.from_config(config, torch.device("cpu"))
-    model.load_state_dict(state, strict=True)
+    if phase == "pretraining":
+        load_state_for_inference(model, state)
+    else:
+        model.load_state_dict(state, strict=True)
 
 
 def main() -> int:

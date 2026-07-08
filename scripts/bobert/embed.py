@@ -18,7 +18,12 @@ from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
 from core.model.adapter import EmbeddingAdapter
 from core.model.bobert import BobertForAlignment, BobertForPretraining
-from core.model.checkpoint import load_checkpoint, setup_checkpoint, strip_checkpoint_state
+from core.model.checkpoint import (
+    load_checkpoint,
+    load_state_for_inference,
+    setup_checkpoint,
+    strip_checkpoint_state,
+)
 from core.paths import ADAPTER_DIR, ALIGN_DIR, PRETRAIN_DIR
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
@@ -118,7 +123,7 @@ def load_pretraining_model(config, checkpoint_path: Path, device: torch.device):
     OmegaConf.set_struct(config, True)
 
     model = BobertForPretraining.from_config(config, device)
-    model.load_state_dict(strip_checkpoint_state(state), strict=True)
+    load_state_for_inference(model, strip_checkpoint_state(state))
     print(f"Loaded checkpoint: {checkpoint_path}")
     print(f"State load: loaded={len(state)}")
     print(f"Model dim_feedforward={config.model.dim_feedforward}")

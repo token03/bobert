@@ -89,6 +89,32 @@ def strip_checkpoint_state(state: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+def load_state_for_inference(
+    model: nn.Module, state: dict[str, Any]
+) -> torch.nn.modules.module._IncompatibleKeys:
+    target = getattr(model, "_orig_mod", model)
+    model_state = target.state_dict()
+    optional_keys = {"masker.span_length_probs", "masker.span_lengths_range"}
+    skipped = {
+        key
+        for key in optional_keys
+        if key in state
+        and key in model_state
+        and tuple(model_state[key].shape) != tuple(state[key].shape)
+    }
+    if not skipped:
+        return target.load_state_dict(state, strict=True)
+
+    compatible_state = {key: value for key, value in state.items() if key not in skipped}
+    missing, unexpected = target.load_state_dict(compatible_state, strict=False)
+    if set(missing) != skipped or unexpected:
+        raise RuntimeError(
+            "Pretraining checkpoint is not compatible with this model; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    return torch.nn.modules.module._IncompatibleKeys(missing, unexpected)
+
+
 def normalize_lightning_state_dict(
     state_dict: dict[str, Any], model_is_compiled: bool
 ) -> dict[str, Any]:
