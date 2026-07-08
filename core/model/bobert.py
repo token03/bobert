@@ -49,6 +49,7 @@ class BobertEncoder(nn.Module):
         n_layers: int,
         dim_feedforward: int,
         local_attention_window: int,
+        local_attention_block_size: int,
         global_attention_layers: Sequence[int],
         dropout: float,
         max_seq_len: int,
@@ -80,6 +81,7 @@ class BobertEncoder(nn.Module):
                     dropout,
                     is_global=i in self.global_attention_layers,
                     local_window_size=local_attention_window,
+                    local_block_size=local_attention_block_size,
                     activation_checkpointing=activation_checkpointing,
                     use_flash=use_flash,
                 )
@@ -108,6 +110,9 @@ class BobertEncoder(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=model_config.dropout,
             local_attention_window=model_config.local_attention_window,
+            local_attention_block_size=getattr(
+                model_config, "local_attention_block_size", 256
+            ),
             global_attention_layers=model_config.global_attention_layers,
             max_seq_len=data_config.max_seq_len,
             activation_checkpointing=runtime_config.activation_checkpointing,

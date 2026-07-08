@@ -52,13 +52,15 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         local_window_size: int,
         is_global: bool,
         use_flash: bool,
+        local_block_size: int = 256,
     ):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
-        self.local_window_size = local_window_size
+        self.local_window_size = int(local_window_size)
+        self.local_block_size = int(local_block_size)
         self.is_global = is_global
         self.use_flash = use_flash
 
@@ -128,30 +130,85 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             out = self._forward_torch(q, k, v, cu_seqlens)
         return self.wo(out.view(total_tokens, self.d_model))
 
+    def _to_sdpa_4d(self, x: torch.Tensor) -> torch.Tensor:
+        return x.transpose(0, 1).unsqueeze(0).contiguous().float()
+
+    def _from_sdpa_4d(self, x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        return x.squeeze(0).transpose(0, 1).contiguous().to(dtype)
+
+    def _local_block_mask(
+        self,
+        q_start: int,
+        q_end: int,
+        kv_start: int,
+        kv_end: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        q_idx = torch.arange(q_start, q_end, device=device)
+        kv_idx = torch.arange(kv_start, kv_end, device=device)
+        mask = (q_idx[:, None] - kv_idx[None, :]).abs() <= self.local_window_size
+        return mask.unsqueeze(0).unsqueeze(0)
+
+    def _forward_local_chunked_one(
+        self,
+        q4: torch.Tensor,
+        k4: torch.Tensor,
+        v4: torch.Tensor,
+    ) -> torch.Tensor:
+        seq_len = q4.shape[-2]
+        block = self.local_block_size
+        window = self.local_window_size
+
+        chunks = []
+        for q_start in range(0, seq_len, block):
+            q_end = min(q_start + block, seq_len)
+            kv_start = max(0, q_start - window)
+            kv_end = min(seq_len, q_end + window)
+            mask = self._local_block_mask(
+                q_start,
+                q_end,
+                kv_start,
+                kv_end,
+                q4.device,
+            )
+            out = F.scaled_dot_product_attention(
+                q4[:, :, q_start:q_end, :],
+                k4[:, :, kv_start:kv_end, :],
+                v4[:, :, kv_start:kv_end, :],
+                attn_mask=mask,
+                dropout_p=0.0,
+            )
+            chunks.append(out)
+
+        return torch.cat(chunks, dim=-2)
+
+    def _forward_torch_one(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        seq_len = q.shape[0]
+        q4 = self._to_sdpa_4d(q)
+        k4 = self._to_sdpa_4d(k)
+        v4 = self._to_sdpa_4d(v)
+
+        if self.is_global or seq_len <= self.local_window_size:
+            out4 = F.scaled_dot_product_attention(q4, k4, v4, dropout_p=0.0)
+        else:
+            out4 = self._forward_local_chunked_one(q4, k4, v4)
+
+        return self._from_sdpa_4d(out4, v.dtype)
+
     def _forward_torch(self, q, k, v, cu_seqlens):
+        if cu_seqlens.numel() == 2:
+            return self._forward_torch_one(q, k, v)
+
         outputs = []
         for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist()):
-            q_i = q[start:end].transpose(0, 1).float()
-            k_i = k[start:end].transpose(0, 1).float()
-            v_i = v[start:end].transpose(0, 1).float()
-
-            seq_len = end - start
-            if self.is_global or seq_len <= self.local_window_size:
-                out = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-            else:
-                idx = torch.arange(seq_len, device=q.device)
-                mask = (
-                    idx.unsqueeze(1) - idx.unsqueeze(0)
-                ).abs() <= self.local_window_size
-                out = F.scaled_dot_product_attention(
-                    q_i,
-                    k_i,
-                    v_i,
-                    attn_mask=mask,
-                    dropout_p=0.0,
-                )
-
-            outputs.append(out.transpose(0, 1).to(v.dtype))
+            outputs.append(
+                self._forward_torch_one(q[start:end], k[start:end], v[start:end])
+            )
         return torch.cat(outputs, dim=0)
 
 
@@ -192,6 +249,7 @@ class EncoderLayer(nn.Module):
         local_window_size: int,
         activation_checkpointing: bool,
         use_flash: bool,
+        local_block_size: int = 256,
     ):
         super().__init__()
         self.is_global = is_global
@@ -203,6 +261,7 @@ class EncoderLayer(nn.Module):
             local_window_size=local_window_size,
             is_global=is_global,
             use_flash=use_flash,
+            local_block_size=local_block_size,
         )
 
         self.ffn = SwiGLU(d_model, dim_feedforward)

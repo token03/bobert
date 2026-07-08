@@ -3,6 +3,9 @@ runtime:
   compile_dynamic: false
   activation_checkpointing: false
 
+model:
+  local_attention_block_size: 256
+
 api:
   osu_api_version: "20241024"
   max_recommend_top_k: 200
