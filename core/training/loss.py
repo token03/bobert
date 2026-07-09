@@ -3,7 +3,11 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from core.data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
+from core.data.schema import (
+    DIFFICULTY_ATTRIBUTES,
+    FEATURE_INFO,
+    OBJECT_TYPE_SLIDER_HEAD,
+)
 
 
 def mlm_loss_fn(
@@ -15,13 +19,10 @@ def mlm_loss_fn(
     cont_indices = [FEATURE_INFO["continuous"][name] for name in cont_names]
     slider_feature_names = set(FEATURE_INFO["slider"].keys())
 
-    masked_targets = targets[mask]
     cont_preds = predictions["continuous"]
-    cont_targets = masked_targets[:, cont_indices]
+    cont_targets = targets[:, cont_indices]
 
-    object_type = masked_targets[
-        :, FEATURE_INFO["categorical"]["object_type"]["index"]
-    ].long()
+    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
     is_slider_head = object_type == OBJECT_TYPE_SLIDER_HEAD
     is_slider_cont_feature = torch.tensor(
         [name in slider_feature_names for name in cont_names], device=targets.device
@@ -35,11 +36,11 @@ def mlm_loss_fn(
     cont_loss = F.smooth_l1_loss(
         cont_preds, final_cont_targets, reduction="none", beta=0.5
     )
-    total_loss = (cont_loss * include_cont_loss).sum()
+    total_loss = (cont_loss * include_cont_loss * mask[:, None]).sum()
 
     for name, info in FEATURE_INFO["categorical"].items():
         cat_logits = predictions["categorical"][name]
-        cat_targets = masked_targets[:, info["index"]].long()
+        cat_targets = targets[:, info["index"]].long()
 
         if name in slider_feature_names:
             final_target = torch.where(
@@ -53,9 +54,9 @@ def mlm_loss_fn(
             final_target,
             reduction="none",
         )
-        total_loss += loss.sum()
+        total_loss += (loss * mask).sum()
 
-    num_masked = masked_targets.shape[0]
+    num_masked = mask.sum()
     return total_loss / (num_masked + 1e-9)
 
 
@@ -132,7 +133,9 @@ def contrastive_loss_fn(
     beatmap_ids = labels["beatmap_ids"].to(device=device, dtype=torch.long)
     beatmapset_ids = labels["beatmapset_ids"].to(device=device, dtype=torch.long)
     song_ids = labels["song_ids"].to(device=device, dtype=torch.long)
-    graph_positive_ids = labels["graph_positive_ids"].to(device=device, dtype=torch.long)
+    graph_positive_ids = labels["graph_positive_ids"].to(
+        device=device, dtype=torch.long
+    )
     graph_positive_weights = labels["graph_positive_weights"].to(device=device)
     ignore_ids = labels["ignore_ids"].to(device=device, dtype=torch.long)
 
@@ -157,10 +160,9 @@ def contrastive_loss_fn(
             & (sorted_ids[safe_positions] == graph_positive_ids)
         )
         if torch.any(positive_matches):
-            rows = (
-                torch.arange(batch_size, device=device)[:, None]
-                .expand_as(graph_positive_ids)[positive_matches]
-            )
+            rows = torch.arange(batch_size, device=device)[:, None].expand_as(
+                graph_positive_ids
+            )[positive_matches]
             cols = sorted_indices[safe_positions[positive_matches]]
             values = 1.0 - graph_positive_weights[positive_matches].clamp_min(0.0)
             positive_keep = torch.ones(
@@ -178,13 +180,17 @@ def contrastive_loss_fn(
 
     valid_sets = beatmapset_ids >= 0
     same_known_set = (
-        beatmapset_ids[:, None] == beatmapset_ids[None, :]
-    ) & valid_sets[:, None] & valid_sets[None, :]
+        (beatmapset_ids[:, None] == beatmapset_ids[None, :])
+        & valid_sets[:, None]
+        & valid_sets[None, :]
+    )
 
     valid_songs = song_ids >= 0
     same_known_song = (
-        song_ids[:, None] == song_ids[None, :]
-    ) & valid_songs[:, None] & valid_songs[None, :]
+        (song_ids[:, None] == song_ids[None, :])
+        & valid_songs[:, None]
+        & valid_songs[None, :]
+    )
 
     mined_ignore_mask = torch.zeros(
         batch_size, batch_size, device=device, dtype=torch.bool
@@ -198,10 +204,9 @@ def contrastive_loss_fn(
             in_bounds & (ignore_ids >= 0) & (sorted_ids[safe_positions] == ignore_ids)
         )
         if torch.any(ignore_matches):
-            rows = (
-                torch.arange(batch_size, device=device)[:, None]
-                .expand_as(ignore_ids)[ignore_matches]
-            )
+            rows = torch.arange(batch_size, device=device)[:, None].expand_as(
+                ignore_ids
+            )[ignore_matches]
             cols = sorted_indices[safe_positions[ignore_matches]]
             mined_ignore_mask[rows, cols] = True
 

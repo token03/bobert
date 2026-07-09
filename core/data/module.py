@@ -258,7 +258,8 @@ class PretrainData(pl.LightningDataModule):
         collate = partial(
             collate_pretrain,
             max_seq_len=self.max_seq_len,
-            length_buckets=length_buckets(self.data_config, self.phase_config),
+            masking_ratio=self.phase_config.masking.ratio,
+            mean_span_length=self.phase_config.masking.mean_span_length,
         )
         return bucketed_loader(self.train_dataset, collate, self, True)
 
@@ -266,7 +267,8 @@ class PretrainData(pl.LightningDataModule):
         collate = partial(
             collate_pretrain,
             max_seq_len=self.max_seq_len,
-            length_buckets=length_buckets(self.data_config, self.phase_config),
+            masking_ratio=self.phase_config.masking.ratio,
+            mean_span_length=self.phase_config.masking.mean_span_length,
         )
         return bucketed_loader(self.val_dataset, collate, self, False)
 
@@ -455,7 +457,9 @@ class AdapterData(pl.LightningDataModule):
             .collect()
         )
         beatmap_ids = [int(bid) for bid in embeddings["beatmap_id"].to_list()]
-        embedding_array = np.asarray(embeddings["embedding"].to_list(), dtype=np.float32)
+        embedding_array = np.asarray(
+            embeddings["embedding"].to_list(), dtype=np.float32
+        )
         normalized = embedding_array / np.maximum(
             np.linalg.norm(embedding_array, axis=1, keepdims=True), 1e-12
         )
@@ -505,7 +509,9 @@ class AdapterData(pl.LightningDataModule):
             if int(bid) in mining_targets
         }
         self.train_epoch_size = min(
-            int(self.phase_config.data.alignment_size or len(self.train_anchor_indices)),
+            int(
+                self.phase_config.data.alignment_size or len(self.train_anchor_indices)
+            ),
             len(self.train_anchor_indices),
         )
         print(

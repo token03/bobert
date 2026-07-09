@@ -11,10 +11,10 @@ data:
   max_sr: 14.0
 
   dataloader:
-    num_workers: 1
-    pin_memory: false
+    num_workers: 2
+    pin_memory: true
     persistent_workers: false
-    prefetch_factor: 1
+    prefetch_factor: 2
 
 model:
   d_model: 384

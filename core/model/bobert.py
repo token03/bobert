@@ -182,9 +182,7 @@ class BobertEncoder(nn.Module):
         attention_mask: torch.Tensor,
         cu_seqlens: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        packed_embeddings, cu_seqlens = self._embed(
-            x, attention_mask, cu_seqlens
-        )
+        packed_embeddings, cu_seqlens = self._embed(x, attention_mask, cu_seqlens)
         max_seqlen = x.shape[1]
         packed_output = self.encode(
             packed_embeddings,
@@ -265,7 +263,9 @@ class BobertForPretraining(nn.Module):
         )
         difficulty_head = DifficultyHead(stats_pooler.output_dim)
 
-        model = cls(base_model, masking_strategy, mlm_head, stats_pooler, difficulty_head)
+        model = cls(
+            base_model, masking_strategy, mlm_head, stats_pooler, difficulty_head
+        )
         model = model.to(device)
 
         if config.runtime.compile_model:
@@ -337,8 +337,12 @@ class BobertForPretraining(nn.Module):
                     f"beat_ids length must match packed tokens: "
                     f"{beat_ids.shape[0]} != {packed_output.shape[0]}"
                 )
-            starts = torch.ones(beat_ids.shape[0], device=beat_ids.device, dtype=torch.bool)
-            starts[1:] = (beat_ids[1:] != beat_ids[:-1]) | (map_index[1:] != map_index[:-1])
+            starts = torch.ones(
+                beat_ids.shape[0], device=beat_ids.device, dtype=torch.bool
+            )
+            starts[1:] = (beat_ids[1:] != beat_ids[:-1]) | (
+                map_index[1:] != map_index[:-1]
+            )
             group_ids = starts.cumsum(0) - 1
             group_count = int(group_ids[-1].item()) + 1 if group_ids.numel() else 0
             col_embedding = torch.zeros(
@@ -377,6 +381,45 @@ class BobertForPretraining(nn.Module):
             padded_mask,
         )
         max_seqlen = x.shape[1]
+
+        packed_output = self.bert.encode(
+            packed_input,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+
+        mlm_predictions = self.mlm_head(packed_output, is_masked)
+
+        pooled_output = self.stats_pooler(
+            packed_output,
+            cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        difficulty_predictions = self.difficulty_head(pooled_output)
+
+        predictions = {"mlm": mlm_predictions, "difficulty": difficulty_predictions}
+
+        return predictions, packed_targets, is_masked
+
+    def forward_packed_pretrain(
+        self,
+        packed_vectors: torch.Tensor,
+        packed_padded_mask: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
+        packed_targets = packed_vectors
+
+        encoder_vectors = self.masker.corrupt_inputs_packed(
+            packed_vectors,
+            packed_padded_mask,
+            cu_seqlens,
+        )
+        packed_embed = self.bert.embed_sequences(encoder_vectors)
+        packed_input, is_masked = self.masker.forward_packed(
+            packed_embed,
+            packed_padded_mask,
+        )
 
         packed_output = self.bert.encode(
             packed_input,
@@ -585,12 +628,8 @@ class BobertForAlignment(nn.Module):
             map_features,
         )
 
-    def embed(
-        self, *args, **kwargs
-    ) -> torch.Tensor:
+    def embed(self, *args, **kwargs) -> torch.Tensor:
         return self.forward(*args, **kwargs)["embedding"]
 
-    def embed_packed(
-        self, *args, **kwargs
-    ) -> torch.Tensor:
+    def embed_packed(self, *args, **kwargs) -> torch.Tensor:
         return self.forward_packed(*args, **kwargs)["embedding"]

@@ -103,12 +103,17 @@ class PretrainingModule(BobertLightningModule):
         self.mlm_metrics = MLMMetrics(feature_info, self.device)
         self.difficulty_metrics = DifficultyMetrics(self.device)
 
-    def forward(self, vectors, attention_mask, cu_seqlens):
-        return self.model(vectors, attention_mask, cu_seqlens)
+    def forward(self, batch):
+        return self.model.forward_packed_pretrain(
+            batch["packed_vectors"],
+            batch["packed_padded_mask"],
+            batch["cu_seqlens"],
+            int(batch["max_seqlen"].item()),
+        )
 
-    def _shared_step(self, batch: Tuple):
-        vectors, attention_mask, difficulty_labels, cu_seqlens = batch
-        predictions, targets, mask = self(vectors, attention_mask, cu_seqlens)
+    def _shared_step(self, batch: Dict[str, Any]):
+        difficulty_labels = batch["labels"]
+        predictions, targets, mask = self(batch)
 
         loss_dict = pretrain_loss_fn(
             predictions, targets, mask, difficulty_labels, self.config
@@ -147,18 +152,16 @@ class PretrainingModule(BobertLightningModule):
         optimizer.zero_grad(set_to_none=True)
 
         if self.global_rank == 0:
-            vectors = warmup_batch[0]
             print(
                 "Preallocation complete. "
-                f"Ran B={vectors.shape[0]}, L={vectors.shape[1]} using {target_dtype}."
+                f"Ran B={warmup_batch['batch_size']}, L={max_seq_len} using {target_dtype}."
             )
 
-    def _create_preallocation_batch(self, max_seq_len: int) -> Tuple:
+    def _create_preallocation_batch(self, max_seq_len: int) -> Dict[str, Any]:
         batch_size = self._preallocation_batch_size(max_seq_len)
         vector_dim = self.datamodule.vector_dim or VECTOR_DIM
-        vectors = torch.randn(
-            batch_size,
-            max_seq_len,
+        packed_vectors = torch.randn(
+            batch_size * max_seq_len,
             vector_dim,
             device=self.device,
             dtype=torch.float32,
@@ -166,15 +169,15 @@ class PretrainingModule(BobertLightningModule):
 
         feature_info = FEATURE_INFO
         for info in feature_info["categorical"].values():
-            vectors[..., info["index"]] = torch.randint(
+            packed_vectors[:, info["index"]] = torch.randint(
                 info["cardinality"],
-                (batch_size, max_seq_len),
+                (batch_size * max_seq_len,),
                 device=self.device,
-            ).to(vectors.dtype)
+            ).to(packed_vectors.dtype)
 
-        attention_mask = torch.ones(
-            batch_size, max_seq_len, device=self.device, dtype=torch.bool
-        )
+        packed_padded_mask = torch.rand(
+            batch_size * max_seq_len, device=self.device
+        ) < float(self.config.pretraining.masking.ratio)
         cu_seqlens = torch.arange(
             0,
             (batch_size + 1) * max_seq_len,
@@ -182,11 +185,18 @@ class PretrainingModule(BobertLightningModule):
             device=self.device,
             dtype=torch.int32,
         )
-        difficulty_labels = {
+        labels = {
             name: torch.zeros(batch_size, device=self.device, dtype=torch.float32)
             for name in DIFFICULTY_ATTRIBUTES
         }
-        return vectors, attention_mask, difficulty_labels, cu_seqlens
+        return {
+            "packed_vectors": packed_vectors,
+            "packed_padded_mask": packed_padded_mask,
+            "labels": labels,
+            "cu_seqlens": cu_seqlens,
+            "max_seqlen": torch.tensor(max_seq_len, device=self.device),
+            "batch_size": batch_size,
+        }
 
     def _preallocation_batch_size(self, max_seq_len: int) -> int:
         phase_batch_size = int(self.config.pretraining.trainer.batch_size)
@@ -196,7 +206,7 @@ class PretrainingModule(BobertLightningModule):
             max_seq_len,
         )
 
-    def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         _, _, _, _, loss_dict = self._shared_step(batch)
 
         metrics_to_log = {
@@ -212,8 +222,10 @@ class PretrainingModule(BobertLightningModule):
 
         return loss_dict["total_loss"]
 
-    def validation_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
-        predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(batch)
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+        predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(
+            batch
+        )
 
         self.mlm_metrics.update(
             predictions["mlm"],
@@ -240,7 +252,9 @@ class PretrainingModule(BobertLightningModule):
 
     def on_validation_epoch_end(self):
         mlm_results = self.flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
-        diff_results = self.flatten_metrics(self.difficulty_metrics.compute(), prefix="val_diff")
+        diff_results = self.flatten_metrics(
+            self.difficulty_metrics.compute(), prefix="val_diff"
+        )
 
         self.log_dict(mlm_results, sync_dist=True)
         self.log_dict(diff_results, sync_dist=True)

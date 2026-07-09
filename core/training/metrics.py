@@ -31,7 +31,15 @@ class MLMMetrics(nn.Module):
         for name, info in feature_info["categorical"].items():
             num_classes = info["cardinality"]
             self.cat_metrics[name] = MetricCollection(
-                {"f2": FBetaScore(task="multiclass", num_classes=num_classes, beta=2.0, average="weighted", zero_division=0)}
+                {
+                    "f2": FBetaScore(
+                        task="multiclass",
+                        num_classes=num_classes,
+                        beta=2.0,
+                        average="weighted",
+                        zero_division=0,
+                    )
+                }
             ).to(device)
 
         self.loss_metric = MeanMetric().to(device)
@@ -52,6 +60,14 @@ class MLMMetrics(nn.Module):
             return
 
         masked_targets = targets[mask]
+        continuous_predictions = predictions["continuous"]
+        if continuous_predictions.shape[0] == targets.shape[0]:
+            continuous_predictions = continuous_predictions[mask]
+        categorical_predictions = {}
+        for name, logits in predictions["categorical"].items():
+            categorical_predictions[name] = (
+                logits[mask] if logits.shape[0] == targets.shape[0] else logits
+            )
         object_type_idx = self.feature_info["categorical"]["object_type"]["index"]
         object_types = masked_targets[:, object_type_idx].long()
 
@@ -63,17 +79,17 @@ class MLMMetrics(nn.Module):
                 slider_mask = object_types == OBJECT_TYPE_SLIDER_HEAD
                 if not torch.any(slider_mask):
                     continue
-                preds = predictions["continuous"][slider_mask, pred_idx]
+                preds = continuous_predictions[slider_mask, pred_idx]
                 targs = masked_targets[slider_mask, target_idx]
             else:
-                preds = predictions["continuous"][:, pred_idx]
+                preds = continuous_predictions[:, pred_idx]
                 targs = masked_targets[:, target_idx]
 
             abs_error = torch.abs(preds - targs)
             self.cont_metrics[name].update(abs_error)
 
         for name, info in self.feature_info["categorical"].items():
-            pred_logits = predictions["categorical"][name]
+            pred_logits = categorical_predictions[name]
             pred_classes = torch.argmax(pred_logits, dim=-1)
             target_classes = masked_targets[:, info["index"]].long()
             self.cat_metrics[name]["f2"].update(pred_classes, target_classes)

@@ -199,6 +199,51 @@ def batch_packed_vectors(
     }
 
 
+def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tensor:
+    mask = torch.zeros(int(length), dtype=torch.bool)
+    target = round(int(length) * float(ratio))
+    if target <= 0:
+        return mask
+
+    max_span_len = max(1, int(mean_span_length * 2))
+    span_lengths = list(range(1, max_span_len + 1))
+    std = float(mean_span_length) / 3.0
+    weights = [
+        math.exp(-0.5 * ((span_len - mean_span_length) / std) ** 2)
+        for span_len in span_lengths
+    ]
+    total_weight = sum(weights)
+    weights = [weight / total_weight for weight in weights]
+
+    spans = []
+    masked = 0
+    while masked < target and len(spans) < max(1, length - target + 1):
+        span_len = random.choices(span_lengths, weights=weights, k=1)[0]
+        span_len = min(span_len, target - masked)
+        if span_len <= 0:
+            break
+        spans.append(span_len)
+        masked += span_len
+
+    if not spans:
+        return mask
+
+    interior_gaps = max(0, len(spans) - 1)
+    extra_gaps = max(0, int(length) - masked - interior_gaps)
+    gap_weights = [random.random() for _ in range(len(spans) + 1)]
+    gap_weight_sum = sum(gap_weights) or 1.0
+    gaps = [int((weight / gap_weight_sum) * extra_gaps) for weight in gap_weights]
+    gaps[-1] += extra_gaps - sum(gaps)
+
+    pos = gaps[0]
+    for idx, span_len in enumerate(spans):
+        mask[pos : pos + span_len] = True
+        pos += span_len
+        if idx + 1 < len(spans):
+            pos += 1 + gaps[idx + 1]
+    return mask
+
+
 def batch_padded_vectors(
     vectors: Sequence[torch.Tensor],
     max_seq_len: int,
@@ -293,21 +338,28 @@ def _alignment_labels(
 def collate_pretrain(
     batch: List[Tuple[torch.Tensor, Dict[str, float]]],
     max_seq_len: int,
-    length_buckets: Sequence[int],
+    masking_ratio: float,
+    mean_span_length: float,
 ):
     vectors, attrs = zip(*batch)
-    max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
-    vector_batch = batch_padded_vectors(
-        vectors,
-        max_seq_len,
-        pad_to_len=rounded_pad_length(max_len, max_seq_len, length_buckets),
+    lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    cu_seqlens = torch.nn.functional.pad(
+        torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
-    return (
-        vector_batch["vectors"],
-        vector_batch["attention_mask"],
-        stack_dicts(attrs),
-        vector_batch["cu_seqlens"],
-    )
+    return {
+        "packed_vectors": torch.cat(
+            [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
+        ),
+        "packed_padded_mask": torch.cat(
+            [span_mask(length, masking_ratio, mean_span_length) for length in lengths],
+            dim=0,
+        ),
+        "labels": stack_dicts(attrs),
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": torch.tensor(max(lengths), dtype=torch.long),
+        "batch_size": len(batch),
+    }
 
 
 def collate_align_train(

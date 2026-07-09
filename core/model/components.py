@@ -68,10 +68,12 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
         if use_flash:
-            from flash_attn import flash_attn_varlen_qkvpacked_func
-            from flash_attn.layers.rotary import apply_rotary_emb as flash_apply_rotary_emb
+            from flash_attn import flash_attn_varlen_func
+            from flash_attn.layers.rotary import (
+                apply_rotary_emb as flash_apply_rotary_emb,
+            )
 
-            self.flash_attn = flash_attn_varlen_qkvpacked_func
+            self.flash_attn = flash_attn_varlen_func
             self.flash_rope = flash_apply_rotary_emb
 
     def forward(
@@ -106,10 +108,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 max_seqlen=max_seqlen,
             )
 
-            qkv_flash = qkv.clone()
-            qkv_flash[:, 0] = q
-            qkv_flash[:, 1] = k
-
             window_size = (
                 (-1, -1)
                 if self.is_global
@@ -117,8 +115,12 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             )
 
             out = self.flash_attn(
-                qkv_flash,
+                q,
+                k,
+                v,
                 cu_seqlens,
+                cu_seqlens,
+                max_seqlen,
                 max_seqlen,
                 dropout_p=0.0,
                 causal=False,
@@ -496,7 +498,9 @@ class SpanMasker(nn.Module):
 
         offsets = torch.arange(self.max_span_len, device=device).view(1, 1, -1)
         span_indices = starts.unsqueeze(-1) + offsets
-        token_active = span_active.unsqueeze(-1) & (offsets < span_lengths.unsqueeze(-1))
+        token_active = span_active.unsqueeze(-1) & (
+            offsets < span_lengths.unsqueeze(-1)
+        )
         batch_indices = (
             torch.arange(batch_size, device=device)
             .view(-1, 1, 1)
@@ -584,6 +588,85 @@ class SpanMasker(nn.Module):
             )
         return encoder_x, padded_mask
 
+    def _packed_boundaries(
+        self, cu_seqlens: torch.Tensor, total_tokens: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        starts = torch.zeros(total_tokens, dtype=torch.bool, device=cu_seqlens.device)
+        ends = torch.zeros_like(starts)
+        starts[cu_seqlens[:-1].long()] = True
+        ends[cu_seqlens[1:].long() - 1] = True
+        return starts, ends
+
+    def corrupt_inputs_packed(
+        self,
+        packed_vectors: torch.Tensor,
+        packed_padded_mask: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        encoder_x = packed_vectors.clone()
+        starts, ends = self._packed_boundaries(cu_seqlens, packed_vectors.shape[0])
+        left = (
+            ~packed_padded_mask
+            & torch.roll(packed_padded_mask, shifts=-1, dims=0)
+            & ~ends
+        )
+        right = (
+            torch.roll(packed_padded_mask, shifts=1, dims=0)
+            & ~packed_padded_mask
+            & ~starts
+        )
+
+        random_source = packed_vectors[
+            torch.randint(
+                packed_vectors.shape[0],
+                (packed_vectors.shape[0],),
+                device=packed_vectors.device,
+            )
+        ]
+        for side, feature_group in self.border_feature_groups:
+            border = left if side == "left" else right
+            corrupt = border & (torch.rand(border.shape, device=encoder_x.device) < 0.9)
+            random_replace = corrupt & (
+                torch.rand(border.shape, device=encoder_x.device) < (1.0 / 9.0)
+            )
+            zero_replace = corrupt & ~random_replace
+            feature_mask = getattr(self, f"{feature_group}_mask").view(1, -1)
+            encoder_x = torch.where(
+                zero_replace.unsqueeze(-1) & feature_mask,
+                torch.zeros((), device=encoder_x.device, dtype=encoder_x.dtype),
+                encoder_x,
+            )
+            encoder_x = torch.where(
+                random_replace.unsqueeze(-1) & feature_mask,
+                random_source,
+                encoder_x,
+            )
+        return encoder_x
+
+    def forward_packed(
+        self,
+        packed_embed: torch.Tensor,
+        packed_padded_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        is_masked = packed_padded_mask
+
+        rand_for_split = torch.rand(packed_embed.shape[0], device=packed_embed.device)
+        mask_replace = is_masked & (rand_for_split < 0.8)
+        mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
+
+        random_embed = packed_embed[
+            torch.randint(
+                packed_embed.shape[0],
+                (packed_embed.shape[0],),
+                device=packed_embed.device,
+            )
+        ]
+        mask_token = self.mask_token_embed.to(packed_embed.dtype).view(1, -1)
+        encoder_input = torch.where(mask_random[:, None], random_embed, packed_embed)
+        encoder_input = torch.where(mask_replace[:, None], mask_token, encoder_input)
+
+        return encoder_input, is_masked
+
     def forward(
         self,
         packed_embed: torch.Tensor,
@@ -600,18 +683,16 @@ class SpanMasker(nn.Module):
 
         encoder_input = packed_embed.clone()
 
-        random_positions = torch.nonzero(mask_random, as_tuple=True)[0]
-        random_indices = torch.randint(
-            packed_embed.shape[0],
-            (random_positions.numel(),),
-            device=packed_embed.device,
-        )
-        encoder_input[random_positions] = packed_embed[random_indices]
-
-        replace_positions = torch.nonzero(mask_replace, as_tuple=True)[0]
-        encoder_input[replace_positions] = self.mask_token_embed.to(
-            packed_embed.dtype
-        ).view(1, -1)
+        random_embed = packed_embed[
+            torch.randint(
+                packed_embed.shape[0],
+                (packed_embed.shape[0],),
+                device=packed_embed.device,
+            )
+        ]
+        mask_token = self.mask_token_embed.to(packed_embed.dtype).view(1, -1)
+        encoder_input = torch.where(mask_random[:, None], random_embed, encoder_input)
+        encoder_input = torch.where(mask_replace[:, None], mask_token, encoder_input)
 
         return encoder_input, is_masked
 
@@ -730,9 +811,7 @@ class QueryAttentionPooler(nn.Module):
         batch_size = seqlens.numel()
 
         x = self.norm(packed_output)
-        kv = self.kv(x).view(
-            packed_output.shape[0], 2, self.n_heads, self.head_dim
-        )
+        kv = self.kv(x).view(packed_output.shape[0], 2, self.n_heads, self.head_dim)
 
         if self.use_flash:
             pooled = self._forward_flash(kv, cu_seqlens, batch_size, max_seqlen)
@@ -823,12 +902,9 @@ class MaskedLMHead(nn.Module):
         packed_output: torch.Tensor,
         is_masked: torch.Tensor,
     ) -> Dict[str, Any]:
-        masked_packed_indices = torch.nonzero(is_masked, as_tuple=True)[0]
-        masked_output = packed_output[masked_packed_indices]
-
-        continuous_preds = self.continuous_head(masked_output)
+        continuous_preds = self.continuous_head(packed_output)
         categorical_preds = {
-            name: head(masked_output) for name, head in self.categorical_heads.items()
+            name: head(packed_output) for name, head in self.categorical_heads.items()
         }
 
         return {"continuous": continuous_preds, "categorical": categorical_preds}
