@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import cast
 
 import torch
-import pytorch_lightning as pl
 from omegaconf import DictConfig, OmegaConf
 
 from core.config import load_config as load_bobert_config
@@ -89,7 +88,6 @@ def main() -> int:
     print(OmegaConf.to_yaml(config))
 
     torch.set_float32_matmul_precision("high")
-    pl.seed_everything(int(config.data.dataset_seed), workers=True)
 
     datamodule = PretrainData(config)
 

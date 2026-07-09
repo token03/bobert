@@ -1,6 +1,5 @@
 from functools import partial
 from pathlib import Path
-import random
 import numpy as np
 import polars as pl_df
 import pytorch_lightning as pl
@@ -144,26 +143,15 @@ def split_loaded_data(beatmap_data, val_split):
 
 def dataloader_kwargs(data_config):
     num_workers = int(data_config.dataloader.num_workers)
-    seed = int(data_config.dataset_seed)
-
     kwargs = {
         "num_workers": num_workers,
         "pin_memory": bool(data_config.dataloader.pin_memory),
         "persistent_workers": bool(data_config.dataloader.persistent_workers)
         and num_workers > 0,
-        "worker_init_fn": partial(seed_worker, seed),
-        "generator": torch.Generator().manual_seed(seed),
     }
     if num_workers > 0:
         kwargs["prefetch_factor"] = int(data_config.dataloader.prefetch_factor)
     return kwargs
-
-
-def seed_worker(seed: int, worker_id: int):
-    worker_seed = int(seed) + int(worker_id)
-    random.seed(worker_seed)
-    np.random.seed(worker_seed)
-    torch.manual_seed(worker_seed)
 
 
 def make_loader(dataset, batch_size, collate_fn, data_config, compile_model, shuffle):
@@ -271,8 +259,6 @@ class PretrainData(pl.LightningDataModule):
             collate_pretrain,
             max_seq_len=self.max_seq_len,
             length_buckets=length_buckets(self.data_config, self.phase_config),
-            masking_ratio=self.phase_config.masking.ratio,
-            mean_span_length=self.phase_config.masking.mean_span_length,
         )
         return bucketed_loader(self.train_dataset, collate, self, True)
 
@@ -281,8 +267,6 @@ class PretrainData(pl.LightningDataModule):
             collate_pretrain,
             max_seq_len=self.max_seq_len,
             length_buckets=length_buckets(self.data_config, self.phase_config),
-            masking_ratio=self.phase_config.masking.ratio,
-            mean_span_length=self.phase_config.masking.mean_span_length,
         )
         return bucketed_loader(self.val_dataset, collate, self, False)
 

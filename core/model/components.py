@@ -89,24 +89,26 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
         if self.use_flash:
             cos, sin = rotary_freqs
-            self.flash_rope(
-                qkv[:, 0],
+            q = self.flash_rope(
+                q,
                 cos,
                 sin,
                 interleaved=True,
-                inplace=True,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-            self.flash_rope(
-                qkv[:, 1],
+            k = self.flash_rope(
+                k,
                 cos,
                 sin,
                 interleaved=True,
-                inplace=True,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
+
+            qkv_flash = qkv.clone()
+            qkv_flash[:, 0] = q
+            qkv_flash[:, 1] = k
 
             window_size = (
                 (-1, -1)
@@ -115,7 +117,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             )
 
             out = self.flash_attn(
-                qkv,
+                qkv_flash,
                 cu_seqlens,
                 max_seqlen,
                 dropout_p=0.0,
@@ -440,6 +442,70 @@ class SpanMasker(nn.Module):
 
         self.max_span_len = max_len
 
+    def _generate_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len = attention_mask.shape
+        device = attention_mask.device
+
+        final_mask = torch.zeros_like(attention_mask)
+        valid_lengths = attention_mask.sum(dim=1).long()
+        target_counts = (valid_lengths.float() * self.masking_ratio).round().long()
+        max_target = int(target_counts.max().item()) if target_counts.numel() else 0
+        if max_target == 0:
+            return final_mask
+
+        span_length_indices = torch.multinomial(
+            self.span_length_probs.expand(batch_size, -1),
+            num_samples=max_target,
+            replacement=True,
+        )
+        sampled_lengths = self.span_lengths_range[span_length_indices]
+        cumsum_lengths = sampled_lengths.cumsum(dim=1)
+        num_spans = (cumsum_lengths < target_counts.unsqueeze(1)).sum(dim=1) + 1
+
+        capacity = (valid_lengths - target_counts + 1).clamp_min(1)
+        num_spans = torch.minimum(num_spans, capacity)
+        max_spans = int(num_spans.max().item())
+        span_slots = torch.arange(max_spans, device=device).view(1, -1)
+        span_active = span_slots < num_spans.unsqueeze(1)
+
+        span_lengths = sampled_lengths[:, :max_spans].clone()
+        span_lengths = span_lengths * span_active.long()
+        span_sums = span_lengths.sum(dim=1)
+        overflow = (span_sums - target_counts).clamp_min(0)
+        last_span = (num_spans - 1).clamp_min(0)
+        span_lengths.scatter_add_(1, last_span[:, None], -overflow[:, None])
+
+        masked_counts = span_lengths.sum(dim=1)
+        extra_gaps = (
+            valid_lengths - masked_counts - (num_spans - 1).clamp_min(0)
+        ).clamp_min(0)
+
+        gap_slots = torch.arange(max_spans + 1, device=device).view(1, -1)
+        gap_active = gap_slots <= num_spans.unsqueeze(1)
+        gap_weights = torch.rand(batch_size, max_spans + 1, device=device)
+        gap_weights = gap_weights.masked_fill(~gap_active, 0.0)
+        gap_weights = gap_weights / gap_weights.sum(dim=1, keepdim=True).clamp_min(1e-9)
+        gaps = (gap_weights * extra_gaps.unsqueeze(1)).floor().long()
+        if max_spans > 1:
+            interior_gap = (span_slots[:, 1:] < num_spans.unsqueeze(1)).long()
+            gaps[:, 1:max_spans] += interior_gap
+
+        previous_lengths = torch.zeros_like(span_lengths)
+        previous_lengths[:, 1:] = span_lengths[:, :-1].cumsum(dim=1)
+        starts = gaps[:, :max_spans].cumsum(dim=1) + previous_lengths
+
+        offsets = torch.arange(self.max_span_len, device=device).view(1, 1, -1)
+        span_indices = starts.unsqueeze(-1) + offsets
+        token_active = span_active.unsqueeze(-1) & (offsets < span_lengths.unsqueeze(-1))
+        batch_indices = (
+            torch.arange(batch_size, device=device)
+            .view(-1, 1, 1)
+            .expand_as(span_indices)
+        )
+        final_mask[batch_indices[token_active], span_indices[token_active]] = True
+
+        return final_mask & attention_mask
+
     def _border_mask(
         self,
         padded_mask: torch.Tensor,
@@ -499,11 +565,9 @@ class SpanMasker(nn.Module):
         ]
 
     def corrupt_inputs(
-        self,
-        x: torch.Tensor,
-        attention_mask: torch.Tensor,
-        padded_mask: torch.Tensor,
+        self, x: torch.Tensor, attention_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        padded_mask = self._generate_mask(attention_mask)
         encoder_x = x.clone()
         source_mask = attention_mask & ~padded_mask
         borders = {
@@ -524,8 +588,10 @@ class SpanMasker(nn.Module):
         self,
         packed_embed: torch.Tensor,
         attention_mask: torch.Tensor,
-        padded_mask: torch.Tensor,
+        padded_mask: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if padded_mask is None:
+            padded_mask = self._generate_mask(attention_mask)
         is_masked = padded_mask[attention_mask]
 
         rand_for_split = torch.rand(packed_embed.shape[0], device=packed_embed.device)
