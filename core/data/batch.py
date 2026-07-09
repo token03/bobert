@@ -294,6 +294,8 @@ def collate_pretrain(
     batch: List[Tuple[torch.Tensor, Dict[str, float]]],
     max_seq_len: int,
     length_buckets: Sequence[int],
+    masking_ratio: float,
+    mean_span_length: float,
 ):
     vectors, attrs = zip(*batch)
     max_len = max(min(v.shape[0], max_seq_len) for v in vectors)
@@ -307,7 +309,90 @@ def collate_pretrain(
         vector_batch["attention_mask"],
         stack_dicts(attrs),
         vector_batch["cu_seqlens"],
+        generate_span_mask(
+            vector_batch["attention_mask"],
+            masking_ratio=masking_ratio,
+            mean_span_length=mean_span_length,
+        ),
     )
+
+
+def generate_span_mask(
+    attention_mask: torch.Tensor,
+    *,
+    masking_ratio: float,
+    mean_span_length: float,
+) -> torch.Tensor:
+    batch_size, _ = attention_mask.shape
+    device = attention_mask.device
+
+    final_mask = torch.zeros_like(attention_mask)
+    valid_lengths = attention_mask.sum(dim=1).long()
+    target_counts = (valid_lengths.float() * float(masking_ratio)).round().long()
+    max_target = int(target_counts.max().item()) if target_counts.numel() else 0
+    if max_target == 0:
+        return final_mask
+
+    min_len = 1
+    max_span_len = max(1, int(float(mean_span_length) * 2))
+    lengths = torch.arange(min_len, max_span_len + 1, device=device, dtype=torch.float32)
+    std = float(mean_span_length) / 3.0
+    span_length_probs = torch.exp(-0.5 * ((lengths - float(mean_span_length)) / std) ** 2)
+    span_length_probs = span_length_probs / span_length_probs.sum()
+    span_lengths_range = lengths.long()
+
+    span_length_indices = torch.multinomial(
+        span_length_probs.expand(batch_size, -1),
+        num_samples=max_target,
+        replacement=True,
+    )
+    sampled_lengths = span_lengths_range[span_length_indices]
+    cumsum_lengths = sampled_lengths.cumsum(dim=1)
+    num_spans = (cumsum_lengths < target_counts.unsqueeze(1)).sum(dim=1) + 1
+
+    capacity = (valid_lengths - target_counts + 1).clamp_min(1)
+    num_spans = torch.minimum(num_spans, capacity)
+    max_spans = int(num_spans.max().item())
+    span_slots = torch.arange(max_spans, device=device).view(1, -1)
+    span_active = span_slots < num_spans.unsqueeze(1)
+
+    span_lengths = sampled_lengths[:, :max_spans].clone()
+    span_lengths = span_lengths * span_active.long()
+    span_sums = span_lengths.sum(dim=1)
+    overflow = (span_sums - target_counts).clamp_min(0)
+    last_span = (num_spans - 1).clamp_min(0)
+    span_lengths.scatter_add_(1, last_span[:, None], -overflow[:, None])
+
+    masked_counts = span_lengths.sum(dim=1)
+    extra_gaps = (
+        valid_lengths - masked_counts - (num_spans - 1).clamp_min(0)
+    ).clamp_min(0)
+
+    gap_slots = torch.arange(max_spans + 1, device=device).view(1, -1)
+    gap_active = gap_slots <= num_spans.unsqueeze(1)
+    gap_weights = torch.rand(batch_size, max_spans + 1, device=device)
+    gap_weights = gap_weights.masked_fill(~gap_active, 0.0)
+    gap_weights = gap_weights / gap_weights.sum(dim=1, keepdim=True).clamp_min(1e-9)
+    gaps = (gap_weights * extra_gaps.unsqueeze(1)).floor().long()
+    if max_spans > 1:
+        interior_gap = (span_slots[:, 1:] < num_spans.unsqueeze(1)).long()
+        gaps[:, 1:max_spans] += interior_gap
+
+    previous_lengths = torch.zeros_like(span_lengths)
+    previous_lengths[:, 1:] = span_lengths[:, :-1].cumsum(dim=1)
+    starts = gaps[:, :max_spans].cumsum(dim=1) + previous_lengths
+
+    offsets = torch.arange(max_span_len, device=device).view(1, 1, -1)
+    span_indices = starts.unsqueeze(-1) + offsets
+    token_active = span_active.unsqueeze(-1) & (offsets < span_lengths.unsqueeze(-1))
+    batch_indices = (
+        torch.arange(batch_size, device=device)
+        .view(-1, 1, 1)
+        .expand_as(span_indices)
+    )
+    final_mask[batch_indices[token_active], span_indices[token_active]] = True
+
+    return final_mask & attention_mask
 
 
 def collate_align_train(

@@ -6,7 +6,13 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, Any, Sequence, Type, TypeVar
 from rotary_embedding_torch import RotaryEmbedding
 
-from ..data.schema import FEATURE_INFO, MAP_FEATURE_ATTRIBUTES
+from ..data.schema import (
+    FEATURE_INDEX,
+    FEATURE_INFO,
+    MAP_FEATURE_ATTRIBUTES,
+    OBJECT_TYPE_SLIDER_END,
+    OBJECT_TYPE_SLIDER_HEAD,
+)
 
 from .components import (
     DifficultyHead,
@@ -285,18 +291,29 @@ class BobertForPretraining(nn.Module):
         packed_output, cu_seqlens, max_seqlen = self.bert.encode_padded(
             x, attention_mask, cu_seqlens
         )
-        return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
+        return self._get_embedding(packed_output, cu_seqlens, x[attention_mask])
 
     def _get_embedding(
         self,
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        packed_vectors: torch.Tensor,
     ) -> torch.Tensor:
         lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
-        pooled = torch.segment_reduce(
-            packed_output.float(), reduce="mean", lengths=lengths
+        object_type = packed_vectors[:, FEATURE_INDEX["object_type"]]
+        weights = torch.ones(
+            object_type.shape, device=object_type.device, dtype=torch.float32
         )
+        weights.masked_fill_(
+            (object_type == OBJECT_TYPE_SLIDER_HEAD)
+            | (object_type == OBJECT_TYPE_SLIDER_END),
+            0.5,
+        )
+        pooled = torch.segment_reduce(
+            packed_output.float() * weights[:, None], reduce="sum", lengths=lengths
+        )
+        weight_sum = torch.segment_reduce(weights, reduce="sum", lengths=lengths)
+        pooled = pooled / weight_sum[:, None].clamp_min(1e-8)
         return pooled.masked_fill(lengths[:, None] == 0, 0.0)
 
     def embed_packed(
@@ -308,7 +325,7 @@ class BobertForPretraining(nn.Module):
         packed_output, cu_seqlens, max_seqlen = self.bert.encode_packed(
             packed_vectors, cu_seqlens, max_seqlen
         )
-        return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
+        return self._get_embedding(packed_output, cu_seqlens, packed_vectors)
 
     def embed_col_packed(
         self,
@@ -353,7 +370,7 @@ class BobertForPretraining(nn.Module):
             col_map_index = map_index[starts]
             col_index = beat_ids[starts]
         return {
-            "embedding": self._get_embedding(packed_output, cu_seqlens, max_seqlen),
+            "embedding": self._get_embedding(packed_output, cu_seqlens, packed_vectors),
             "col_embedding": col_embedding,
             "col_map_index": col_map_index,
             "col_index": col_index,
@@ -364,8 +381,13 @@ class BobertForPretraining(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        padded_mask: torch.Tensor,
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        encoder_x, padded_mask = self.masker.corrupt_inputs(x, attention_mask)
+        encoder_x, padded_mask = self.masker.corrupt_inputs(
+            x,
+            attention_mask,
+            padded_mask,
+        )
 
         packed_embed, cu_seqlens = self.bert._embed(
             encoder_x, attention_mask, cu_seqlens

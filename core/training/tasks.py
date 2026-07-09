@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from core.data.module import AdapterData, PretrainData, preallocation_batch_size
+from core.data.batch import generate_span_mask
 
 from .loss import alignment_loss_fn, pretrain_loss_fn
 from .metrics import ContrastiveMetrics, DifficultyMetrics, MLMMetrics
@@ -103,12 +104,17 @@ class PretrainingModule(BobertLightningModule):
         self.mlm_metrics = MLMMetrics(feature_info, self.device)
         self.difficulty_metrics = DifficultyMetrics(self.device)
 
-    def forward(self, vectors, attention_mask, cu_seqlens):
-        return self.model(vectors, attention_mask, cu_seqlens)
+    def forward(self, vectors, attention_mask, cu_seqlens, padded_mask):
+        return self.model(vectors, attention_mask, cu_seqlens, padded_mask)
 
     def _shared_step(self, batch: Tuple):
-        vectors, attention_mask, difficulty_labels, cu_seqlens = batch
-        predictions, targets, mask = self(vectors, attention_mask, cu_seqlens)
+        vectors, attention_mask, difficulty_labels, cu_seqlens, padded_mask = batch
+        predictions, targets, mask = self(
+            vectors,
+            attention_mask,
+            cu_seqlens,
+            padded_mask,
+        )
 
         loss_dict = pretrain_loss_fn(
             predictions, targets, mask, difficulty_labels, self.config
@@ -186,7 +192,12 @@ class PretrainingModule(BobertLightningModule):
             name: torch.zeros(batch_size, device=self.device, dtype=torch.float32)
             for name in DIFFICULTY_ATTRIBUTES
         }
-        return vectors, attention_mask, difficulty_labels, cu_seqlens
+        padded_mask = generate_span_mask(
+            attention_mask,
+            masking_ratio=self.config.pretraining.masking.ratio,
+            mean_span_length=self.config.pretraining.masking.mean_span_length,
+        )
+        return vectors, attention_mask, difficulty_labels, cu_seqlens, padded_mask
 
     def _preallocation_batch_size(self, max_seq_len: int) -> int:
         phase_batch_size = int(self.config.pretraining.trainer.batch_size)
