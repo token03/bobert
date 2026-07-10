@@ -374,12 +374,12 @@ class BobertForPretraining(nn.Module):
         packed_embed, cu_seqlens = self.bert._embed(
             encoder_x, attention_mask, cu_seqlens
         )
-        packed_targets = x[attention_mask]
         packed_input, is_masked = self.masker(
             packed_embed,
             attention_mask,
             padded_mask,
         )
+        packed_targets = x[attention_mask][is_masked]
         max_seqlen = x.shape[1]
 
         packed_output = self.bert.encode(
@@ -408,7 +408,7 @@ class BobertForPretraining(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        packed_targets = packed_vectors
+        packed_targets = packed_vectors[packed_padded_mask]
 
         encoder_vectors = self.masker.corrupt_inputs_packed(
             packed_vectors,

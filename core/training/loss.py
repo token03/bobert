@@ -11,7 +11,7 @@ from core.data.schema import (
 
 
 def mlm_loss_fn(
-    predictions: Dict[str, Any], targets: torch.Tensor, mask: torch.Tensor
+    predictions: Dict[str, Any], targets: torch.Tensor
 ) -> torch.Tensor:
     cont_names = sorted(
         FEATURE_INFO["continuous"].keys(), key=lambda k: FEATURE_INFO["continuous"][k]
@@ -36,7 +36,7 @@ def mlm_loss_fn(
     cont_loss = F.smooth_l1_loss(
         cont_preds, final_cont_targets, reduction="none", beta=0.5
     )
-    total_loss = (cont_loss * include_cont_loss * mask[:, None]).sum()
+    total_loss = (cont_loss * include_cont_loss).sum()
 
     for name, info in FEATURE_INFO["categorical"].items():
         cat_logits = predictions["categorical"][name]
@@ -49,15 +49,13 @@ def mlm_loss_fn(
         else:
             final_target = cat_targets
 
-        loss = F.cross_entropy(
+        total_loss += F.cross_entropy(
             cat_logits,
             final_target,
-            reduction="none",
+            reduction="sum",
         )
-        total_loss += (loss * mask).sum()
 
-    num_masked = mask.sum()
-    return total_loss / (num_masked + 1e-9)
+    return total_loss / (targets.shape[0] + 1e-9)
 
 
 def difficulty_loss_fn(
@@ -94,14 +92,13 @@ def difficulty_loss_fn(
 def pretrain_loss_fn(
     predictions: Dict[str, Any],
     targets: torch.Tensor,
-    mask: torch.Tensor,
     difficulty_labels: Dict[str, torch.Tensor],
     config: DictConfig,
 ) -> Dict[str, torch.Tensor]:
     losses = {}
     mlm_weight = config.pretraining.loss.mlm_weight
 
-    mlm_loss = mlm_loss_fn(predictions["mlm"], targets, mask)
+    mlm_loss = mlm_loss_fn(predictions["mlm"], targets)
     losses["mlm_loss"] = mlm_loss
 
     total_loss = mlm_loss * mlm_weight

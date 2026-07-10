@@ -48,7 +48,6 @@ class MLMMetrics(nn.Module):
         self,
         predictions: Dict[str, Any],
         targets: torch.Tensor,
-        mask: torch.Tensor,
         loss: Optional[float] = None,
     ):
         from core.data.schema import OBJECT_TYPE_SLIDER_HEAD
@@ -56,18 +55,12 @@ class MLMMetrics(nn.Module):
         if loss is not None:
             self.loss_metric.update(loss)
 
-        if not torch.any(mask):
+        if targets.shape[0] == 0:
             return
 
-        masked_targets = targets[mask]
+        masked_targets = targets
         continuous_predictions = predictions["continuous"]
-        if continuous_predictions.shape[0] == targets.shape[0]:
-            continuous_predictions = continuous_predictions[mask]
-        categorical_predictions = {}
-        for name, logits in predictions["categorical"].items():
-            categorical_predictions[name] = (
-                logits[mask] if logits.shape[0] == targets.shape[0] else logits
-            )
+        categorical_predictions = predictions["categorical"]
         object_type_idx = self.feature_info["categorical"]["object_type"]["index"]
         object_types = masked_targets[:, object_type_idx].long()
 

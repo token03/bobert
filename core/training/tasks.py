@@ -116,7 +116,7 @@ class PretrainingModule(BobertLightningModule):
         predictions, targets, mask = self(batch)
 
         loss_dict = pretrain_loss_fn(
-            predictions, targets, mask, difficulty_labels, self.config
+            predictions, targets, difficulty_labels, self.config
         )
 
         return predictions, targets, mask, difficulty_labels, loss_dict
@@ -230,7 +230,6 @@ class PretrainingModule(BobertLightningModule):
         self.mlm_metrics.update(
             predictions["mlm"],
             targets,
-            mask,
             loss=loss_dict["mlm_loss"].item(),
         )
 

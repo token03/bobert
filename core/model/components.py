@@ -902,9 +902,11 @@ class MaskedLMHead(nn.Module):
         packed_output: torch.Tensor,
         is_masked: torch.Tensor,
     ) -> Dict[str, Any]:
-        continuous_preds = self.continuous_head(packed_output)
+        masked_output = packed_output[is_masked]
+
+        continuous_preds = self.continuous_head(masked_output)
         categorical_preds = {
-            name: head(packed_output) for name, head in self.categorical_heads.items()
+            name: head(masked_output) for name, head in self.categorical_heads.items()
         }
 
         return {"continuous": continuous_preds, "categorical": categorical_preds}
