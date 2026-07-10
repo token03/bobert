@@ -347,14 +347,55 @@ def collate_pretrain(
     cu_seqlens = torch.nn.functional.pad(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
+    masks = [span_mask(length, masking_ratio, mean_span_length) for length in lengths]
+    masked_counts = torch.tensor(
+        [int(mask.sum()) for mask in masks], dtype=torch.int32
+    )
+    masked_positions = torch.cat(
+        [mask.nonzero(as_tuple=False).flatten() for mask in masks], dim=0
+    )
+    masked_idx = masked_positions + torch.repeat_interleave(
+        cu_seqlens[:-1].long(), masked_counts.long()
+    )
+    split = torch.rand(masked_idx.numel())
+    mask_token_idx = masked_idx[split < 0.8]
+    random_dst_idx = masked_idx[(split >= 0.8) & (split < 0.9)]
+    unchanged_idx = masked_idx[split >= 0.9]
+    left_border_idx = torch.cat(
+        [
+            (~mask[:-1] & mask[1:]).nonzero(as_tuple=False).flatten()
+            + cu_seqlens[i].long()
+            for i, mask in enumerate(masks)
+        ]
+    )
+    right_border_idx = torch.cat(
+        [
+            (mask[:-1] & ~mask[1:]).nonzero(as_tuple=False).flatten()
+            + cu_seqlens[i].long()
+            + 1
+            for i, mask in enumerate(masks)
+        ]
+    )
+    left_split = torch.rand(left_border_idx.numel())
+    right_split = torch.rand(right_border_idx.numel())
     return {
         "packed_vectors": torch.cat(
             [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
         ),
-        "packed_padded_mask": torch.cat(
-            [span_mask(length, masking_ratio, mean_span_length) for length in lengths],
-            dim=0,
-        ),
+        "masked_idx": masked_idx,
+        "masked_positions": masked_positions.to(torch.int32),
+        "masked_counts": masked_counts,
+        "mask_token_idx": mask_token_idx,
+        "random_dst_idx": random_dst_idx,
+        "unchanged_idx": unchanged_idx,
+        "left_border_zero_idx": left_border_idx[left_split < 0.8],
+        "left_border_random_idx": left_border_idx[
+            (left_split >= 0.8) & (left_split < 0.9)
+        ],
+        "right_border_zero_idx": right_border_idx[right_split < 0.8],
+        "right_border_random_idx": right_border_idx[
+            (right_split >= 0.8) & (right_split < 0.9)
+        ],
         "cu_seqlens": cu_seqlens,
         "max_seqlen": torch.tensor(max(lengths), dtype=torch.long),
         "batch_size": len(batch),

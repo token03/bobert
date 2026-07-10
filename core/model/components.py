@@ -508,6 +508,7 @@ class SpanMasker(nn.Module):
             [continuous["relative_cos"], continuous["relative_sin"]],
             dtype=torch.long,
         )
+        right_geometry = torch.cat((right_delta_velocity, right_angle))
         for name, indices in (
             ("left_angle", left_angle),
             ("right_delta_velocity", right_delta_velocity),
@@ -517,12 +518,14 @@ class SpanMasker(nn.Module):
             mask[indices] = True
             self.register_buffer(f"{name}_indices", indices, persistent=False)
             self.register_buffer(f"{name}_mask", mask, persistent=False)
+        self.register_buffer(
+            "right_geometry_indices", right_geometry, persistent=False
+        )
         self.border_feature_groups = (
             ("left", "left_angle"),
             ("right", "right_delta_velocity"),
             ("right", "right_angle"),
         )
-
         min_len = 1
         max_len = max(1, int(mean_span_length * 2))
 
@@ -681,84 +684,55 @@ class SpanMasker(nn.Module):
             )
         return encoder_x, padded_mask
 
-    def _packed_boundaries(
-        self, cu_seqlens: torch.Tensor, total_tokens: int
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        starts = torch.zeros(total_tokens, dtype=torch.bool, device=cu_seqlens.device)
-        ends = torch.zeros_like(starts)
-        starts[cu_seqlens[:-1].long()] = True
-        ends[cu_seqlens[1:].long() - 1] = True
-        return starts, ends
-
     def corrupt_inputs_packed(
         self,
         packed_vectors: torch.Tensor,
-        packed_padded_mask: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        left_zero_idx: torch.Tensor,
+        left_random_idx: torch.Tensor,
+        right_zero_idx: torch.Tensor,
+        right_random_idx: torch.Tensor,
     ) -> torch.Tensor:
         encoder_x = packed_vectors.clone()
-        starts, ends = self._packed_boundaries(cu_seqlens, packed_vectors.shape[0])
-        left = (
-            ~packed_padded_mask
-            & torch.roll(packed_padded_mask, shifts=-1, dims=0)
-            & ~ends
-        )
-        right = (
-            torch.roll(packed_padded_mask, shifts=1, dims=0)
-            & ~packed_padded_mask
-            & ~starts
-        )
-
-        random_source = packed_vectors[
-            torch.randint(
+        for zero_idx, random_idx, feature_group in (
+            (left_zero_idx, left_random_idx, "left_angle"),
+            (right_zero_idx, right_random_idx, "right_geometry"),
+        ):
+            features = getattr(self, f"{feature_group}_indices")
+            encoder_x[zero_idx[:, None], features[None, :]] = 0
+            source_idx = torch.randint(
                 packed_vectors.shape[0],
-                (packed_vectors.shape[0],),
+                (random_idx.numel(),),
                 device=packed_vectors.device,
             )
-        ]
-        for side, feature_group in self.border_feature_groups:
-            border = left if side == "left" else right
-            corrupt = border & (torch.rand(border.shape, device=encoder_x.device) < 0.9)
-            random_replace = corrupt & (
-                torch.rand(border.shape, device=encoder_x.device) < (1.0 / 9.0)
-            )
-            zero_replace = corrupt & ~random_replace
-            feature_mask = getattr(self, f"{feature_group}_mask").view(1, -1)
-            encoder_x = torch.where(
-                zero_replace.unsqueeze(-1) & feature_mask,
-                torch.zeros((), device=encoder_x.device, dtype=encoder_x.dtype),
-                encoder_x,
-            )
-            encoder_x = torch.where(
-                random_replace.unsqueeze(-1) & feature_mask,
-                random_source,
-                encoder_x,
-            )
+            encoder_x[random_idx[:, None], features[None, :]] = packed_vectors[
+                source_idx[:, None], features[None, :]
+            ]
         return encoder_x
 
     def forward_packed(
         self,
         packed_embed: torch.Tensor,
-        packed_padded_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        is_masked = packed_padded_mask
-
-        rand_for_split = torch.rand(packed_embed.shape[0], device=packed_embed.device)
-        mask_replace = is_masked & (rand_for_split < 0.8)
-        mask_random = is_masked & (rand_for_split >= 0.8) & (rand_for_split < 0.9)
-
-        random_embed = packed_embed[
-            torch.randint(
-                packed_embed.shape[0],
-                (packed_embed.shape[0],),
-                device=packed_embed.device,
-            )
-        ]
+        mask_token_idx: torch.Tensor,
+        random_dst_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        encoder_input = packed_embed.clone()
         mask_token = self.mask_token_embed.to(packed_embed.dtype).view(1, -1)
-        encoder_input = torch.where(mask_random[:, None], random_embed, packed_embed)
-        encoder_input = torch.where(mask_replace[:, None], mask_token, encoder_input)
-
-        return encoder_input, is_masked
+        encoder_input.index_copy_(
+            0,
+            mask_token_idx,
+            mask_token.expand(mask_token_idx.numel(), -1),
+        )
+        random_src_idx = torch.randint(
+            packed_embed.shape[0],
+            (random_dst_idx.numel(),),
+            device=packed_embed.device,
+        )
+        encoder_input.index_copy_(
+            0,
+            random_dst_idx,
+            packed_embed.index_select(0, random_src_idx),
+        )
+        return encoder_input
 
     def forward(
         self,

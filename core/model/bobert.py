@@ -397,18 +397,16 @@ class BobertForPretraining(nn.Module):
     def _pretrain_predictions(
         self,
         packed_input: torch.Tensor,
-        is_masked: torch.Tensor,
+        masked_idx: torch.Tensor,
+        masked_positions: torch.Tensor,
+        masked_counts: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> Dict[str, Any]:
-        masked_idx = is_masked.nonzero(as_tuple=False).flatten()
-        batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
-        masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
-        counts = torch.bincount(
-            batch_ids, minlength=cu_seqlens.shape[0] - 1
-        ).to(torch.int32)
-        cu_seqlens_q = F.pad(torch.cumsum(counts, dim=0, dtype=torch.int32), (1, 0))
-        max_seqlen_q = int(counts.max().item())
+        cu_seqlens_q = F.pad(
+            torch.cumsum(masked_counts, dim=0, dtype=torch.int32), (1, 0)
+        )
+        max_seqlen_q = int(masked_counts.max().item())
         masked_output = self.bert.encode_masked(
             packed_input,
             masked_idx,
@@ -438,9 +436,20 @@ class BobertForPretraining(nn.Module):
         )
         packed_targets = x[attention_mask][is_masked]
         max_seqlen = x.shape[1]
+        masked_idx = is_masked.nonzero(as_tuple=False).flatten()
+        batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
+        masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
+        masked_counts = torch.bincount(
+            batch_ids, minlength=cu_seqlens.shape[0] - 1
+        ).to(torch.int32)
 
         predictions = self._pretrain_predictions(
-            packed_input, is_masked, cu_seqlens, max_seqlen
+            packed_input,
+            masked_idx,
+            masked_positions,
+            masked_counts,
+            cu_seqlens,
+            max_seqlen,
         )
 
         return predictions, packed_targets, is_masked
@@ -448,28 +457,44 @@ class BobertForPretraining(nn.Module):
     def forward_packed_pretrain(
         self,
         packed_vectors: torch.Tensor,
-        packed_padded_mask: torch.Tensor,
+        masked_idx: torch.Tensor,
+        masked_positions: torch.Tensor,
+        masked_counts: torch.Tensor,
+        mask_token_idx: torch.Tensor,
+        random_dst_idx: torch.Tensor,
+        left_border_zero_idx: torch.Tensor,
+        left_border_random_idx: torch.Tensor,
+        right_border_zero_idx: torch.Tensor,
+        right_border_random_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        packed_targets = packed_vectors[packed_padded_mask]
+        packed_targets = packed_vectors.index_select(0, masked_idx)
 
         encoder_vectors = self.masker.corrupt_inputs_packed(
             packed_vectors,
-            packed_padded_mask,
-            cu_seqlens,
+            left_border_zero_idx,
+            left_border_random_idx,
+            right_border_zero_idx,
+            right_border_random_idx,
         )
         packed_embed = self.bert.embed_sequences(encoder_vectors)
-        packed_input, is_masked = self.masker.forward_packed(
+        packed_input = self.masker.forward_packed(
             packed_embed,
-            packed_padded_mask,
+            mask_token_idx,
+            random_dst_idx,
         )
 
         predictions = self._pretrain_predictions(
-            packed_input, is_masked, cu_seqlens, max_seqlen
+            packed_input,
+            masked_idx,
+            masked_positions,
+            masked_counts,
+            cu_seqlens,
+            max_seqlen,
         )
 
-        return predictions, packed_targets, is_masked
+        return predictions, packed_targets, masked_idx
 
 
 class BobertForAlignment(nn.Module):

@@ -105,7 +105,15 @@ class PretrainingModule(BobertLightningModule):
     def forward(self, batch):
         return self.model.forward_packed_pretrain(
             batch["packed_vectors"],
-            batch["packed_padded_mask"],
+            batch["masked_idx"],
+            batch["masked_positions"],
+            batch["masked_counts"],
+            batch["mask_token_idx"],
+            batch["random_dst_idx"],
+            batch["left_border_zero_idx"],
+            batch["left_border_random_idx"],
+            batch["right_border_zero_idx"],
+            batch["right_border_random_idx"],
             batch["cu_seqlens"],
             int(batch["max_seqlen"].item()),
         )
@@ -177,9 +185,43 @@ class PretrainingModule(BobertLightningModule):
             device=self.device,
             dtype=torch.int32,
         )
+        masked_idx = packed_padded_mask.nonzero(as_tuple=False).flatten()
+        batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
+        masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
+        masked_counts = torch.bincount(batch_ids, minlength=batch_size).to(torch.int32)
+        split = torch.rand(masked_idx.numel(), device=self.device)
+        starts = torch.zeros_like(packed_padded_mask)
+        ends = torch.zeros_like(packed_padded_mask)
+        starts[cu_seqlens[:-1].long()] = True
+        ends[cu_seqlens[1:].long() - 1] = True
+        left_border_idx = (
+            ~packed_padded_mask
+            & torch.roll(packed_padded_mask, shifts=-1)
+            & ~ends
+        ).nonzero(as_tuple=False).flatten()
+        right_border_idx = (
+            torch.roll(packed_padded_mask, shifts=1)
+            & ~packed_padded_mask
+            & ~starts
+        ).nonzero(as_tuple=False).flatten()
+        left_split = torch.rand(left_border_idx.numel(), device=self.device)
+        right_split = torch.rand(right_border_idx.numel(), device=self.device)
         return {
             "packed_vectors": packed_vectors,
-            "packed_padded_mask": packed_padded_mask,
+            "masked_idx": masked_idx,
+            "masked_positions": masked_positions,
+            "masked_counts": masked_counts,
+            "mask_token_idx": masked_idx[split < 0.8],
+            "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
+            "unchanged_idx": masked_idx[split >= 0.9],
+            "left_border_zero_idx": left_border_idx[left_split < 0.8],
+            "left_border_random_idx": left_border_idx[
+                (left_split >= 0.8) & (left_split < 0.9)
+            ],
+            "right_border_zero_idx": right_border_idx[right_split < 0.8],
+            "right_border_random_idx": right_border_idx[
+                (right_split >= 0.8) & (right_split < 0.9)
+            ],
             "cu_seqlens": cu_seqlens,
             "max_seqlen": torch.tensor(max_seq_len, device=self.device),
             "batch_size": batch_size,
