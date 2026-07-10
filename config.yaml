@@ -61,23 +61,12 @@ pretraining:
     cooldown: "cosine"
     num_cycles: 0.5
 
-  pooling:
-    stats: ["mean"]
-    stat_dim: 384
-    stats_mixer_dim: 384
-
   masking:
     ratio: 0.30
     mean_span_length: 4
 
   loss:
     mlm_weight: 1.0
-    difficulty_weight: 0.0
-    difficulty_huber_beta: 1.0
-    stars_weight: 1.0
-    aim_weight: 1.0
-    speed_weight: 1.0
-    slider_factor_weight: 1.0
 
 mining:
   top_k: 32

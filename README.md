@@ -17,4 +17,4 @@ Transformer encoder for learning beatmap representations from hit object sequenc
 2. **Regression:** Difficulty attribute regression (`stars`, `aim`, `speed`, `slider_factor`, `AR`, `CS`, `slider_multiplier`).
 
 ## Use Cases
-Semantic search, similarity/recommendation, quality/difficulty prediction — any understanding task (no generation).
+Semantic search and similarity/recommendation for beatmaps.

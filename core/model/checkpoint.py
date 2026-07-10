@@ -24,7 +24,6 @@ def model_spec_from_config(config: DictConfig, phase: str) -> dict[str, Any]:
         }
     elif phase == "pretraining":
         spec["pretraining"] = {
-            "pooling": OmegaConf.to_container(config.pretraining.pooling, resolve=True),
             "masking": OmegaConf.to_container(config.pretraining.masking, resolve=True),
         }
     elif phase == "adapter":
@@ -61,9 +60,6 @@ def setup_checkpoint(config: DictConfig, checkpoint: dict[str, Any], phase: str)
         )
     elif phase == "pretraining":
         phase_spec = model_spec["pretraining"]
-        config.pretraining.pooling = OmegaConf.merge(
-            config.pretraining.pooling, OmegaConf.create(phase_spec["pooling"])
-        )
         config.pretraining.masking = OmegaConf.merge(
             config.pretraining.masking, OmegaConf.create(phase_spec["masking"])
         )

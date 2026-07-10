@@ -3,11 +3,7 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from core.data.schema import (
-    DIFFICULTY_ATTRIBUTES,
-    FEATURE_INFO,
-    OBJECT_TYPE_SLIDER_HEAD,
-)
+from core.data.schema import FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
 
 
 def mlm_loss_fn(
@@ -58,41 +54,9 @@ def mlm_loss_fn(
     return total_loss / (targets.shape[0] + 1e-9)
 
 
-def difficulty_loss_fn(
-    predictions: Dict[str, torch.Tensor],
-    labels: Dict[str, torch.Tensor],
-    config: DictConfig,
-    phase: str = "pretraining",
-) -> Dict[str, torch.Tensor]:
-    losses = {}
-    loss_config = config[phase].loss
-    overall_weight = loss_config.difficulty_weight
-
-    per_attr_weights = {
-        "stars": loss_config.stars_weight,
-        "aim": loss_config.aim_weight,
-        "speed": loss_config.speed_weight,
-        "slider_factor": loss_config.slider_factor_weight,
-    }
-
-    device = next(iter(predictions.values())).device
-    unscaled_sum = torch.zeros((), device=device)
-    beta = float(loss_config.difficulty_huber_beta)
-
-    for key in DIFFICULTY_ATTRIBUTES:
-        loss = F.smooth_l1_loss(predictions[key], labels[key], beta=beta)
-        losses[f"{key}_loss"] = loss
-        unscaled_sum = unscaled_sum + per_attr_weights[key] * loss
-
-    losses["difficulty_loss_unscaled"] = unscaled_sum
-    losses["difficulty_loss"] = unscaled_sum * overall_weight
-    return losses
-
-
 def pretrain_loss_fn(
     predictions: Dict[str, Any],
     targets: torch.Tensor,
-    difficulty_labels: Dict[str, torch.Tensor],
     config: DictConfig,
 ) -> Dict[str, torch.Tensor]:
     losses = {}
@@ -101,15 +65,7 @@ def pretrain_loss_fn(
     mlm_loss = mlm_loss_fn(predictions["mlm"], targets)
     losses["mlm_loss"] = mlm_loss
 
-    total_loss = mlm_loss * mlm_weight
-
-    diff_losses = difficulty_loss_fn(
-        predictions["difficulty"], difficulty_labels, config, phase="pretraining"
-    )
-    losses.update(diff_losses)
-    total_loss = total_loss + diff_losses["difficulty_loss"]
-
-    losses["total_loss"] = total_loss
+    losses["total_loss"] = mlm_loss * mlm_weight
     return losses
 
 

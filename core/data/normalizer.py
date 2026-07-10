@@ -76,7 +76,6 @@ class BeatmapNormalizer:
     def from_data(
         cls,
         train_data: List[torch.Tensor],
-        difficulty_attributes: Dict[str, np.ndarray],
         epsilon: float = 1e-8,
     ) -> "BeatmapNormalizer":
         vector_field_names = FIELD_NAMES
@@ -128,11 +127,7 @@ class BeatmapNormalizer:
                 torch.clamp(torch.sqrt(variance), min=epsilon),
             )
 
-        attribute_stats = cls.attribute_stats_from_data(difficulty_attributes, epsilon)
-
-        return cls(
-            vector_stats=vector_stats, attribute_stats=attribute_stats, epsilon=epsilon
-        )
+        return cls(vector_stats=vector_stats, epsilon=epsilon)
 
     def get_vector_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
         return self.vector_stats

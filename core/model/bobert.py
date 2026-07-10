@@ -9,7 +9,6 @@ from rotary_embedding_torch import RotaryEmbedding
 from ..data.schema import FEATURE_INFO, MAP_FEATURE_ATTRIBUTES
 
 from .components import (
-    DifficultyHead,
     EncoderLayer,
     HitObjectFeatureTokenizer,
     MapFeatureProjector,
@@ -35,6 +34,11 @@ def _compile_encoder_only(model: nn.Module, config: DictConfig, label: str) -> N
     )
     model.bert.encode = torch.compile(
         model.bert.encode,
+        mode=compile_mode,
+        dynamic=compile_dynamic,
+    )
+    model.bert.encode_masked = torch.compile(
+        model.bert.encode_masked,
         mode=compile_mode,
         dynamic=compile_dynamic,
     )
@@ -176,6 +180,49 @@ class BobertEncoder(nn.Module):
 
         return packed_output
 
+    def encode_masked(
+        self,
+        packed_embeddings: torch.Tensor,
+        masked_idx: torch.Tensor,
+        masked_positions: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+    ) -> torch.Tensor:
+        if not self.use_flash or not self.layers[-1].is_global:
+            return self.encode(
+                packed_embeddings,
+                cu_seqlens_k,
+                max_seqlen_k,
+            ).index_select(0, masked_idx)
+
+        all_freqs = self.rotary_emb(
+            torch.arange(max_seqlen_k, device=packed_embeddings.device),
+            seq_len=max_seqlen_k,
+        )
+        rotary_freqs = (all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin())
+        packed_output = packed_embeddings
+        for layer in self.layers[:-1]:
+            packed_output = layer(
+                packed_output,
+                rotary_freqs=rotary_freqs,
+                cu_seqlens=cu_seqlens_k,
+                max_seqlen=max_seqlen_k,
+            )
+
+        masked_output = self.layers[-1].forward_masked(
+            packed_output,
+            masked_idx=masked_idx,
+            masked_positions=masked_positions,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            rotary_freqs=rotary_freqs,
+        )
+        return self.final_norm(masked_output)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -227,15 +274,11 @@ class BobertForPretraining(nn.Module):
         bert_model: BobertEncoder,
         masker: SpanMasker,
         mlm_head: MaskedLMHead,
-        stats_pooler: StatsPooler,
-        difficulty_head: DifficultyHead,
     ):
         super().__init__()
         self.bert = bert_model
         self.masker = masker
         self.mlm_head = mlm_head
-        self.stats_pooler = stats_pooler
-        self.difficulty_head = difficulty_head
         self.is_compiled = False
 
     @classmethod
@@ -253,19 +296,7 @@ class BobertForPretraining(nn.Module):
         )
 
         mlm_head = MaskedLMHead(base_model.d_model)
-
-        pooling_stats = tuple(pretraining_config.pooling.stats)
-        stats_pooler = StatsPooler(
-            base_model.d_model,
-            stat_dim=pretraining_config.pooling.stat_dim,
-            stats=pooling_stats,
-            output_dim=pretraining_config.pooling.stats_mixer_dim,
-        )
-        difficulty_head = DifficultyHead(stats_pooler.output_dim)
-
-        model = cls(
-            base_model, masking_strategy, mlm_head, stats_pooler, difficulty_head
-        )
+        model = cls(base_model, masking_strategy, mlm_head)
         model = model.to(device)
 
         if config.runtime.compile_model:
@@ -363,6 +394,32 @@ class BobertForPretraining(nn.Module):
             "col_index": col_index,
         }
 
+    def _pretrain_predictions(
+        self,
+        packed_input: torch.Tensor,
+        is_masked: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> Dict[str, Any]:
+        masked_idx = is_masked.nonzero(as_tuple=False).flatten()
+        batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
+        masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
+        counts = torch.bincount(
+            batch_ids, minlength=cu_seqlens.shape[0] - 1
+        ).to(torch.int32)
+        cu_seqlens_q = F.pad(torch.cumsum(counts, dim=0, dtype=torch.int32), (1, 0))
+        max_seqlen_q = int(counts.max().item())
+        masked_output = self.bert.encode_masked(
+            packed_input,
+            masked_idx,
+            masked_positions,
+            cu_seqlens_q,
+            cu_seqlens,
+            max_seqlen_q,
+            max_seqlen,
+        )
+        return {"mlm": self.mlm_head(masked_output)}
+
     def forward(
         self,
         x: torch.Tensor,
@@ -382,22 +439,9 @@ class BobertForPretraining(nn.Module):
         packed_targets = x[attention_mask][is_masked]
         max_seqlen = x.shape[1]
 
-        packed_output = self.bert.encode(
-            packed_input,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+        predictions = self._pretrain_predictions(
+            packed_input, is_masked, cu_seqlens, max_seqlen
         )
-
-        mlm_predictions = self.mlm_head(packed_output, is_masked)
-
-        pooled_output = self.stats_pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        difficulty_predictions = self.difficulty_head(pooled_output)
-
-        predictions = {"mlm": mlm_predictions, "difficulty": difficulty_predictions}
 
         return predictions, packed_targets, is_masked
 
@@ -421,22 +465,9 @@ class BobertForPretraining(nn.Module):
             packed_padded_mask,
         )
 
-        packed_output = self.bert.encode(
-            packed_input,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+        predictions = self._pretrain_predictions(
+            packed_input, is_masked, cu_seqlens, max_seqlen
         )
-
-        mlm_predictions = self.mlm_head(packed_output, is_masked)
-
-        pooled_output = self.stats_pooler(
-            packed_output,
-            cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        difficulty_predictions = self.difficulty_head(pooled_output)
-
-        predictions = {"mlm": mlm_predictions, "difficulty": difficulty_predictions}
 
         return predictions, packed_targets, is_masked
 

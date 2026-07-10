@@ -5,7 +5,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from .schema import DIFFICULTY_ATTRIBUTES, MAP_FEATURE_ATTRIBUTES
+from .schema import MAP_FEATURE_ATTRIBUTES
 from .feature import build_feature_tensors, calculate_drain_times
 
 
@@ -183,7 +183,7 @@ def load_beatmap_dataset(
         else:
             hitobject_data, ids, _ = features
 
-        meta_cols = ["beatmap_id", *DIFFICULTY_ATTRIBUTES, *MAP_FEATURE_ATTRIBUTES]
+        meta_cols = ["beatmap_id", *MAP_FEATURE_ATTRIBUTES]
         meta = beatmaps_chunk.select(meta_cols)
         meta_by_id = {
             int(bid): index
@@ -199,11 +199,6 @@ def load_beatmap_dataset(
             bid_int = int(bid)
             meta_index = meta_by_id[bid_int]
 
-            ratings = {
-                key: float(meta_arrays[key][meta_index])
-                for key in DIFFICULTY_ATTRIBUTES
-            }
-
             beatmap_attrs = {
                 key: float(meta_arrays[key][meta_index])
                 for key in MAP_FEATURE_ATTRIBUTES
@@ -212,7 +207,6 @@ def load_beatmap_dataset(
             item = {
                 "beatmap_id": bid_int,
                 "hitobjects": vectors,
-                "difficulty": ratings,
                 "map_features": beatmap_attrs,
             }
             if include_beat_ids:

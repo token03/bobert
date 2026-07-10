@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from omegaconf import DictConfig
 import pytorch_lightning as pl
@@ -9,7 +9,7 @@ import torch.nn as nn
 from core.data.module import AdapterData, PretrainData, preallocation_batch_size
 
 from .loss import alignment_loss_fn, pretrain_loss_fn
-from .metrics import ContrastiveMetrics, DifficultyMetrics, MLMMetrics
+from .metrics import ContrastiveMetrics, MLMMetrics
 from .setup import (
     create_optimizer,
     create_scheduler,
@@ -21,7 +21,7 @@ from ..model.checkpoint import (
     restore_normalizer_from_checkpoint,
 )
 from ..data.normalizer import BeatmapNormalizer
-from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, VECTOR_DIM
+from ..data.schema import FEATURE_INFO, VECTOR_DIM
 
 
 class BobertLightningModule(pl.LightningModule):
@@ -101,7 +101,6 @@ class PretrainingModule(BobertLightningModule):
 
         feature_info = FEATURE_INFO
         self.mlm_metrics = MLMMetrics(feature_info, self.device)
-        self.difficulty_metrics = DifficultyMetrics(self.device)
 
     def forward(self, batch):
         return self.model.forward_packed_pretrain(
@@ -112,18 +111,11 @@ class PretrainingModule(BobertLightningModule):
         )
 
     def _shared_step(self, batch: Dict[str, Any]):
-        difficulty_labels = batch["labels"]
         predictions, targets, mask = self(batch)
-
-        loss_dict = pretrain_loss_fn(
-            predictions, targets, difficulty_labels, self.config
-        )
-
-        return predictions, targets, mask, difficulty_labels, loss_dict
+        loss_dict = pretrain_loss_fn(predictions, targets, self.config)
+        return predictions, targets, mask, loss_dict
 
     def on_fit_start(self):
-        self.difficulty_metrics.normalizer = self.datamodule.normalizer
-
         if self.global_rank == 0:
             print("Running max-length preallocation pass for pretraining...")
 
@@ -147,7 +139,7 @@ class PretrainingModule(BobertLightningModule):
             else nullcontext()
         )
         with autocast_context:
-            _, _, _, _, loss_dict = self._shared_step(warmup_batch)
+            _, _, _, loss_dict = self._shared_step(warmup_batch)
         loss_dict["total_loss"].backward()
         optimizer.zero_grad(set_to_none=True)
 
@@ -185,14 +177,9 @@ class PretrainingModule(BobertLightningModule):
             device=self.device,
             dtype=torch.int32,
         )
-        labels = {
-            name: torch.zeros(batch_size, device=self.device, dtype=torch.float32)
-            for name in DIFFICULTY_ATTRIBUTES
-        }
         return {
             "packed_vectors": packed_vectors,
             "packed_padded_mask": packed_padded_mask,
-            "labels": labels,
             "cu_seqlens": cu_seqlens,
             "max_seqlen": torch.tensor(max_seq_len, device=self.device),
             "batch_size": batch_size,
@@ -207,7 +194,7 @@ class PretrainingModule(BobertLightningModule):
         )
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        _, _, _, _, loss_dict = self._shared_step(batch)
+        _, _, _, loss_dict = self._shared_step(batch)
 
         metrics_to_log = {
             "train_loss": loss_dict["total_loss"],
@@ -215,28 +202,17 @@ class PretrainingModule(BobertLightningModule):
             "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
         }
 
-        if "difficulty_loss" in loss_dict:
-            metrics_to_log["train_difficulty_loss"] = loss_dict["difficulty_loss"]
-
         self.log_dict(metrics_to_log, prog_bar=True, batch_size=self.batch_size)
 
         return loss_dict["total_loss"]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, targets, mask, difficulty_labels, loss_dict = self._shared_step(
-            batch
-        )
+        predictions, targets, mask, loss_dict = self._shared_step(batch)
 
         self.mlm_metrics.update(
             predictions["mlm"],
             targets,
             loss=loss_dict["mlm_loss"].item(),
-        )
-
-        self.difficulty_metrics.update(
-            predictions["difficulty"],
-            difficulty_labels,
-            loss=loss_dict["difficulty_loss"].item(),
         )
 
         self.log(
@@ -251,15 +227,8 @@ class PretrainingModule(BobertLightningModule):
 
     def on_validation_epoch_end(self):
         mlm_results = self.flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
-        diff_results = self.flatten_metrics(
-            self.difficulty_metrics.compute(), prefix="val_diff"
-        )
-
         self.log_dict(mlm_results, sync_dist=True)
-        self.log_dict(diff_results, sync_dist=True)
-
         self.mlm_metrics.reset()
-        self.difficulty_metrics.reset()
 
 
 class AlignmentModule(BobertLightningModule):

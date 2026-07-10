@@ -336,12 +336,12 @@ def _alignment_labels(
 
 
 def collate_pretrain(
-    batch: List[Tuple[torch.Tensor, Dict[str, float]]],
+    batch: List[torch.Tensor],
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
 ):
-    vectors, attrs = zip(*batch)
+    vectors = batch
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
     cu_seqlens = torch.nn.functional.pad(
@@ -355,7 +355,6 @@ def collate_pretrain(
             [span_mask(length, masking_ratio, mean_span_length) for length in lengths],
             dim=0,
         ),
-        "labels": stack_dicts(attrs),
         "cu_seqlens": cu_seqlens,
         "max_seqlen": torch.tensor(max(lengths), dtype=torch.long),
         "batch_size": len(batch),
@@ -366,7 +365,7 @@ def collate_align_train(
     batch: List[Tuple],
     max_seq_len: int,
 ):
-    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
+    vectors, map_features, beatmap_ids, targets = zip(*batch)
     labels = _alignment_labels(map_features, beatmap_ids, targets)
     labels["use_contrastive"] = True
 
@@ -383,7 +382,7 @@ def collate_align_eval(
     batch: List[Tuple],
     max_seq_len: int,
 ):
-    vectors, _, map_features, beatmap_ids, targets = zip(*batch)
+    vectors, map_features, beatmap_ids, targets = zip(*batch)
     labels = _alignment_labels(map_features, beatmap_ids, targets)
     labels["use_contrastive"] = False
 

@@ -6,10 +6,6 @@ from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import FBetaScore
 
-from core.data.schema import DIFFICULTY_ATTRIBUTES
-from core.data.normalizer import BeatmapNormalizer
-
-
 class MLMMetrics(nn.Module):
     def __init__(self, feature_info: Dict[str, Any], device: torch.device):
         super().__init__()
@@ -117,58 +113,6 @@ class MLMMetrics(nn.Module):
         self.cont_metrics.reset()
         for collection in self.cat_metrics.values():
             collection.reset()
-        self.loss_metric.reset()
-
-
-class DifficultyMetrics(nn.Module):
-    def __init__(
-        self, device: torch.device, normalizer: Optional[BeatmapNormalizer] = None
-    ):
-        super().__init__()
-        self._device = device
-        self.normalizer = normalizer
-
-        self.attr_metrics = MetricCollection(
-            {f"{name}_mae": MeanMetric() for name in DIFFICULTY_ATTRIBUTES}
-        ).to(device)
-
-        self.loss_metric = MeanMetric().to(device)
-
-    def update(
-        self,
-        predictions: Dict[str, torch.Tensor],
-        labels: Dict[str, torch.Tensor],
-        loss: Optional[float] = None,
-    ):
-        if loss is not None:
-            self.loss_metric.update(loss)
-
-        for key, preds in predictions.items():
-            if key in labels:
-                label = labels[key]
-                if self.normalizer is not None:
-                    preds = self.normalizer.denormalize_attribute(key, preds)
-                    label = self.normalizer.denormalize_attribute(key, label)
-                mae = torch.abs(preds - label)
-                self.attr_metrics[f"{key}_mae"].update(mae)
-
-    def compute(self) -> Dict[str, Any]:
-        results = {}
-
-        attr_results = self.attr_metrics.compute()
-        difficulty_metrics = {
-            k: v.item() for k, v in attr_results.items() if v.numel() > 0
-        }
-        if difficulty_metrics:
-            results["difficulty_metrics"] = difficulty_metrics
-
-        if self.loss_metric.update_count > 0:
-            results["difficulty_loss"] = self.loss_metric.compute().item()
-
-        return results
-
-    def reset(self):
-        self.attr_metrics.reset()
         self.loss_metric.reset()
 
 

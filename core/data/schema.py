@@ -1,13 +1,6 @@
 from typing import NamedTuple
 from enum import Enum
 
-DIFFICULTY_ATTRIBUTES = [
-    "stars",
-    "aim",
-    "speed",
-    "slider_factor",
-]
-
 MAP_FEATURE_ATTRIBUTES = [
     "ar",
     "cs",

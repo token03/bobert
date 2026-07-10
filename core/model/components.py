@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from rotary_embedding_torch import apply_rotary_emb
 from torch.utils.checkpoint import checkpoint
 
-from ..data.schema import DIFFICULTY_ATTRIBUTES, FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
+from ..data.schema import FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
 
 try:
     import torch.distributed.tensor  # noqa: F401
@@ -68,12 +68,16 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.wo = nn.Linear(d_model, d_model, bias=False)
 
         if use_flash:
-            from flash_attn import flash_attn_varlen_func
+            from flash_attn import (
+                flash_attn_varlen_func,
+                flash_attn_varlen_kvpacked_func,
+            )
             from flash_attn.layers.rotary import (
                 apply_rotary_emb as flash_apply_rotary_emb,
             )
 
             self.flash_attn = flash_attn_varlen_func
+            self.flash_attn_kvpacked = flash_attn_varlen_kvpacked_func
             self.flash_rope = flash_apply_rotary_emb
 
     def forward(
@@ -131,6 +135,63 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
             out = self._forward_torch(q, k, v, cu_seqlens)
         return self.wo(out.view(total_tokens, self.d_model))
+
+    def forward_masked(
+        self,
+        x: torch.Tensor,
+        *,
+        masked_idx: torch.Tensor,
+        masked_positions: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        rotary_freqs: Tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        if not self.use_flash or not self.is_global:
+            raise RuntimeError("masked attention requires global FlashAttention")
+
+        total_tokens = x.shape[0]
+        masked_tokens = masked_idx.shape[0]
+        wq = self.wqkv.weight[: self.d_model]
+        wkv = self.wqkv.weight[self.d_model :]
+
+        q = F.linear(x.index_select(0, masked_idx), wq).view(
+            masked_tokens, self.n_heads, self.d_head
+        )
+        kv = F.linear(x, wkv).view(
+            total_tokens, 2, self.n_heads, self.d_head
+        )
+        k, v = kv.unbind(dim=1)
+
+        cos, sin = rotary_freqs
+        q = self.flash_rope(
+            q.unsqueeze(1),
+            cos,
+            sin,
+            interleaved=True,
+            seqlen_offsets=masked_positions,
+        ).squeeze(1)
+        k = self.flash_rope(
+            k,
+            cos,
+            sin,
+            interleaved=True,
+            cu_seqlens=cu_seqlens_k,
+            max_seqlen=max_seqlen_k,
+        )
+
+        out = self.flash_attn_kvpacked(
+            q,
+            torch.stack((k, v), dim=1),
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p=0.0,
+            causal=False,
+        )
+        return self.wo(out.view(masked_tokens, self.d_model))
 
     def _to_sdpa_4d(self, x: torch.Tensor) -> torch.Tensor:
         return x.transpose(0, 1).unsqueeze(0).contiguous().float()
@@ -298,6 +359,38 @@ class EncoderLayer(nn.Module):
         src = src + self.dropout2(src2)
 
         return src
+
+    def forward_masked(
+        self,
+        src: torch.Tensor,
+        *,
+        masked_idx: torch.Tensor,
+        masked_positions: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        rotary_freqs: Tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        src_masked = src.index_select(0, masked_idx)
+        src2 = self.self_attn.forward_masked(
+            self.norm1(src),
+            masked_idx=masked_idx,
+            masked_positions=masked_positions,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            rotary_freqs=rotary_freqs,
+        )
+        src = src_masked + self.dropout1(src2)
+
+        if self.training and self.activation_checkpointing:
+            src2 = checkpoint(self.ffn, self.norm2(src), use_reentrant=False)
+        else:
+            src2 = self.ffn(self.norm2(src))
+
+        return src + self.dropout2(src2)
 
 
 class HitObjectFeatureTokenizer(nn.Module):
@@ -900,9 +993,11 @@ class MaskedLMHead(nn.Module):
     def forward(
         self,
         packed_output: torch.Tensor,
-        is_masked: torch.Tensor,
+        is_masked: torch.Tensor | None = None,
     ) -> Dict[str, Any]:
-        masked_output = packed_output[is_masked]
+        masked_output = (
+            packed_output if is_masked is None else packed_output[is_masked]
+        )
 
         continuous_preds = self.continuous_head(masked_output)
         categorical_preds = {
@@ -910,20 +1005,6 @@ class MaskedLMHead(nn.Module):
         }
 
         return {"continuous": continuous_preds, "categorical": categorical_preds}
-
-
-class DifficultyHead(nn.Module):
-    def __init__(self, input_dim: int):
-        super().__init__()
-        self.head = nn.Linear(input_dim, len(DIFFICULTY_ATTRIBUTES))
-
-    def forward(self, pooled_output: torch.Tensor) -> Dict[str, torch.Tensor]:
-        difficulty_preds_raw = self.head(pooled_output)
-
-        return {
-            name: difficulty_preds_raw[:, i]
-            for i, name in enumerate(DIFFICULTY_ATTRIBUTES)
-        }
 
 
 class MapFeatureProjector(nn.Module):

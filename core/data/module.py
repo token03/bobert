@@ -59,7 +59,6 @@ class BeatmapDataset(Dataset):
         self.task = task
         self.beatmap_data = split["data"]
         self.normalizer = normalizer
-        self.diff_attrs = split["attrs"]
         self.map_features = split["map_features"]
         self.beatmap_ids = split["ids"]
         self.alignment_targets = alignment_targets
@@ -76,20 +75,15 @@ class BeatmapDataset(Dataset):
             self.augment,
             self.max_seq_len,
         )
-        attrs = {
-            k: self.normalizer.normalize_attribute(k, v[idx])
-            for k, v in self.diff_attrs.items()
-        }
-
         if self.task == "pretrain":
-            return vec, attrs
+            return vec
 
         map_features = {
             k: self.normalizer.normalize_attribute(k, v[idx])
             for k, v in self.map_features.items()
         }
         bid = int(self.beatmap_ids[idx])
-        return vec, attrs, map_features, bid, self.alignment_targets[bid]
+        return vec, map_features, bid, self.alignment_targets[bid]
 
 
 class AdapterEmbeddingDataset(Dataset):
@@ -122,10 +116,6 @@ def load_data(data_config, max_seq_len, ids_to_load, sample_size):
 def unpack(rows):
     return {
         "data": [row["hitobjects"] for row in rows],
-        "attrs": {
-            key: [row["difficulty"][key] for row in rows]
-            for key in rows[0]["difficulty"]
-        },
         "map_features": {
             key: [row["map_features"][key] for row in rows]
             for key in rows[0]["map_features"]
@@ -239,9 +229,7 @@ class PretrainData(pl.LightningDataModule):
             self.phase_config.data.pretrain_size,
         )
         train_s, val_s = split_loaded_data(all_beatmap_data, self.data_config.val_split)
-        train_attrs_np = {k: np.array(v) for k, v in train_s["attrs"].items()}
-
-        self.normalizer = BeatmapNormalizer.from_data(train_s["data"], train_attrs_np)
+        self.normalizer = BeatmapNormalizer.from_data(train_s["data"])
         self.vector_dim = train_s["data"][0].shape[1]
         self.train_dataset = BeatmapDataset(
             "pretrain", train_s, self.normalizer, self.max_seq_len, True, {}
