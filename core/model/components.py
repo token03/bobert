@@ -991,16 +991,15 @@ class QueryAttentionPooler(nn.Module):
 class MaskedLMHead(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
-        self.feature_info = FEATURE_INFO
-        num_continuous = len(self.feature_info["continuous"])
-
-        self.continuous_head = nn.Linear(d_model, num_continuous)
-        self.categorical_heads = nn.ModuleDict(
-            {
-                name: nn.Linear(d_model, info["cardinality"])
-                for name, info in self.feature_info["categorical"].items()
-            }
+        self.categorical_names = tuple(FEATURE_INFO["categorical"])
+        self.output_sizes = (
+            len(FEATURE_INFO["continuous"]),
+            *(
+                FEATURE_INFO["categorical"][name]["cardinality"]
+                for name in self.categorical_names
+            ),
         )
+        self.proj = nn.Linear(d_model, sum(self.output_sizes))
 
     def forward(
         self,
@@ -1011,12 +1010,11 @@ class MaskedLMHead(nn.Module):
             packed_output if is_masked is None else packed_output[is_masked]
         )
 
-        continuous_preds = self.continuous_head(masked_output)
-        categorical_preds = {
-            name: head(masked_output) for name, head in self.categorical_heads.items()
+        pieces = self.proj(masked_output).split(self.output_sizes, dim=-1)
+        return {
+            "continuous": pieces[0],
+            "categorical": dict(zip(self.categorical_names, pieces[1:])),
         }
-
-        return {"continuous": continuous_preds, "categorical": categorical_preds}
 
 
 class MapFeatureProjector(nn.Module):
