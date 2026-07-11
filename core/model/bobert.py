@@ -92,6 +92,8 @@ class BobertEncoder(nn.Module):
                 for i in range(n_layers)
             ]
         )
+        if self.layers:
+            self.layers[-1].activation_checkpointing = False
 
         self.final_norm = RMSNorm(d_model)
 

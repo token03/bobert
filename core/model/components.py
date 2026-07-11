@@ -430,18 +430,51 @@ class HitObjectFeatureTokenizer(nn.Module):
         )
         self.num_tokens = len(self.numeric_tokens) + len(self.categorical_tokens)
 
-        for module_name, feature_names in self.numeric_tokens:
-            setattr(
-                self,
-                module_name,
-                nn.Sequential(nn.Linear(len(feature_names), d_feat), nn.GELU()),
-            )
-        for module_name, feature_name in self.categorical_tokens:
-            setattr(
-                self,
-                module_name,
-                nn.Embedding(self.categorical[feature_name]["cardinality"], d_feat),
-            )
+        numeric_indices = []
+        numeric_mask = []
+        self.numeric_weight = nn.Parameter(torch.zeros(len(self.numeric_tokens), 3, d_feat))
+        self.numeric_bias = nn.Parameter(torch.empty(len(self.numeric_tokens), d_feat))
+        for group, (_, feature_names) in enumerate(self.numeric_tokens):
+            indices = [self.continuous[name] for name in feature_names]
+            numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
+            numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
+            nn.init.kaiming_uniform_(self.numeric_weight[group, : len(indices)].T, a=5**0.5)
+            bound = 1 / len(indices) ** 0.5
+            nn.init.uniform_(self.numeric_bias[group], -bound, bound)
+        self.register_buffer(
+            "numeric_indices", torch.tensor(numeric_indices, dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "numeric_mask", torch.tensor(numeric_mask), persistent=False
+        )
+
+        categorical_indices = []
+        categorical_cardinalities = []
+        category_offsets = []
+        offset = 0
+        for _, feature_name in self.categorical_tokens:
+            cardinality = self.categorical[feature_name]["cardinality"]
+            categorical_indices.append(self.categorical[feature_name]["index"])
+            categorical_cardinalities.append(cardinality)
+            category_offsets.append(offset)
+            offset += cardinality
+        self.categorical_weight = nn.Parameter(torch.empty(offset, d_feat))
+        nn.init.normal_(self.categorical_weight)
+        self.register_buffer(
+            "categorical_indices",
+            torch.tensor(categorical_indices, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "categorical_cardinalities",
+            torch.tensor(categorical_cardinalities, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "category_offsets",
+            torch.tensor(category_offsets, dtype=torch.long),
+            persistent=False,
+        )
 
         self.feature_bias = nn.Parameter(torch.zeros(self.num_tokens, d_feat))
         self.object_mlp = nn.Sequential(
@@ -464,17 +497,22 @@ class HitObjectFeatureTokenizer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         object_type = self._categorical_feature(x, "object_type")
 
-        tokens = torch.stack(
-            [
-                getattr(self, module_name)(self._continuous_features(x, feature_names))
-                for module_name, feature_names in self.numeric_tokens
-            ]
-            + [
-                getattr(self, module_name)(self._categorical_feature(x, feature_name))
-                for module_name, feature_name in self.categorical_tokens
-            ],
-            dim=-2,
+        numeric_inputs = x[..., self.numeric_indices]
+        numeric_inputs = numeric_inputs * self.numeric_mask.to(dtype=x.dtype)
+        numeric_tokens = torch.einsum(
+            "...gi,gif->...gf", numeric_inputs, self.numeric_weight
         )
+        numeric_tokens = F.gelu(numeric_tokens + self.numeric_bias)
+
+        categorical_ids = x[..., self.categorical_indices].long()
+        categorical_ids = categorical_ids.clamp_min(0)
+        categorical_ids = torch.minimum(
+            categorical_ids, self.categorical_cardinalities - 1
+        )
+        categorical_tokens = F.embedding(
+            categorical_ids + self.category_offsets, self.categorical_weight
+        )
+        tokens = torch.cat((numeric_tokens, categorical_tokens), dim=-2)
 
         tokens = tokens + self.feature_bias.to(dtype=tokens.dtype)
 

@@ -18,6 +18,9 @@ from core.training.setup import create_trainer, find_latest_checkpoint, find_lat
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT pretraining.")
     parser.add_argument("--config", default="config.yaml")
+    profile = parser.add_mutually_exclusive_group()
+    profile.add_argument("--ablate", action="store_true")
+    profile.add_argument("--full", action="store_true")
     parser.add_argument("--dataset-path")
     parser.add_argument("--pretrain-size", type=int)
     parser.add_argument("--dataset-seed", type=int)
@@ -44,6 +47,13 @@ def parse_args() -> argparse.Namespace:
 def load_config(args: argparse.Namespace) -> DictConfig:
     config = cast(DictConfig, load_bobert_config(args.config))
     OmegaConf.set_struct(config, False)
+
+    if args.ablate:
+        config.pretraining.data.pretrain_size = 60000
+        config.pretraining.trainer.epochs = 6
+    elif args.full:
+        config.pretraining.data.pretrain_size = None
+        config.pretraining.trainer.epochs = 30
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
