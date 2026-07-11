@@ -16,6 +16,7 @@ from .batch import (
     collate_align_eval,
     collate_align_train,
     collate_pretrain,
+    masked_query_buckets,
 )
 from .mining import load_alignment_cache
 from .normalizer import BeatmapNormalizer
@@ -243,20 +244,32 @@ class PretrainData(pl.LightningDataModule):
         )
 
     def train_dataloader(self):
+        q_buckets = masked_query_buckets(
+            self.data_config.length_buckets,
+            self.max_seq_len,
+            self.phase_config.masking.ratio,
+        )
         collate = partial(
             collate_pretrain,
             max_seq_len=self.max_seq_len,
             masking_ratio=self.phase_config.masking.ratio,
             mean_span_length=self.phase_config.masking.mean_span_length,
+            q_buckets=q_buckets,
         )
         return bucketed_loader(self.train_dataset, collate, self, True)
 
     def val_dataloader(self):
+        q_buckets = masked_query_buckets(
+            self.data_config.length_buckets,
+            self.max_seq_len,
+            self.phase_config.masking.ratio,
+        )
         collate = partial(
             collate_pretrain,
             max_seq_len=self.max_seq_len,
             masking_ratio=self.phase_config.masking.ratio,
             mean_span_length=self.phase_config.masking.mean_span_length,
+            q_buckets=q_buckets,
         )
         return bucketed_loader(self.val_dataset, collate, self, False)
 

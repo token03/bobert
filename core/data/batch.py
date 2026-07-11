@@ -10,11 +10,23 @@ from torch.utils.data import Sampler
 from .schema import MAP_FEATURE_ATTRIBUTES
 
 
-Q_BUCKETS = (160, 224, 320, 480, 640, 960, 1280, 4096)
+def masked_query_buckets(
+    length_buckets: Sequence[int], max_seq_len: int, masking_ratio: float
+) -> Tuple[int, ...]:
+    lengths = {*map(int, length_buckets), int(max_seq_len)}
+    return tuple(
+        sorted(
+            {
+                max(32, ((round(length * masking_ratio) + 31) // 32) * 32)
+                for length in lengths
+                if length <= max_seq_len
+            }
+        )
+    )
 
 
-def select_q_bucket(max_masked_count: int) -> int:
-    for bound in Q_BUCKETS:
+def select_q_bucket(max_masked_count: int, buckets: Sequence[int]) -> int:
+    for bound in buckets:
         if max_masked_count <= bound:
             return bound
     raise ValueError(f"Masked sequence too long: {max_masked_count}")
@@ -350,6 +362,7 @@ def collate_pretrain(
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
+    q_buckets: Sequence[int],
 ):
     vectors = batch
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
@@ -361,7 +374,7 @@ def collate_pretrain(
     masked_counts = torch.tensor(
         [int(mask.sum()) for mask in masks], dtype=torch.int32
     )
-    max_seqlen_q = select_q_bucket(int(masked_counts.max()))
+    max_seqlen_q = select_q_bucket(int(masked_counts.max()), q_buckets)
     masked_positions = torch.cat(
         [mask.nonzero(as_tuple=False).flatten() for mask in masks], dim=0
     )

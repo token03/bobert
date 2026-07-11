@@ -6,7 +6,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
-from core.data.batch import select_q_bucket
+from core.data.batch import masked_query_buckets, select_q_bucket
 from core.data.module import AdapterData, PretrainData, preallocation_batch_size
 
 from .loss import alignment_loss_fn, pretrain_loss_fn
@@ -177,9 +177,11 @@ class PretrainingModule(BobertLightningModule):
                 device=self.device,
             ).to(packed_vectors.dtype)
 
-        packed_padded_mask = torch.rand(
-            batch_size * max_seq_len, device=self.device
-        ) < float(self.config.pretraining.masking.ratio)
+        masking_ratio = float(self.config.pretraining.masking.ratio)
+        mask_count = round(max_seq_len * masking_ratio)
+        packed_padded_mask = (
+            torch.arange(max_seq_len, device=self.device)[None, :] < mask_count
+        ).expand(batch_size, -1).reshape(-1)
         cu_seqlens = torch.arange(
             0,
             (batch_size + 1) * max_seq_len,
@@ -213,7 +215,14 @@ class PretrainingModule(BobertLightningModule):
             "masked_idx": masked_idx,
             "masked_positions": masked_positions,
             "masked_counts": masked_counts,
-            "max_seqlen_q": select_q_bucket(int(masked_counts.max().item())),
+            "max_seqlen_q": select_q_bucket(
+                mask_count,
+                masked_query_buckets(
+                    self.config.data.length_buckets,
+                    max_seq_len,
+                    masking_ratio,
+                ),
+            ),
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
             "unchanged_idx": masked_idx[split >= 0.9],
