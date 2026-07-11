@@ -335,6 +335,9 @@ class EncoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
+    def _ffn_block(self, src: torch.Tensor) -> torch.Tensor:
+        return self.ffn(self.norm2(src))
+
     def forward(
         self,
         src: torch.Tensor,
@@ -352,9 +355,9 @@ class EncoderLayer(nn.Module):
         src = src + self.dropout1(src2)
 
         if self.training and self.activation_checkpointing:
-            src2 = checkpoint(self.ffn, self.norm2(src), use_reentrant=False)
+            src2 = checkpoint(self._ffn_block, src, use_reentrant=False)
         else:
-            src2 = self.ffn(self.norm2(src))
+            src2 = self._ffn_block(src)
 
         src = src + self.dropout2(src2)
 
@@ -386,9 +389,9 @@ class EncoderLayer(nn.Module):
         src = src_masked + self.dropout1(src2)
 
         if self.training and self.activation_checkpointing:
-            src2 = checkpoint(self.ffn, self.norm2(src), use_reentrant=False)
+            src2 = checkpoint(self._ffn_block, src, use_reentrant=False)
         else:
-            src2 = self.ffn(self.norm2(src))
+            src2 = self._ffn_block(src)
 
         return src + self.dropout2(src2)
 

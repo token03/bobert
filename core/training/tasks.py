@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
+from core.data.batch import select_q_bucket
 from core.data.module import AdapterData, PretrainData, preallocation_batch_size
 
 from .loss import alignment_loss_fn, pretrain_loss_fn
@@ -108,6 +109,7 @@ class PretrainingModule(BobertLightningModule):
             batch["masked_idx"],
             batch["masked_positions"],
             batch["masked_counts"],
+            batch["max_seqlen_q"],
             batch["mask_token_idx"],
             batch["random_dst_idx"],
             batch["left_border_zero_idx"],
@@ -115,7 +117,7 @@ class PretrainingModule(BobertLightningModule):
             batch["right_border_zero_idx"],
             batch["right_border_random_idx"],
             batch["cu_seqlens"],
-            int(batch["max_seqlen"].item()),
+            batch["max_seqlen"],
         )
 
     def _shared_step(self, batch: Dict[str, Any]):
@@ -211,6 +213,7 @@ class PretrainingModule(BobertLightningModule):
             "masked_idx": masked_idx,
             "masked_positions": masked_positions,
             "masked_counts": masked_counts,
+            "max_seqlen_q": select_q_bucket(int(masked_counts.max().item())),
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
             "unchanged_idx": masked_idx[split >= 0.9],
@@ -223,7 +226,7 @@ class PretrainingModule(BobertLightningModule):
                 (right_split >= 0.8) & (right_split < 0.9)
             ],
             "cu_seqlens": cu_seqlens,
-            "max_seqlen": torch.tensor(max_seq_len, device=self.device),
+            "max_seqlen": max_seq_len,
             "batch_size": batch_size,
         }
 

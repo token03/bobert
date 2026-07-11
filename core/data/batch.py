@@ -10,6 +10,16 @@ from torch.utils.data import Sampler
 from .schema import MAP_FEATURE_ATTRIBUTES
 
 
+Q_BUCKETS = (160, 224, 320, 480, 640, 960, 1280, 4096)
+
+
+def select_q_bucket(max_masked_count: int) -> int:
+    for bound in Q_BUCKETS:
+        if max_masked_count <= bound:
+            return bound
+    raise ValueError(f"Masked sequence too long: {max_masked_count}")
+
+
 class LengthBucketBatchSampler(Sampler[List[int]]):
     def __init__(
         self,
@@ -351,6 +361,7 @@ def collate_pretrain(
     masked_counts = torch.tensor(
         [int(mask.sum()) for mask in masks], dtype=torch.int32
     )
+    max_seqlen_q = select_q_bucket(int(masked_counts.max()))
     masked_positions = torch.cat(
         [mask.nonzero(as_tuple=False).flatten() for mask in masks], dim=0
     )
@@ -385,6 +396,7 @@ def collate_pretrain(
         "masked_idx": masked_idx,
         "masked_positions": masked_positions.to(torch.int32),
         "masked_counts": masked_counts,
+        "max_seqlen_q": max_seqlen_q,
         "mask_token_idx": mask_token_idx,
         "random_dst_idx": random_dst_idx,
         "unchanged_idx": unchanged_idx,
@@ -397,7 +409,7 @@ def collate_pretrain(
             (right_split >= 0.8) & (right_split < 0.9)
         ],
         "cu_seqlens": cu_seqlens,
-        "max_seqlen": torch.tensor(max(lengths), dtype=torch.long),
+        "max_seqlen": max(lengths),
         "batch_size": len(batch),
     }
 

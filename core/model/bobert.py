@@ -86,7 +86,7 @@ class BobertEncoder(nn.Module):
                     is_global=i in self.global_attention_layers,
                     local_window_size=local_attention_window,
                     local_block_size=local_attention_block_size,
-                    activation_checkpointing=activation_checkpointing,
+                    activation_checkpointing=activation_checkpointing and i % 2 == 0,
                     use_flash=use_flash,
                 )
                 for i in range(n_layers)
@@ -402,13 +402,13 @@ class BobertForPretraining(nn.Module):
         masked_idx: torch.Tensor,
         masked_positions: torch.Tensor,
         masked_counts: torch.Tensor,
+        max_seqlen_q: int,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        max_seqlen_k: int,
     ) -> Dict[str, Any]:
         cu_seqlens_q = F.pad(
             torch.cumsum(masked_counts, dim=0, dtype=torch.int32), (1, 0)
         )
-        max_seqlen_q = int(masked_counts.max().item())
         masked_output = self.bert.encode_masked(
             packed_input,
             masked_idx,
@@ -416,7 +416,7 @@ class BobertForPretraining(nn.Module):
             cu_seqlens_q,
             cu_seqlens,
             max_seqlen_q,
-            max_seqlen,
+            max_seqlen_k,
         )
         return {"mlm": self.mlm_head(masked_output)}
 
@@ -450,6 +450,7 @@ class BobertForPretraining(nn.Module):
             masked_idx,
             masked_positions,
             masked_counts,
+            int(masked_counts.max().item()),
             cu_seqlens,
             max_seqlen,
         )
@@ -462,6 +463,7 @@ class BobertForPretraining(nn.Module):
         masked_idx: torch.Tensor,
         masked_positions: torch.Tensor,
         masked_counts: torch.Tensor,
+        max_seqlen_q: int,
         mask_token_idx: torch.Tensor,
         random_dst_idx: torch.Tensor,
         left_border_zero_idx: torch.Tensor,
@@ -492,6 +494,7 @@ class BobertForPretraining(nn.Module):
             masked_idx,
             masked_positions,
             masked_counts,
+            max_seqlen_q,
             cu_seqlens,
             max_seqlen,
         )
