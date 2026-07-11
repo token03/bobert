@@ -23,13 +23,10 @@ RHYTHM_WINDOW_STRATA = (
     (1, 3),
     (1, 4),
     (1, 5),
-    (2, 3),
-    (2, 4),
-    (2, 5),
-    (2, 6),
-    (2, 7),
-    (2, 8),
-    (2, 16),
+    (1, 6),
+    (1, 7),
+    (1, 8),
+    (1, 16),
 )
 DESCRIPTOR_COLUMNS = (
     "spacing_median",
@@ -172,7 +169,8 @@ def build_rff_signatures(
     n_maps = beatmap_ids.shape[0]
     n_strata = len(RHYTHM_WINDOW_STRATA)
     descriptor_dim = len(DESCRIPTOR_COLUMNS)
-    output_dim = n_strata * int(rff_dim)
+    rff_output_dim = n_strata * int(rff_dim)
+    output_dim = rff_output_dim + n_strata
 
     rng = np.random.default_rng(seed)
     sigma = float(bandwidth_scale) * np.sqrt(descriptor_dim)
@@ -183,7 +181,7 @@ def build_rff_signatures(
     phases_t = torch.from_numpy(phases).to(device)
     mean_t = torch.from_numpy(mean).to(device)
     std_t = torch.from_numpy(std).to(device)
-    sums = torch.zeros((n_maps, output_dim), device=device, dtype=torch.float32)
+    sums = torch.zeros((n_maps, rff_output_dim), device=device, dtype=torch.float32)
     counts = torch.zeros((n_maps, n_strata), device=device, dtype=torch.float32)
 
     code_map = np.full(4 * 32 + 32, -1, dtype=np.int16)
@@ -270,6 +268,8 @@ def build_rff_signatures(
 
     embeddings = sums.cpu().numpy()
     window_counts = counts.sum(dim=1).cpu().numpy()
+    prevalence = torch.log1p(counts).cpu().numpy()
+    embeddings = np.concatenate((embeddings, prevalence), axis=1)
     if l2_normalize:
         embeddings /= np.clip(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-9, None)
     embeddings = embeddings.astype(np.float32, copy=False)

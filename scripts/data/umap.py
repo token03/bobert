@@ -11,18 +11,17 @@ EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
 
 N_EXPORT_NEIGHBORS = 25
-UMAP_NEIGHBORS = 5
-RANDOM_STATE = 42
+UMAP_NEIGHBORS = 10
 
 
 def _resolve_path(path: str | Path) -> Path:
     return resolve_path(path)
 
 
-def _sample_df(df: pd.DataFrame, limit: int | None, seed: int) -> pd.DataFrame:
+def _sample_df(df: pd.DataFrame, limit: int | None) -> pd.DataFrame:
     if limit is None or limit <= 0 or len(df) <= limit:
         return df.reset_index(drop=True)
-    return df.sample(n=limit, random_state=seed).reset_index(drop=True)
+    return df.sample(n=limit).reset_index(drop=True)
 
 
 def _nearest_neighbors_faiss(matrix: np.ndarray, n_neighbors: int, use_gpu: bool):
@@ -51,7 +50,6 @@ def _nearest_neighbors_cpu(matrix: np.ndarray, n_neighbors: int):
 def _umap_cpu(
     matrix: np.ndarray,
     n_neighbors: int,
-    random_state: int,
     precomputed_knn: tuple[np.ndarray, np.ndarray, None] | None = None,
 ):
     from umap import UMAP
@@ -61,7 +59,11 @@ def _umap_cpu(
         n_neighbors=n_neighbors,
         min_dist=0.0,
         metric="cosine",
-        random_state=random_state,
+        random_state=None,
+        init="random",
+        n_epochs=100,
+        negative_sample_rate=2,
+        low_memory=False,
         precomputed_knn=precomputed_knn,
     )
     return reducer.fit_transform(matrix)
@@ -74,9 +76,9 @@ def process(
     min_star: float | None = None,
     max_star: float | None = None,
     use_gpu: bool = True,
+    center: bool = False,
     n_export_neighbors: int = N_EXPORT_NEIGHBORS,
     umap_neighbors: int = UMAP_NEIGHBORS,
-    random_state: int = RANDOM_STATE,
 ):
     print("Initializing...")
     embeddings_path = _resolve_path(embeddings_path)
@@ -117,13 +119,17 @@ def process(
         df = df[df["difficulty_rating"] <= max_star]
     if len(df) == 0:
         raise ValueError("No beatmaps remain after applying filters.")
-    df = _sample_df(df, limit, random_state)
+    df = _sample_df(df, limit)
 
     del emb_df, meta_df
 
     print(f"Preparing matrix ({len(df)} items)...")
     matrix_cpu = np.stack(df["embedding"].values).astype(np.float32)
     matrix_cpu /= np.clip(np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None)
+    if center:
+        print("Centering embeddings...")
+        matrix_cpu -= matrix_cpu.mean(axis=0, keepdims=True)
+        matrix_cpu /= np.clip(np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None)
 
     try:
         backend = "GPU" if use_gpu else "CPU"
@@ -138,8 +144,11 @@ def process(
         embedding_2d = _umap_cpu(
             matrix_cpu,
             umap_neighbors,
-            random_state,
-            precomputed_knn=(kn_indices, kn_dists, None),
+            precomputed_knn=(
+                kn_indices[:, :umap_neighbors],
+                kn_dists[:, :umap_neighbors],
+                None,
+            ),
         )
     except Exception as exc:
         if use_gpu:
@@ -152,7 +161,7 @@ def process(
         cpu_dists = cpu_dists[:, 1:]
 
         print("Running UMAP (CPU)...")
-        embedding_2d = _umap_cpu(matrix_cpu, umap_neighbors, random_state)
+        embedding_2d = _umap_cpu(matrix_cpu, umap_neighbors)
 
     print("Preparing data for export...")
     output_dir.mkdir(exist_ok=True)
@@ -240,9 +249,13 @@ def main() -> None:
     parser.add_argument("--min-star", type=float, default=None, help="Minimum star rating to include")
     parser.add_argument("--max-star", type=float, default=None, help="Maximum star rating to include")
     parser.add_argument("--cpu", action="store_true", help="Force CPU backend")
+    parser.add_argument(
+        "--center",
+        action="store_true",
+        help="Subtract the normalized embedding mean and renormalize",
+    )
     parser.add_argument("--neighbors", type=int, default=N_EXPORT_NEIGHBORS)
     parser.add_argument("--umap-neighbors", type=int, default=UMAP_NEIGHBORS)
-    parser.add_argument("--seed", type=int, default=RANDOM_STATE)
     args = parser.parse_args()
 
     process(
@@ -252,9 +265,9 @@ def main() -> None:
         min_star=args.min_star,
         max_star=args.max_star,
         use_gpu=not args.cpu,
+        center=args.center,
         n_export_neighbors=args.neighbors,
         umap_neighbors=args.umap_neighbors,
-        random_state=args.seed,
     )
 
 

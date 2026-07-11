@@ -20,18 +20,16 @@ from core.data.source import scan_dataset_parquet
 from scripts.common.paths import resolve_path
 
 
-RHYTHM_TARGETS = (("1/2", 0.5), ("1/3", 1.0 / 3.0), ("1/4", 0.25), ("1/6", 1.0 / 6.0))
+RHYTHM_TARGETS = (("1/2", 0.5), ("1/4", 0.25))
 WINDOW_LENGTHS = {
     "1/2": (3, 4, 5, 6, 7, 8),
-    "1/3": (3, 4, 5, 6, 7, 8),
     "1/4": (3, 4, 5, 6, 7, 8, 16),
-    "1/6": (3, 4, 5, 6, 7, 8, 16),
 }
 BREAK_BOUNDARY = "boundary"
 BREAK_RHYTHM = "rhythm"
 BREAK_SPINNER = "spinner"
 BREAK_GAP = "gap"
-RHYTHM_CODES = {"1/2": 0, "1/3": 1, "1/4": 2, "1/6": 3}
+RHYTHM_CODES = {"1/2": 0, "1/4": 1}
 BREAK_CODES = {BREAK_BOUNDARY: 0, BREAK_RHYTHM: 1, BREAK_SPINNER: 2, BREAK_GAP: 3}
 EPS = 1e-6
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import runpy
+import importlib
 import sys
 
 
@@ -59,7 +59,7 @@ def main() -> int:
     module = MODEL_COMMANDS.get(sys.argv[1])
     if module is not None:
         sys.argv = [f"bobert {sys.argv[1]}", *sys.argv[2:]]
-        runpy.run_module(module, run_name="__main__")
+        importlib.import_module(module).main()
         return 0
 
     if len(sys.argv) < 3:
@@ -73,7 +73,7 @@ def main() -> int:
         return 2
 
     sys.argv = [f"bobert {' '.join(key)}", *sys.argv[3:]]
-    runpy.run_module(module, run_name="__main__")
+    importlib.import_module(module).main()
     return 0
 
 
