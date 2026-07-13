@@ -15,6 +15,7 @@ from rich.table import Table
 
 from scripts.collections.ngram import tokenize
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, resolve_path
+from scripts.data.rff import RHYTHM_WINDOW_STRATA
 
 console = Console()
 
@@ -24,6 +25,8 @@ COLLECTION_EDGES_EVAL_PATH = COLLECTIONS_DIR / "edges.parquet"
 COLLECTION_VERTICES_EVAL_PATH = COLLECTIONS_DIR / "vertices.parquet"
 COLLECTION_NGRAMS_EVAL_PATH = COLLECTIONS_DIR / "ngrams.txt"
 TOURNAMENTS_EVAL_PATH = COLLECTIONS_DIR / "tournaments.parquet"
+RATINGS_EVAL_PATH = DATA_DIR / "ratings.parquet"
+RFF_EVAL_PATH = DATA_DIR / "motifs" / "rff.parquet"
 
 PROBE_SEED = 0
 PROBE_TEST_SIZE = 0.2
@@ -33,6 +36,8 @@ PROBE_LR = 1e-2
 PROBE_WEIGHT_DECAY = 1e-4
 MAPPER_MIN_MAPS = 50
 YEAR_MIN_MAPS = 1000
+RATING_MAX_STARS = 20.0
+RFF_RIDGE_ALPHA = 1e-3
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
 MULTILABEL_TOP_K = (1, 3, 5)
@@ -96,7 +101,9 @@ def load_eval_groups(path: Path) -> dict[str, list[int]]:
     return {group: ids for group, ids in groups.items() if len(set(ids)) >= 2}
 
 
-def load_embeddings(path: Path, *, center: bool) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
+def load_embeddings(
+    path: Path, *, center: bool, normalize: bool = True
+) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
     if not path.exists():
         raise FileNotFoundError(f"Embeddings parquet not found: {path}")
     df = pl.read_parquet(path)
@@ -108,10 +115,12 @@ def load_embeddings(path: Path, *, center: bool) -> tuple[np.ndarray, np.ndarray
     if embeddings.dtype == object:
         embeddings = np.stack(embeddings)
     embeddings = embeddings.astype(np.float32, copy=False)
-    embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
+    if normalize:
+        embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
     if center:
         embeddings -= embeddings.mean(axis=0, keepdims=True)
-        embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
+        if normalize:
+            embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
     id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
     return beatmap_ids, embeddings, id_to_index
 
@@ -120,8 +129,17 @@ def load_targets(targets: list[str], *, center: bool) -> list[TargetData]:
     loaded = []
     for target in targets:
         path = target_path(target)
-        beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=center)
+        beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=False)
         loaded.append(TargetData(target_name(path), path, beatmap_ids, embeddings, id_to_index))
+    if center:
+        shared = common_ids(loaded)
+        if not shared:
+            raise ValueError("Embedding targets have no shared beatmap IDs")
+        for target in loaded:
+            target.embeddings -= target_matrix(target, shared).mean(axis=0, keepdims=True)
+            target.embeddings /= np.maximum(
+                np.linalg.norm(target.embeddings, axis=1, keepdims=True), 1e-12
+            )
     return loaded
 
 
@@ -180,11 +198,15 @@ def query_metrics(ranks: list[int], k: int) -> tuple[float, float]:
 def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
+    candidate_ids: list[int],
     k_values: list[int],
 ) -> TargetResult:
     eval_ids = sorted({beatmap_id for ids in groups.values() for beatmap_id in ids})
-    missing_ids = [beatmap_id for beatmap_id in eval_ids if beatmap_id not in target.id_to_index]
+    candidate_set = set(candidate_ids)
+    missing_ids = [beatmap_id for beatmap_id in eval_ids if beatmap_id not in candidate_set]
     covered = set(eval_ids) - set(missing_ids)
+    candidate_indices = {beatmap_id: idx for idx, beatmap_id in enumerate(candidate_ids)}
+    candidates = target_matrix(target, candidate_ids)
 
     positives_by_query: dict[int, set[int]] = {}
     for ids in groups.values():
@@ -199,12 +221,12 @@ def evaluate_grouped_retrieval(
     for query_id, positive_ids in positives_by_query.items():
         if not positive_ids:
             continue
-        query_idx = target.id_to_index[query_id]
-        similarities = target.embeddings @ target.embeddings[query_idx]
+        query_idx = candidate_indices[query_id]
+        similarities = candidates @ candidates[query_idx]
         similarities[query_idx] = -np.inf
         ranks = []
         for target_id in positive_ids:
-            target_similarity = similarities[target.id_to_index[target_id]]
+            target_similarity = similarities[candidate_indices[target_id]]
             rank = int(np.count_nonzero(similarities > target_similarity)) + 1
             ranks.append(rank)
             pair_ranks.append(rank)
@@ -382,6 +404,7 @@ def multiclass_probe(
     y = torch.tensor(encoded, dtype=torch.long, device=device)
     metrics = {}
     for target in targets:
+        torch.manual_seed(PROBE_SEED)
         x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
         model = torch.nn.Linear(x.shape[1], len(classes), device=device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=PROBE_LR, weight_decay=PROBE_WEIGHT_DECAY)
@@ -425,6 +448,7 @@ def regression_probe(
     y_norm = (y - y_mean) / y_std
     metrics = {}
     for target in targets:
+        torch.manual_seed(PROBE_SEED)
         x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
         model = torch.nn.Linear(x.shape[1], 1, device=device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=PROBE_LR, weight_decay=PROBE_WEIGHT_DECAY)
@@ -519,6 +543,7 @@ def multilabel_probe(
     pos_weight = (negative / positive.clamp_min(1)).clamp(max=20.0)
     metrics = {}
     for target in targets:
+        torch.manual_seed(PROBE_SEED)
         x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
         model = torch.nn.Linear(x.shape[1], len(classes), device=device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=PROBE_LR, weight_decay=PROBE_WEIGHT_DECAY)
@@ -542,7 +567,9 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
     if not groups:
         console.print("[yellow]Skipping grouped retrieval: no eval groups with at least two beatmaps.[/yellow]")
         return
-    results = [evaluate_grouped_retrieval(target, groups, args.k) for target in targets]
+    candidate_ids = common_ids(targets)
+    console.print(f"[dim]Ranking against {len(candidate_ids):,} IDs shared by every target.[/dim]")
+    results = [evaluate_grouped_retrieval(target, groups, candidate_ids, args.k) for target in targets]
     keys = ["mrr", "mean_rank", "median_rank"]
     for k in args.k:
         keys.extend([f"recall@{k}", f"map@{k}", f"ndcg@{k}"])
@@ -598,6 +625,80 @@ def run_year_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
     result = regression_probe(targets, ids, years, title="Submitted Year Probe", suffix="years")
     if result:
         print_eval_result(result)
+
+
+def run_rating_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    if not RATINGS_EVAL_PATH.exists():
+        console.print(f"[yellow]Skipping Star Rating Probe: {RATINGS_EVAL_PATH} not found.[/yellow]")
+        return
+    ratings = (
+        pl.read_parquet(RATINGS_EVAL_PATH, columns=["beatmap_id", "stars"])
+        .filter(
+            pl.col("stars").is_finite()
+            & (pl.col("stars") > 0.0)
+            & (pl.col("stars") <= RATING_MAX_STARS)
+        )
+        .unique("beatmap_id", keep="last")
+    )
+    ids = common_ids(targets, set(ratings["beatmap_id"].to_list()))
+    stars_by_id = dict(ratings.filter(pl.col("beatmap_id").is_in(ids)).iter_rows())
+    ids = [beatmap_id for beatmap_id in ids if beatmap_id in stars_by_id]
+    stars = np.array([stars_by_id[beatmap_id] for beatmap_id in ids], dtype=np.float32)
+    result = regression_probe(targets, ids, stars, title="Star Rating Probe", suffix="stars")
+    if result:
+        print_eval_result(result)
+
+
+def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    if not RFF_EVAL_PATH.exists():
+        console.print(f"[yellow]Skipping RFF Probe: {RFF_EVAL_PATH} not found.[/yellow]")
+        return
+    beatmap_ids, embeddings, id_to_index = load_embeddings(
+        RFF_EVAL_PATH, center=False, normalize=False
+    )
+    reference = TargetData("rff", RFF_EVAL_PATH, beatmap_ids, embeddings, id_to_index)
+    ids = common_ids([*targets, reference])
+    if len(ids) < YEAR_MIN_MAPS:
+        console.print(f"[yellow]Skipping RFF Probe: only {len(ids):,} shared rows.[/yellow]")
+        return
+
+    device = probe_device()
+    train_idx, test_idx = random_split_indices(len(ids), device)
+    y = torch.tensor(target_matrix(reference, ids), dtype=torch.float32, device=device)
+    y_mean = y[train_idx].mean(dim=0)
+    y_std = y[train_idx].std(dim=0)
+    valid = y_std > 1e-6
+    y_norm = (y - y_mean) / y_std.clamp_min(1e-6)
+    motif_dims = y.shape[1] - len(RHYTHM_WINDOW_STRATA)
+    motif_mask = valid.clone()
+    motif_mask[motif_dims:] = False
+    prevalence_mask = valid.clone()
+    prevalence_mask[:motif_dims] = False
+    y_test_norm = y_norm[test_idx]
+
+    def r2(mask: torch.Tensor, pred: torch.Tensor) -> float:
+        residual = torch.sum((y_test_norm[:, mask] - pred[:, mask]) ** 2)
+        total = torch.sum(y_test_norm[:, mask] ** 2)
+        return float((1.0 - residual / total.clamp_min(1e-12)).item())
+
+    metrics = {}
+    for target in targets:
+        x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
+        x_mean = x[train_idx].mean(dim=0)
+        x_train = x[train_idx] - x_mean
+        gram = x_train.T @ x_train / train_idx.numel()
+        gram.diagonal().add_(RFF_RIDGE_ALPHA)
+        cross = x_train.T @ y_norm[train_idx] / train_idx.numel()
+        weights = torch.linalg.solve(gram, cross)
+        pred_norm = (x[test_idx] - x_mean) @ weights
+        metrics[target.name] = {
+            "r2": r2(valid, pred_norm),
+            "motif_r2": r2(motif_mask, pred_norm),
+            "prevalence_r2": r2(prevalence_mask, pred_norm),
+        }
+        del x, x_train, gram, cross, weights, pred_norm
+        torch.cuda.empty_cache()
+    print_eval_result(EvalResult("RFF Probe", len(ids), None, metrics))
 
 
 def load_valid_ngrams(path: Path) -> set[str]:
@@ -730,6 +831,8 @@ def main() -> None:
         ("Mapper Probe", run_mapper_eval),
         ("Ranked Probe", run_ranked_eval),
         ("Submitted Year Probe", run_year_eval),
+        ("Star Rating Probe", run_rating_eval),
+        ("RFF Probe", run_rff_eval),
         ("Collection Ngram Probe", run_collection_ngram_eval),
         ("Tournament Slot Probe", run_tournament_slot_eval),
     ]
@@ -737,7 +840,8 @@ def main() -> None:
         console.rule(title)
         run_eval(targets, args)
     console.print(
-        "[dim]Embeddings are L2-normalized, mean-centered, then L2-normalized. "
+        "[dim]Embeddings are L2-normalized, mean-centered on IDs shared by every target, "
+        "then L2-normalized. "
         "Use --no-center to disable centering.[/dim]"
     )
 

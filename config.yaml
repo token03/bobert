@@ -18,7 +18,7 @@ data:
 
 model:
   d_model: 384
-  n_heads: 8
+  n_heads: 6
   n_layers: 9
   dim_feedforward: 1024
   dropout: 0.1
