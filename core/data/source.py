@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import polars as pl
-import torch
 from tqdm import tqdm
 
 from .schema import MAP_FEATURE_ATTRIBUTES
@@ -127,7 +126,6 @@ def load_beatmap_dataset(
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
     include_beat_ids: bool = False,
-    include_auxiliary_targets: bool = False,
 ) -> List[Dict[str, Any]]:
     dataset_path = Path(dataset_path).expanduser()
     ratings_path = Path(ratings_path).expanduser()
@@ -139,7 +137,6 @@ def load_beatmap_dataset(
 
     if not beatmaps_path.exists() or not hitobjects_path.exists():
         raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
-
     if ids_to_load:
         ids_to_load = [int(bid) for bid in ids_to_load]
         print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
@@ -170,6 +167,7 @@ def load_beatmap_dataset(
 
     hitobject_cols = [
         "beatmap_id",
+        "object_index",
         "x",
         "y",
         "time",
@@ -182,8 +180,13 @@ def load_beatmap_dataset(
         "end_bpm",
         "end_timing_origin",
         "slider_repeats",
-        "slider_end_x",
-        "slider_end_y",
+        "slider_path_valid",
+        "span_end_dx",
+        "span_end_dy",
+        "curve_residual_1_dx",
+        "curve_residual_1_dy",
+        "curve_residual_2_dx",
+        "curve_residual_2_dy",
     ]
 
     chunks = _chunk_beatmap_ids(all_beatmap_ids, chunk_size)
@@ -213,20 +216,8 @@ def load_beatmap_dataset(
             max_seq_len=max_seq_len,
             return_original_counts=False,
             return_beat_ids=include_beat_ids,
-            return_auxiliary_targets=include_auxiliary_targets,
         )
-        if include_auxiliary_targets and include_beat_ids:
-            (
-                hitobject_data,
-                ids,
-                _,
-                beat_ids,
-                auxiliary_targets,
-                auxiliary_valid,
-            ) = features
-        elif include_auxiliary_targets:
-            hitobject_data, ids, _, auxiliary_targets, auxiliary_valid = features
-        elif include_beat_ids:
+        if include_beat_ids:
             hitobject_data, ids, _, beat_ids = features
         else:
             hitobject_data, ids, _ = features
@@ -256,14 +247,6 @@ def load_beatmap_dataset(
             }
             if include_beat_ids:
                 item["beat_ids"] = beat_ids[index][: vectors.shape[0]]
-            if include_auxiliary_targets:
-                item["auxiliary_targets"] = torch.from_numpy(
-                    auxiliary_targets[index][: vectors.shape[0]]
-                )
-                item["auxiliary_valid"] = torch.from_numpy(
-                    auxiliary_valid[index][: vectors.shape[0]]
-                )
-
             all_beatmap_data.append(item)
 
     print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")

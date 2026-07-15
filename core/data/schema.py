@@ -47,49 +47,64 @@ class NormalizationType(Enum):
 
 
 OBJECT_TYPE_CIRCLE = 0
-OBJECT_TYPE_SLIDER_HEAD = 1
-OBJECT_TYPE_SLIDER_END = 2
-OBJECT_TYPE_SPINNER_START = 3
-OBJECT_TYPE_SPINNER_END = 4
+OBJECT_TYPE_SLIDER = 1
+OBJECT_TYPE_SPINNER = 2
 
 
 class Feature(NamedTuple):
     name: str
     norm: NormalizationType
     cardinality: int | None = None
-    slider_only: bool = False
+    conditional: str | None = None
 
 
 FEATURES = [
     Feature("norm_x", NormalizationType.NONE),
     Feature("norm_y", NormalizationType.NONE),
-    Feature("delta_x", NormalizationType.STANDARD),
-    Feature("delta_y", NormalizationType.STANDARD),
-    Feature("log_time_diff_ms", NormalizationType.STANDARD),
-    Feature("log_slider_pixel_length", NormalizationType.STANDARD, slider_only=True),
-    Feature("log_slider_repeats", NormalizationType.STANDARD, slider_only=True),
-    Feature("slider_tortuosity", NormalizationType.STANDARD, slider_only=True),
-    Feature("object_type", NormalizationType.CATEGORICAL, 5),
+    Feature("incoming_dx", NormalizationType.STANDARD),
+    Feature("incoming_dy", NormalizationType.STANDARD),
+    Feature("log_onset_ioi_ms", NormalizationType.STANDARD),
+    Feature("log_span_duration_ms", NormalizationType.STANDARD, conditional="slider"),
+    Feature("log_span_length", NormalizationType.STANDARD, conditional="slider"),
+    Feature("log_span_count", NormalizationType.STANDARD, conditional="slider"),
+    Feature("span_end_dx", NormalizationType.STANDARD, conditional="slider"),
+    Feature("span_end_dy", NormalizationType.STANDARD, conditional="slider"),
+    Feature("curve_residual_1_dx", NormalizationType.STANDARD, conditional="slider"),
+    Feature("curve_residual_1_dy", NormalizationType.STANDARD, conditional="slider"),
+    Feature("curve_residual_2_dx", NormalizationType.STANDARD, conditional="slider"),
+    Feature("curve_residual_2_dy", NormalizationType.STANDARD, conditional="slider"),
+    Feature(
+        "log_spinner_duration_ms", NormalizationType.STANDARD, conditional="spinner"
+    ),
+    Feature("object_type", NormalizationType.CATEGORICAL, 3),
     Feature("is_new_combo", NormalizationType.CATEGORICAL, 2),
-    Feature("time_diff_bin", NormalizationType.CATEGORICAL, len(DURATION_BINS)),
+    Feature("onset_duration_bin", NormalizationType.CATEGORICAL, len(DURATION_BINS)),
     Feature("beat_phase", NormalizationType.CATEGORICAL, BEAT_PHASE_CARDINALITY),
+    Feature("incoming_motion_valid", NormalizationType.CATEGORICAL, 2),
+    Feature(
+        "span_duration_bin",
+        NormalizationType.CATEGORICAL,
+        len(DURATION_BINS),
+        conditional="slider",
+    ),
+    Feature("ends_at_head", NormalizationType.CATEGORICAL, 2, conditional="slider"),
+    Feature(
+        "spinner_duration_bin",
+        NormalizationType.CATEGORICAL,
+        len(DURATION_BINS),
+        conditional="spinner",
+    ),
 ]
-
-AUXILIARY_TARGET_NAMES = (
-    "log_effective_speed",
-    "delta_log_speed",
-    "turn_sharpness",
-    "curvature_change",
-    "log_tap_strain",
-    "log_ioi_ratio",
-    "rhythm_island_age",
-)
 
 CATEGORICAL_FEATURE_ORDER = (
     "object_type",
     "is_new_combo",
-    "time_diff_bin",
+    "onset_duration_bin",
     "beat_phase",
+    "incoming_motion_valid",
+    "span_duration_bin",
+    "ends_at_head",
+    "spinner_duration_bin",
 )
 
 
@@ -98,7 +113,10 @@ VECTOR_DIM = len(FIELD_NAMES)
 FEATURE_INDEX = {name: i for i, name in enumerate(FIELD_NAMES)}
 FEATURES_BY_NAME = {feature.name: feature for feature in FEATURES}
 SLIDER_ONLY_FEATURES = tuple(
-    feature.name for feature in FEATURES if feature.slider_only
+    feature.name for feature in FEATURES if feature.conditional == "slider"
+)
+SPINNER_ONLY_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.conditional == "spinner"
 )
 NORMALIZATION_SPECS = {feature.name: feature.norm for feature in FEATURES}
 FEATURE_INFO = {
@@ -115,5 +133,11 @@ FEATURE_INFO = {
         if feature.norm is not NormalizationType.CATEGORICAL
     },
     "slider": {name: FEATURE_INDEX[name] for name in SLIDER_ONLY_FEATURES},
+    "spinner": {name: FEATURE_INDEX[name] for name in SPINNER_ONLY_FEATURES},
+    "common": {
+        feature.name: FEATURE_INDEX[feature.name]
+        for feature in FEATURES
+        if feature.conditional is None
+    },
     "names": FIELD_NAMES,
 }

@@ -36,11 +36,13 @@ def prepare_vector(vec, normalizer, augment, max_seq_len):
         flip_y = aug_type in (2, 3)
 
         if flip_x:
-            vec[:, FEATURE_INFO["continuous"]["norm_x"]] *= -1
-            vec[:, FEATURE_INFO["continuous"]["delta_x"]] *= -1
+            for name, index in FEATURE_INFO["continuous"].items():
+                if name == "norm_x" or name.endswith("_dx"):
+                    vec[:, index] *= -1
         if flip_y:
-            vec[:, FEATURE_INFO["continuous"]["norm_y"]] *= -1
-            vec[:, FEATURE_INFO["continuous"]["delta_y"]] *= -1
+            for name, index in FEATURE_INFO["continuous"].items():
+                if name == "norm_y" or name.endswith("_dy"):
+                    vec[:, index] *= -1
     return normalizer.normalize_vectors(vec)
 
 
@@ -60,8 +62,6 @@ class BeatmapDataset(Dataset):
         self.map_features = split["map_features"]
         self.beatmap_ids = split["ids"]
         self.alignment_targets = alignment_targets
-        self.auxiliary_targets = split.get("auxiliary_targets")
-        self.auxiliary_valid = split.get("auxiliary_valid")
         self.max_seq_len = int(max_seq_len)
         self.augment = augment
 
@@ -76,11 +76,7 @@ class BeatmapDataset(Dataset):
             self.max_seq_len,
         )
         if self.task == "pretrain":
-            valid = self.auxiliary_valid[idx][: self.max_seq_len]
-            targets = self.normalizer.normalize_auxiliary(
-                self.auxiliary_targets[idx][: self.max_seq_len], valid
-            )
-            return vec, targets, valid
+            return vec
 
         map_features = {
             k: self.normalizer.normalize_attribute(k, v[idx])
@@ -104,9 +100,7 @@ class AdapterEmbeddingDataset(Dataset):
         return self.embeddings[idx], bid, self.alignment_targets[bid]
 
 
-def load_data(
-    data_config, max_seq_len, ids_to_load, sample_size, include_auxiliary_targets=False
-):
+def load_data(data_config, max_seq_len, ids_to_load, sample_size):
     return load_beatmap_dataset(
         data_config.dataset_path,
         dataset_seed=data_config.dataset_seed,
@@ -116,7 +110,6 @@ def load_data(
         chunk_size=int(getattr(data_config, "load_chunk_size", 5000)),
         min_sr=data_config.min_sr,
         max_sr=data_config.max_sr,
-        include_auxiliary_targets=include_auxiliary_targets,
     )
 
 
@@ -129,9 +122,6 @@ def unpack(rows):
         },
         "ids": [row["beatmap_id"] for row in rows],
     }
-    if "auxiliary_targets" in rows[0]:
-        split["auxiliary_targets"] = [row["auxiliary_targets"] for row in rows]
-        split["auxiliary_valid"] = [row["auxiliary_valid"] for row in rows]
     return split
 
 
@@ -238,14 +228,9 @@ class PretrainData(pl.LightningDataModule):
             self.max_seq_len,
             [],
             self.phase_config.data.pretrain_size,
-            include_auxiliary_targets=True,
         )
         train_s, val_s = split_loaded_data(all_beatmap_data, self.data_config.val_split)
-        self.normalizer = BeatmapNormalizer.from_data(
-            train_s["data"],
-            train_s["auxiliary_targets"],
-            train_s["auxiliary_valid"],
-        )
+        self.normalizer = BeatmapNormalizer.from_data(train_s["data"])
         self.vector_dim = train_s["data"][0].shape[1]
         self.train_dataset = BeatmapDataset(
             "pretrain", train_s, self.normalizer, self.max_seq_len, True, {}

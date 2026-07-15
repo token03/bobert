@@ -7,7 +7,11 @@ import torch.nn.functional as F
 from rotary_embedding_torch import apply_rotary_emb
 from torch.utils.checkpoint import checkpoint
 
-from ..data.schema import FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
+from ..data.schema import (
+    FEATURE_INFO,
+    OBJECT_TYPE_SLIDER,
+    OBJECT_TYPE_SPINNER,
+)
 
 try:
     import torch.distributed.tensor  # noqa: F401
@@ -405,41 +409,57 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.feature_info = feature_info
         self.continuous = feature_info["continuous"]
         self.categorical = feature_info["categorical"]
-        self.numeric_tokens = (
-            ("position", ("norm_x", "norm_y")),
-            ("delta", ("delta_x", "delta_y")),
-            ("timing", ("log_time_diff_ms",)),
-            (
-                "slider",
+        self.numeric_groups = {
+            "common": (
+                ("position", ("norm_x", "norm_y")),
+                ("incoming", ("incoming_dx", "incoming_dy")),
+                ("timing", ("log_onset_ioi_ms",)),
+            ),
+            "slider": (
                 (
-                    "log_slider_pixel_length",
-                    "log_slider_repeats",
-                    "slider_tortuosity",
+                    "timing",
+                    (
+                        "log_span_duration_ms",
+                        "log_span_length",
+                        "log_span_count",
+                    ),
+                ),
+                ("endpoint", ("span_end_dx", "span_end_dy")),
+                (
+                    "residual_1",
+                    ("curve_residual_1_dx", "curve_residual_1_dy"),
+                ),
+                (
+                    "residual_2",
+                    ("curve_residual_2_dx", "curve_residual_2_dy"),
                 ),
             ),
-        )
-        self.categorical_tokens = (
-            ("object_type", "object_type"),
-            ("new_combo", "is_new_combo"),
-            ("time_bin", "time_diff_bin"),
-            ("beat_phase", "beat_phase"),
-        )
-        self.num_tokens = len(self.numeric_tokens) + len(self.categorical_tokens)
-
+            "spinner": (("duration", ("log_spinner_duration_ms",)),),
+        }
+        self.categorical_names = {
+            group: tuple(
+                name
+                for name in feature_info[group]
+                if name in self.categorical and name != "object_type"
+            )
+            for group in self.numeric_groups
+        }
         numeric_indices = []
         numeric_mask = []
+        numeric_sizes = []
+        for numeric_groups in self.numeric_groups.values():
+            for _, feature_names in numeric_groups:
+                indices = [self.continuous[feature] for feature in feature_names]
+                numeric_sizes.append(len(indices))
+                numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
+                numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
         self.numeric_weight = nn.Parameter(
-            torch.zeros(len(self.numeric_tokens), 3, d_feat)
+            torch.zeros(len(numeric_indices), 3, d_feat)
         )
-        self.numeric_bias = nn.Parameter(torch.empty(len(self.numeric_tokens), d_feat))
-        for group, (_, feature_names) in enumerate(self.numeric_tokens):
-            indices = [self.continuous[name] for name in feature_names]
-            numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
-            numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
-            nn.init.kaiming_uniform_(
-                self.numeric_weight[group, : len(indices)].T, a=5**0.5
-            )
-            bound = 1 / len(indices) ** 0.5
+        self.numeric_bias = nn.Parameter(torch.empty(len(numeric_indices), d_feat))
+        for group, size in enumerate(numeric_sizes):
+            nn.init.kaiming_uniform_(self.numeric_weight[group, :size].T, a=5**0.5)
+            bound = 1 / size**0.5
             nn.init.uniform_(self.numeric_bias[group], -bound, bound)
         self.register_buffer(
             "numeric_indices",
@@ -450,16 +470,19 @@ class HitObjectFeatureTokenizer(nn.Module):
             "numeric_mask", torch.tensor(numeric_mask), persistent=False
         )
 
+        categorical_names = tuple(
+            name for names in self.categorical_names.values() for name in names
+        ) + ("object_type",)
         categorical_indices = []
         categorical_cardinalities = []
         category_offsets = []
         offset = 0
-        for _, feature_name in self.categorical_tokens:
-            cardinality = self.categorical[feature_name]["cardinality"]
-            categorical_indices.append(self.categorical[feature_name]["index"])
-            categorical_cardinalities.append(cardinality)
+        for name in categorical_names:
+            info = self.categorical[name]
+            categorical_indices.append(info["index"])
+            categorical_cardinalities.append(info["cardinality"])
             category_offsets.append(offset)
-            offset += cardinality
+            offset += info["cardinality"]
         self.categorical_weight = nn.Parameter(torch.empty(offset, d_feat))
         nn.init.normal_(self.categorical_weight)
         self.register_buffer(
@@ -478,53 +501,66 @@ class HitObjectFeatureTokenizer(nn.Module):
             persistent=False,
         )
 
-        self.feature_bias = nn.Parameter(torch.zeros(self.num_tokens, d_feat))
-        self.object_mlp = nn.Sequential(
-            nn.LayerNorm(self.num_tokens * d_feat),
-            nn.Linear(self.num_tokens * d_feat, d_feat * 2),
+        self.common_encoder = nn.Sequential(
+            nn.LayerNorm(d_feat),
+            nn.Linear(d_feat, d_feat * 2),
             nn.GELU(),
             nn.Linear(d_feat * 2, d_feat),
         )
+        self.slider_encoder = nn.Sequential(
+            nn.LayerNorm(d_feat),
+            nn.Linear(d_feat, d_feat * 2),
+            nn.GELU(),
+            nn.Linear(d_feat * 2, d_feat),
+        )
+        self.spinner_encoder = nn.Sequential(
+            nn.LayerNorm(d_feat),
+            nn.Linear(d_feat, d_feat * 2),
+            nn.GELU(),
+            nn.Linear(d_feat * 2, d_feat),
+        )
+        self.norm = nn.LayerNorm(d_feat)
         self.out = nn.Linear(d_feat, d_model, bias=False)
 
-    def _categorical_feature(self, x: torch.Tensor, name: str) -> torch.Tensor:
-        info = self.categorical[name]
-        return x[..., info["index"]].long().clamp(0, info["cardinality"] - 1)
-
-    def _continuous_features(
-        self, x: torch.Tensor, names: Tuple[str, ...]
-    ) -> torch.Tensor:
-        return x[..., [self.continuous[name] for name in names]]
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        object_type = self._categorical_feature(x, "object_type")
-
         numeric_inputs = x[..., self.numeric_indices]
         numeric_inputs = numeric_inputs * self.numeric_mask.to(dtype=x.dtype)
-        numeric_tokens = torch.einsum(
-            "...gi,gif->...gf", numeric_inputs, self.numeric_weight
+        numeric_tokens = F.gelu(
+            torch.einsum("...gi,gif->...gf", numeric_inputs, self.numeric_weight)
+            + self.numeric_bias
         )
-        numeric_tokens = F.gelu(numeric_tokens + self.numeric_bias)
 
-        categorical_ids = x[..., self.categorical_indices].long()
-        categorical_ids = categorical_ids.clamp_min(0)
+        categorical_ids = x[..., self.categorical_indices].long().clamp_min(0)
         categorical_ids = torch.minimum(
             categorical_ids, self.categorical_cardinalities - 1
         )
         categorical_tokens = F.embedding(
             categorical_ids + self.category_offsets, self.categorical_weight
         )
-        tokens = torch.cat((numeric_tokens, categorical_tokens), dim=-2)
+        object_type = categorical_ids[..., -1]
 
-        tokens = tokens + self.feature_bias.to(dtype=tokens.dtype)
-
-        hard_gate = torch.ones(tokens.shape[:-1], device=x.device, dtype=tokens.dtype)
-        hard_gate[..., 3] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
-        tokens = tokens * hard_gate.unsqueeze(-1)
-
-        pooled = tokens.sum(dim=-2) / hard_gate.sum(dim=-1, keepdim=True)
-        pooled = pooled + self.object_mlp(tokens.flatten(-2))
-        return self.out(pooled)
+        common_input = torch.cat(
+            (numeric_tokens[..., :3, :], categorical_tokens[..., :4, :]), dim=-2
+        ).sum(dim=-2)
+        slider_input = torch.cat(
+            (numeric_tokens[..., 3:7, :], categorical_tokens[..., 4:6, :]), dim=-2
+        ).sum(dim=-2)
+        spinner_input = torch.cat(
+            (numeric_tokens[..., 7:8, :], categorical_tokens[..., 6:7, :]), dim=-2
+        ).sum(dim=-2)
+        common = self.common_encoder(common_input)
+        slider = self.slider_encoder(slider_input)
+        spinner = self.spinner_encoder(spinner_input)
+        hidden = common + categorical_tokens[..., -1, :]
+        hidden = (
+            hidden
+            + (object_type == OBJECT_TYPE_SLIDER).to(x.dtype).unsqueeze(-1) * slider
+        )
+        hidden = (
+            hidden
+            + (object_type == OBJECT_TYPE_SPINNER).to(x.dtype).unsqueeze(-1) * spinner
+        )
+        return self.out(self.norm(hidden))
 
 
 class SpanMasker(nn.Module):
@@ -536,8 +572,13 @@ class SpanMasker(nn.Module):
 
         continuous = FEATURE_INFO["continuous"]
         feature_count = len(FEATURE_INFO["names"])
+        categorical = FEATURE_INFO["categorical"]
         right_delta = torch.tensor(
-            [continuous["delta_x"], continuous["delta_y"]],
+            [
+                continuous["incoming_dx"],
+                continuous["incoming_dy"],
+                categorical["incoming_motion_valid"]["index"],
+            ],
             dtype=torch.long,
         )
         right_delta_mask = torch.zeros(feature_count, dtype=torch.bool)
@@ -954,15 +995,37 @@ class QueryAttentionPooler(nn.Module):
 class MaskedLMHead(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
-        self.categorical_names = tuple(FEATURE_INFO["categorical"])
-        self.output_sizes = (
-            len(FEATURE_INFO["continuous"]),
-            *(
-                FEATURE_INFO["categorical"][name]["cardinality"]
-                for name in self.categorical_names
-            ),
+        self.groups = ("common", "slider", "spinner")
+        self.continuous_names = {
+            group: tuple(
+                name
+                for name in FEATURE_INFO[group]
+                if name in FEATURE_INFO["continuous"]
+            )
+            for group in self.groups
+        }
+        self.categorical_names = {
+            group: tuple(
+                name
+                for name in FEATURE_INFO[group]
+                if name in FEATURE_INFO["categorical"]
+            )
+            for group in self.groups
+        }
+        self.output_sizes = {
+            group: (
+                len(self.continuous_names[group]),
+                *(
+                    FEATURE_INFO["categorical"][name]["cardinality"]
+                    for name in self.categorical_names[group]
+                ),
+            )
+            for group in self.groups
+        }
+        self.flat_output_sizes = tuple(
+            size for group in self.groups for size in self.output_sizes[group]
         )
-        self.proj = nn.Linear(d_model, sum(self.output_sizes))
+        self.proj = nn.Linear(d_model, sum(self.flat_output_sizes))
 
     def forward(
         self,
@@ -971,11 +1034,20 @@ class MaskedLMHead(nn.Module):
     ) -> Dict[str, Any]:
         masked_output = packed_output if is_masked is None else packed_output[is_masked]
 
-        pieces = self.proj(masked_output).split(self.output_sizes, dim=-1)
-        return {
-            "continuous": pieces[0],
-            "categorical": dict(zip(self.categorical_names, pieces[1:])),
-        }
+        outputs = {}
+        pieces = self.proj(masked_output).split(self.flat_output_sizes, dim=-1)
+        offset = 0
+        for group in self.groups:
+            count = len(self.output_sizes[group])
+            group_pieces = pieces[offset : offset + count]
+            offset += count
+            outputs[group] = {
+                "continuous": group_pieces[0],
+                "categorical": dict(
+                    zip(self.categorical_names[group], group_pieces[1:])
+                ),
+            }
+        return outputs
 
 
 class MapFeatureProjector(nn.Module):

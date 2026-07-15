@@ -5,54 +5,52 @@ from typing import Dict, Any
 
 from core.data.schema import (
     FEATURE_INFO,
-    OBJECT_TYPE_SLIDER_HEAD,
+    OBJECT_TYPE_SLIDER,
+    OBJECT_TYPE_SPINNER,
 )
 
 
-def mlm_loss_fn(predictions: Dict[str, Any], targets: torch.Tensor) -> torch.Tensor:
-    cont_names = sorted(
-        FEATURE_INFO["continuous"].keys(), key=lambda k: FEATURE_INFO["continuous"][k]
-    )
-    cont_indices = [FEATURE_INFO["continuous"][name] for name in cont_names]
-    slider_feature_names = set(FEATURE_INFO["slider"].keys())
-
-    cont_preds = predictions["continuous"]
-    cont_targets = targets[:, cont_indices]
-
-    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
-    is_slider_head = object_type == OBJECT_TYPE_SLIDER_HEAD
-    is_slider_cont_feature = torch.tensor(
-        [name in slider_feature_names for name in cont_names], device=targets.device
-    ).view(1, -1)
-    include_cont_loss = ~is_slider_cont_feature | is_slider_head.unsqueeze(1)
-
-    final_cont_targets = torch.where(
-        include_cont_loss, cont_targets, torch.zeros_like(cont_targets)
-    )
-
-    cont_loss = F.smooth_l1_loss(
-        cont_preds, final_cont_targets, reduction="none", beta=0.5
-    )
-    total_loss = (cont_loss * include_cont_loss).sum()
-
-    for name, info in FEATURE_INFO["categorical"].items():
-        cat_logits = predictions["categorical"][name]
-        cat_targets = targets[:, info["index"]].long()
-
-        if name in slider_feature_names:
-            final_target = torch.where(
-                is_slider_head, cat_targets, torch.zeros_like(cat_targets)
-            )
-        else:
-            final_target = cat_targets
-
-        total_loss += F.cross_entropy(
-            cat_logits,
-            final_target,
-            reduction="sum",
+def mlm_loss_fn(
+    predictions: Dict[str, Any],
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    if targets.shape[0] == 0:
+        return sum(
+            output["continuous"].sum() * 0.0 for output in predictions.values()
         )
 
-    return total_loss / (targets.shape[0] + 1e-9)
+    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
+    masks = {
+        "common": torch.ones_like(object_type, dtype=torch.bool),
+        "slider": object_type == OBJECT_TYPE_SLIDER,
+        "spinner": object_type == OBJECT_TYPE_SPINNER,
+    }
+    total_loss = targets.new_zeros(())
+    for group, mask in masks.items():
+        output = predictions[group]
+        if not torch.any(mask):
+            total_loss = total_loss + output["continuous"].sum() * 0.0
+            continue
+
+        names = [
+            name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
+        ]
+        if names:
+            indices = [FEATURE_INFO["continuous"][name] for name in names]
+            total_loss = total_loss + F.smooth_l1_loss(
+                output["continuous"][mask],
+                targets[mask][:, indices],
+                beta=0.5,
+                reduction="sum",
+            )
+        for name, logits in output["categorical"].items():
+            info = FEATURE_INFO["categorical"][name]
+            total_loss = total_loss + F.cross_entropy(
+                logits[mask],
+                targets[mask, info["index"]].long(),
+                reduction="sum",
+            )
+    return total_loss / targets.shape[0]
 
 
 def pretrain_loss_fn(
@@ -61,29 +59,9 @@ def pretrain_loss_fn(
     config: DictConfig,
 ) -> Dict[str, torch.Tensor]:
     losses = {}
-    mlm_weight = config.pretraining.loss.mlm_weight
-
     mlm_loss = mlm_loss_fn(predictions["mlm"], targets["mlm"])
     losses["mlm_loss"] = mlm_loss
-
-    auxiliary_elementwise = F.smooth_l1_loss(
-        predictions["auxiliary"],
-        targets["auxiliary"],
-        reduction="none",
-    )
-    auxiliary_valid = targets["auxiliary_valid"].to(auxiliary_elementwise.dtype)
-    auxiliary_counts = auxiliary_valid.sum(dim=0)
-    auxiliary_per_target = (auxiliary_elementwise * auxiliary_valid).sum(
-        dim=0
-    ) / auxiliary_counts.clamp_min(1.0)
-    auxiliary_present = (auxiliary_counts > 0).to(auxiliary_elementwise.dtype)
-    auxiliary_loss = (
-        5.0
-        * (auxiliary_per_target * auxiliary_present).sum()
-        / auxiliary_present.sum().clamp_min(1.0)
-    )
-    losses["auxiliary_loss"] = auxiliary_loss
-    losses["total_loss"] = mlm_loss * mlm_weight + auxiliary_loss
+    losses["total_loss"] = mlm_loss
     return losses
 
 

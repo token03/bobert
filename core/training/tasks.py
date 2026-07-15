@@ -22,7 +22,7 @@ from ..model.checkpoint import (
     restore_normalizer_from_checkpoint,
 )
 from ..data.normalizer import BeatmapNormalizer
-from ..data.schema import AUXILIARY_TARGET_NAMES, FEATURE_INFO, VECTOR_DIM
+from ..data.schema import FEATURE_INFO, VECTOR_DIM
 
 
 class BobertLightningModule(pl.LightningModule):
@@ -106,8 +106,6 @@ class PretrainingModule(BobertLightningModule):
     def forward(self, batch):
         return self.model.forward_packed_pretrain(
             batch["packed_vectors"],
-            batch["packed_auxiliary_targets"],
-            batch["packed_auxiliary_valid"],
             batch["masked_idx"],
             batch["masked_positions"],
             batch["masked_counts"],
@@ -206,17 +204,6 @@ class PretrainingModule(BobertLightningModule):
         right_split = torch.rand(right_border_idx.numel(), device=self.device)
         return {
             "packed_vectors": packed_vectors,
-            "packed_auxiliary_targets": torch.randn(
-                masked_idx.numel(),
-                len(AUXILIARY_TARGET_NAMES),
-                device=self.device,
-            ),
-            "packed_auxiliary_valid": torch.ones(
-                masked_idx.numel(),
-                len(AUXILIARY_TARGET_NAMES),
-                device=self.device,
-                dtype=torch.bool,
-            ),
             "masked_idx": masked_idx,
             "masked_positions": masked_positions,
             "masked_counts": masked_counts,
@@ -254,7 +241,6 @@ class PretrainingModule(BobertLightningModule):
         metrics_to_log = {
             "train_loss": loss_dict["total_loss"],
             "train_mlm_loss": loss_dict["mlm_loss"],
-            "train_auxiliary_loss": loss_dict["auxiliary_loss"],
             "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
         }
 

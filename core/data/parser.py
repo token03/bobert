@@ -1,6 +1,7 @@
 import bisect
 import math
 import os
+from collections.abc import Iterable, Iterator
 from typing import List, NamedTuple, Optional
 
 OBJECT_TYPE_CIRCLE = 0
@@ -8,6 +9,10 @@ OBJECT_TYPE_SLIDER = 1
 OBJECT_TYPE_SPINNER = 2
 
 MAX_TIME_MS = 36000000
+BEZIER_TOLERANCE = 0.25
+CATMULL_DETAIL = 50
+
+Point = tuple[float, float]
 
 DIFFICULTY_KEYS = {
     "hpdrainrate": "hp_drain",
@@ -29,6 +34,7 @@ class RawTimingPoint(NamedTuple):
 
 
 class RawHitObject(NamedTuple):
+    object_index: int
     x: int
     y: int
     time: int
@@ -48,6 +54,13 @@ class RawHitObject(NamedTuple):
     hard_anchor_ratio: float
     slider_end_x: int
     slider_end_y: int
+    slider_path_valid: int
+    span_end_dx: float
+    span_end_dy: float
+    curve_residual_1_dx: float
+    curve_residual_1_dy: float
+    curve_residual_2_dx: float
+    curve_residual_2_dy: float
 
 
 class RawBeatmap(NamedTuple):
@@ -71,6 +84,269 @@ class TimingSection(NamedTuple):
     timing_origin: int
     sv_multiplier: float
     kiai: int
+
+
+def _midpoint(a: Point, b: Point) -> Point:
+    return ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
+
+
+def _flatten_bezier(points: list[Point], vertices: list[Point], depth: int = 0) -> None:
+    if len(points) == 1:
+        return
+    if len(points) == 2:
+        vertices.append(points[1])
+        return
+
+    if len(points) in (3, 4):
+        curvature = max(
+            math.hypot(
+                points[index - 1][0] - 2 * points[index][0] + points[index + 1][0],
+                points[index - 1][1] - 2 * points[index][1] + points[index + 1][1],
+            )
+            for index in range(1, len(points) - 1)
+        )
+        steps = max(1, math.ceil(math.sqrt(curvature / (8 * BEZIER_TOLERANCE))))
+        if len(points) == 3:
+            a, b, c = points
+            for step in range(1, steps + 1):
+                t = step / steps
+                s = 1 - t
+                vertices.append(
+                    (
+                        s * s * a[0] + 2 * s * t * b[0] + t * t * c[0],
+                        s * s * a[1] + 2 * s * t * b[1] + t * t * c[1],
+                    )
+                )
+        else:
+            a, b, c, d = points
+            for step in range(1, steps + 1):
+                t = step / steps
+                s = 1 - t
+                vertices.append(
+                    (
+                        s**3 * a[0]
+                        + 3 * s * s * t * b[0]
+                        + 3 * s * t * t * c[0]
+                        + t**3 * d[0],
+                        s**3 * a[1]
+                        + 3 * s * s * t * b[1]
+                        + 3 * s * t * t * c[1]
+                        + t**3 * d[1],
+                    )
+                )
+        return
+
+    tolerance = BEZIER_TOLERANCE * BEZIER_TOLERANCE * 4
+    flat = all(
+        (points[i - 1][0] - 2 * points[i][0] + points[i + 1][0]) ** 2
+        + (points[i - 1][1] - 2 * points[i][1] + points[i + 1][1]) ** 2
+        <= tolerance
+        for i in range(1, len(points) - 1)
+    )
+    if flat or depth >= 16:
+        vertices.append(points[-1])
+        return
+
+    left = [points[0]]
+    right = [points[-1]]
+    work = points
+    while len(work) > 1:
+        work = [_midpoint(work[i], work[i + 1]) for i in range(len(work) - 1)]
+        left.append(work[0])
+        right.append(work[-1])
+
+    _flatten_bezier(left, vertices, depth + 1)
+    _flatten_bezier(list(reversed(right)), vertices, depth + 1)
+
+
+def _split_bezier_vertices(points: list[Point]) -> list[Point]:
+    vertices = [points[0]]
+    segment = [points[0]]
+    for point in points[1:]:
+        if point == segment[-1]:
+            if len(segment) > 1:
+                _flatten_bezier(segment, vertices)
+            segment = [point]
+        else:
+            segment.append(point)
+    _flatten_bezier(segment, vertices)
+    return vertices
+
+
+def _perfect_vertices(points: list[Point]) -> Iterator[Point]:
+    a, b, c = points
+    cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    if abs(cross) < 1e-7:
+        yield from _split_bezier_vertices(points)
+        return
+
+    a2 = a[0] * a[0] + a[1] * a[1]
+    b2 = b[0] * b[0] + b[1] * b[1]
+    c2 = c[0] * c[0] + c[1] * c[1]
+    divisor = 2 * cross
+    center = (
+        (a2 * (b[1] - c[1]) + b2 * (c[1] - a[1]) + c2 * (a[1] - b[1])) / divisor,
+        (a2 * (c[0] - b[0]) + b2 * (a[0] - c[0]) + c2 * (b[0] - a[0])) / divisor,
+    )
+    radius = math.hypot(a[0] - center[0], a[1] - center[1])
+    if not math.isfinite(radius) or radius <= 0:
+        yield from _split_bezier_vertices(points)
+        return
+
+    start_angle = math.atan2(a[1] - center[1], a[0] - center[0])
+    end_angle = math.atan2(c[1] - center[1], c[0] - center[0])
+    angle = end_angle - start_angle
+    if cross > 0:
+        angle %= 2 * math.pi
+    else:
+        angle = -((-angle) % (2 * math.pi))
+    max_step = 2 * math.acos(max(-1.0, 1 - BEZIER_TOLERANCE / radius))
+    segments = max(1, math.ceil(abs(angle) / max_step)) if max_step > 0 else 1
+    for index in range(segments + 1):
+        theta = start_angle + angle * index / segments
+        yield (
+            center[0] + radius * math.cos(theta),
+            center[1] + radius * math.sin(theta),
+        )
+
+
+def _catmull_vertices(points: list[Point]) -> Iterator[Point]:
+    for index in range(len(points) - 1):
+        v1 = points[index - 1] if index > 0 else points[index]
+        v2 = points[index]
+        v3 = points[index + 1]
+        v4 = (
+            points[index + 2]
+            if index + 2 < len(points)
+            else (
+                2 * v3[0] - v2[0],
+                2 * v3[1] - v2[1],
+            )
+        )
+        for step in range(CATMULL_DETAIL):
+            t = step / CATMULL_DETAIL
+            t2 = t * t
+            t3 = t2 * t
+            yield (
+                0.5
+                * (
+                    2 * v2[0]
+                    + (-v1[0] + v3[0]) * t
+                    + (2 * v1[0] - 5 * v2[0] + 4 * v3[0] - v4[0]) * t2
+                    + (-v1[0] + 3 * v2[0] - 3 * v3[0] + v4[0]) * t3
+                ),
+                0.5
+                * (
+                    2 * v2[1]
+                    + (-v1[1] + v3[1]) * t
+                    + (2 * v1[1] - 5 * v2[1] + 4 * v3[1] - v4[1]) * t2
+                    + (-v1[1] + 3 * v2[1] - 3 * v3[1] + v4[1]) * t3
+                ),
+            )
+    yield points[-1]
+
+
+def _path_vertices(curve_type: str, points: list[Point]) -> Iterable[Point]:
+    if curve_type == "L":
+        return points
+    if curve_type == "B":
+        return _split_bezier_vertices(points)
+    if curve_type == "P":
+        return (
+            _perfect_vertices(points)
+            if len(points) == 3
+            else _split_bezier_vertices(points)
+        )
+    if curve_type == "C":
+        return _catmull_vertices(points)
+    raise ValueError("unknown slider path type")
+
+
+def _slider_geometry(
+    curve_type: str, points: list[Point], expected_length: float
+) -> tuple[float, float, float, float, float, float, float]:
+    invalid = (0.0,) * 7
+    if not points or expected_length < 0 or not math.isfinite(expected_length):
+        return invalid
+    if curve_type == "L" and len(points) == 2:
+        dx = points[1][0] - points[0][0]
+        dy = points[1][1] - points[0][1]
+        length = math.hypot(dx, dy)
+        if length == 0:
+            return (
+                (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) if expected_length == 0 else invalid
+            )
+        scale = expected_length / length
+        return (1.0, dx * scale, dy * scale, 0.0, 0.0, 0.0, 0.0)
+
+    targets = (expected_length / 3, expected_length * 2 / 3, expected_length)
+    samples: list[Point] = []
+    previous: Point | None = None
+    last_direction: Point | None = None
+    distance = 0.0
+    try:
+        for vertex in _path_vertices(curve_type, points):
+            if previous is None:
+                previous = vertex
+                while len(samples) < 3 and targets[len(samples)] == 0:
+                    samples.append(vertex)
+                continue
+            segment_length = math.hypot(
+                vertex[0] - previous[0], vertex[1] - previous[1]
+            )
+            if not math.isfinite(segment_length):
+                return invalid
+            if segment_length > 0:
+                while (
+                    len(samples) < 3
+                    and targets[len(samples)] <= distance + segment_length
+                ):
+                    ratio = (targets[len(samples)] - distance) / segment_length
+                    samples.append(
+                        (
+                            previous[0] + (vertex[0] - previous[0]) * ratio,
+                            previous[1] + (vertex[1] - previous[1]) * ratio,
+                        )
+                    )
+                last_direction = (
+                    (vertex[0] - previous[0]) / segment_length,
+                    (vertex[1] - previous[1]) / segment_length,
+                )
+                distance += segment_length
+            previous = vertex
+            if len(samples) == 3:
+                break
+    except (ArithmeticError, ValueError):
+        return invalid
+
+    if previous is None:
+        return invalid
+    if len(samples) < 3:
+        if last_direction is None:
+            if expected_length > 0:
+                return invalid
+            samples = [points[0], points[0], points[0]]
+        else:
+            samples.extend(
+                (
+                    previous[0] + last_direction[0] * (target - distance),
+                    previous[1] + last_direction[1] * (target - distance),
+                )
+                for target in targets[len(samples) :]
+            )
+
+    start = points[0]
+    one, two, end = samples
+    end_dx, end_dy = end[0] - start[0], end[1] - start[1]
+    return (
+        1.0,
+        float(end_dx),
+        float(end_dy),
+        float(one[0] - start[0] - end_dx / 3),
+        float(one[1] - start[1] - end_dy / 3),
+        float(two[0] - start[0] - end_dx * 2 / 3),
+        float(two[1] - start[1] - end_dy * 2 / 3),
+    )
 
 
 def _preprocess_timing_points(
@@ -142,7 +418,12 @@ def parse_osu_file(
 
     with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         for raw_line in file:
-            if section_name not in {"metadata", "difficulty", "timingpoints", "hitobjects"}:
+            if section_name not in {
+                "metadata",
+                "difficulty",
+                "timingpoints",
+                "hitobjects",
+            }:
                 if not raw_line.startswith("["):
                     continue
 
@@ -154,7 +435,9 @@ def parse_osu_file(
                 continue
 
             if section_name == "metadata":
-                if filename_beatmap_id is None and line.lower().startswith("beatmapid:"):
+                if filename_beatmap_id is None and line.lower().startswith(
+                    "beatmapid:"
+                ):
                     data["beatmap_id"] = int(line.split(":", 1)[1])
                 continue
 
@@ -262,16 +545,24 @@ def parse_osu_file(
             num_hard_anchors = 0
             slider_end_x = 0
             slider_end_y = 0
+            slider_geometry = (0.0,) * 7
 
             if object_type == OBJECT_TYPE_SLIDER:
                 try:
                     curve_data = parts[5].split("|")
                     curve_type = curve_data[0]
+                    control_points: list[Point] = [(float(x), float(y))]
+                    path_valid = bool(curve_type)
                     previous_point = None
                     previous_was_hard = False
                     for raw_point in curve_data[1:]:
-                        coordinates = raw_point.split(":", 2)
-                        point = (int(coordinates[0]), int(coordinates[1]))
+                        try:
+                            coordinates = raw_point.split(":", 2)
+                            point = (int(coordinates[0]), int(coordinates[1]))
+                        except (ValueError, IndexError):
+                            path_valid = False
+                            continue
+                        control_points.append((float(point[0]), float(point[1])))
                         if point == previous_point:
                             if not previous_was_hard:
                                 num_hard_anchors += 1
@@ -284,7 +575,11 @@ def parse_osu_file(
 
                     slides = int(parts[6])
                     pixel_length = float(parts[7])
-                    if active_section is not None:
+                    if path_valid:
+                        slider_geometry = _slider_geometry(
+                            curve_type, control_points, pixel_length
+                        )
+                    if active_section is not None and math.isfinite(pixel_length):
                         slider_velocity = (
                             data["slider_multiplier"]
                             * 100.0
@@ -320,6 +615,7 @@ def parse_osu_file(
             )
             hit_objects.append(
                 RawHitObject(
+                    object_index=len(hit_objects),
                     x=x,
                     y=y,
                     time=time,
@@ -339,6 +635,13 @@ def parse_osu_file(
                     hard_anchor_ratio=hard_anchor_ratio,
                     slider_end_x=slider_end_x,
                     slider_end_y=slider_end_y,
+                    slider_path_valid=int(slider_geometry[0]),
+                    span_end_dx=slider_geometry[1],
+                    span_end_dy=slider_geometry[2],
+                    curve_residual_1_dx=slider_geometry[3],
+                    curve_residual_1_dy=slider_geometry[4],
+                    curve_residual_2_dx=slider_geometry[5],
+                    curve_residual_2_dy=slider_geometry[6],
                 )
             )
 

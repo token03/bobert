@@ -358,13 +358,13 @@ def _alignment_labels(
 
 
 def collate_pretrain(
-    batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    batch: List[torch.Tensor],
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
     q_buckets: Sequence[int],
 ):
-    vectors, auxiliary_targets, auxiliary_valid = zip(*batch)
+    vectors = batch
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
     cu_seqlens = torch.nn.functional.pad(
@@ -395,20 +395,6 @@ def collate_pretrain(
     return {
         "packed_vectors": torch.cat(
             [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
-        ),
-        "packed_auxiliary_targets": torch.cat(
-            [
-                targets[:length][mask]
-                for targets, mask, length in zip(auxiliary_targets, masks, lengths)
-            ],
-            dim=0,
-        ),
-        "packed_auxiliary_valid": torch.cat(
-            [
-                valid[:length][mask]
-                for valid, mask, length in zip(auxiliary_valid, masks, lengths)
-            ],
-            dim=0,
         ),
         "masked_idx": masked_idx,
         "masked_positions": masked_positions.to(torch.int32),

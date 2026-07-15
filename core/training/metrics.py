@@ -2,9 +2,12 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, Optional
 
+from core.data.schema import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+
 from torchmetrics import MetricCollection
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import FBetaScore
+
 
 class MLMMetrics(nn.Module):
     def __init__(self, feature_info: Dict[str, Any], device: torch.device):
@@ -12,19 +15,31 @@ class MLMMetrics(nn.Module):
         self.feature_info = feature_info
         self._device = device
 
-        self.cont_names = sorted(
-            feature_info["continuous"].keys(),
-            key=lambda k: feature_info["continuous"][k],
-        )
-
-        self.slider_feature_names = set(feature_info.get("slider", {}).keys())
+        self.groups = ("common", "slider", "spinner")
+        self.cont_names = {
+            group: tuple(
+                name
+                for name in feature_info[group]
+                if name in feature_info["continuous"]
+            )
+            for group in self.groups
+        }
+        self.cat_names = {
+            group: tuple(
+                name
+                for name in feature_info[group]
+                if name in feature_info["categorical"]
+            )
+            for group in self.groups
+        }
 
         self.cont_metrics = MetricCollection(
-            {name: MeanMetric() for name in self.cont_names}
+            {name: MeanMetric() for names in self.cont_names.values() for name in names}
         ).to(device)
 
         self.cat_metrics = nn.ModuleDict()
-        for name, info in feature_info["categorical"].items():
+        for name in (name for names in self.cat_names.values() for name in names):
+            info = feature_info["categorical"][name]
             num_classes = info["cardinality"]
             self.cat_metrics[name] = MetricCollection(
                 {
@@ -46,50 +61,45 @@ class MLMMetrics(nn.Module):
         targets: torch.Tensor,
         loss: Optional[float] = None,
     ):
-        from core.data.schema import OBJECT_TYPE_SLIDER_HEAD
-
         if loss is not None:
             self.loss_metric.update(loss)
 
         if targets.shape[0] == 0:
             return
 
-        masked_targets = targets
-        continuous_predictions = predictions["continuous"]
-        categorical_predictions = predictions["categorical"]
         object_type_idx = self.feature_info["categorical"]["object_type"]["index"]
-        object_types = masked_targets[:, object_type_idx].long()
+        object_types = targets[:, object_type_idx].long()
+        masks = {
+            "common": torch.ones_like(object_types, dtype=torch.bool),
+            "slider": object_types == OBJECT_TYPE_SLIDER,
+            "spinner": object_types == OBJECT_TYPE_SPINNER,
+        }
 
-        for i, name in enumerate(self.cont_names):
-            target_idx = self.feature_info["continuous"][name]
-            pred_idx = i
+        for group, mask in masks.items():
+            if not torch.any(mask):
+                continue
 
-            if name in self.slider_feature_names:
-                slider_mask = object_types == OBJECT_TYPE_SLIDER_HEAD
-                if not torch.any(slider_mask):
-                    continue
-                preds = continuous_predictions[slider_mask, pred_idx]
-                targs = masked_targets[slider_mask, target_idx]
-            else:
-                preds = continuous_predictions[:, pred_idx]
-                targs = masked_targets[:, target_idx]
+            output = predictions[group]
+            for pred_idx, name in enumerate(self.cont_names[group]):
+                target_idx = self.feature_info["continuous"][name]
+                abs_error = torch.abs(
+                    output["continuous"][mask, pred_idx] - targets[mask, target_idx]
+                )
+                self.cont_metrics[name].update(abs_error)
 
-            abs_error = torch.abs(preds - targs)
-            self.cont_metrics[name].update(abs_error)
-
-        for name, info in self.feature_info["categorical"].items():
-            pred_logits = categorical_predictions[name]
-            pred_classes = torch.argmax(pred_logits, dim=-1)
-            target_classes = masked_targets[:, info["index"]].long()
-            self.cat_metrics[name]["f2"].update(pred_classes, target_classes)
+            for name in self.cat_names[group]:
+                info = self.feature_info["categorical"][name]
+                pred_classes = torch.argmax(output["categorical"][name][mask], dim=-1)
+                target_classes = targets[mask, info["index"]].long()
+                self.cat_metrics[name]["f2"].update(pred_classes, target_classes)
 
     def compute(self) -> Dict[str, Any]:
         results = {}
 
         cont_results = self.cont_metrics.compute()
         continuous_metrics = {}
-        for name in self.cont_names:
-            if name in cont_results:
+        for names in self.cont_names.values():
+            for name in names:
                 continuous_metrics[name] = {"mae": cont_results[name].item()}
         if continuous_metrics:
             results["continuous_metrics"] = continuous_metrics

@@ -48,6 +48,7 @@ BEATMAPS_SCHEMA = {
 HITOBJECTS_SCHEMA = {
     "beatmap_id": pl.Int64,
     "category": pl.String,
+    "object_index": pl.Int32,
     "x": pl.Int32,
     "y": pl.Int32,
     "time": pl.Int32,
@@ -67,7 +68,15 @@ HITOBJECTS_SCHEMA = {
     "hard_anchor_ratio": pl.Float32,
     "slider_end_x": pl.Int32,
     "slider_end_y": pl.Int32,
+    "slider_path_valid": pl.Int8,
+    "span_end_dx": pl.Float32,
+    "span_end_dy": pl.Float32,
+    "curve_residual_1_dx": pl.Float32,
+    "curve_residual_1_dy": pl.Float32,
+    "curve_residual_2_dx": pl.Float32,
+    "curve_residual_2_dy": pl.Float32,
 }
+
 
 def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
     return (
@@ -78,7 +87,9 @@ def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
     )
 
 
-def log_worker_failure(temp_dir: str, pid: int, file_path: str, reason: str, detail: str):
+def log_worker_failure(
+    temp_dir: str, pid: int, file_path: str, reason: str, detail: str
+):
     log_path = os.path.join(temp_dir, f"failures-worker-{pid}.jsonl")
     record = {
         "file_path": file_path,
@@ -110,6 +121,7 @@ def extract_hitobject_records(beatmap: RawBeatmap) -> List[Dict]:
             {
                 "beatmap_id": beatmap.beatmap_id,
                 "category": beatmap.category,
+                "object_index": ho.object_index,
                 "x": ho.x,
                 "y": ho.y,
                 "time": ho.time,
@@ -129,6 +141,13 @@ def extract_hitobject_records(beatmap: RawBeatmap) -> List[Dict]:
                 "hard_anchor_ratio": ho.hard_anchor_ratio,
                 "slider_end_x": ho.slider_end_x,
                 "slider_end_y": ho.slider_end_y,
+                "slider_path_valid": ho.slider_path_valid,
+                "span_end_dx": ho.span_end_dx,
+                "span_end_dy": ho.span_end_dy,
+                "curve_residual_1_dx": ho.curve_residual_1_dx,
+                "curve_residual_1_dy": ho.curve_residual_1_dy,
+                "curve_residual_2_dx": ho.curve_residual_2_dx,
+                "curve_residual_2_dy": ho.curve_residual_2_dy,
             }
         )
     return records
@@ -205,21 +224,16 @@ def _write_worker_batch(
     hitobjects_data: List[Dict],
 ):
     pl.DataFrame(beatmaps_data, schema=BEATMAPS_SCHEMA).write_parquet(
-        os.path.join(
-            temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet"
-        )
+        os.path.join(temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet")
     )
     pl.DataFrame(hitobjects_data, schema=HITOBJECTS_SCHEMA).write_parquet(
-        os.path.join(
-            temp_dir, "hitobjects", f"worker-{pid}-batch-{batch_num}.parquet"
-        )
+        os.path.join(temp_dir, "hitobjects", f"worker-{pid}-batch-{batch_num}.parquet")
     )
 
 
 def _parquet_row_count(path: str | Path) -> int:
     return sum(
-        pq.ParquetFile(file).metadata.num_rows
-        for file in Path(path).glob("*.parquet")
+        pq.ParquetFile(file).metadata.num_rows for file in Path(path).glob("*.parquet")
     )
 
 
@@ -254,7 +268,7 @@ def consolidate_hitobjects(temp_path: str, output_path: str) -> int:
             f"""
             COPY (
                 SELECT *, beatmap_id // 100000 AS _bucket
-                FROM read_parquet('{_sql_path(Path(temp_path) / '*.parquet')}')
+                FROM read_parquet('{_sql_path(Path(temp_path) / "*.parquet")}')
             ) TO '{_sql_path(buckets)}' (
                 FORMAT parquet,
                 PARTITION_BY (_bucket),
@@ -279,10 +293,10 @@ def consolidate_hitobjects(temp_path: str, output_path: str) -> int:
                 COPY (
                     SELECT * EXCLUDE (_bucket)
                     FROM read_parquet(
-                        '{_sql_path(bucket_dir / '*.parquet')}',
+                        '{_sql_path(bucket_dir / "*.parquet")}',
                         hive_partitioning = true
                     )
-                    ORDER BY beatmap_id, time
+                    ORDER BY beatmap_id, time, object_index
                 ) TO '{_sql_path(part_path)}' (
                     FORMAT parquet,
                     COMPRESSION zstd,
@@ -318,9 +332,9 @@ def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
 
     output = Path(output_path)
     output.mkdir(parents=True, exist_ok=True)
-    frame = pl.scan_parquet(str(Path(temp_path) / "*.parquet")).sort(
-        "beatmap_id"
-    ).collect()
+    frame = (
+        pl.scan_parquet(str(Path(temp_path) / "*.parquet")).sort("beatmap_id").collect()
+    )
     frame.write_parquet(output / "part-0.parquet")
     return frame.height
 
@@ -414,7 +428,9 @@ def create_dataset(
         p.start()
 
     try:
-        with tqdm(total=len(files_to_process), desc="Parsing files", unit="files") as pbar:
+        with tqdm(
+            total=len(files_to_process), desc="Parsing files", unit="files"
+        ) as pbar:
             last_value = 0
             reported_flush = False
             while any(p.is_alive() for p in processes):
@@ -440,7 +456,9 @@ def create_dataset(
         for p in processes:
             p.join()
             if p.exitcode != 0:
-                raise RuntimeError(f"Worker process {p.pid} exited with code {p.exitcode}")
+                raise RuntimeError(
+                    f"Worker process {p.pid} exited with code {p.exitcode}"
+                )
     except KeyboardInterrupt:
         print("Interrupted; terminating worker processes...")
         terminate_processes(processes)

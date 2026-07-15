@@ -63,10 +63,7 @@ pretraining:
 
   masking:
     ratio: 0.30
-    mean_span_length: 4
-
-  loss:
-    mlm_weight: 1.0
+    mean_span_length: 3
 
 mining:
   top_k: 32

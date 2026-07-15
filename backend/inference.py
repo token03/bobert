@@ -77,7 +77,9 @@ class CpuInferencer:
         vectors = self.normalizer.normalize_vectors(vectors)
         map_features = torch.tensor(
             [
-                self.normalizer.normalize_attribute(name, raw_map_features.get(name, 0.0))
+                self.normalizer.normalize_attribute(
+                    name, raw_map_features.get(name, 0.0)
+                )
                 for name in MAP_FEATURE_ATTRIBUTES
             ],
             dtype=torch.float32,
@@ -164,6 +166,7 @@ def _extract_hitobject_records(beatmap: RawBeatmap) -> list[dict[str, Any]]:
             {
                 "beatmap_id": beatmap.beatmap_id,
                 "category": beatmap.category,
+                "object_index": ho.object_index,
                 "x": ho.x,
                 "y": ho.y,
                 "time": ho.time,
@@ -183,6 +186,13 @@ def _extract_hitobject_records(beatmap: RawBeatmap) -> list[dict[str, Any]]:
                 "hard_anchor_ratio": ho.hard_anchor_ratio,
                 "slider_end_x": ho.slider_end_x,
                 "slider_end_y": ho.slider_end_y,
+                "slider_path_valid": ho.slider_path_valid,
+                "span_end_dx": ho.span_end_dx,
+                "span_end_dy": ho.span_end_dy,
+                "curve_residual_1_dx": ho.curve_residual_1_dx,
+                "curve_residual_1_dy": ho.curve_residual_1_dy,
+                "curve_residual_2_dx": ho.curve_residual_2_dx,
+                "curve_residual_2_dy": ho.curve_residual_2_dy,
             }
         )
     return records
