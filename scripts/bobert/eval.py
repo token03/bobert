@@ -27,6 +27,7 @@ COLLECTION_NGRAMS_EVAL_PATH = COLLECTIONS_DIR / "ngrams.txt"
 TOURNAMENTS_EVAL_PATH = COLLECTIONS_DIR / "tournaments.parquet"
 RATINGS_EVAL_PATH = DATA_DIR / "ratings.parquet"
 RFF_EVAL_PATH = DATA_DIR / "motifs" / "rff.parquet"
+TAGS_EVAL_PATH = DATA_DIR / "tags.csv"
 
 PROBE_SEED = 0
 PROBE_TEST_SIZE = 0.2
@@ -40,6 +41,8 @@ RATING_MAX_STARS = 20.0
 RFF_RIDGE_ALPHA = 1e-3
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
+TAG_MIN_TRAIN_SETS = 20
+TAG_MIN_TEST_SETS = 5
 MULTILABEL_TOP_K = (1, 3, 5)
 
 
@@ -562,6 +565,140 @@ def multilabel_probe(
     return EvalResult(title, len(ids), len(classes), metrics)
 
 
+def pu_tag_scores(votes: torch.Tensor, scores: torch.Tensor) -> dict[str, float]:
+    average_precision = []
+    vote_average_precision = []
+    auroc = []
+    vote_auroc = []
+    for label_idx in range(votes.shape[1]):
+        label_votes = votes[:, label_idx]
+        label_scores = scores[:, label_idx]
+        positive = label_votes > 0
+        unlabeled = ~positive
+
+        order = label_scores.argsort(descending=True)
+        ranked_positive = positive[order]
+        precision = ranked_positive.cumsum(dim=0) / torch.arange(
+            1, len(order) + 1, device=votes.device
+        )
+        positive_precision = precision[ranked_positive]
+        confidence = torch.log1p(label_votes[order][ranked_positive])
+        average_precision.append(positive_precision.mean())
+        vote_average_precision.append(
+            (positive_precision * confidence).sum() / confidence.sum()
+        )
+
+        positive_scores = label_scores[positive]
+        unlabeled_scores = label_scores[unlabeled]
+        comparisons = positive_scores[:, None] - unlabeled_scores[None, :]
+        positive_auc = (comparisons > 0).float().mean(dim=1)
+        positive_auc += 0.5 * (comparisons == 0).float().mean(dim=1)
+        confidence = torch.log1p(label_votes[positive])
+        auroc.append(positive_auc.mean())
+        vote_auroc.append((positive_auc * confidence).sum() / confidence.sum())
+
+    return {
+        "pu_map": float(torch.stack(average_precision).mean().item()),
+        "pu_vote_map": float(torch.stack(vote_average_precision).mean().item()),
+        "pu_auroc": float(torch.stack(auroc).mean().item()),
+        "pu_vote_auroc": float(torch.stack(vote_auroc).mean().item()),
+    }
+
+
+def run_tag_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    if not TAGS_EVAL_PATH.exists():
+        console.print(f"[yellow]Skipping Community Tag PU Probe: {TAGS_EVAL_PATH} not found.[/yellow]")
+        return
+
+    tags = pl.read_csv(TAGS_EVAL_PATH, infer_schema_length=None)
+    if "beatmapset_id" not in tags.columns:
+        raise ValueError(f"Expected beatmapset_id column in {TAGS_EVAL_PATH}")
+    tag_names = [column for column in tags.columns if column != "beatmapset_id"]
+    beatmaps = load_standard_beatmaps(["beatmapset_id"]).drop_nulls(
+        ["beatmap_id", "beatmapset_id"]
+    )
+    shared_ids = set(common_ids(targets, set(beatmaps["beatmap_id"].to_list())))
+    beatmaps = beatmaps.filter(pl.col("beatmap_id").is_in(shared_ids)).unique("beatmap_id")
+    map_ids_by_set = {
+        int(beatmapset_id): sorted(map(int, beatmap_ids))
+        for beatmapset_id, beatmap_ids in beatmaps.group_by("beatmapset_id")
+        .agg(pl.col("beatmap_id"))
+        .iter_rows()
+    }
+    tags = tags.filter(pl.col("beatmapset_id").is_in(map_ids_by_set)).sort("beatmapset_id")
+    if tags.height < 100:
+        console.print(
+            f"[yellow]Skipping Community Tag PU Probe: only {tags.height:,} shared mapsets.[/yellow]"
+        )
+        return
+
+    votes = tags.select(tag_names).fill_null(0).cast(pl.Float32).to_numpy()
+    rng = np.random.default_rng(PROBE_SEED)
+    order = rng.permutation(tags.height)
+    test_size = max(1, int(round(tags.height * PROBE_TEST_SIZE)))
+    test_indices = order[:test_size]
+    train_indices = order[test_size:]
+    train_counts = (votes[train_indices] > 0).sum(axis=0)
+    test_counts = (votes[test_indices] > 0).sum(axis=0)
+    keep = (train_counts >= TAG_MIN_TRAIN_SETS) & (test_counts >= TAG_MIN_TEST_SETS)
+    if np.count_nonzero(keep) < 2:
+        console.print(
+            "[yellow]Skipping Community Tag PU Probe: fewer than two tags have sufficient "
+            "train and test mapsets.[/yellow]"
+        )
+        return
+
+    votes = votes[:, keep]
+    classes = [tag for tag, kept in zip(tag_names, keep) if kept]
+    beatmapset_ids = tags["beatmapset_id"].to_list()
+    device = probe_device()
+    train_idx = torch.tensor(train_indices, device=device)
+    test_idx = torch.tensor(test_indices, device=device)
+    y = torch.tensor(votes, dtype=torch.float32, device=device)
+    train_positive = y[train_idx] > 0
+    train_confidence = torch.log1p(y[train_idx])
+    train_unlabeled = ~train_positive
+    metrics = {}
+    for target in targets:
+        torch.manual_seed(PROBE_SEED)
+        set_embeddings = np.stack(
+            [
+                target_matrix(target, map_ids_by_set[int(beatmapset_id)]).mean(axis=0)
+                for beatmapset_id in beatmapset_ids
+            ]
+        )
+        set_embeddings /= np.maximum(
+            np.linalg.norm(set_embeddings, axis=1, keepdims=True), 1e-12
+        )
+        x = torch.tensor(set_embeddings, dtype=torch.float32, device=device)
+        model = torch.nn.Linear(x.shape[1], len(classes), device=device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=PROBE_LR, weight_decay=PROBE_WEIGHT_DECAY)
+        for _epoch in range(PROBE_EPOCHS):
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(x[train_idx])
+            positive_loss = (
+                F.softplus(-logits) * train_confidence
+            ).sum(dim=0) / train_confidence.sum(dim=0)
+            unlabeled_loss = (
+                F.softplus(logits) * train_unlabeled
+            ).sum(dim=0) / train_unlabeled.sum(dim=0)
+            loss = (0.5 * positive_loss + 0.5 * unlabeled_loss).mean()
+            loss.backward()
+            optimizer.step()
+        model.eval()
+        with torch.no_grad():
+            metrics[target.name] = pu_tag_scores(y[test_idx], model(x[test_idx]))
+        del x, model, optimizer
+        torch.cuda.empty_cache()
+
+    console.print(
+        "[dim]Missing tags are treated as unlabeled comparison examples, not confirmed negatives; "
+        "vote counts logarithmically weight observed positives.[/dim]"
+    )
+    print_eval_result(EvalResult("Community Tag PU Probe", tags.height, len(classes), metrics))
+
+
 def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -> None:
     groups = load_eval_groups(resolve_path(args.eval))
     if not groups:
@@ -833,6 +970,7 @@ def main() -> None:
         ("Submitted Year Probe", run_year_eval),
         ("Star Rating Probe", run_rating_eval),
         ("RFF Probe", run_rff_eval),
+        ("Community Tag PU Probe", run_tag_eval),
         ("Collection Ngram Probe", run_collection_ngram_eval),
         ("Tournament Slot Probe", run_tournament_slot_eval),
     ]

@@ -6,13 +6,16 @@ import signal
 import time
 import shutil
 import multiprocessing as mp
+from pathlib import Path
 from typing import Optional, List, Dict
+import duckdb
 import polars as pl
+import pyarrow.parquet as pq
 from tqdm import tqdm
 
 from core.data.parser import parse_osu_file, RawBeatmap
 
-BATCH_SIZE = 1024
+MAX_BUFFER_HITOBJECT_ROWS = 100_000
 MIN_OBJECTS_PER_MAP = 1
 MAX_OBJECTS_PER_MAP = 16_384
 MAX_CURVE_POINTS_PER_MAP = 32_768
@@ -54,6 +57,9 @@ HITOBJECTS_SCHEMA = {
     "end_time": pl.Int32,
     "pixel_length": pl.Float32,
     "bpm": pl.Float32,
+    "timing_origin": pl.Int32,
+    "end_bpm": pl.Float32,
+    "end_timing_origin": pl.Int32,
     "curve_type_char": pl.String,
     "num_anchors": pl.Int32,
     "kiai_time": pl.Int8,
@@ -62,16 +68,6 @@ HITOBJECTS_SCHEMA = {
     "slider_end_x": pl.Int32,
     "slider_end_y": pl.Int32,
 }
-
-CURVEPOINTS_SCHEMA = {
-    "beatmap_id": pl.Int64,
-    "hitobject_time": pl.Int32,
-    "point_index": pl.Int32,
-    "x": pl.Int32,
-    "y": pl.Int32,
-    "is_hard": pl.Int8,
-}
-
 
 def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
     return (
@@ -123,6 +119,9 @@ def extract_hitobject_records(beatmap: RawBeatmap) -> List[Dict]:
                 "end_time": ho.end_time,
                 "pixel_length": ho.pixel_length or 0.0,
                 "bpm": ho.bpm,
+                "timing_origin": ho.timing_origin,
+                "end_bpm": ho.end_bpm,
+                "end_timing_origin": ho.end_timing_origin,
                 "curve_type_char": ho.curve_type or "",
                 "num_anchors": ho.num_anchors,
                 "kiai_time": ho.kiai_time,
@@ -135,29 +134,10 @@ def extract_hitobject_records(beatmap: RawBeatmap) -> List[Dict]:
     return records
 
 
-def extract_curvepoint_records(beatmap: RawBeatmap) -> List[Dict]:
-    records = []
-    for ho in beatmap.hit_objects:
-        if ho.curve_points:
-            for i, (p_x, p_y, is_hard) in enumerate(ho.curve_points):
-                records.append(
-                    {
-                        "beatmap_id": beatmap.beatmap_id,
-                        "hitobject_time": ho.time,
-                        "point_index": i,
-                        "x": p_x,
-                        "y": p_y,
-                        "is_hard": is_hard,
-                    }
-                )
-    return records
-
-
 def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
     pid = os.getpid()
     beatmaps_buffer = []
     hitobjects_buffer = []
-    curvepoints_buffer = []
     file_counter = 0
 
     def handle_timeout(signum, frame):
@@ -180,7 +160,6 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
             if raw_beatmap and validate_beatmap(raw_beatmap):
                 beatmaps_buffer.append(extract_beatmap_record(raw_beatmap))
                 hitobjects_buffer.extend(extract_hitobject_records(raw_beatmap))
-                curvepoints_buffer.extend(extract_curvepoint_records(raw_beatmap))
         except ParseTimeoutError:
             log_worker_failure(
                 temp_dir,
@@ -197,16 +176,15 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
         with progress_counter.get_lock():
             progress_counter.value += 1
 
-        if len(beatmaps_buffer) >= BATCH_SIZE:
+        if len(hitobjects_buffer) >= MAX_BUFFER_HITOBJECT_ROWS:
             _write_worker_batch(
                 temp_dir,
                 pid,
                 file_counter,
                 beatmaps_buffer,
                 hitobjects_buffer,
-                curvepoints_buffer,
             )
-            beatmaps_buffer, hitobjects_buffer, curvepoints_buffer = [], [], []
+            beatmaps_buffer, hitobjects_buffer = [], []
             file_counter += 1
 
     if beatmaps_buffer:
@@ -216,7 +194,6 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
             file_counter,
             beatmaps_buffer,
             hitobjects_buffer,
-            curvepoints_buffer,
         )
 
 
@@ -226,56 +203,126 @@ def _write_worker_batch(
     batch_num: int,
     beatmaps_data: List[Dict],
     hitobjects_data: List[Dict],
-    curvepoints_data: List[Dict],
 ):
+    pl.DataFrame(beatmaps_data, schema=BEATMAPS_SCHEMA).write_parquet(
+        os.path.join(
+            temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet"
+        )
+    )
+    pl.DataFrame(hitobjects_data, schema=HITOBJECTS_SCHEMA).write_parquet(
+        os.path.join(
+            temp_dir, "hitobjects", f"worker-{pid}-batch-{batch_num}.parquet"
+        )
+    )
+
+
+def _parquet_row_count(path: str | Path) -> int:
+    return sum(
+        pq.ParquetFile(file).metadata.num_rows
+        for file in Path(path).glob("*.parquet")
+    )
+
+
+def _sql_path(path: str | Path) -> str:
+    return str(Path(path).resolve()).replace("'", "''")
+
+
+def consolidate_hitobjects(temp_path: str, output_path: str) -> int:
+    if not list(Path(temp_path).glob("*.parquet")):
+        return 0
+
+    output = Path(output_path)
+    staging_output = output.with_name(f"{output.name}.inprogress")
+    ram_root = Path("/dev/shm") / f"bobert-hitobjects-{os.getpid()}"
+    buckets = ram_root / "buckets"
+    spill = ram_root / "spill"
+    if output.exists() or staging_output.exists():
+        raise FileExistsError(f"refusing to replace existing output: {output}")
+
+    ram_root.mkdir(parents=True)
+    spill.mkdir()
+    staging_output.mkdir(parents=True)
+    connection = duckdb.connect(":memory:")
     try:
-        pl.DataFrame(beatmaps_data, schema=BEATMAPS_SCHEMA).write_parquet(
-            os.path.join(
-                temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet"
+        connection.execute("SET memory_limit = '2GiB'")
+        connection.execute("SET threads = 2")
+        connection.execute("SET preserve_insertion_order = false")
+        connection.execute("PRAGMA disable_progress_bar")
+        connection.execute(f"SET temp_directory = '{_sql_path(spill)}'")
+        connection.execute("SET max_temp_directory_size = '6GiB'")
+        connection.execute(
+            f"""
+            COPY (
+                SELECT *, beatmap_id // 100000 AS _bucket
+                FROM read_parquet('{_sql_path(Path(temp_path) / '*.parquet')}')
+            ) TO '{_sql_path(buckets)}' (
+                FORMAT parquet,
+                PARTITION_BY (_bucket),
+                COMPRESSION zstd
             )
-        )
-        pl.DataFrame(hitobjects_data, schema=HITOBJECTS_SCHEMA).write_parquet(
-            os.path.join(
-                temp_dir, "hitobjects", f"worker-{pid}-batch-{batch_num}.parquet"
-            )
+            """
         )
 
-        if curvepoints_data:
-            pl.DataFrame(curvepoints_data, schema=CURVEPOINTS_SCHEMA).write_parquet(
-                os.path.join(
-                    temp_dir, "curvepoints", f"worker-{pid}-batch-{batch_num}.parquet"
+        bucket_dirs = sorted(
+            buckets.glob("_bucket=*"),
+            key=lambda path: int(path.name.split("=", 1)[1]),
+        )
+        for bucket_dir in tqdm(
+            bucket_dirs, desc="Sorting hitobject ranges", unit="range"
+        ):
+            bucket = int(bucket_dir.name.split("=", 1)[1])
+            lower = bucket * 100000
+            upper = lower + 99999
+            part_path = staging_output / f"part-{lower:07d}-{upper:07d}.parquet"
+            connection.execute(
+                f"""
+                COPY (
+                    SELECT * EXCLUDE (_bucket)
+                    FROM read_parquet(
+                        '{_sql_path(bucket_dir / '*.parquet')}',
+                        hive_partitioning = true
+                    )
+                    ORDER BY beatmap_id, time
+                ) TO '{_sql_path(part_path)}' (
+                    FORMAT parquet,
+                    COMPRESSION zstd,
+                    ROW_GROUP_SIZE 262144
                 )
+                """
             )
+            shutil.rmtree(bucket_dir)
+    except Exception:
+        shutil.rmtree(staging_output, ignore_errors=True)
+        raise
+    finally:
+        connection.close()
+        shutil.rmtree(ram_root, ignore_errors=True)
 
-    except Exception as e:
-        print(f"Worker {pid} failed to write batch {batch_num}: {e}")
+    expected_rows = _parquet_row_count(temp_path)
+    actual_rows = _parquet_row_count(staging_output)
+    if actual_rows != expected_rows:
+        shutil.rmtree(staging_output)
+        raise RuntimeError(
+            f"hitobject row count mismatch: {actual_rows} != {expected_rows}"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging_output.rename(output)
+    return actual_rows
 
 
 def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
-    if not os.path.exists(temp_path):
-        return 0
-
-    temp_files = sorted([f for f in os.listdir(temp_path) if f.endswith(".parquet")])
-    if not temp_files:
-        return 0
-
-    frames = [
-        pl.read_parquet(os.path.join(temp_path, temp_file))
-        for temp_file in tqdm(
-            temp_files, desc=f"Consolidating {table_name}", leave=False
-        )
-    ]
-    merged_df = pl.concat(frames, how="vertical")
     if table_name == "hitobjects":
-        merged_df = merged_df.sort(["beatmap_id", "time"])
-    elif table_name == "curvepoints":
-        merged_df = merged_df.sort(["beatmap_id", "hitobject_time", "point_index"])
-    elif table_name == "beatmaps":
-        merged_df = merged_df.sort("beatmap_id")
-    os.makedirs(output_path, exist_ok=True)
-    merged_df.write_parquet(os.path.join(output_path, "part-0.parquet"))
+        return consolidate_hitobjects(temp_path, output_path)
+    if not list(Path(temp_path).glob("*.parquet")):
+        return 0
 
-    return merged_df.height
+    output = Path(output_path)
+    output.mkdir(parents=True, exist_ok=True)
+    frame = pl.scan_parquet(str(Path(temp_path) / "*.parquet")).sort(
+        "beatmap_id"
+    ).collect()
+    frame.write_parquet(output / "part-0.parquet")
+    return frame.height
 
 
 def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
@@ -292,19 +339,13 @@ def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
             os.path.join(output_dir, "hitobjects"),
             "hitobjects",
         ),
-        (
-            os.path.join(temp_dir, "curvepoints"),
-            os.path.join(output_dir, "curvepoints"),
-            "curvepoints",
-        ),
     ]
 
     results = [consolidate_table(*args) for args in consolidation_args]
 
-    beatmap_count, hitobject_count, curvepoint_count = results
+    beatmap_count, hitobject_count = results
     print(f"Consolidated {beatmap_count} beatmap records.")
     print(f"Consolidated {hitobject_count} hitobject records.")
-    print(f"Consolidated {curvepoint_count} curve point records.")
 
     return beatmap_count
 
@@ -335,9 +376,8 @@ def create_dataset(
         shutil.rmtree(output_dir)
     os.makedirs(os.path.join(temp_dir, "beatmaps"))
     os.makedirs(os.path.join(temp_dir, "hitobjects"))
-    os.makedirs(os.path.join(temp_dir, "curvepoints"))
 
-    num_workers = mp.cpu_count()
+    num_workers = 4
 
     print("Finding all .osu files using os.walk...")
     all_files = [

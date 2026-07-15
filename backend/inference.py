@@ -117,7 +117,12 @@ def _beatmap_inputs_from_osu(path: Path, max_seq_len: int):
         beatmaps_df = beatmaps_df.with_columns(
             pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
         )
-    vectors, _ids, _ = build_feature_tensors(beatmaps_df, hitobjects_df)
+    vectors, _ids, _ = build_feature_tensors(
+        beatmaps_df,
+        hitobjects_df,
+        max_seq_len=max_seq_len,
+        return_original_counts=False,
+    )
     if not vectors:
         raise ValueError(f"could not engineer hitobject features for {path}")
 
@@ -168,6 +173,9 @@ def _extract_hitobject_records(beatmap: RawBeatmap) -> list[dict[str, Any]]:
                 "end_time": ho.end_time,
                 "pixel_length": ho.pixel_length or 0.0,
                 "bpm": ho.bpm,
+                "timing_origin": ho.timing_origin,
+                "end_bpm": ho.end_bpm,
+                "end_timing_origin": ho.end_timing_origin,
                 "curve_type_char": ho.curve_type or "",
                 "num_anchors": ho.num_anchors,
                 "kiai_time": ho.kiai_time,

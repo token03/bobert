@@ -198,7 +198,12 @@ def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
         beatmaps_df = beatmaps_df.with_columns(
             pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
         )
-    vectors, _ids, _ = build_feature_tensors(beatmaps_df, hitobjects_df)
+    vectors, _ids, _ = build_feature_tensors(
+        beatmaps_df,
+        hitobjects_df,
+        max_seq_len=max_seq_len,
+        return_original_counts=False,
+    )
     if not vectors:
         raise ValueError(f"Could not engineer hitobject features for {path}")
 

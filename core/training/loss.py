@@ -3,12 +3,13 @@ import torch
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from core.data.schema import FEATURE_INFO, OBJECT_TYPE_SLIDER_HEAD
+from core.data.schema import (
+    FEATURE_INFO,
+    OBJECT_TYPE_SLIDER_HEAD,
+)
 
 
-def mlm_loss_fn(
-    predictions: Dict[str, Any], targets: torch.Tensor
-) -> torch.Tensor:
+def mlm_loss_fn(predictions: Dict[str, Any], targets: torch.Tensor) -> torch.Tensor:
     cont_names = sorted(
         FEATURE_INFO["continuous"].keys(), key=lambda k: FEATURE_INFO["continuous"][k]
     )
@@ -56,16 +57,33 @@ def mlm_loss_fn(
 
 def pretrain_loss_fn(
     predictions: Dict[str, Any],
-    targets: torch.Tensor,
+    targets: Dict[str, torch.Tensor],
     config: DictConfig,
 ) -> Dict[str, torch.Tensor]:
     losses = {}
     mlm_weight = config.pretraining.loss.mlm_weight
 
-    mlm_loss = mlm_loss_fn(predictions["mlm"], targets)
+    mlm_loss = mlm_loss_fn(predictions["mlm"], targets["mlm"])
     losses["mlm_loss"] = mlm_loss
 
-    losses["total_loss"] = mlm_loss * mlm_weight
+    auxiliary_elementwise = F.smooth_l1_loss(
+        predictions["auxiliary"],
+        targets["auxiliary"],
+        reduction="none",
+    )
+    auxiliary_valid = targets["auxiliary_valid"].to(auxiliary_elementwise.dtype)
+    auxiliary_counts = auxiliary_valid.sum(dim=0)
+    auxiliary_per_target = (auxiliary_elementwise * auxiliary_valid).sum(
+        dim=0
+    ) / auxiliary_counts.clamp_min(1.0)
+    auxiliary_present = (auxiliary_counts > 0).to(auxiliary_elementwise.dtype)
+    auxiliary_loss = (
+        5.0
+        * (auxiliary_per_target * auxiliary_present).sum()
+        / auxiliary_present.sum().clamp_min(1.0)
+    )
+    losses["auxiliary_loss"] = auxiliary_loss
+    losses["total_loss"] = mlm_loss * mlm_weight + auxiliary_loss
     return losses
 
 

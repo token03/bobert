@@ -16,8 +16,6 @@ CENTER_X = OSU_STAGE_WIDTH / 2.0
 CENTER_Y = OSU_STAGE_HEIGHT / 2.0
 DEFAULT_PRE_START_MS = 200.0
 
-MAX_METER_CARDINALITY = 8
-
 DURATION_BINS = [
     1 / 16,
     1 / 12,
@@ -39,6 +37,7 @@ DURATION_BINS = [
 ]
 
 CANONICAL_BPM_MIN = 120.0
+BEAT_PHASE_CARDINALITY = 49
 
 
 class NormalizationType(Enum):
@@ -67,27 +66,30 @@ FEATURES = [
     Feature("delta_x", NormalizationType.STANDARD),
     Feature("delta_y", NormalizationType.STANDARD),
     Feature("log_time_diff_ms", NormalizationType.STANDARD),
-    Feature("notes_per_second", NormalizationType.STANDARD),
-    Feature("velocity", NormalizationType.STANDARD),
-    Feature("relative_cos", NormalizationType.NONE),
-    Feature("relative_sin", NormalizationType.NONE),
-    Feature("rhythm_change", NormalizationType.STANDARD),
     Feature("log_slider_pixel_length", NormalizationType.STANDARD, slider_only=True),
     Feature("log_slider_repeats", NormalizationType.STANDARD, slider_only=True),
     Feature("slider_tortuosity", NormalizationType.STANDARD, slider_only=True),
-    Feature("beat_in_measure", NormalizationType.CATEGORICAL, MAX_METER_CARDINALITY),
     Feature("object_type", NormalizationType.CATEGORICAL, 5),
     Feature("is_new_combo", NormalizationType.CATEGORICAL, 2),
     Feature("time_diff_bin", NormalizationType.CATEGORICAL, len(DURATION_BINS)),
-    Feature("rhythmic_snap", NormalizationType.CATEGORICAL, 6),
+    Feature("beat_phase", NormalizationType.CATEGORICAL, BEAT_PHASE_CARDINALITY),
 ]
+
+AUXILIARY_TARGET_NAMES = (
+    "log_effective_speed",
+    "delta_log_speed",
+    "turn_sharpness",
+    "curvature_change",
+    "log_tap_strain",
+    "log_ioi_ratio",
+    "rhythm_island_age",
+)
 
 CATEGORICAL_FEATURE_ORDER = (
     "object_type",
     "is_new_combo",
-    "beat_in_measure",
     "time_diff_bin",
-    "rhythmic_snap",
+    "beat_phase",
 )
 
 
@@ -95,7 +97,9 @@ FIELD_NAMES = tuple(feature.name for feature in FEATURES)
 VECTOR_DIM = len(FIELD_NAMES)
 FEATURE_INDEX = {name: i for i, name in enumerate(FIELD_NAMES)}
 FEATURES_BY_NAME = {feature.name: feature for feature in FEATURES}
-SLIDER_ONLY_FEATURES = tuple(feature.name for feature in FEATURES if feature.slider_only)
+SLIDER_ONLY_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.slider_only
+)
 NORMALIZATION_SPECS = {feature.name: feature.norm for feature in FEATURES}
 FEATURE_INFO = {
     "categorical": {

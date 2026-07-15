@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
+    "duckdb>=1.5.4",
     "faiss-gpu-cu12>=1.14.1.post1",
     "flash-attn==2.8.3",
     "fastapi>=0.116.0",

@@ -159,9 +159,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         q = F.linear(x.index_select(0, masked_idx), wq).view(
             masked_tokens, self.n_heads, self.d_head
         )
-        kv = F.linear(x, wkv).view(
-            total_tokens, 2, self.n_heads, self.d_head
-        )
+        kv = F.linear(x, wkv).view(total_tokens, 2, self.n_heads, self.d_head)
         k, v = kv.unbind(dim=1)
 
         cos, sin = rotary_freqs
@@ -411,10 +409,6 @@ class HitObjectFeatureTokenizer(nn.Module):
             ("position", ("norm_x", "norm_y")),
             ("delta", ("delta_x", "delta_y")),
             ("timing", ("log_time_diff_ms",)),
-            ("density", ("notes_per_second",)),
-            ("velocity", ("velocity",)),
-            ("angle", ("relative_cos", "relative_sin")),
-            ("rhythm_change", ("rhythm_change",)),
             (
                 "slider",
                 (
@@ -426,26 +420,31 @@ class HitObjectFeatureTokenizer(nn.Module):
         )
         self.categorical_tokens = (
             ("object_type", "object_type"),
-            ("combo", "is_new_combo"),
-            ("measure", "beat_in_measure"),
+            ("new_combo", "is_new_combo"),
             ("time_bin", "time_diff_bin"),
-            ("snap", "rhythmic_snap"),
+            ("beat_phase", "beat_phase"),
         )
         self.num_tokens = len(self.numeric_tokens) + len(self.categorical_tokens)
 
         numeric_indices = []
         numeric_mask = []
-        self.numeric_weight = nn.Parameter(torch.zeros(len(self.numeric_tokens), 3, d_feat))
+        self.numeric_weight = nn.Parameter(
+            torch.zeros(len(self.numeric_tokens), 3, d_feat)
+        )
         self.numeric_bias = nn.Parameter(torch.empty(len(self.numeric_tokens), d_feat))
         for group, (_, feature_names) in enumerate(self.numeric_tokens):
             indices = [self.continuous[name] for name in feature_names]
             numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
             numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
-            nn.init.kaiming_uniform_(self.numeric_weight[group, : len(indices)].T, a=5**0.5)
+            nn.init.kaiming_uniform_(
+                self.numeric_weight[group, : len(indices)].T, a=5**0.5
+            )
             bound = 1 / len(indices) ** 0.5
             nn.init.uniform_(self.numeric_bias[group], -bound, bound)
         self.register_buffer(
-            "numeric_indices", torch.tensor(numeric_indices, dtype=torch.long), persistent=False
+            "numeric_indices",
+            torch.tensor(numeric_indices, dtype=torch.long),
+            persistent=False,
         )
         self.register_buffer(
             "numeric_mask", torch.tensor(numeric_mask), persistent=False
@@ -520,7 +519,7 @@ class HitObjectFeatureTokenizer(nn.Module):
         tokens = tokens + self.feature_bias.to(dtype=tokens.dtype)
 
         hard_gate = torch.ones(tokens.shape[:-1], device=x.device, dtype=tokens.dtype)
-        hard_gate[..., 7] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
+        hard_gate[..., 3] = (object_type == OBJECT_TYPE_SLIDER_HEAD).to(tokens.dtype)
         tokens = tokens * hard_gate.unsqueeze(-1)
 
         pooled = tokens.sum(dim=-2) / hard_gate.sum(dim=-1, keepdim=True)
@@ -537,36 +536,14 @@ class SpanMasker(nn.Module):
 
         continuous = FEATURE_INFO["continuous"]
         feature_count = len(FEATURE_INFO["names"])
-        left_angle = torch.tensor(
-            [continuous["relative_cos"], continuous["relative_sin"]],
+        right_delta = torch.tensor(
+            [continuous["delta_x"], continuous["delta_y"]],
             dtype=torch.long,
         )
-        right_delta_velocity = torch.tensor(
-            [continuous["delta_x"], continuous["delta_y"], continuous["velocity"]],
-            dtype=torch.long,
-        )
-        right_angle = torch.tensor(
-            [continuous["relative_cos"], continuous["relative_sin"]],
-            dtype=torch.long,
-        )
-        right_geometry = torch.cat((right_delta_velocity, right_angle))
-        for name, indices in (
-            ("left_angle", left_angle),
-            ("right_delta_velocity", right_delta_velocity),
-            ("right_angle", right_angle),
-        ):
-            mask = torch.zeros(feature_count, dtype=torch.bool)
-            mask[indices] = True
-            self.register_buffer(f"{name}_indices", indices, persistent=False)
-            self.register_buffer(f"{name}_mask", mask, persistent=False)
-        self.register_buffer(
-            "right_geometry_indices", right_geometry, persistent=False
-        )
-        self.border_feature_groups = (
-            ("left", "left_angle"),
-            ("right", "right_delta_velocity"),
-            ("right", "right_angle"),
-        )
+        right_delta_mask = torch.zeros(feature_count, dtype=torch.bool)
+        right_delta_mask[right_delta] = True
+        self.register_buffer("right_delta_indices", right_delta, persistent=False)
+        self.register_buffer("right_delta_mask", right_delta_mask, persistent=False)
         min_len = 1
         max_len = max(1, int(mean_span_length * 2))
 
@@ -651,17 +628,11 @@ class SpanMasker(nn.Module):
         self,
         padded_mask: torch.Tensor,
         attention_mask: torch.Tensor,
-        side: str,
     ) -> torch.Tensor:
         border = torch.zeros_like(padded_mask)
-        if side == "left":
-            border[:, :-1] = (
-                attention_mask[:, :-1] & ~padded_mask[:, :-1] & padded_mask[:, 1:]
-            )
-        else:
-            border[:, 1:] = (
-                padded_mask[:, :-1] & attention_mask[:, 1:] & ~padded_mask[:, 1:]
-            )
+        border[:, 1:] = (
+            padded_mask[:, :-1] & attention_mask[:, 1:] & ~padded_mask[:, 1:]
+        )
         return border
 
     def _corrupt_border_group(
@@ -711,43 +682,32 @@ class SpanMasker(nn.Module):
         padded_mask = self._generate_mask(attention_mask)
         encoder_x = x.clone()
         source_mask = attention_mask & ~padded_mask
-        borders = {
-            side: self._border_mask(padded_mask, attention_mask, side)
-            for side in ("left", "right")
-        }
-        for side, feature_group in self.border_feature_groups:
-            self._corrupt_border_group(
-                encoder_x,
-                x,
-                source_mask,
-                borders[side],
-                feature_group,
-            )
+        self._corrupt_border_group(
+            encoder_x,
+            x,
+            source_mask,
+            self._border_mask(padded_mask, attention_mask),
+            "right_delta",
+        )
         return encoder_x, padded_mask
 
     def corrupt_inputs_packed(
         self,
         packed_vectors: torch.Tensor,
-        left_zero_idx: torch.Tensor,
-        left_random_idx: torch.Tensor,
         right_zero_idx: torch.Tensor,
         right_random_idx: torch.Tensor,
     ) -> torch.Tensor:
         encoder_x = packed_vectors.clone()
-        for zero_idx, random_idx, feature_group in (
-            (left_zero_idx, left_random_idx, "left_angle"),
-            (right_zero_idx, right_random_idx, "right_geometry"),
-        ):
-            features = getattr(self, f"{feature_group}_indices")
-            encoder_x[zero_idx[:, None], features[None, :]] = 0
-            source_idx = torch.randint(
-                packed_vectors.shape[0],
-                (random_idx.numel(),),
-                device=packed_vectors.device,
-            )
-            encoder_x[random_idx[:, None], features[None, :]] = packed_vectors[
-                source_idx[:, None], features[None, :]
-            ]
+        features = self.right_delta_indices
+        encoder_x[right_zero_idx[:, None], features[None, :]] = 0
+        source_idx = torch.randint(
+            packed_vectors.shape[0],
+            (right_random_idx.numel(),),
+            device=packed_vectors.device,
+        )
+        encoder_x[right_random_idx[:, None], features[None, :]] = packed_vectors[
+            source_idx[:, None], features[None, :]
+        ]
         return encoder_x
 
     def forward_packed(
@@ -1009,9 +969,7 @@ class MaskedLMHead(nn.Module):
         packed_output: torch.Tensor,
         is_masked: torch.Tensor | None = None,
     ) -> Dict[str, Any]:
-        masked_output = (
-            packed_output if is_masked is None else packed_output[is_masked]
-        )
+        masked_output = packed_output if is_masked is None else packed_output[is_masked]
 
         pieces = self.proj(masked_output).split(self.output_sizes, dim=-1)
         return {

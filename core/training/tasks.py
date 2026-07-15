@@ -22,7 +22,7 @@ from ..model.checkpoint import (
     restore_normalizer_from_checkpoint,
 )
 from ..data.normalizer import BeatmapNormalizer
-from ..data.schema import FEATURE_INFO, VECTOR_DIM
+from ..data.schema import AUXILIARY_TARGET_NAMES, FEATURE_INFO, VECTOR_DIM
 
 
 class BobertLightningModule(pl.LightningModule):
@@ -106,14 +106,14 @@ class PretrainingModule(BobertLightningModule):
     def forward(self, batch):
         return self.model.forward_packed_pretrain(
             batch["packed_vectors"],
+            batch["packed_auxiliary_targets"],
+            batch["packed_auxiliary_valid"],
             batch["masked_idx"],
             batch["masked_positions"],
             batch["masked_counts"],
             batch["max_seqlen_q"],
             batch["mask_token_idx"],
             batch["random_dst_idx"],
-            batch["left_border_zero_idx"],
-            batch["left_border_random_idx"],
             batch["right_border_zero_idx"],
             batch["right_border_random_idx"],
             batch["cu_seqlens"],
@@ -180,8 +180,10 @@ class PretrainingModule(BobertLightningModule):
         masking_ratio = float(self.config.pretraining.masking.ratio)
         mask_count = round(max_seq_len * masking_ratio)
         packed_padded_mask = (
-            torch.arange(max_seq_len, device=self.device)[None, :] < mask_count
-        ).expand(batch_size, -1).reshape(-1)
+            (torch.arange(max_seq_len, device=self.device)[None, :] < mask_count)
+            .expand(batch_size, -1)
+            .reshape(-1)
+        )
         cu_seqlens = torch.arange(
             0,
             (batch_size + 1) * max_seq_len,
@@ -195,23 +197,26 @@ class PretrainingModule(BobertLightningModule):
         masked_counts = torch.bincount(batch_ids, minlength=batch_size).to(torch.int32)
         split = torch.rand(masked_idx.numel(), device=self.device)
         starts = torch.zeros_like(packed_padded_mask)
-        ends = torch.zeros_like(packed_padded_mask)
         starts[cu_seqlens[:-1].long()] = True
-        ends[cu_seqlens[1:].long() - 1] = True
-        left_border_idx = (
-            ~packed_padded_mask
-            & torch.roll(packed_padded_mask, shifts=-1)
-            & ~ends
-        ).nonzero(as_tuple=False).flatten()
         right_border_idx = (
-            torch.roll(packed_padded_mask, shifts=1)
-            & ~packed_padded_mask
-            & ~starts
-        ).nonzero(as_tuple=False).flatten()
-        left_split = torch.rand(left_border_idx.numel(), device=self.device)
+            (torch.roll(packed_padded_mask, shifts=1) & ~packed_padded_mask & ~starts)
+            .nonzero(as_tuple=False)
+            .flatten()
+        )
         right_split = torch.rand(right_border_idx.numel(), device=self.device)
         return {
             "packed_vectors": packed_vectors,
+            "packed_auxiliary_targets": torch.randn(
+                masked_idx.numel(),
+                len(AUXILIARY_TARGET_NAMES),
+                device=self.device,
+            ),
+            "packed_auxiliary_valid": torch.ones(
+                masked_idx.numel(),
+                len(AUXILIARY_TARGET_NAMES),
+                device=self.device,
+                dtype=torch.bool,
+            ),
             "masked_idx": masked_idx,
             "masked_positions": masked_positions,
             "masked_counts": masked_counts,
@@ -226,10 +231,6 @@ class PretrainingModule(BobertLightningModule):
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
             "unchanged_idx": masked_idx[split >= 0.9],
-            "left_border_zero_idx": left_border_idx[left_split < 0.8],
-            "left_border_random_idx": left_border_idx[
-                (left_split >= 0.8) & (left_split < 0.9)
-            ],
             "right_border_zero_idx": right_border_idx[right_split < 0.8],
             "right_border_random_idx": right_border_idx[
                 (right_split >= 0.8) & (right_split < 0.9)
@@ -253,6 +254,7 @@ class PretrainingModule(BobertLightningModule):
         metrics_to_log = {
             "train_loss": loss_dict["total_loss"],
             "train_mlm_loss": loss_dict["mlm_loss"],
+            "train_auxiliary_loss": loss_dict["auxiliary_loss"],
             "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
         }
 
@@ -265,7 +267,7 @@ class PretrainingModule(BobertLightningModule):
 
         self.mlm_metrics.update(
             predictions["mlm"],
-            targets,
+            targets["mlm"],
             loss=loss_dict["mlm_loss"].item(),
         )
 

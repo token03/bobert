@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from .schema import (
+    AUXILIARY_TARGET_NAMES,
     FEATURE_INFO,
     FIELD_NAMES,
     NORMALIZATION_SPECS,
@@ -37,6 +38,16 @@ class BeatmapNormalizer:
                 normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
         return normalized_vectors
 
+    def normalize_auxiliary(
+        self, targets: torch.Tensor, valid: torch.Tensor
+    ) -> torch.Tensor:
+        targets = targets.to(dtype=torch.float32)
+        normalized = torch.zeros_like(targets)
+        for index, name in enumerate(AUXILIARY_TARGET_NAMES):
+            mean, std = self.vector_stats[name]
+            normalized[:, index] = (targets[:, index] - mean) / (std + self.epsilon)
+        return normalized.masked_fill(~valid, 0.0)
+
     def normalize_attribute(self, key: str, value: float) -> float:
         if key not in self.attribute_stats:
             return value
@@ -52,9 +63,9 @@ class BeatmapNormalizer:
             return value
 
         mean, std = self.attribute_stats[key]
-        return value * (std.to(device=value.device, dtype=value.dtype) + self.epsilon) + (
-            mean.to(device=value.device, dtype=value.dtype)
-        )
+        return value * (
+            std.to(device=value.device, dtype=value.dtype) + self.epsilon
+        ) + (mean.to(device=value.device, dtype=value.dtype))
 
     @classmethod
     def attribute_stats_from_data(
@@ -76,6 +87,8 @@ class BeatmapNormalizer:
     def from_data(
         cls,
         train_data: List[torch.Tensor],
+        auxiliary_targets: Optional[List[torch.Tensor]] = None,
+        auxiliary_valid: Optional[List[torch.Tensor]] = None,
         epsilon: float = 1e-8,
     ) -> "BeatmapNormalizer":
         vector_field_names = FIELD_NAMES
@@ -126,6 +139,33 @@ class BeatmapNormalizer:
                 mean,
                 torch.clamp(torch.sqrt(variance), min=epsilon),
             )
+
+        if auxiliary_targets is not None and auxiliary_valid is not None:
+            for index, name in enumerate(AUXILIARY_TARGET_NAMES):
+                count = 0
+                total = torch.tensor(0.0)
+                total_sq = torch.tensor(0.0)
+                for targets, valid in zip(auxiliary_targets, auxiliary_valid):
+                    values = targets[valid[:, index], index].float()
+                    count += values.numel()
+                    total += values.sum()
+                    total_sq += values.square().sum()
+                if count == 0:
+                    vector_stats[name] = (
+                        torch.tensor(0.0),
+                        torch.tensor(epsilon),
+                    )
+                    continue
+                mean = total / count
+                variance = (
+                    (total_sq - total * total / count) / (count - 1)
+                    if count > 1
+                    else torch.tensor(0.0)
+                )
+                vector_stats[name] = (
+                    mean,
+                    variance.clamp_min(0.0).sqrt().clamp_min(epsilon),
+                )
 
         return cls(vector_stats=vector_stats, epsilon=epsilon)
 

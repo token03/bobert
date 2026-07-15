@@ -1,18 +1,37 @@
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import polars as pl
+import torch
 from tqdm import tqdm
 
 from .schema import MAP_FEATURE_ATTRIBUTES
 from .feature import build_feature_tensors, calculate_drain_times
+
+HITOBJECT_ID_RANGE = 100_000
 
 
 def scan_dataset_parquet(path: str | Path) -> pl.LazyFrame:
     path_obj = Path(path)
     source = path_obj / "**" / "*.parquet" if path_obj.is_dir() else path_obj
     return pl.scan_parquet(str(source))
+
+
+def _scan_hitobject_range(path: Path, lower: int, upper: int) -> pl.LazyFrame:
+    files = sorted(path.rglob("*.parquet"))
+    ranged_files = []
+    for file in files:
+        match = re.fullmatch(r"part-(\d+)-(\d+)\.parquet", file.name)
+        if match is None:
+            return scan_dataset_parquet(path)
+        file_lower, file_upper = map(int, match.groups())
+        if file_lower <= upper and file_upper >= lower:
+            ranged_files.append(str(file))
+    if not ranged_files:
+        return scan_dataset_parquet(path)
+    return pl.scan_parquet(ranged_files)
 
 
 def _best_supported_ratings_lf(
@@ -80,6 +99,22 @@ def _sample_beatmap_ids(
     return sorted(int(bid) for bid in selected)
 
 
+def _chunk_beatmap_ids(beatmap_ids: List[int], chunk_size: int) -> List[List[int]]:
+    chunks = []
+    chunk = []
+    bucket = None
+    for beatmap_id in beatmap_ids:
+        next_bucket = beatmap_id // HITOBJECT_ID_RANGE
+        if chunk and (next_bucket != bucket or len(chunk) >= chunk_size):
+            chunks.append(chunk)
+            chunk = []
+        chunk.append(beatmap_id)
+        bucket = next_bucket
+    if chunk:
+        chunks.append(chunk)
+    return chunks
+
+
 def load_beatmap_dataset(
     dataset_path: str,
     dataset_seed: int,
@@ -92,6 +127,7 @@ def load_beatmap_dataset(
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
     include_beat_ids: bool = False,
+    include_auxiliary_targets: bool = False,
 ) -> List[Dict[str, Any]]:
     dataset_path = Path(dataset_path).expanduser()
     ratings_path = Path(ratings_path).expanduser()
@@ -115,7 +151,7 @@ def load_beatmap_dataset(
         rating_seq_len,
         min_sr,
         max_sr,
-    ).collect()
+    ).collect(engine="streaming")
 
     all_beatmap_ids = _sample_beatmap_ids(
         selected_beatmaps["beatmap_id"].unique().to_list(),
@@ -142,25 +178,25 @@ def load_beatmap_dataset(
         "end_time",
         "pixel_length",
         "bpm",
+        "timing_origin",
+        "end_bpm",
+        "end_timing_origin",
         "slider_repeats",
         "slider_end_x",
         "slider_end_y",
     ]
 
-    chunks = [
-        all_beatmap_ids[i : i + chunk_size]
-        for i in range(0, len(all_beatmap_ids), chunk_size)
-    ]
-    hitobjects_lf = scan_dataset_parquet(hitobjects_path).select(hitobject_cols)
+    chunks = _chunk_beatmap_ids(all_beatmap_ids, chunk_size)
     for chunk_ids in tqdm(chunks, desc="Processing Chunks"):
         beatmaps_chunk = selected_beatmaps.filter(pl.col("beatmap_id").is_in(chunk_ids))
         lo = int(chunk_ids[0])
         hi = int(chunk_ids[-1])
         hitobjects_chunk = (
-            hitobjects_lf
+            _scan_hitobject_range(hitobjects_path, lo, hi)
+            .select(hitobject_cols)
             .filter(pl.col("beatmap_id").is_between(lo, hi))
             .filter(pl.col("beatmap_id").is_in(chunk_ids))
-            .collect()
+            .collect(engine="streaming")
         )
 
         if hitobjects_chunk.is_empty():
@@ -177,8 +213,20 @@ def load_beatmap_dataset(
             max_seq_len=max_seq_len,
             return_original_counts=False,
             return_beat_ids=include_beat_ids,
+            return_auxiliary_targets=include_auxiliary_targets,
         )
-        if include_beat_ids:
+        if include_auxiliary_targets and include_beat_ids:
+            (
+                hitobject_data,
+                ids,
+                _,
+                beat_ids,
+                auxiliary_targets,
+                auxiliary_valid,
+            ) = features
+        elif include_auxiliary_targets:
+            hitobject_data, ids, _, auxiliary_targets, auxiliary_valid = features
+        elif include_beat_ids:
             hitobject_data, ids, _, beat_ids = features
         else:
             hitobject_data, ids, _ = features
@@ -186,13 +234,10 @@ def load_beatmap_dataset(
         meta_cols = ["beatmap_id", *MAP_FEATURE_ATTRIBUTES]
         meta = beatmaps_chunk.select(meta_cols)
         meta_by_id = {
-            int(bid): index
-            for index, bid in enumerate(meta["beatmap_id"].to_numpy())
+            int(bid): index for index, bid in enumerate(meta["beatmap_id"].to_numpy())
         }
         meta_arrays = {
-            col: meta[col].to_numpy()
-            for col in meta_cols
-            if col != "beatmap_id"
+            col: meta[col].to_numpy() for col in meta_cols if col != "beatmap_id"
         }
 
         for index, (bid, vectors) in enumerate(zip(ids, hitobject_data)):
@@ -211,6 +256,13 @@ def load_beatmap_dataset(
             }
             if include_beat_ids:
                 item["beat_ids"] = beat_ids[index][: vectors.shape[0]]
+            if include_auxiliary_targets:
+                item["auxiliary_targets"] = torch.from_numpy(
+                    auxiliary_targets[index][: vectors.shape[0]]
+                )
+                item["auxiliary_valid"] = torch.from_numpy(
+                    auxiliary_valid[index][: vectors.shape[0]]
+                )
 
             all_beatmap_data.append(item)
 

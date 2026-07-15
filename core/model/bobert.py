@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from typing import Tuple, Dict, Any, Sequence, Type, TypeVar
 from rotary_embedding_torch import RotaryEmbedding
 
-from ..data.schema import FEATURE_INFO, MAP_FEATURE_ATTRIBUTES
+from ..data.schema import AUXILIARY_TARGET_NAMES, FEATURE_INFO, MAP_FEATURE_ATTRIBUTES
 
 from .components import (
     EncoderLayer,
@@ -281,6 +281,9 @@ class BobertForPretraining(nn.Module):
         self.bert = bert_model
         self.masker = masker
         self.mlm_head = mlm_head
+        self.auxiliary_projection = nn.Linear(
+            bert_model.d_model, len(AUXILIARY_TARGET_NAMES)
+        )
         self.is_compiled = False
 
     @classmethod
@@ -418,14 +421,19 @@ class BobertForPretraining(nn.Module):
             max_seqlen_q,
             max_seqlen_k,
         )
-        return {"mlm": self.mlm_head(masked_output)}
+        return {
+            "mlm": self.mlm_head(masked_output),
+            "auxiliary": self.auxiliary_projection(masked_output),
+        }
 
     def forward(
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         cu_seqlens: torch.Tensor,
-    ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
+        auxiliary_targets: torch.Tensor | None = None,
+        auxiliary_valid: torch.Tensor | None = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, torch.Tensor], torch.Tensor]:
         encoder_x, padded_mask = self.masker.corrupt_inputs(x, attention_mask)
 
         packed_embed, cu_seqlens = self.bert._embed(
@@ -436,14 +444,21 @@ class BobertForPretraining(nn.Module):
             attention_mask,
             padded_mask,
         )
-        packed_targets = x[attention_mask][is_masked]
+        if auxiliary_targets is None:
+            auxiliary_targets = x.new_zeros(*x.shape[:2], len(AUXILIARY_TARGET_NAMES))
+            auxiliary_valid = torch.zeros_like(auxiliary_targets, dtype=torch.bool)
+        packed_targets = {
+            "mlm": x[attention_mask][is_masked],
+            "auxiliary": auxiliary_targets[attention_mask][is_masked],
+            "auxiliary_valid": auxiliary_valid[attention_mask][is_masked],
+        }
         max_seqlen = x.shape[1]
         masked_idx = is_masked.nonzero(as_tuple=False).flatten()
         batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
         masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
-        masked_counts = torch.bincount(
-            batch_ids, minlength=cu_seqlens.shape[0] - 1
-        ).to(torch.int32)
+        masked_counts = torch.bincount(batch_ids, minlength=cu_seqlens.shape[0] - 1).to(
+            torch.int32
+        )
 
         predictions = self._pretrain_predictions(
             packed_input,
@@ -460,25 +475,27 @@ class BobertForPretraining(nn.Module):
     def forward_packed_pretrain(
         self,
         packed_vectors: torch.Tensor,
+        packed_auxiliary_targets: torch.Tensor,
+        packed_auxiliary_valid: torch.Tensor,
         masked_idx: torch.Tensor,
         masked_positions: torch.Tensor,
         masked_counts: torch.Tensor,
         max_seqlen_q: int,
         mask_token_idx: torch.Tensor,
         random_dst_idx: torch.Tensor,
-        left_border_zero_idx: torch.Tensor,
-        left_border_random_idx: torch.Tensor,
         right_border_zero_idx: torch.Tensor,
         right_border_random_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-    ) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor]:
-        packed_targets = packed_vectors.index_select(0, masked_idx)
+    ) -> Tuple[Dict[str, Any], Dict[str, torch.Tensor], torch.Tensor]:
+        packed_targets = {
+            "mlm": packed_vectors.index_select(0, masked_idx),
+            "auxiliary": packed_auxiliary_targets,
+            "auxiliary_valid": packed_auxiliary_valid,
+        }
 
         encoder_vectors = self.masker.corrupt_inputs_packed(
             packed_vectors,
-            left_border_zero_idx,
-            left_border_random_idx,
             right_border_zero_idx,
             right_border_random_idx,
         )
