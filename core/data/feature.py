@@ -7,6 +7,7 @@ import torch
 from .parser import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 from .schema import (
     BEAT_PHASE_CARDINALITY,
+    BEAT_PHASE_DIVISIONS,
     CANONICAL_BPM_MIN,
     CENTER_X,
     CENTER_Y,
@@ -103,9 +104,9 @@ def _duration_bin_expr(values: pl.Expr) -> pl.Expr:
 
 
 def _beat_phase_expr(phase: pl.Expr, beat_length_ms: pl.Expr) -> pl.Expr:
-    scaled = phase * 48.0
+    scaled = phase * BEAT_PHASE_DIVISIONS
     nearest = scaled.round()
-    error_ms = (scaled - nearest).abs() * beat_length_ms / 48.0
+    error_ms = (scaled - nearest).abs() * beat_length_ms / BEAT_PHASE_DIVISIONS
     quantized = nearest.cast(pl.Int32, strict=False)
     return (
         pl.when(
@@ -113,7 +114,7 @@ def _beat_phase_expr(phase: pl.Expr, beat_length_ms: pl.Expr) -> pl.Expr:
             & (error_ms <= BEAT_PHASE_TOLERANCE_MS)
             & quantized.is_not_null()
         )
-        .then(quantized % 48)
+        .then(quantized % BEAT_PHASE_DIVISIONS)
         .otherwise(BEAT_PHASE_OFF_GRID)
         .cast(pl.Int32)
     )
@@ -271,10 +272,6 @@ def _apply_features(df: pl.DataFrame, return_beat_ids: bool) -> pl.DataFrame:
             .then(pl.col("pixel_length").clip(lower_bound=0).log1p())
             .otherwise(0.0)
             .alias("log_span_length"),
-            pl.when(is_slider)
-            .then(pl.col("_span_count").log())
-            .otherwise(0.0)
-            .alias("log_span_count"),
             pl.when(is_spinner)
             .then(pl.col("_spinner_duration_ms").log1p())
             .otherwise(0.0)
@@ -311,10 +308,15 @@ def _apply_features(df: pl.DataFrame, return_beat_ids: bool) -> pl.DataFrame:
             .otherwise(0)
             .cast(pl.Int32)
             .alias("span_duration_bin"),
-            pl.when(is_slider)
-            .then((pl.col("_span_count") % 2 == 0).cast(pl.Int32))
-            .otherwise(0)
-            .alias("ends_at_head"),
+            pl.when(~is_slider)
+            .then(0)
+            .when(pl.col("_span_count") <= 3)
+            .then(pl.col("_span_count") - 1)
+            .when(pl.col("_span_count") % 2 == 0)
+            .then(3)
+            .otherwise(4)
+            .cast(pl.Int32)
+            .alias("span_count_bin"),
             pl.when(is_spinner)
             .then(_duration_bin_expr(pl.col("_spinner_beats")))
             .otherwise(0)

@@ -421,7 +421,6 @@ class HitObjectFeatureTokenizer(nn.Module):
                     (
                         "log_span_duration_ms",
                         "log_span_length",
-                        "log_span_count",
                     ),
                 ),
                 ("endpoint", ("span_end_dx", "span_end_dy")),
