@@ -26,7 +26,7 @@ model:
   local_attention_window: 128
   global_attention_layers: [2, 5, 8]
 
-  feature_token_dim: 32
+  feature_token_dim: 16
 
 runtime:
   compile_model: true

@@ -9,6 +9,7 @@ from torch.utils.checkpoint import checkpoint
 
 from ..data.schema import (
     FEATURE_INFO,
+    OBJECT_TYPE_CIRCLE,
     OBJECT_TYPE_SLIDER,
     OBJECT_TYPE_SPINNER,
 )
@@ -409,53 +410,25 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.feature_info = feature_info
         self.continuous = feature_info["continuous"]
         self.categorical = feature_info["categorical"]
-        self.numeric_groups = {
-            "common": (
-                ("position", ("norm_x", "norm_y")),
-                ("incoming", ("incoming_dx", "incoming_dy")),
-                ("timing", ("log_onset_ioi_ms",)),
-            ),
-            "slider": (
-                (
-                    "timing",
-                    (
-                        "log_span_duration_ms",
-                        "log_span_length",
-                    ),
-                ),
-                ("endpoint", ("span_end_dx", "span_end_dy")),
-                (
-                    "residual_1",
-                    ("curve_residual_1_dx", "curve_residual_1_dy"),
-                ),
-                (
-                    "residual_2",
-                    ("curve_residual_2_dx", "curve_residual_2_dy"),
-                ),
-            ),
-            "spinner": (("duration", ("log_spinner_duration_ms",)),),
-        }
-        self.categorical_names = {
-            group: tuple(
-                name
-                for name in feature_info[group]
-                if name in self.categorical and name != "object_type"
-            )
-            for group in self.numeric_groups
-        }
+        common_numeric = (
+            ("norm_x", "norm_y"),
+            ("incoming_dx", "incoming_dy"),
+            ("log_onset_ioi_ms",),
+        )
+        slider_numeric = (
+            ("span_end_dx", "span_end_dy"),
+            ("curve_residual_1_dx", "curve_residual_1_dy"),
+            ("curve_residual_2_dx", "curve_residual_2_dy"),
+        )
         numeric_indices = []
         numeric_mask = []
-        numeric_sizes = []
-        for numeric_groups in self.numeric_groups.values():
-            for _, feature_names in numeric_groups:
-                indices = [self.continuous[feature] for feature in feature_names]
-                numeric_sizes.append(len(indices))
-                numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
-                numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
-        self.numeric_weight = nn.Parameter(
-            torch.zeros(len(numeric_indices), 3, d_feat)
-        )
-        self.numeric_bias = nn.Parameter(torch.empty(len(numeric_indices), d_feat))
+        numeric_sizes = [2, 2, 1, 3, 2, 2, 2]
+        for feature_names in common_numeric + slider_numeric:
+            indices = [self.continuous[feature] for feature in feature_names]
+            numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
+            numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
+        self.numeric_weight = nn.Parameter(torch.zeros(7, 3, d_feat))
+        self.numeric_bias = nn.Parameter(torch.empty(7, d_feat))
         for group, size in enumerate(numeric_sizes):
             nn.init.kaiming_uniform_(self.numeric_weight[group, :size].T, a=5**0.5)
             bound = 1 / size**0.5
@@ -468,14 +441,23 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.register_buffer(
             "numeric_mask", torch.tensor(numeric_mask), persistent=False
         )
+        self.span_duration_index = self.continuous["log_span_duration_ms"]
+        self.span_length_index = self.continuous["log_span_length"]
+        self.spinner_duration_index = self.continuous["log_spinner_duration_ms"]
 
-        categorical_names = tuple(
-            name for names in self.categorical_names.values() for name in names
-        ) + ("object_type",)
+        categorical_names = (
+            "is_new_combo",
+            "onset_duration_bin",
+            "beat_phase",
+            "incoming_motion_valid",
+            "span_duration_bin",
+            "span_count_bin",
+            "object_type",
+        )
         categorical_indices = []
         categorical_cardinalities = []
         category_offsets = []
-        offset = 0
+        offset = 1
         for name in categorical_names:
             info = self.categorical[name]
             categorical_indices.append(info["index"])
@@ -483,7 +465,9 @@ class HitObjectFeatureTokenizer(nn.Module):
             category_offsets.append(offset)
             offset += info["cardinality"]
         self.categorical_weight = nn.Parameter(torch.empty(offset, d_feat))
-        nn.init.normal_(self.categorical_weight)
+        nn.init.normal_(self.categorical_weight, std=d_feat**-0.5)
+        with torch.no_grad():
+            self.categorical_weight[0].zero_()
         self.register_buffer(
             "categorical_indices",
             torch.tensor(categorical_indices, dtype=torch.long),
@@ -500,66 +484,94 @@ class HitObjectFeatureTokenizer(nn.Module):
             persistent=False,
         )
 
-        self.common_encoder = nn.Sequential(
-            nn.LayerNorm(d_feat),
-            nn.Linear(d_feat, d_feat * 2),
-            nn.GELU(),
-            nn.Linear(d_feat * 2, d_feat),
-        )
-        self.slider_encoder = nn.Sequential(
-            nn.LayerNorm(d_feat),
-            nn.Linear(d_feat, d_feat * 2),
-            nn.GELU(),
-            nn.Linear(d_feat * 2, d_feat),
-        )
-        self.spinner_encoder = nn.Sequential(
-            nn.LayerNorm(d_feat),
-            nn.Linear(d_feat, d_feat * 2),
-            nn.GELU(),
-            nn.Linear(d_feat * 2, d_feat),
-        )
-        self.norm = nn.LayerNorm(d_feat)
-        self.out = nn.Linear(d_feat, d_model, bias=False)
+        self.out = nn.Linear(14 * d_feat, d_model * 2, bias=False)
+        self.norm = RMSNorm(d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        numeric_inputs = x[..., self.numeric_indices]
-        numeric_inputs = numeric_inputs * self.numeric_mask.to(dtype=x.dtype)
-        numeric_tokens = F.gelu(
-            torch.einsum("...gi,gif->...gf", numeric_inputs, self.numeric_weight)
-            + self.numeric_bias
-        )
-
         categorical_ids = x[..., self.categorical_indices].long().clamp_min(0)
         categorical_ids = torch.minimum(
             categorical_ids, self.categorical_cardinalities - 1
         )
-        categorical_tokens = F.embedding(
-            categorical_ids + self.category_offsets, self.categorical_weight
-        )
         object_type = categorical_ids[..., -1]
+        is_slider = object_type == OBJECT_TYPE_SLIDER
+        is_spinner = object_type == OBJECT_TYPE_SPINNER
+        incoming_valid = categorical_ids[..., 3] == 1
+        slider_scale = is_slider.to(x.dtype)
+        spinner_scale = is_spinner.to(x.dtype)
 
-        common_input = torch.cat(
-            (numeric_tokens[..., :3, :], categorical_tokens[..., :4, :]), dim=-2
-        ).sum(dim=-2)
-        slider_input = torch.cat(
-            (numeric_tokens[..., 3:7, :], categorical_tokens[..., 4:6, :]), dim=-2
-        ).sum(dim=-2)
-        spinner_input = torch.cat(
-            (numeric_tokens[..., 7:8, :], categorical_tokens[..., 6:7, :]), dim=-2
-        ).sum(dim=-2)
-        common = self.common_encoder(common_input)
-        slider = self.slider_encoder(slider_input)
-        spinner = self.spinner_encoder(spinner_input)
-        hidden = common + categorical_tokens[..., -1, :]
-        hidden = (
-            hidden
-            + (object_type == OBJECT_TYPE_SLIDER).to(x.dtype).unsqueeze(-1) * slider
+        numeric_inputs = x[..., self.numeric_indices]
+        numeric_inputs = numeric_inputs * self.numeric_mask.to(dtype=x.dtype)
+        common_inputs = numeric_inputs[..., :3, :]
+        slider_inputs = numeric_inputs[..., 3:, :]
+        sustain_inputs = torch.stack(
+            (
+                x[..., self.span_duration_index] * slider_scale
+                + x[..., self.spinner_duration_index] * spinner_scale,
+                x[..., self.span_length_index] * slider_scale,
+                spinner_scale,
+            ),
+            dim=-1,
         )
-        hidden = (
-            hidden
-            + (object_type == OBJECT_TYPE_SPINNER).to(x.dtype).unsqueeze(-1) * spinner
+        numeric_inputs = torch.cat(
+            (common_inputs, sustain_inputs.unsqueeze(-2), slider_inputs), dim=-2
         )
-        return self.out(self.norm(hidden))
+        numeric_hidden = torch.einsum(
+            "...gi,gif->...gf", numeric_inputs, self.numeric_weight
+        )
+        numeric_tokens = F.gelu(numeric_hidden + self.numeric_bias) - F.gelu(
+            self.numeric_bias
+        )
+        numeric_active = torch.stack(
+            (
+                torch.ones_like(incoming_valid),
+                incoming_valid,
+                torch.ones_like(incoming_valid),
+                is_slider | is_spinner,
+                is_slider,
+                is_slider,
+                is_slider,
+            ),
+            dim=-1,
+        )
+        numeric_tokens = numeric_tokens * numeric_active[..., None]
+
+        categorical_lookup = categorical_ids + self.category_offsets
+        categorical_lookup = torch.cat(
+            (
+                torch.where(
+                    categorical_ids[..., :1] != 0,
+                    categorical_lookup[..., :1],
+                    torch.zeros_like(categorical_lookup[..., :1]),
+                ),
+                categorical_lookup[..., 1:3],
+                torch.where(
+                    incoming_valid[..., None],
+                    torch.zeros_like(categorical_lookup[..., 3:4]),
+                    categorical_lookup[..., 3:4],
+                ),
+                torch.where(
+                    is_slider[..., None],
+                    categorical_lookup[..., 4:6],
+                    torch.zeros_like(categorical_lookup[..., 4:6]),
+                ),
+                torch.where(
+                    (object_type != OBJECT_TYPE_CIRCLE)[..., None],
+                    categorical_lookup[..., 6:7],
+                    torch.zeros_like(categorical_lookup[..., 6:7]),
+                ),
+            ),
+            dim=-1,
+        )
+        categorical_tokens = F.embedding(
+            categorical_lookup,
+            self.categorical_weight,
+            padding_idx=0,
+        )
+        features = torch.cat(
+            (numeric_tokens.flatten(-2), categorical_tokens.flatten(-2)), dim=-1
+        )
+        gate, value = self.out(features).chunk(2, dim=-1)
+        return self.norm(F.silu(gate) * value)
 
 
 class SpanMasker(nn.Module):

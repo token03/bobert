@@ -38,6 +38,10 @@ PROBE_RIDGE_ALPHA = 1e-3
 MAPPER_MIN_MAPS = 50
 YEAR_MIN_MAPS = 1000
 RATING_MAX_STARS = 20.0
+RATING_MAX_SEQ_LEN = 4096
+DIFFICULTY_COLUMNS = ["stars", "aim", "speed", "slider_factor"]
+DIFFICULTY_NEIGHBOR_KS = [10, 50, 100]
+DIFFICULTY_BATCH_SIZE = 256
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
 TAG_MIN_SETS = 25
@@ -63,6 +67,14 @@ class TargetResult:
 class EvalResult:
     name: str
     metrics: dict[str, dict[str, float]]
+
+
+@dataclass
+class DifficultyData:
+    ids: list[int]
+    values: np.ndarray
+    normalized: np.ndarray
+    groups: np.ndarray
 
 
 def target_path(target: str) -> Path:
@@ -439,6 +451,47 @@ def regression_probe(
     return EvalResult(title, metrics)
 
 
+def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
+    if not RATINGS_EVAL_PATH.exists():
+        console.print(
+            f"[yellow]Skipping difficulty eval: {RATINGS_EVAL_PATH} not found.[/yellow]"
+        )
+        return None
+
+    ratings = pl.read_parquet(
+        RATINGS_EVAL_PATH, columns=["beatmap_id", "seq_len", *DIFFICULTY_COLUMNS]
+    ).filter(
+        (pl.col("seq_len") > 0)
+        & (pl.col("seq_len") <= RATING_MAX_SEQ_LEN)
+        & (pl.col("stars") > 0.0)
+        & (pl.col("stars") <= RATING_MAX_STARS)
+        & pl.all_horizontal(
+            [pl.col(column).is_finite() for column in DIFFICULTY_COLUMNS]
+        )
+    )
+    ratings = (
+        ratings.with_columns(pl.col("seq_len").max().over("beatmap_id").alias("_max_len"))
+        .filter(pl.col("seq_len") == pl.col("_max_len"))
+        .unique("beatmap_id", keep="last")
+        .drop("_max_len")
+    )
+    ids = common_ids(targets, set(ratings["beatmap_id"].to_list()))
+    ratings = ratings.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
+    ids = [int(beatmap_id) for beatmap_id in ratings["beatmap_id"]]
+    if len(ids) < YEAR_MIN_MAPS:
+        console.print(
+            f"[yellow]Skipping difficulty eval: only {len(ids):,} shared ratings.[/yellow]"
+        )
+        return None
+
+    values = ratings.select(DIFFICULTY_COLUMNS).cast(pl.Float32).to_numpy()
+    scale = values.std(axis=0)
+    if np.any(scale <= 1e-6):
+        raise ValueError("Difficulty attributes must have non-zero variance")
+    normalized = (values - values.mean(axis=0)) / scale
+    return DifficultyData(ids, values, normalized, beatmapset_groups(ids))
+
+
 def average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
     order = scores.argsort(descending=True)
     sorted_true = y_true[order]
@@ -683,30 +736,139 @@ def run_year_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
         print_eval_result(result)
 
 
-def run_rating_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    if not RATINGS_EVAL_PATH.exists():
-        console.print(
-            f"[yellow]Skipping Star Rating Probe: {RATINGS_EVAL_PATH} not found.[/yellow]"
+def difficulty_neighbor_indices(
+    difficulty: torch.Tensor, groups: torch.Tensor, top_k: int
+) -> np.ndarray:
+    neighbors = np.empty((len(difficulty), top_k), dtype=np.int64)
+    squared_norm = (difficulty * difficulty).sum(dim=1)
+    for start in range(0, len(difficulty), DIFFICULTY_BATCH_SIZE):
+        stop = min(start + DIFFICULTY_BATCH_SIZE, len(difficulty))
+        query = difficulty[start:stop]
+        scores = (
+            2 * query @ difficulty.T
+            - (query * query).sum(dim=1, keepdim=True)
+            - squared_norm[None, :]
         )
+        scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
+        neighbors[start:stop] = scores.topk(top_k, dim=1).indices.cpu().numpy()
+    return neighbors
+
+
+def difficulty_neighbor_metrics(
+    embeddings: torch.Tensor,
+    difficulty: torch.Tensor,
+    groups: torch.Tensor,
+    expected: np.ndarray,
+) -> dict[str, float]:
+    totals = {
+        metric: {top_k: 0.0 for top_k in DIFFICULTY_NEIGHBOR_KS}
+        for metric in ["distance", "variance", "recall", "ordering_spearman"]
+    }
+    rank = {
+        top_k: torch.arange(top_k, device=embeddings.device, dtype=torch.float32)
+        for top_k in DIFFICULTY_NEIGHBOR_KS
+    }
+    max_k = max(DIFFICULTY_NEIGHBOR_KS)
+
+    for start in range(0, len(embeddings), DIFFICULTY_BATCH_SIZE):
+        stop = min(start + DIFFICULTY_BATCH_SIZE, len(embeddings))
+        scores = embeddings[start:stop] @ embeddings.T
+        scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
+        neighbors = scores.topk(max_k, dim=1).indices
+        expected_batch = torch.as_tensor(
+            expected[start:stop], device=embeddings.device
+        )
+        query_difficulty = difficulty[start:stop, None, :]
+
+        for top_k in DIFFICULTY_NEIGHBOR_KS:
+            selected = neighbors[:, :top_k]
+            selected_difficulty = difficulty[selected]
+            distance = torch.linalg.vector_norm(
+                selected_difficulty - query_difficulty, dim=2
+            )
+            difficulty_rank = distance.argsort(dim=1).argsort(dim=1).float()
+            rank_delta = difficulty_rank - rank[top_k]
+            ordering = 1.0 - 6.0 * (rank_delta * rank_delta).sum(dim=1) / (
+                top_k * (top_k * top_k - 1)
+            )
+            recall = (
+                (selected[:, :, None] == expected_batch[:, None, :top_k])
+                .any(dim=2)
+                .sum(dim=1)
+                / top_k
+            )
+            totals["distance"][top_k] += float(distance.mean(dim=1).sum().item())
+            totals["variance"][top_k] += float(
+                selected_difficulty.var(dim=1, correction=0).mean(dim=1).sum().item()
+            )
+            totals["recall"][top_k] += float(recall.sum().item())
+            totals["ordering_spearman"][top_k] += float(ordering.sum().item())
+
+    return {
+        f"{metric}@{top_k}": totals[metric][top_k] / len(embeddings)
+        for top_k in DIFFICULTY_NEIGHBOR_KS
+        for metric in ["distance", "variance", "recall", "ordering_spearman"]
+    }
+
+
+def run_difficulty_neighbor_eval(
+    targets: list[TargetData], _args: argparse.Namespace
+) -> None:
+    data = load_difficulty_data(targets)
+    if data is None:
         return
-    ratings = (
-        pl.read_parquet(RATINGS_EVAL_PATH, columns=["beatmap_id", "stars"])
-        .filter(
-            pl.col("stars").is_finite()
-            & (pl.col("stars") > 0.0)
-            & (pl.col("stars") <= RATING_MAX_STARS)
+    max_k = max(DIFFICULTY_NEIGHBOR_KS)
+    largest_group = max(np.unique(data.groups, return_counts=True)[1])
+    if len(data.ids) - largest_group < max_k:
+        console.print("[yellow]Skipping Difficulty Neighbors: too few candidates.[/yellow]")
+        return
+
+    device = probe_device()
+    difficulty = torch.tensor(data.normalized, dtype=torch.float32, device=device)
+    groups = torch.tensor(data.groups, dtype=torch.long, device=device)
+    expected = difficulty_neighbor_indices(difficulty, groups, max_k)
+    metrics = {}
+    for target in targets:
+        embeddings = torch.tensor(
+            target_matrix(target, data.ids), dtype=torch.float32, device=device
         )
-        .unique("beatmap_id", keep="last")
-    )
-    ids = common_ids(targets, set(ratings["beatmap_id"].to_list()))
-    stars_by_id = dict(ratings.filter(pl.col("beatmap_id").is_in(ids)).iter_rows())
-    ids = [beatmap_id for beatmap_id in ids if beatmap_id in stars_by_id]
-    stars = np.array([stars_by_id[beatmap_id] for beatmap_id in ids], dtype=np.float32)
-    result = regression_probe(
-        targets, ids, stars, title="Star Rating Probe", suffix="stars"
-    )
-    if result:
-        print_eval_result(result)
+        metrics[target.name] = difficulty_neighbor_metrics(
+            embeddings, difficulty, groups, expected
+        )
+        del embeddings
+    print_eval_result(EvalResult("Difficulty Neighbors", metrics))
+
+
+def run_difficulty_probe(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    data = load_difficulty_data(targets)
+    if data is None:
+        return
+    device = probe_device()
+    folds = fold_indices(data.groups, device)
+    y = torch.tensor(data.values, dtype=torch.float32, device=device)
+    scale = y.std(dim=0, correction=0)
+    metrics = {}
+    for target in targets:
+        x = torch.tensor(
+            target_matrix(target, data.ids), dtype=torch.float32, device=device
+        )
+        pred = ridge_oof(x, y, folds)
+        normalized_error = torch.linalg.vector_norm((pred - y) / scale, dim=1)
+        r2 = [torch_r2(pred[:, idx], y[:, idx]) for idx in range(y.shape[1])]
+        pred_cpu = pred.cpu().numpy()
+        spearman = [
+            float(spearmanr(pred_cpu[:, idx], data.values[:, idx]).statistic)
+            for idx in range(y.shape[1])
+        ]
+        metrics[target.name] = {
+            "mean_z_error": float(normalized_error.mean().item()),
+            "median_z_error": float(normalized_error.median().item()),
+            "mae_stars": float(torch.abs(pred[:, 0] - y[:, 0]).mean().item()),
+            "mean_r2": mean(r2),
+            "mean_spearman": mean(spearman),
+        }
+        del x, pred, normalized_error
+    print_eval_result(EvalResult("Difficulty Linear Probe", metrics))
 
 
 def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
@@ -893,7 +1055,8 @@ def main() -> None:
         ("Mapper Probe", run_mapper_eval),
         ("Ranked Probe", run_ranked_eval),
         ("Submitted Year Probe", run_year_eval),
-        ("Star Rating Probe", run_rating_eval),
+        ("Difficulty Neighbors", run_difficulty_neighbor_eval),
+        ("Difficulty Linear Probe", run_difficulty_probe),
         ("RFF Probe", run_rff_eval),
         ("Community Tag PU Probe", run_tag_eval),
         ("Collection Ngram Probe", run_collection_ngram_eval),
