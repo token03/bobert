@@ -1,4 +1,6 @@
+import logging
 import os
+import warnings
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -87,10 +89,6 @@ def create_optimizer(model: nn.Module, config: DictConfig, phase: str) -> Optimi
         ),
     ]
 
-    print(
-        f"Optimizer initialized: {len(muon_params)} Muon params, {len(adam_params)} AdamW params."
-    )
-
     optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
 
     return optimizer
@@ -144,6 +142,7 @@ def create_trainer(
     phase: str,
     extra_callbacks: Optional[List[pl.Callback]] = None,
     logger_version: Optional[int] = None,
+    quiet: bool = False,
 ) -> pl.Trainer:
     trainer_config = config[phase].trainer
     base_dirs = {
@@ -155,8 +154,6 @@ def create_trainer(
 
     checkpoint_path = os.path.join(str(base_dir), "checkpoints")
     logs_path = str(base_dir)
-
-    progress_bar = TQDMProgressBar(refresh_rate=1)
 
     callbacks = []
     if trainer_config.save_checkpoints:
@@ -170,7 +167,8 @@ def create_trainer(
                 save_last=True,
             )
         )
-    callbacks.append(progress_bar)
+    if not quiet:
+        callbacks.append(TQDMProgressBar(refresh_rate=1))
 
     if extra_callbacks:
         callbacks.extend(extra_callbacks)
@@ -183,6 +181,22 @@ def create_trainer(
         TensorBoardLogger(save_dir=logs_path, name="logs", version=csv_logger.version),
     ]
 
+    warnings.filterwarnings(
+        "ignore", message=r"Checkpoint directory .* exists and is not empty\."
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
+        category=FutureWarning,
+    )
+    logging.getLogger("pytorch_lightning.accelerators.cuda").addFilter(
+        lambda record: not record.getMessage().startswith("LOCAL_RANK:")
+    )
+    logging.getLogger("pytorch_lightning.utilities.rank_zero").addFilter(
+        lambda record: record.getMessage()
+        != "Loading `train_dataloader` to estimate number of stepping batches."
+    )
+
     return pl.Trainer(
         max_epochs=trainer_config.epochs,
         accelerator=setup_device(),
@@ -192,7 +206,7 @@ def create_trainer(
         accumulate_grad_batches=trainer_config.grad_accum,
         logger=loggers,
         callbacks=callbacks,
-        enable_progress_bar=True,
+        enable_progress_bar=not quiet,
         log_every_n_steps=10,
         enable_model_summary=False,
         num_sanity_val_steps=0,

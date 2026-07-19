@@ -117,7 +117,6 @@ def main() -> int:
 
     print(f"PyTorch version: {torch.__version__}")
     print(f"Using device: {setup_device()}")
-    print(OmegaConf.to_yaml(config))
 
     torch.set_float32_matmul_precision("high")
     maybe_build_cache(config, args.build_cache)

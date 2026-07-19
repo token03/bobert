@@ -92,11 +92,13 @@ class PretrainingModule(BobertLightningModule):
         model: nn.Module,
         config: DictConfig,
         datamodule: PretrainData,
+        quiet: bool = False,
     ):
         super().__init__("pretraining")
         self.model = model
         self.config = config
         self.datamodule = datamodule
+        self.quiet = quiet
         self.batch_size = config.pretraining.trainer.batch_size
         self.save_hyperparameters(ignore=["model", "datamodule"])
 
@@ -244,7 +246,8 @@ class PretrainingModule(BobertLightningModule):
             "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
         }
 
-        self.log_dict(metrics_to_log, prog_bar=True, batch_size=self.batch_size)
+        if not self.quiet:
+            self.log_dict(metrics_to_log, prog_bar=True, batch_size=self.batch_size)
 
         return loss_dict["total_loss"]
 

@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--resume-ckpt")
+    parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--compile",
         dest="compile_model",
@@ -95,7 +96,6 @@ def main() -> int:
 
     print(f"PyTorch version: {torch.__version__}")
     print(f"Using device: {setup_device()}")
-    print(OmegaConf.to_yaml(config))
 
     torch.set_float32_matmul_precision("high")
 
@@ -118,8 +118,10 @@ def main() -> int:
         if resume_checkpoint is not None
         else None
     )
-    module = PretrainingModule(model, config, datamodule)
-    trainer = create_trainer(config, "pretraining", logger_version=logger_version)
+    module = PretrainingModule(model, config, datamodule, quiet=args.quiet)
+    trainer = create_trainer(
+        config, "pretraining", logger_version=logger_version, quiet=args.quiet
+    )
 
     print("\nPretraining setup complete.")
     print(f"Total epochs: {config.pretraining.trainer.epochs}")
