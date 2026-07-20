@@ -10,7 +10,7 @@ from core.data.batch import masked_query_buckets, select_q_bucket
 from core.data.module import AdapterData, PretrainData, preallocation_batch_size
 
 from .loss import alignment_loss_fn, pretrain_loss_fn
-from .metrics import ContrastiveMetrics, MLMMetrics
+from .metrics import ContrastiveMetrics, GeometryMetrics, MLMMetrics
 from .setup import (
     create_optimizer,
     create_scheduler,
@@ -104,6 +104,7 @@ class PretrainingModule(BobertLightningModule):
 
         feature_info = FEATURE_INFO
         self.mlm_metrics = MLMMetrics(feature_info, self.device)
+        self.geometry_metrics = GeometryMetrics(model.bert.d_model)
 
     def forward(self, batch):
         return self.model.forward_packed_pretrain(
@@ -254,6 +255,13 @@ class PretrainingModule(BobertLightningModule):
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         predictions, targets, mask, loss_dict = self._shared_step(batch)
 
+        packed_output, cu_seqlens, _ = self.model.bert.encode_packed(
+            batch["packed_vectors"],
+            batch["cu_seqlens"],
+            batch["max_seqlen"],
+        )
+        self.geometry_metrics.update(packed_output, cu_seqlens)
+
         self.mlm_metrics.update(
             predictions["mlm"],
             targets["mlm"],
@@ -272,8 +280,13 @@ class PretrainingModule(BobertLightningModule):
 
     def on_validation_epoch_end(self):
         mlm_results = self.flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
-        self.log_dict(mlm_results, sync_dist=True)
+        geometry_results = {
+            f"val_{name}": value
+            for name, value in self.geometry_metrics.compute().items()
+        }
+        self.log_dict({**mlm_results, **geometry_results}, sync_dist=True)
         self.mlm_metrics.reset()
+        self.geometry_metrics.reset()
 
 
 class AlignmentModule(BobertLightningModule):

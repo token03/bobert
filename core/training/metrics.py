@@ -9,6 +9,70 @@ from torchmetrics.aggregation import MeanMetric
 from torchmetrics.classification import FBetaScore
 
 
+class GeometryMetrics(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.register_buffer("map_sum", torch.zeros(dim), persistent=False)
+        self.register_buffer("map_outer", torch.zeros(dim, dim), persistent=False)
+        self.register_buffer("map_unit_sum", torch.zeros(dim), persistent=False)
+        self.register_buffer("token_unit_sum", torch.zeros(dim), persistent=False)
+        self.register_buffer(
+            "map_count", torch.zeros((), dtype=torch.long), persistent=False
+        )
+        self.register_buffer(
+            "token_count", torch.zeros((), dtype=torch.long), persistent=False
+        )
+
+    def update(self, packed_output: torch.Tensor, cu_seqlens: torch.Tensor):
+        output = packed_output.float()
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).long()
+        maps = torch.segment_reduce(output, reduce="mean", lengths=lengths)
+
+        self.map_sum.add_(maps.sum(dim=0))
+        self.map_outer.add_(maps.T @ maps)
+        self.map_unit_sum.add_(torch.nn.functional.normalize(maps, dim=-1).sum(dim=0))
+        self.token_unit_sum.add_(
+            torch.nn.functional.normalize(output, dim=-1).sum(dim=0)
+        )
+        self.map_count.add_(maps.shape[0])
+        self.token_count.add_(output.shape[0])
+
+    def compute(self) -> Dict[str, float]:
+        map_count = int(self.map_count.item())
+        token_count = int(self.token_count.item())
+        if map_count < 2 or token_count == 0:
+            return {}
+
+        map_sum = self.map_sum.double().cpu()
+        covariance = (
+            self.map_outer.double().cpu() - torch.outer(map_sum, map_sum) / map_count
+        )
+        eigenvalues = torch.linalg.eigvalsh(covariance / (map_count - 1)).clamp_min(0)
+        total = eigenvalues.sum().clamp_min(1e-30)
+        probabilities = eigenvalues / total
+        probabilities = probabilities[probabilities > 0]
+        effective_rank = torch.exp(-(probabilities * probabilities.log()).sum())
+
+        return {
+            "map_effective_rank": float(effective_rank),
+            "map_pc1_ratio": float(eigenvalues[-1] / total),
+            "map_anisotropy": float(
+                (self.map_unit_sum / map_count).square().sum().item()
+            ),
+            "token_anisotropy": float(
+                (self.token_unit_sum / token_count).square().sum().item()
+            ),
+        }
+
+    def reset(self):
+        self.map_sum.zero_()
+        self.map_outer.zero_()
+        self.map_unit_sum.zero_()
+        self.token_unit_sum.zero_()
+        self.map_count.zero_()
+        self.token_count.zero_()
+
+
 class MLMMetrics(nn.Module):
     def __init__(self, feature_info: Dict[str, Any], device: torch.device):
         super().__init__()
