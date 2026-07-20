@@ -32,7 +32,7 @@ runtime:
   compile_model: true
   compile_mode: "default"
   compile_dynamic: true
-  activation_checkpointing: true
+  activation_checkpointing: false
 
 pretraining:
   trainer:
