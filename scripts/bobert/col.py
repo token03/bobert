@@ -14,10 +14,9 @@ from tqdm import tqdm
 from core.config import load_config
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
-from core.paths import PRETRAIN_DIR
 from scripts.bobert.embed import (
     find_checkpoint,
-    load_pretraining_model,
+    load_model,
     sample_ids,
 )
 from scripts.common.paths import PROJECT_ROOT, resolve_path
@@ -322,13 +321,10 @@ def build(args):
 
     config = load_config(resolve_path(args.config))
     dataset_dir = resolve_path(args.dataset or config.data.dataset_path)
-    checkpoint = find_checkpoint(Path(args.checkpoint) if args.checkpoint else None, PRETRAIN_DIR)
+    checkpoint = find_checkpoint(Path(args.checkpoint) if args.checkpoint else None)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model, checkpoint_data = load_pretraining_model(config, checkpoint, device)
-    normalizer = BeatmapNormalizer(
-        vector_stats=checkpoint_data["vector_stats"],
-        attribute_stats=checkpoint_data.get("attribute_stats", {}),
-    )
+    model, checkpoint_data = load_model(config, checkpoint, device)
+    normalizer = BeatmapNormalizer(vector_stats=checkpoint_data["vector_stats"])
     with torch.inference_mode():
         model.bert.rotary_emb(
             torch.arange(config.data.max_seq_len, device=device),

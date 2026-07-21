@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from core.data.mining import _centered_rows
 from scripts.collections.ngram import tokenize
 from scripts.common.collections import deduplicate_collections
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
@@ -47,6 +46,11 @@ LR = 2e-3
 GRAD_CLIP_NORM = 5.0
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _centered_rows(values):
+    values = F.normalize(values, dim=1)
+    return F.normalize(values - values.mean(dim=0, keepdim=True), dim=1)
 
 
 def load_and_process_data(source_filter=None):
@@ -368,7 +372,7 @@ def train(source_filter=None):
         _, item_emb = model(sparse_adj)
         item_emb = F.normalize(item_emb, dim=-1)
 
-    item_emb_np = _centered_rows(item_emb.cpu().numpy())
+    item_emb_np = _centered_rows(item_emb).cpu().numpy()
     pd.DataFrame(
         [
             {"beatmap_id": beatmap_id, "embedding": item_emb_np[idx].tolist()}
@@ -378,8 +382,12 @@ def train(source_filter=None):
     print("Done.")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--source", type=int)
     args = parser.parse_args()
     train(source_filter=args.source)
+
+
+if __name__ == "__main__":
+    main()

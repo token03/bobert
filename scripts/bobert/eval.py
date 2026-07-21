@@ -133,7 +133,7 @@ def load_targets(targets: list[str], *, center: bool) -> list[TargetData]:
         path = target_path(target)
         name = target_name(path)
         beatmap_ids, embeddings, id_to_index = load_embeddings(
-            path, center=center and "pretrain" in name
+            path, center=center and name != "graph"
         )
         loaded.append(
             TargetData(name, beatmap_ids, embeddings, id_to_index)
@@ -1038,7 +1038,7 @@ def parse_args() -> argparse.Namespace:
         description="Compare embedding files with retrieval and linear probe evals"
     )
     parser.add_argument(
-        "targets", nargs="+", help="Embedding suffixes, e.g. pretrain pretrain-v3 graph"
+        "targets", nargs="+", help="Embedding suffixes or paths, e.g. pretrain-v7 graph"
     )
     parser.add_argument("--eval", default=str(DATA_DIR / "eval.csv"))
     parser.add_argument(

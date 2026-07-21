@@ -4,19 +4,18 @@ import argparse
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 
 from core.config import load_config
-from core.model.bobert import (
-    BobertForAlignment,
-    BobertForPretraining,
-)
+from core.model.bobert import BobertForPretraining
 from core.model.checkpoint import (
     load_checkpoint,
     load_state_for_inference,
+    model_spec_from_config,
     setup_checkpoint,
     strip_checkpoint_state,
 )
-from core.paths import ALIGN_DIR, PRETRAIN_DIR
+from core.paths import RUNS_DIR
 from core.training.setup import find_latest_checkpoint
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
@@ -26,7 +25,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
     parser.add_argument("--output")
-    parser.add_argument("--pretrain", action="store_true")
     return parser.parse_args()
 
 
@@ -37,47 +35,35 @@ def resolve_checkpoint(args: argparse.Namespace) -> Path:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
         return checkpoint
 
-    default_dir = PRETRAIN_DIR if args.pretrain else ALIGN_DIR
-    checkpoint = find_latest_checkpoint(default_dir)
+    checkpoint = find_latest_checkpoint(RUNS_DIR)
     if checkpoint is None:
-        raise FileNotFoundError(f"No checkpoint found in {default_dir}")
+        raise FileNotFoundError(f"No checkpoint found in {RUNS_DIR}")
     return checkpoint
-
-
-def verify_checkpoint(config_path: Path, checkpoint: dict, phase: str) -> None:
-    config, state = setup_checkpoint(load_config(config_path), checkpoint, phase)
-    model_cls = BobertForPretraining if phase == "pretraining" else BobertForAlignment
-    model = model_cls.from_config(config, torch.device("cpu"))
-    if phase == "pretraining":
-        load_state_for_inference(model, state)
-    else:
-        model.load_state_dict(state, strict=True)
 
 
 def main() -> int:
     args = parse_args()
     checkpoint_path = resolve_checkpoint(args)
     config_path = resolve_path(args.config)
-    phase = "pretraining" if args.pretrain else "alignment"
-    output_path = resolve_path(
-        args.output or ("data/bobert-pretrain.pt" if args.pretrain else "data/bobert.pt")
-    )
+    output_path = resolve_path(args.output or "data/bobert.pt")
 
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     state = strip_checkpoint_state(checkpoint["state_dict"])
-    model_spec = checkpoint.get("model_spec")
-    if model_spec is None:
+    if checkpoint.get("model_spec") is None:
         raise RuntimeError(f"Checkpoint does not contain model_spec: {checkpoint_path}")
+
+    config, _ = setup_checkpoint(load_config(config_path), checkpoint)
+    OmegaConf.set_struct(config, False)
+    config.runtime.compile_model = False
+    OmegaConf.set_struct(config, True)
+    model = BobertForPretraining.from_config(config, torch.device("cpu"))
+    load_state_for_inference(model, state)
 
     stripped = {
         "state_dict": state,
-        "model_spec": model_spec,
+        "model_spec": model_spec_from_config(config),
+        "vector_stats": checkpoint["vector_stats"],
     }
-    for key in ("vector_stats", "attribute_stats"):
-        if key in checkpoint:
-            stripped[key] = checkpoint[key]
-
-    verify_checkpoint(config_path, stripped, phase)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(stripped, output_path)
     print(f"Stripped checkpoint: {checkpoint_path}")

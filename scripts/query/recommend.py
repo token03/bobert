@@ -10,8 +10,6 @@ from rich.markup import escape
 from rich.table import Table
 from tqdm import tqdm
 
-from core.data.mining import load_alignment_cache
-from core.paths import MINING_CACHE_PATH
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
 from scripts.common.paths import resolve_path
@@ -36,17 +34,9 @@ from scripts.bobert.col import ColIndex
 console = Console()
 MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
-MODE_CANDIDATES = "candidates"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
 DEFAULT_EMBEDDINGS_PATH = Path("data/embeddings.parquet")
-DEFAULT_ADAPTER_EMBEDDINGS_PATH = Path("data/embeddings-adapter.parquet")
-DEFAULT_COMPARE_EMBEDDINGS_PATH = Path("data/embeddings-compare.parquet")
-DEFAULT_PRETRAIN_EMBEDDINGS_PATH = Path("data/embeddings-pretrain.parquet")
-DEFAULT_CHECKPOINT_PATH = Path("data/bobert.pt")
-DEFAULT_ADAPTER_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
-DEFAULT_PRETRAIN_CHECKPOINT_PATH = Path("data/bobert-pretrain.pt")
 DEFAULT_COL_INDEX_PATH = Path("data/col")
-CANDIDATE_LIMIT = 8
 
 
 @dataclass
@@ -66,7 +56,6 @@ class QueryContext:
     col_index: ColIndex | None = None
     maxsim: bool = False
     candidate_k: int = 500
-    candidates_lookup: dict[int, dict] = field(default_factory=dict)
     cache: dict[int, np.ndarray] = field(default_factory=dict)
     col_cache: dict[int, np.ndarray] = field(default_factory=dict)
 
@@ -337,40 +326,7 @@ def graph_recommend(raw_input: str, ctx: QueryContext):
     console.print()
 
 
-def candidates_recommend(raw_input: str, ctx: QueryContext):
-    beatmap_id = extract_beatmap_id(raw_input)
-    candidate_row = ctx.candidates_lookup.get(beatmap_id)
-    if candidate_row is None:
-        console.print(
-            f"[yellow]Skipping unsupported candidates id:[/yellow] {beatmap_id}\n"
-        )
-        return
-
-    print_query_table(beatmap_id, ctx)
-    console.print(
-        f"[dim]Anchor weight: {float(candidate_row.get('anchor_weight', 1.0)):.4f}; "
-        f"ignored negatives: {len(candidate_row.get('ignore_ids', []))}[/dim]"
-    )
-
-    items = list(
-        zip(
-            candidate_row.get("graph_positive_ids", []),
-            candidate_row.get("graph_positive_weights", []),
-        )
-    )
-    results = [
-        (int(candidate_id), float(weight), ctx.metadata_lookup.get(int(candidate_id)))
-        for candidate_id, weight in items[:CANDIDATE_LIMIT]
-    ]
-    print_result_table(results, title="Graph Positives", score="Weight")
-    console.print()
-
-
 def recommend(raw_input: str, ctx: QueryContext):
-    if ctx.mode == MODE_CANDIDATES:
-        candidates_recommend(raw_input, ctx)
-        return
-
     if ctx.mode == MODE_GRAPH:
         graph_recommend(raw_input, ctx)
         return
@@ -423,13 +379,6 @@ def recommend(raw_input: str, ctx: QueryContext):
 
 
 def run_query(parts: list[str], ctx: QueryContext):
-    if ctx.mode == MODE_CANDIDATES:
-        if not parts:
-            raise ValueError("enter one or more beatmap ids or URLs")
-        for part in parts:
-            candidates_recommend(part, ctx)
-        return
-
     if len(parts) == 1:
         recommend(parts[0], ctx)
     elif len(parts) == 2:
@@ -478,22 +427,10 @@ def parse_args():
         help="One beatmap id/URL recommends; two beatmap ids/URLs compares.",
     )
     parser.add_argument("--embeddings", default=None)
-    parser.add_argument("--pretrain", action="store_true")
-    parser.add_argument("--adapter", action="store_true")
     parser.add_argument(
         "--graph",
         action="store_true",
         help="Use fixed graph embeddings from data/graph.parquet",
-    )
-    parser.add_argument(
-        "--candidates",
-        action="store_true",
-        help="Show mining-cache candidates per lane",
-    )
-    parser.add_argument(
-        "--candidates-path",
-        default=None,
-        help="Defaults to data/candidates.parquet",
     )
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
@@ -501,15 +438,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoint",
         default=None,
-        help=(
-            "Defaults to data/bobert.pt, data/bobert-pretrain.pt with --pretrain, "
-            "or latest runs/adapter with --adapter"
-        ),
-    )
-    parser.add_argument(
-        "--pretrain-checkpoint",
-        default=None,
-        help="Pretraining checkpoint used only for lazy --adapter queries",
+        help="Override the Bobert checkpoint used for lazy queries",
     )
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--maxsim", action="store_true")
@@ -521,52 +450,19 @@ def parse_args():
 
 
 def validate_args(args: argparse.Namespace):
-    if len(args.beatmaps) > 2 and not args.candidates:
+    if len(args.beatmaps) > 2:
         raise SystemExit("Error: provide at most two beatmap ids or URLs")
-    if args.graph and args.candidates:
-        raise SystemExit("Error: --graph and --candidates are mutually exclusive")
-    if args.adapter and args.pretrain:
-        raise SystemExit("Error: --adapter and --pretrain are mutually exclusive")
-    if args.adapter and (args.graph or args.candidates):
-        raise SystemExit(
-            "Error: --adapter is mutually exclusive with --graph and --candidates"
-        )
-    if args.maxsim and not args.pretrain:
-        raise SystemExit("Error: --maxsim requires --pretrain")
-    if args.maxsim and (args.graph or args.candidates or args.adapter):
-        raise SystemExit("Error: --maxsim only supports default --pretrain queries")
+    if args.maxsim and args.graph:
+        raise SystemExit("Error: --maxsim only supports default Bobert queries")
 
 
 def query_mode(args: argparse.Namespace) -> str:
-    if args.candidates:
-        return MODE_CANDIDATES
     if args.graph:
         return MODE_GRAPH
     return MODE_DEFAULT
 
 
-def empty_embeddings():
-    return np.array([], dtype=np.int64), np.empty((0, 0), dtype=np.float32), {}
-
-
-def load_candidate_lookup(args: argparse.Namespace):
-    candidates_path = (
-        resolve_path(args.candidates_path) if args.candidates_path else MINING_CACHE_PATH
-    )
-    candidates_cache = load_alignment_cache(candidates_path)
-    lookup = {
-        int(row["beatmap_id"]): row for row in candidates_cache.iter_rows(named=True)
-    }
-    console.print(
-        f"[green]Loaded[/green] {len(lookup):,} candidate rows from "
-        f"[dim]{escape(str(candidates_path))}[/dim]"
-    )
-    return lookup
-
-
 def load_query_data(args: argparse.Namespace, mode: str):
-    if mode == MODE_CANDIDATES:
-        return (*empty_embeddings(), load_candidate_lookup(args))
     if mode == MODE_GRAPH:
         embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
         beatmap_ids, embeddings, id_to_index = load_embeddings(
@@ -577,13 +473,8 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
-        return beatmap_ids, embeddings, id_to_index, {}
-    default_embeddings_path = DEFAULT_EMBEDDINGS_PATH
-    if args.pretrain:
-        default_embeddings_path = DEFAULT_PRETRAIN_EMBEDDINGS_PATH
-    elif args.adapter:
-        default_embeddings_path = DEFAULT_ADAPTER_EMBEDDINGS_PATH
-    embeddings_path = resolve_path(args.embeddings or default_embeddings_path)
+        return beatmap_ids, embeddings, id_to_index
+    embeddings_path = resolve_path(args.embeddings or DEFAULT_EMBEDDINGS_PATH)
     beatmap_ids, embeddings, id_to_index = load_embeddings(
         embeddings_path,
         dtype=np.float16,
@@ -593,45 +484,23 @@ def load_query_data(args: argparse.Namespace, mode: str):
         f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
         f"[dim]{escape(str(embeddings_path))}[/dim]"
     )
-    return beatmap_ids, embeddings, id_to_index, {}
+    return beatmap_ids, embeddings, id_to_index
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = query_mode(args)
-    beatmap_ids, embeddings, id_to_index, candidates_lookup = load_query_data(args, mode)
+    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
     embedding_transform = None
-    if mode == MODE_DEFAULT and args.pretrain and len(embeddings):
+    if mode == MODE_DEFAULT and len(embeddings):
         embedding_transform = EmbeddingTransform.fit(embeddings)
         embeddings = embedding_transform.apply(embeddings)
-    checkpoint_path = resolve_path(
-        args.pretrain_checkpoint
-        or (
-            DEFAULT_PRETRAIN_CHECKPOINT_PATH
-            if args.pretrain
-            else DEFAULT_ADAPTER_PRETRAIN_CHECKPOINT_PATH
-            if args.adapter
-            else DEFAULT_CHECKPOINT_PATH
-        )
-    )
-    adapter_checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
-    if not args.adapter:
-        checkpoint_path = resolve_path(
-            args.checkpoint
-            or (
-                DEFAULT_PRETRAIN_CHECKPOINT_PATH
-                if args.pretrain
-                else DEFAULT_CHECKPOINT_PATH
-            )
-        )
+    checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
     embedder = (
         None
         if mode != MODE_DEFAULT
         else LazyEmbedder(
             resolve_path(args.config),
             checkpoint_path,
-            pretrain=args.pretrain,
-            adapter=args.adapter,
-            adapter_checkpoint_path=adapter_checkpoint_path,
         )
     )
     col_index = ColIndex(resolve_path(args.col_index)) if args.maxsim else None
@@ -652,7 +521,6 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         col_index=col_index,
         maxsim=args.maxsim,
         candidate_k=args.candidate_k,
-        candidates_lookup=candidates_lookup,
     )
 
 

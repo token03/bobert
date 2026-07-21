@@ -188,23 +188,3 @@ class MLMMetrics(nn.Module):
         for collection in self.cat_metrics.values():
             collection.reset()
         self.loss_metric.reset()
-
-
-class ContrastiveMetrics(nn.Module):
-    def __init__(self, device: torch.device):
-        super().__init__()
-        self._device = device
-        self.loss_metric = MeanMetric().to(device)
-
-    def update(self, loss: Optional[float] = None):
-        if loss is not None:
-            self.loss_metric.update(loss)
-
-    def compute(self) -> Dict[str, float]:
-        results = {}
-        if self.loss_metric.update_count > 0:
-            results["contrastive_loss"] = self.loss_metric.compute().item()
-        return results
-
-    def reset(self):
-        self.loss_metric.reset()

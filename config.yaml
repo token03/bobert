@@ -34,7 +34,7 @@ runtime:
   compile_dynamic: true
   activation_checkpointing: false
 
-pretraining:
+training:
   trainer:
     epochs: 6
     batch_size: 64
@@ -45,7 +45,7 @@ pretraining:
     use_length_buckets: true
 
   data:
-    pretrain_size: 60000
+    sample_size: 60000
 
   optimizer:
     adam_lr: 2e-4
@@ -64,102 +64,3 @@ pretraining:
   masking:
     ratio: 0.30
     mean_span_length: 3
-
-mining:
-  top_k: 32
-  candidate_k: 512
-  max_candidate_star_delta: 0.25
-  block_size: 256
-  alignment_size: null
-  random_seed: 42
-  use_faiss_gpu: true
-
-alignment:
-  embedding_dim: 384
-
-  trainer:
-    epochs: 1
-    batch_size: 128
-    grad_accum: 1
-    grad_clip: 1.0
-    precision: "bf16-mixed"
-    save_checkpoints: true
-
-  data:
-    alignment_size: null
-    max_positive_ids_per_type: null
-    seed: 42
-    group_size: 4
-
-  optimizer:
-    adam_lr: 1e-4
-    adam_wd: 0.05
-    adam_betas: [0.9, 0.95]
-    muon_lr: 0.005
-    muon_wd: 0.01
-
-  scheduler:
-    adam_min_lr: 1e-5
-    warmup_ratio: 0.05
-    stable_ratio: 0.60
-    cooldown: "cosine"
-    num_cycles: 0.5
-
-  encoder:
-    trainable_layers: 0
-
-  pooling:
-    stats: ["mean"]
-    stat_dim: 384
-    stats_mixer_dim: 384
-
-  query_pool:
-    num_queries: 16
-    heads: 8
-    head_dim: 32
-    output_dim: 384
-    dropout: 0.0
-
-  map_features:
-    names: ["ar", "cs", "drain_time", "slider_multiplier"]
-    dim: 32
-
-  loss:
-    temperature: 0.10
-
-adapter:
-  embedding_dim: 384
-  hidden_dim: 768
-  dropout: 0.0
-  embeddings_path: "./data/embeddings-pretrain.parquet"
-
-  trainer:
-    epochs: 3
-    batch_size: 2048
-    grad_accum: 1
-    grad_clip: 1.0
-    precision: "bf16-mixed"
-    save_checkpoints: true
-
-  data:
-    alignment_size: null
-    max_positive_ids_per_type: null
-    seed: 42
-    group_size: 4
-
-  optimizer:
-    adam_lr: 1e-3
-    adam_wd: 0.05
-    adam_betas: [0.9, 0.95]
-    muon_lr: 0.0
-    muon_wd: 0.0
-
-  scheduler:
-    adam_min_lr: 1e-5
-    warmup_ratio: 0.03
-    stable_ratio: 0.50
-    cooldown: "cosine"
-    num_cycles: 0.5
-
-  loss:
-    temperature: 0.10

@@ -21,66 +21,6 @@ from .schema import (
 
 BEAT_PHASE_TOLERANCE_MS = 2.0
 BEAT_PHASE_OFF_GRID = BEAT_PHASE_CARDINALITY - 1
-MIN_BREAK_GAP_MS = 5000.0
-BREAK_START_OFFSET_MS = 200.0
-
-
-def ar_to_preempt_ms_expr(ar: pl.Expr) -> pl.Expr:
-    return (
-        pl.when(ar < 5.0)
-        .then(1200.0 + 600.0 * (5.0 - ar) / 5.0)
-        .when(ar > 5.0)
-        .then(1200.0 - 750.0 * (ar - 5.0) / 5.0)
-        .otherwise(1200.0)
-    )
-
-
-def calculate_drain_times(
-    beatmaps_df: pl.DataFrame, hitobjects_df: pl.DataFrame
-) -> pl.DataFrame:
-    if beatmaps_df.is_empty() or hitobjects_df.is_empty():
-        return pl.DataFrame(schema={"beatmap_id": pl.Int64, "drain_time": pl.Float32})
-
-    objects = (
-        hitobjects_df.select(
-            "beatmap_id",
-            "time",
-            pl.max_horizontal(
-                "time", pl.col("end_time").fill_null(pl.col("time"))
-            ).alias("_end_time"),
-        )
-        .join(beatmaps_df.select("beatmap_id", "ar"), on="beatmap_id", how="inner")
-        .sort(["beatmap_id", "time"])
-        .with_columns(
-            pl.col("_end_time").shift(1).over("beatmap_id").alias("_prev_end_time"),
-            ar_to_preempt_ms_expr(pl.col("ar")).alias("_preempt_ms"),
-        )
-        .with_columns((pl.col("time") - pl.col("_prev_end_time")).alias("_gap_ms"))
-        .with_columns(
-            pl.when(pl.col("_gap_ms") >= MIN_BREAK_GAP_MS)
-            .then(
-                pl.max_horizontal(
-                    pl.col("_gap_ms") - BREAK_START_OFFSET_MS - pl.col("_preempt_ms"),
-                    pl.lit(0.0),
-                )
-            )
-            .otherwise(0.0)
-            .alias("_break_ms")
-        )
-    )
-
-    return objects.group_by("beatmap_id").agg(
-        (
-            (
-                pl.col("_end_time").max()
-                - pl.col("time").min()
-                - pl.col("_break_ms").sum()
-            ).clip(lower_bound=0.0)
-            / 1000.0
-        )
-        .cast(pl.Float32)
-        .alias("drain_time")
-    )
 
 
 def _canonical_bpm_expr(bpm: pl.Expr) -> pl.Expr:

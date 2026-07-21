@@ -6,8 +6,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from .schema import MAP_FEATURE_ATTRIBUTES
-from .feature import build_feature_tensors, calculate_drain_times
+from .feature import build_feature_tensors
 
 HITOBJECT_ID_RANGE = 100_000
 
@@ -66,9 +65,7 @@ def _selected_beatmaps_lf(
     max_sr: Optional[float],
 ) -> pl.LazyFrame:
     beatmaps_lf = (
-        scan_dataset_parquet(beatmaps_path)
-        .select(["beatmap_id", "cs", "ar", "od", "hp_drain", "slider_multiplier"])
-        .unique("beatmap_id")
+        scan_dataset_parquet(beatmaps_path).select("beatmap_id").unique("beatmap_id")
     )
 
     if ids_to_load:
@@ -205,13 +202,8 @@ def load_beatmap_dataset(
         if hitobjects_chunk.is_empty():
             continue
 
-        drain_times = calculate_drain_times(beatmaps_chunk, hitobjects_chunk)
-        beatmaps_chunk = beatmaps_chunk.join(
-            drain_times, on="beatmap_id", how="left"
-        ).with_columns(pl.col("drain_time").fill_null(0.0).cast(pl.Float32))
-
         features = build_feature_tensors(
-            beatmaps_chunk.select(["beatmap_id", "cs", "ar", "slider_multiplier"]),
+            beatmaps_chunk,
             hitobjects_chunk,
             max_seq_len=max_seq_len,
             return_original_counts=False,
@@ -222,28 +214,11 @@ def load_beatmap_dataset(
         else:
             hitobject_data, ids, _ = features
 
-        meta_cols = ["beatmap_id", *MAP_FEATURE_ATTRIBUTES]
-        meta = beatmaps_chunk.select(meta_cols)
-        meta_by_id = {
-            int(bid): index for index, bid in enumerate(meta["beatmap_id"].to_numpy())
-        }
-        meta_arrays = {
-            col: meta[col].to_numpy() for col in meta_cols if col != "beatmap_id"
-        }
-
         for index, (bid, vectors) in enumerate(zip(ids, hitobject_data)):
             bid_int = int(bid)
-            meta_index = meta_by_id[bid_int]
-
-            beatmap_attrs = {
-                key: float(meta_arrays[key][meta_index])
-                for key in MAP_FEATURE_ATTRIBUTES
-            }
-
             item = {
                 "beatmap_id": bid_int,
                 "hitobjects": vectors,
-                "map_features": beatmap_attrs,
             }
             if include_beat_ids:
                 item["beat_ids"] = beat_ids[index][: vectors.shape[0]]

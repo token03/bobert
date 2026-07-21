@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import requests
-from core.data.schema import MAP_FEATURE_ATTRIBUTES
 from scripts.common.osu import (
     API_TIERS,
     DOWNLOAD_HEADERS,
@@ -168,13 +167,7 @@ def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -
 
 
 def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
-    vectors, _map_features = beatmap_inputs_from_osu(path, max_seq_len)
-    return vectors
-
-
-def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
     from core.data.feature import build_feature_tensors
-    from core.data.feature import calculate_drain_times
     from core.data.parser import parse_osu_file
     from scripts.data.dataset import (
         extract_beatmap_record,
@@ -188,16 +181,6 @@ def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
 
     beatmaps_df = pl.DataFrame([extract_beatmap_record(raw_beatmap)])
     hitobjects_df = pl.DataFrame(extract_hitobject_records(raw_beatmap))
-    drain_times = calculate_drain_times(beatmaps_df, hitobjects_df)
-    beatmaps_df = beatmaps_df.join(drain_times, on="beatmap_id", how="left")
-    if "drain_time" not in beatmaps_df.columns:
-        beatmaps_df = beatmaps_df.with_columns(
-            pl.lit(0.0).cast(pl.Float32).alias("drain_time")
-        )
-    else:
-        beatmaps_df = beatmaps_df.with_columns(
-            pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
-        )
     vectors, _ids, _ = build_feature_tensors(
         beatmaps_df,
         hitobjects_df,
@@ -206,18 +189,11 @@ def beatmap_inputs_from_osu(path: Path, max_seq_len: int):
     )
     if not vectors:
         raise ValueError(f"Could not engineer hitobject features for {path}")
-
-    expanded_count = vectors[0].shape[0]
-    truncate_len = min(expanded_count, max_seq_len)
-    row = beatmaps_df.row(0, named=True)
-    map_features = {
-        name: float(row.get(name, 0.0) or 0.0) for name in MAP_FEATURE_ATTRIBUTES
-    }
-    return vectors[0][:truncate_len], map_features
+    return vectors[0][:max_seq_len]
 
 
 def beatmap_col_inputs_from_osu(path: Path, max_seq_len: int):
-    from core.data.feature import build_feature_tensors, calculate_drain_times
+    from core.data.feature import build_feature_tensors
     from core.data.parser import parse_osu_file
     from scripts.data.dataset import (
         extract_beatmap_record,
@@ -231,16 +207,6 @@ def beatmap_col_inputs_from_osu(path: Path, max_seq_len: int):
 
     beatmaps_df = pl.DataFrame([extract_beatmap_record(raw_beatmap)])
     hitobjects_df = pl.DataFrame(extract_hitobject_records(raw_beatmap))
-    drain_times = calculate_drain_times(beatmaps_df, hitobjects_df)
-    beatmaps_df = beatmaps_df.join(drain_times, on="beatmap_id", how="left")
-    if "drain_time" not in beatmaps_df.columns:
-        beatmaps_df = beatmaps_df.with_columns(
-            pl.lit(0.0).cast(pl.Float32).alias("drain_time")
-        )
-    else:
-        beatmaps_df = beatmaps_df.with_columns(
-            pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
-        )
     vectors, _ids, _counts, beat_ids = build_feature_tensors(
         beatmaps_df,
         hitobjects_df,
@@ -260,19 +226,12 @@ class LazyEmbedder:
         config_path: Path,
         checkpoint_path: Path | None,
         device: str | None = None,
-        pretrain: bool = False,
-        adapter: bool = False,
-        adapter_checkpoint_path: Path | None = None,
     ):
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
         self.device_name = device
-        self.pretrain = pretrain
-        self.adapter = adapter
-        self.adapter_checkpoint_path = adapter_checkpoint_path
         self.config = None
         self.model = None
-        self.adapter_model = None
         self.normalizer = None
         self.device = None
 
@@ -281,13 +240,7 @@ class LazyEmbedder:
 
         from core.config import load_config
         from core.model.checkpoint import normalizer_from_checkpoint
-        from core.paths import ADAPTER_DIR, ALIGN_DIR, PRETRAIN_DIR
-        from scripts.bobert.embed import (
-            find_checkpoint,
-            load_adapter_model,
-            load_alignment_model,
-            load_pretraining_model,
-        )
+        from scripts.bobert.embed import find_checkpoint, load_model
 
         if self.model is not None:
             return
@@ -296,42 +249,21 @@ class LazyEmbedder:
         self.device = torch.device(
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        checkpoint_dir = PRETRAIN_DIR if self.pretrain or self.adapter else ALIGN_DIR
-        ckpt_path = find_checkpoint(self.checkpoint_path, checkpoint_dir)
-        loader = (
-            load_pretraining_model
-            if self.pretrain or self.adapter
-            else load_alignment_model
-        )
-        self.model, checkpoint = loader(self.config, ckpt_path, self.device)
-        if self.adapter:
-            adapter_ckpt = find_checkpoint(self.adapter_checkpoint_path, ADAPTER_DIR)
-            self.adapter_model, _ = load_adapter_model(
-                self.config, adapter_ckpt, self.device
-            )
+        checkpoint_path = find_checkpoint(self.checkpoint_path)
+        self.model, checkpoint = load_model(self.config, checkpoint_path, self.device)
         self.normalizer = normalizer_from_checkpoint(checkpoint)
 
     def embed_osu(self, path: Path) -> np.ndarray:
         import torch
 
         self.load()
-        vectors, raw_map_features = beatmap_inputs_from_osu(
-            path, self.config.data.max_seq_len
-        )
+        vectors = beatmap_vectors_from_osu(path, self.config.data.max_seq_len)
         vectors = self.normalizer.normalize_vectors(vectors)
-        map_features = torch.tensor(
-            [
-                self.normalizer.normalize_attribute(name, raw_map_features.get(name, 0.0))
-                for name in MAP_FEATURE_ATTRIBUTES
-            ],
-            dtype=torch.float32,
-        ).unsqueeze(0)
         packed = vectors[: self.config.data.max_seq_len].contiguous()
         max_seqlen = packed.shape[0]
         cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
         packed = packed.to(self.device)
         cu_seqlens = cu_seqlens.to(self.device)
-        map_features = map_features.to(self.device)
         amp_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
 
         with torch.no_grad():
@@ -340,30 +272,15 @@ class LazyEmbedder:
                 dtype=amp_dtype,
                 enabled=self.device.type == "cuda",
             ):
-                if self.pretrain or self.adapter:
-                    embedding = self.model.embed_packed(
-                        packed, cu_seqlens, max_seqlen
-                    )
-                else:
-                    embedding = self.model.embed_packed(
-                        packed, cu_seqlens, max_seqlen, map_features
-                    )
-
-            if self.adapter:
-                embedding = self.adapter_model(embedding)["embedding"]
+                embedding = self.model.embed_packed(packed, cu_seqlens, max_seqlen)
 
         embedding = embedding.float().cpu().numpy()[0]
-        if self.pretrain:
-            return embedding.astype(np.float32)
-        norm = np.linalg.norm(embedding)
-        return (embedding / max(norm, 1e-12)).astype(np.float32)
+        return embedding.astype(np.float32)
 
     def embed_col_osu(self, path: Path) -> np.ndarray:
         import torch
 
         self.load()
-        if not self.pretrain:
-            raise ValueError("Col MaxSim queries require a pretraining embedder")
         vectors, beat_ids = beatmap_col_inputs_from_osu(path, self.config.data.max_seq_len)
         vectors = self.normalizer.normalize_vectors(vectors)
         packed = vectors[: self.config.data.max_seq_len].contiguous()

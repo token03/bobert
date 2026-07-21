@@ -1,15 +1,6 @@
 from typing import NamedTuple
 from enum import Enum
 
-MAP_FEATURE_ATTRIBUTES = [
-    "ar",
-    "cs",
-    "od",
-    "hp_drain",
-    "drain_time",
-    "slider_multiplier",
-]
-
 OSU_STAGE_WIDTH = 512
 OSU_STAGE_HEIGHT = 384
 CENTER_X = OSU_STAGE_WIDTH / 2.0

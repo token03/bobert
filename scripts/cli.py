@@ -5,15 +5,12 @@ import sys
 
 
 MODEL_COMMANDS = {
-    "adapter": "scripts.bobert.adapter",
-    "align": "scripts.bobert.align",
     "embed": "scripts.bobert.embed",
     "eval": "scripts.bobert.eval",
     "pretrain": "scripts.bobert.pretrain",
     "strip": "scripts.bobert.strip",
     "recommend": "scripts.query.recommend",
     "graph": "scripts.data.graph",
-    "mining": "scripts.data.mining",
 }
 
 GROUP_COMMANDS = {
@@ -22,6 +19,7 @@ GROUP_COMMANDS = {
     ("collections", "tournaments"): "scripts.collections.tournaments",
     ("collections", "vertices"): "scripts.collections.vertices",
     ("data", "dataset"): "scripts.data.dataset",
+    ("data", "graph"): "scripts.data.graph",
     ("data", "motifs"): "scripts.data.motifs",
     ("data", "ratings"): "scripts.data.ratings",
     ("data", "rff"): "scripts.data.rff",

@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from omegaconf import DictConfig
 import pytorch_lightning as pl
@@ -7,75 +7,68 @@ import torch
 import torch.nn as nn
 
 from core.data.batch import masked_query_buckets, select_q_bucket
-from core.data.module import AdapterData, PretrainData, preallocation_batch_size
+from core.data.module import BobertDataModule, preallocation_batch_size
 
-from .loss import alignment_loss_fn, pretrain_loss_fn
-from .metrics import ContrastiveMetrics, GeometryMetrics, MLMMetrics
-from .setup import (
-    create_optimizer,
-    create_scheduler,
-)
+from .loss import compute_loss
+from .metrics import GeometryMetrics, MLMMetrics
+from .setup import create_optimizer, create_scheduler
+from ..data.schema import FEATURE_INFO, VECTOR_DIM
 from ..model.checkpoint import (
     add_normalizer_to_checkpoint,
     model_spec_from_config,
     normalize_lightning_state_dict,
     restore_normalizer_from_checkpoint,
 )
-from ..data.normalizer import BeatmapNormalizer
-from ..data.schema import FEATURE_INFO, VECTOR_DIM
 
 
-class BobertLightningModule(pl.LightningModule):
-    phase: str
-
-    def __init__(self, phase: str):
+class BobertModule(pl.LightningModule):
+    def __init__(
+        self,
+        model: nn.Module,
+        config: DictConfig,
+        datamodule: BobertDataModule,
+        quiet: bool = False,
+    ):
         super().__init__()
-        self.phase = phase
+        self.model = model
+        self.config = config
+        self.datamodule = datamodule
+        self.quiet = quiet
+        self.batch_size = config.training.trainer.batch_size
+        self.save_hyperparameters(ignore=["model", "datamodule"])
+        self.mlm_metrics = MLMMetrics(FEATURE_INFO, self.device)
+        self.geometry_metrics = GeometryMetrics(model.bert.d_model)
 
     @staticmethod
     def flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
         flat = {}
         for key, value in metrics.items():
-            new_key = f"{prefix}_{key}" if prefix else key
+            name = f"{prefix}_{key}" if prefix else key
             if isinstance(value, dict):
-                flat.update(BobertLightningModule.flatten_metrics(value, new_key))
+                flat.update(BobertModule.flatten_metrics(value, name))
             else:
-                flat[new_key] = value
+                flat[name] = value
         return flat
 
-    def checkpoint_normalizer(self) -> Optional[BeatmapNormalizer]:
-        normalizer = getattr(self, "normalizer", None)
-        if normalizer is not None:
-            return normalizer
-        datamodule = getattr(self, "datamodule", None)
-        return getattr(datamodule, "normalizer", None)
-
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
-        checkpoint["model_spec"] = model_spec_from_config(self.config, self.phase)
-        add_normalizer_to_checkpoint(checkpoint, self.checkpoint_normalizer())
+        checkpoint["model_spec"] = model_spec_from_config(self.config)
+        add_normalizer_to_checkpoint(checkpoint, self.datamodule.normalizer)
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        restore_normalizer_from_checkpoint(checkpoint, self.checkpoint_normalizer())
-
+        restore_normalizer_from_checkpoint(checkpoint, self.datamodule.normalizer)
         state_dict = checkpoint.get("state_dict")
-        if not state_dict:
-            return
-
-        model_is_compiled = hasattr(self.model, "_orig_mod")
-        checkpoint["state_dict"] = normalize_lightning_state_dict(
-            state_dict, model_is_compiled
-        )
+        if state_dict:
+            checkpoint["state_dict"] = normalize_lightning_state_dict(
+                state_dict, hasattr(self.model, "_orig_mod")
+            )
 
     def configure_optimizers(self):
-        optimizer = create_optimizer(self.model, self.config, self.phase)
+        optimizer = create_optimizer(self.model, self.config)
         scheduler = create_scheduler(
             optimizer,
             self.config,
             int(self.trainer.estimated_stepping_batches),
-            self.phase,
         )
-        if scheduler is None:
-            return optimizer
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -85,29 +78,8 @@ class BobertLightningModule(pl.LightningModule):
             },
         }
 
-
-class PretrainingModule(BobertLightningModule):
-    def __init__(
-        self,
-        model: nn.Module,
-        config: DictConfig,
-        datamodule: PretrainData,
-        quiet: bool = False,
-    ):
-        super().__init__("pretraining")
-        self.model = model
-        self.config = config
-        self.datamodule = datamodule
-        self.quiet = quiet
-        self.batch_size = config.pretraining.trainer.batch_size
-        self.save_hyperparameters(ignore=["model", "datamodule"])
-
-        feature_info = FEATURE_INFO
-        self.mlm_metrics = MLMMetrics(feature_info, self.device)
-        self.geometry_metrics = GeometryMetrics(model.bert.d_model)
-
     def forward(self, batch):
-        return self.model.forward_packed_pretrain(
+        return self.model.forward_packed(
             batch["packed_vectors"],
             batch["masked_idx"],
             batch["masked_positions"],
@@ -123,33 +95,30 @@ class PretrainingModule(BobertLightningModule):
 
     def _shared_step(self, batch: Dict[str, Any]):
         predictions, targets, mask = self(batch)
-        loss_dict = pretrain_loss_fn(predictions, targets, self.config)
+        loss_dict = compute_loss(predictions, targets)
         return predictions, targets, mask, loss_dict
 
     def on_fit_start(self):
         if self.global_rank == 0:
-            print("Running max-length preallocation pass for pretraining...")
+            print("Running max-length preallocation pass...")
 
-        max_seq_len = self.config["data"]["max_seq_len"]
+        max_seq_len = self.config.data.max_seq_len
         warmup_batch = self._create_preallocation_batch(max_seq_len)
-
         target_dtype = torch.float32
-
-        precision_str = str(self.trainer.precision)
-        if "bf16" in precision_str:
+        precision = str(self.trainer.precision)
+        if "bf16" in precision:
             target_dtype = torch.bfloat16
-        elif "16" in precision_str:
+        elif "16" in precision:
             target_dtype = torch.float16
 
         optimizer = self.trainer.optimizers[0]
         optimizer.zero_grad(set_to_none=True)
-
-        autocast_context = (
+        autocast = (
             torch.autocast(device_type=self.device.type, dtype=target_dtype)
             if target_dtype != torch.float32
             else nullcontext()
         )
-        with autocast_context:
+        with autocast:
             _, _, _, loss_dict = self._shared_step(warmup_batch)
         loss_dict["total_loss"].backward()
         optimizer.zero_grad(set_to_none=True)
@@ -157,11 +126,16 @@ class PretrainingModule(BobertLightningModule):
         if self.global_rank == 0:
             print(
                 "Preallocation complete. "
-                f"Ran B={warmup_batch['batch_size']}, L={max_seq_len} using {target_dtype}."
+                f"Ran B={warmup_batch['batch_size']}, L={max_seq_len} "
+                f"using {target_dtype}."
             )
 
     def _create_preallocation_batch(self, max_seq_len: int) -> Dict[str, Any]:
-        batch_size = self._preallocation_batch_size(max_seq_len)
+        batch_size = preallocation_batch_size(
+            self.datamodule.train_dataset,
+            self.config.training.trainer.batch_size,
+            max_seq_len,
+        )
         vector_dim = self.datamodule.vector_dim or VECTOR_DIM
         packed_vectors = torch.randn(
             batch_size * max_seq_len,
@@ -169,18 +143,16 @@ class PretrainingModule(BobertLightningModule):
             device=self.device,
             dtype=torch.float32,
         )
-
-        feature_info = FEATURE_INFO
-        for info in feature_info["categorical"].values():
+        for info in FEATURE_INFO["categorical"].values():
             packed_vectors[:, info["index"]] = torch.randint(
                 info["cardinality"],
                 (batch_size * max_seq_len,),
                 device=self.device,
             ).to(packed_vectors.dtype)
 
-        masking_ratio = float(self.config.pretraining.masking.ratio)
+        masking_ratio = float(self.config.training.masking.ratio)
         mask_count = round(max_seq_len * masking_ratio)
-        packed_padded_mask = (
+        packed_mask = (
             (torch.arange(max_seq_len, device=self.device)[None, :] < mask_count)
             .expand(batch_size, -1)
             .reshape(-1)
@@ -192,15 +164,15 @@ class PretrainingModule(BobertLightningModule):
             device=self.device,
             dtype=torch.int32,
         )
-        masked_idx = packed_padded_mask.nonzero(as_tuple=False).flatten()
+        masked_idx = packed_mask.nonzero(as_tuple=False).flatten()
         batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
         masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
         masked_counts = torch.bincount(batch_ids, minlength=batch_size).to(torch.int32)
         split = torch.rand(masked_idx.numel(), device=self.device)
-        starts = torch.zeros_like(packed_padded_mask)
+        starts = torch.zeros_like(packed_mask)
         starts[cu_seqlens[:-1].long()] = True
         right_border_idx = (
-            (torch.roll(packed_padded_mask, shifts=1) & ~packed_padded_mask & ~starts)
+            (torch.roll(packed_mask, shifts=1) & ~packed_mask & ~starts)
             .nonzero(as_tuple=False)
             .flatten()
         )
@@ -220,7 +192,6 @@ class PretrainingModule(BobertLightningModule):
             ),
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
-            "unchanged_idx": masked_idx[split >= 0.9],
             "right_border_zero_idx": right_border_idx[right_split < 0.8],
             "right_border_random_idx": right_border_idx[
                 (right_split >= 0.8) & (right_split < 0.9)
@@ -230,44 +201,29 @@ class PretrainingModule(BobertLightningModule):
             "batch_size": batch_size,
         }
 
-    def _preallocation_batch_size(self, max_seq_len: int) -> int:
-        phase_batch_size = int(self.config.pretraining.trainer.batch_size)
-        return preallocation_batch_size(
-            self.datamodule.train_dataset,
-            phase_batch_size,
-            max_seq_len,
-        )
-
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         _, _, _, loss_dict = self._shared_step(batch)
-
-        metrics_to_log = {
-            "train_loss": loss_dict["total_loss"],
-            "train_mlm_loss": loss_dict["mlm_loss"],
-            "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
-        }
-
         if not self.quiet:
-            self.log_dict(metrics_to_log, prog_bar=True, batch_size=self.batch_size)
-
+            self.log_dict(
+                {
+                    "train_loss": loss_dict["total_loss"],
+                    "train_mlm_loss": loss_dict["mlm_loss"],
+                    "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
+                },
+                prog_bar=True,
+                batch_size=self.batch_size,
+            )
         return loss_dict["total_loss"]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, targets, mask, loss_dict = self._shared_step(batch)
-
+        predictions, targets, _mask, loss_dict = self._shared_step(batch)
         packed_output, cu_seqlens, _ = self.model.bert.encode_packed(
-            batch["packed_vectors"],
-            batch["cu_seqlens"],
-            batch["max_seqlen"],
+            batch["packed_vectors"], batch["cu_seqlens"], batch["max_seqlen"]
         )
         self.geometry_metrics.update(packed_output, cu_seqlens)
-
         self.mlm_metrics.update(
-            predictions["mlm"],
-            targets["mlm"],
-            loss=loss_dict["mlm_loss"].item(),
+            predictions["mlm"], targets["mlm"], loss=loss_dict["mlm_loss"].item()
         )
-
         self.log(
             "val_loss",
             loss_dict["total_loss"],
@@ -275,7 +231,6 @@ class PretrainingModule(BobertLightningModule):
             sync_dist=True,
             batch_size=self.batch_size,
         )
-
         return loss_dict["total_loss"]
 
     def on_validation_epoch_end(self):
@@ -287,166 +242,3 @@ class PretrainingModule(BobertLightningModule):
         self.log_dict({**mlm_results, **geometry_results}, sync_dist=True)
         self.mlm_metrics.reset()
         self.geometry_metrics.reset()
-
-
-class AlignmentModule(BobertLightningModule):
-    def __init__(
-        self,
-        model: nn.Module,
-        config: Dict[str, Any],
-        normalizer: Optional[BeatmapNormalizer] = None,
-    ):
-        super().__init__("alignment")
-        self.model = model
-        self.config = config
-        self.normalizer = normalizer
-        self.save_hyperparameters(ignore=["model", "normalizer"])
-
-        self.batch_size = config.alignment.trainer.batch_size
-        self.metrics = ContrastiveMetrics(torch.device("cpu"))
-
-    def forward(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
-
-    def on_fit_start(self):
-        if self.global_rank == 0:
-            print("Running warmup pass to initialize RoPE cache to max_seq_len...")
-
-        max_seq_len = self.config["data"]["max_seq_len"]
-        target_dtype = torch.float32
-
-        precision_str = str(self.trainer.precision)
-        if "bf16" in precision_str:
-            target_dtype = torch.bfloat16
-        elif "16" in precision_str:
-            target_dtype = torch.float16
-
-        model_to_run = self.model
-        if hasattr(model_to_run, "_orig_mod"):
-            model_to_run = model_to_run._orig_mod
-
-        with torch.no_grad():
-            with torch.autocast(device_type=self.device.type, dtype=target_dtype):
-                model_to_run.bert.rotary_emb(
-                    torch.arange(max_seq_len, device=self.device), seq_len=max_seq_len
-                )
-
-        if self.global_rank == 0:
-            print(
-                f"Warmup complete. RoPE cache initialized for L={max_seq_len} using {target_dtype}."
-            )
-
-    def _forward_packed_batch(self, batch: Dict[str, Any]):
-        labels = batch["labels"]
-        max_seqlen = int(batch["max_seqlen"].item())
-        predictions = self.model.forward_packed(
-            batch["packed_vectors"],
-            batch["cu_seqlens"],
-            max_seqlen,
-            labels["map_features"],
-        )
-        return predictions, labels
-
-    def _forward_eval_batch(self, batch: Dict[str, Any]):
-        labels = batch["labels"]
-        predictions = self(
-            batch["vectors"],
-            batch["attention_mask"],
-            batch["cu_seqlens"],
-            map_features=labels["map_features"],
-        )
-        return predictions, labels
-
-    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, labels = self._forward_packed_batch(batch)
-        loss_dict = alignment_loss_fn(predictions, labels, self.config)
-
-        self.log_dict(
-            {
-                "train_loss": loss_dict["total_loss"],
-                "train_contrastive_loss": loss_dict["contrastive_loss"],
-            },
-            prog_bar=True,
-            batch_size=self.batch_size,
-        )
-
-        return loss_dict["total_loss"]
-
-    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, labels = self._forward_eval_batch(batch)
-        loss_dict = alignment_loss_fn(predictions, labels, self.config)
-        self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
-        self.log(
-            "val_loss",
-            loss_dict["total_loss"],
-            prog_bar=True,
-            sync_dist=True,
-            batch_size=self.batch_size,
-        )
-        return loss_dict["total_loss"]
-
-    def on_validation_epoch_end(self):
-        results = self.metrics.compute()
-        for key, value in results.items():
-            self.log(f"val_{key}", value)
-        self.metrics.reset()
-
-
-class AdapterModule(BobertLightningModule):
-    def __init__(
-        self,
-        model: nn.Module,
-        config: Dict[str, Any],
-        datamodule: AdapterData,
-    ):
-        super().__init__("adapter")
-        self.model = model
-        self.config = config
-        self.datamodule = datamodule
-        self.batch_size = config.adapter.trainer.batch_size
-        self.metrics = ContrastiveMetrics(torch.device("cpu"))
-        self.save_hyperparameters(ignore=["model", "datamodule"])
-
-    def forward(self, embeddings):
-        return self.model(embeddings)
-
-    def on_fit_start(self):
-        input_mean = getattr(self.datamodule, "input_mean", None)
-        if input_mean is not None and hasattr(self.model, "set_input_mean"):
-            self.model.set_input_mean(input_mean)
-
-    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions = self(batch["embeddings"])
-        loss_dict = alignment_loss_fn(
-            predictions, batch["labels"], self.config, phase="adapter"
-        )
-        self.log_dict(
-            {
-                "train_loss": loss_dict["total_loss"],
-                "train_contrastive_loss": loss_dict["contrastive_loss"],
-            },
-            prog_bar=True,
-            batch_size=self.batch_size,
-        )
-        return loss_dict["total_loss"]
-
-    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions = self(batch["embeddings"])
-        loss_dict = alignment_loss_fn(
-            predictions, batch["labels"], self.config, phase="adapter"
-        )
-        self.metrics.update(loss=float(loss_dict["total_loss"].detach().cpu()))
-        self.log(
-            "val_loss",
-            loss_dict["total_loss"],
-            prog_bar=True,
-            sync_dist=True,
-            batch_size=self.batch_size,
-        )
-        return loss_dict["total_loss"]
-
-    def on_validation_epoch_end(self):
-        results = self.metrics.compute()
-        for key, value in results.items():
-            self.log(f"val_{key}", value)
-        self.metrics.reset()

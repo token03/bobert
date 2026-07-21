@@ -1,6 +1,5 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
-import numpy as np
 import torch
 
 from .schema import (
@@ -19,11 +18,9 @@ class BeatmapNormalizer:
     def __init__(
         self,
         vector_stats: Dict[str, Tuple[torch.Tensor, torch.Tensor]],
-        attribute_stats: Optional[Dict[str, Tuple[torch.Tensor, torch.Tensor]]] = None,
         epsilon: float = 1e-8,
     ):
         self.vector_stats = vector_stats
-        self.attribute_stats = attribute_stats if attribute_stats is not None else {}
         self.epsilon = epsilon
         self.vector_norm_specs = NORMALIZATION_SPECS
 
@@ -38,41 +35,6 @@ class BeatmapNormalizer:
                 mean, std = self.vector_stats[field_name]
                 normalized_vectors[:, i] = (vectors[:, i] - mean) / (std + self.epsilon)
         return normalized_vectors
-
-    def normalize_attribute(self, key: str, value: float) -> float:
-        if key not in self.attribute_stats:
-            return value
-
-        mean, std = self.attribute_stats[key]
-        normalized = (torch.as_tensor(value, dtype=torch.float32) - mean) / (
-            std + self.epsilon
-        )
-        return float(normalized)
-
-    def denormalize_attribute(self, key: str, value: torch.Tensor) -> torch.Tensor:
-        if key not in self.attribute_stats:
-            return value
-
-        mean, std = self.attribute_stats[key]
-        return value * (
-            std.to(device=value.device, dtype=value.dtype) + self.epsilon
-        ) + (mean.to(device=value.device, dtype=value.dtype))
-
-    @classmethod
-    def attribute_stats_from_data(
-        cls,
-        attributes: Dict[str, np.ndarray],
-        epsilon: float = 1e-8,
-    ) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
-        attribute_stats = {}
-        for key, values in attributes.items():
-            tensor = torch.from_numpy(values.astype(np.float32))
-            if tensor.numel() > 0:
-                attribute_stats[key] = (
-                    tensor.mean(),
-                    torch.clamp(tensor.std(unbiased=False), min=epsilon),
-                )
-        return attribute_stats
 
     @classmethod
     def from_data(
@@ -137,6 +99,3 @@ class BeatmapNormalizer:
 
     def get_vector_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
         return self.vector_stats
-
-    def get_attribute_stats(self) -> Dict[str, Tuple[torch.Tensor, torch.Tensor]]:
-        return self.attribute_stats
