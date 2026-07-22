@@ -4,7 +4,7 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from .batch import LengthBucketBatchSampler, collate_pretrain, masked_query_buckets
+from .batch import LengthBucketBatchSampler, collate_pretrain
 from .normalizer import BeatmapNormalizer
 from .schema import FEATURE_INFO
 from .source import load_beatmap_dataset
@@ -178,11 +178,6 @@ class BobertDataModule(pl.LightningDataModule):
             max_seq_len=self.max_seq_len,
             masking_ratio=config.ratio,
             mean_span_length=config.mean_span_length,
-            q_buckets=masked_query_buckets(
-                self.config.data.length_buckets,
-                self.max_seq_len,
-                config.ratio,
-            ),
         )
 
     def train_dataloader(self):

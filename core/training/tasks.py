@@ -6,7 +6,6 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 
-from core.data.batch import masked_query_buckets, select_q_bucket
 from core.data.module import BobertDataModule, preallocation_batch_size
 
 from .loss import compute_loss
@@ -82,9 +81,6 @@ class BobertModule(pl.LightningModule):
         return self.model.forward_packed(
             batch["packed_vectors"],
             batch["masked_idx"],
-            batch["masked_positions"],
-            batch["masked_counts"],
-            batch["max_seqlen_q"],
             batch["mask_token_idx"],
             batch["random_dst_idx"],
             batch["right_border_zero_idx"],
@@ -165,9 +161,6 @@ class BobertModule(pl.LightningModule):
             dtype=torch.int32,
         )
         masked_idx = packed_mask.nonzero(as_tuple=False).flatten()
-        batch_ids = torch.bucketize(masked_idx, cu_seqlens[1:], right=True)
-        masked_positions = (masked_idx - cu_seqlens[batch_ids]).to(torch.int32)
-        masked_counts = torch.bincount(batch_ids, minlength=batch_size).to(torch.int32)
         split = torch.rand(masked_idx.numel(), device=self.device)
         starts = torch.zeros_like(packed_mask)
         starts[cu_seqlens[:-1].long()] = True
@@ -180,16 +173,6 @@ class BobertModule(pl.LightningModule):
         return {
             "packed_vectors": packed_vectors,
             "masked_idx": masked_idx,
-            "masked_positions": masked_positions,
-            "masked_counts": masked_counts,
-            "max_seqlen_q": select_q_bucket(
-                mask_count,
-                masked_query_buckets(
-                    self.config.data.length_buckets,
-                    max_seq_len,
-                    masking_ratio,
-                ),
-            ),
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
             "right_border_zero_idx": right_border_idx[right_split < 0.8],

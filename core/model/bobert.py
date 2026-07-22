@@ -2,7 +2,6 @@
 from omegaconf import DictConfig
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Tuple, Dict, Any, Sequence, Type, TypeVar
 from rotary_embedding_torch import RotaryEmbedding
 
@@ -31,11 +30,6 @@ def _compile_encoder_only(model: nn.Module, config: DictConfig, label: str) -> N
     )
     model.bert.encode = torch.compile(
         model.bert.encode,
-        mode=compile_mode,
-        dynamic=compile_dynamic,
-    )
-    model.bert.encode_masked = torch.compile(
-        model.bert.encode_masked,
         mode=compile_mode,
         dynamic=compile_dynamic,
     )
@@ -171,49 +165,6 @@ class BobertEncoder(nn.Module):
 
         return packed_output
 
-    def encode_masked(
-        self,
-        packed_embeddings: torch.Tensor,
-        masked_idx: torch.Tensor,
-        masked_positions: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
-    ) -> torch.Tensor:
-        if not self.use_flash or not self.layers[-1].is_global:
-            return self.encode(
-                packed_embeddings,
-                cu_seqlens_k,
-                max_seqlen_k,
-            ).index_select(0, masked_idx)
-
-        all_freqs = self.rotary_emb(
-            torch.arange(max_seqlen_k, device=packed_embeddings.device),
-            seq_len=max_seqlen_k,
-        )
-        rotary_freqs = (all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin())
-        packed_output = packed_embeddings
-        for layer in self.layers[:-1]:
-            packed_output = layer(
-                packed_output,
-                rotary_freqs=rotary_freqs,
-                cu_seqlens=cu_seqlens_k,
-                max_seqlen=max_seqlen_k,
-            )
-
-        masked_output = self.layers[-1].forward_masked(
-            packed_output,
-            masked_idx=masked_idx,
-            masked_positions=masked_positions,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            rotary_freqs=rotary_freqs,
-        )
-        return self.final_norm(masked_output)
-
     def encode_packed(
         self,
         packed_vectors: torch.Tensor,
@@ -346,33 +297,21 @@ class BobertForPretraining(nn.Module):
         self,
         packed_input: torch.Tensor,
         masked_idx: torch.Tensor,
-        masked_positions: torch.Tensor,
-        masked_counts: torch.Tensor,
-        max_seqlen_q: int,
         cu_seqlens: torch.Tensor,
-        max_seqlen_k: int,
+        max_seqlen: int,
     ) -> Dict[str, Any]:
-        cu_seqlens_q = F.pad(
-            torch.cumsum(masked_counts, dim=0, dtype=torch.int32), (1, 0)
-        )
-        masked_output = self.bert.encode_masked(
+        encoded = self.bert.encode(
             packed_input,
-            masked_idx,
-            masked_positions,
-            cu_seqlens_q,
-            cu_seqlens,
-            max_seqlen_q,
-            max_seqlen_k,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
+        masked_output = encoded.index_select(0, masked_idx)
         return {"mlm": self.mlm_head(masked_output)}
 
     def forward_packed(
         self,
         packed_vectors: torch.Tensor,
         masked_idx: torch.Tensor,
-        masked_positions: torch.Tensor,
-        masked_counts: torch.Tensor,
-        max_seqlen_q: int,
         mask_token_idx: torch.Tensor,
         random_dst_idx: torch.Tensor,
         right_border_zero_idx: torch.Tensor,
@@ -397,9 +336,6 @@ class BobertForPretraining(nn.Module):
         predictions = self._predictions(
             packed_input,
             masked_idx,
-            masked_positions,
-            masked_counts,
-            max_seqlen_q,
             cu_seqlens,
             max_seqlen,
         )

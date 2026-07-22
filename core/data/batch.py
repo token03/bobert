@@ -1,31 +1,9 @@
 import math
 import random
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence
 
 import torch
 from torch.utils.data import Sampler
-
-
-def masked_query_buckets(
-    length_buckets: Sequence[int], max_seq_len: int, masking_ratio: float
-) -> Tuple[int, ...]:
-    lengths = {*map(int, length_buckets), int(max_seq_len)}
-    return tuple(
-        sorted(
-            {
-                max(32, ((round(length * masking_ratio) + 31) // 32) * 32)
-                for length in lengths
-                if length <= max_seq_len
-            }
-        )
-    )
-
-
-def select_q_bucket(max_masked_count: int, buckets: Sequence[int]) -> int:
-    for bound in buckets:
-        if max_masked_count <= bound:
-            return bound
-    raise ValueError(f"Masked sequence too long: {max_masked_count}")
 
 
 class LengthBucketBatchSampler(Sampler[List[int]]):
@@ -143,7 +121,6 @@ def collate_pretrain(
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
-    q_buckets: Sequence[int],
 ):
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in batch]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
@@ -151,12 +128,11 @@ def collate_pretrain(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
     )
     masks = [span_mask(length, masking_ratio, mean_span_length) for length in lengths]
-    masked_counts = torch.tensor([int(mask.sum()) for mask in masks], dtype=torch.int32)
-    masked_positions = torch.cat(
-        [mask.nonzero(as_tuple=False).flatten() for mask in masks], dim=0
-    )
-    masked_idx = masked_positions + torch.repeat_interleave(
-        cu_seqlens[:-1].long(), masked_counts.long()
+    masked_idx = torch.cat(
+        [
+            mask.nonzero(as_tuple=False).flatten() + cu_seqlens[i].long()
+            for i, mask in enumerate(masks)
+        ]
     )
     split = torch.rand(masked_idx.numel())
     right_border_idx = torch.cat(
@@ -173,9 +149,6 @@ def collate_pretrain(
             [vector[:length] for vector, length in zip(batch, lengths)], dim=0
         ),
         "masked_idx": masked_idx,
-        "masked_positions": masked_positions.to(torch.int32),
-        "masked_counts": masked_counts,
-        "max_seqlen_q": select_q_bucket(int(masked_counts.max()), q_buckets),
         "mask_token_idx": masked_idx[split < 0.8],
         "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
         "right_border_zero_idx": right_border_idx[right_split < 0.8],
