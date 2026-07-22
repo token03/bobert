@@ -22,6 +22,7 @@ os.environ.setdefault("POLARS_MAX_THREADS", str(THREAD_COUNT))
 
 import httpx
 import numpy as np
+from omegaconf import OmegaConf
 from ossapi import Ossapi
 import polars as pl
 import torch
@@ -43,7 +44,6 @@ from backend.logging import (
     timed_call,
 )
 from backend.osu import close_osu_http_client, fetch_osu_file, open_osu_http_client
-from core.config import load_config
 
 
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
@@ -99,11 +99,7 @@ class DateWindow(str, Enum):
     all_time = "all_time"
 
 
-def load_api_config() -> dict[str, Any]:
-    return load_config(CONFIG_PATH).api
-
-
-API_CONFIG = load_api_config()
+API_CONFIG = OmegaConf.load(CONFIG_PATH).api
 MAX_RECOMMEND_TOP_K = int(API_CONFIG.max_recommend_top_k)
 DEFAULT_RECOMMEND_IDS = [
     int(beatmap_id)

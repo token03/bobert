@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+from omegaconf import OmegaConf
 import pyarrow as pa
 import pyarrow.parquet as pq
 import polars as pl
@@ -12,13 +13,11 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from core.config import load_config
 from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
 from core.model.bobert import BobertEncoder
-from core.paths import RUNS_DIR
-from scripts.common.paths import PROJECT_ROOT, resolve_path
+from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
 
 class ExportDataset(Dataset):
@@ -193,7 +192,7 @@ def export_embeddings(
     seed: int,
     device_name: str | None,
 ):
-    config = load_config(config_path)
+    config = OmegaConf.load(config_path)
     if load_chunk_size <= 0:
         raise ValueError("load_chunk_size must be positive")
     if flush_size <= 0:

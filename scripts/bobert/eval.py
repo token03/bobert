@@ -18,9 +18,8 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
-from core.paths import RUNS_DIR
 from scripts.collections.ngram import tokenize
-from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, resolve_path
+from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
 from scripts.data.rff import RHYTHM_WINDOW_STRATA
 
 console = Console()

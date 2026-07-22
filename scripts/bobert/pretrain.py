@@ -7,10 +7,8 @@ from typing import cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from core.config import load_config as load_bobert_config
 from core.data.module import BobertDataModule
 from core.model.bobert import BobertForPretraining
-from core.paths import RUNS_DIR
 from core.training.tasks import BobertModule
 from core.training.setup import (
     create_trainer,
@@ -18,6 +16,7 @@ from core.training.setup import (
     run_name_from_checkpoint,
     setup_device,
 )
+from scripts.common.paths import RUNS_DIR
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,7 +55,7 @@ def load_config(args: argparse.Namespace, checkpoint: dict | None = None) -> Dic
         DictConfig,
         OmegaConf.create(checkpoint["config"])
         if checkpoint is not None
-        else load_bobert_config(args.config),
+        else OmegaConf.load(args.config),
     )
     OmegaConf.set_struct(config, False)
 

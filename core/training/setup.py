@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
-from core.paths import RUNS_DIR
+from scripts.common.paths import RUNS_DIR
 
 
 def setup_device() -> str:

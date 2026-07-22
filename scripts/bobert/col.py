@@ -7,11 +7,11 @@ import shutil
 from pathlib import Path
 
 import numpy as np
+from omegaconf import OmegaConf
 import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from core.config import load_config
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
 from scripts.bobert.embed import (
@@ -326,7 +326,7 @@ def build(args):
         shutil.rmtree(output)
     output.mkdir(parents=True)
 
-    config = load_config(resolve_path(args.config))
+    config = OmegaConf.load(resolve_path(args.config))
     dataset_dir = resolve_path(args.dataset or config.data.dataset_path)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, normalizer = load_model(model_path, device)

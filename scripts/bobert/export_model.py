@@ -8,9 +8,8 @@ import torch
 
 from core.data.normalizer import BeatmapNormalizer
 from core.model.bobert import BobertForPretraining
-from core.paths import RUNS_DIR
 from core.training.setup import find_latest_checkpoint
-from scripts.common.paths import resolve_path
+from scripts.common.paths import RUNS_DIR, resolve_path
 
 
 def parse_args() -> argparse.Namespace:
