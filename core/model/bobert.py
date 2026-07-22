@@ -24,16 +24,15 @@ T = TypeVar("T", bound="BobertEncoder")
 def _compile_encoder_only(model: nn.Module, config: DictConfig, label: str) -> None:
     print(f"Compiling BERT {label} tokenizer and encoder with torch.compile...")
     compile_mode = config.runtime.compile_mode
-    compile_dynamic = config.runtime.compile_dynamic
     model.bert.embed_sequences = torch.compile(
         model.bert.embed_sequences,
         mode=compile_mode,
-        dynamic=compile_dynamic,
+        dynamic=False,
     )
-    model.bert.encode = torch.compile(
-        model.bert.encode,
+    model.bert._encode = torch.compile(
+        model.bert._encode,
         mode=compile_mode,
-        dynamic=compile_dynamic,
+        dynamic=False,
     )
     model.is_compiled = True
 
@@ -92,15 +91,12 @@ class BobertEncoder(nn.Module):
                     is_global=i in self.global_attention_layers,
                     local_window_size=local_attention_window,
                     local_block_size=local_attention_block_size,
-                    activation_checkpointing=activation_checkpointing and i % 2 == 0,
+                    activation_checkpointing=activation_checkpointing,
                     use_flash=use_flash,
                 )
                 for i in range(n_layers)
             ]
         )
-        if self.layers:
-            self.layers[-1].activation_checkpointing = False
-
         self.final_norm = RMSNorm(d_model)
 
         self.rotary_emb = RotaryEmbedding(
@@ -181,9 +177,22 @@ class BobertEncoder(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
+        positions = torch.arange(max_seqlen, device=packed_embeddings.device)
+        torch._dynamo.mark_dynamic(packed_embeddings, 0)
+        torch._dynamo.mark_dynamic(cu_seqlens, 0)
+        torch._dynamo.mark_dynamic(positions, 0)
+        return self._encode(packed_embeddings, cu_seqlens, positions)
+
+    def _encode(
+        self,
+        packed_embeddings: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
         packed_output = packed_embeddings
+        max_seqlen = positions.shape[0]
         all_freqs = self.rotary_emb(
-            torch.arange(max_seqlen, device=packed_embeddings.device),
+            positions,
             seq_len=max_seqlen,
         )
         if self.use_flash:
@@ -215,6 +224,7 @@ class BobertEncoder(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        torch._dynamo.mark_dynamic(packed_vectors, 0)
         packed_input = self.embed_sequences(packed_vectors)
         packed_output = self.encode(
             packed_input,
@@ -369,6 +379,7 @@ class BobertForPretraining(nn.Module):
             right_border_zero_idx,
             right_border_random_idx,
         )
+        torch._dynamo.mark_dynamic(encoder_vectors, 0)
         packed_embed = self.bert.embed_sequences(encoder_vectors)
         packed_input = self.masker.forward_packed(
             packed_embed,
