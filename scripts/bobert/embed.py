@@ -1,4 +1,6 @@
 import argparse
+from datetime import datetime, timezone
+import json
 import math
 from pathlib import Path
 
@@ -7,7 +9,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import polars as pl
 import torch
-from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -15,15 +16,8 @@ from core.config import load_config
 from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
-from core.model.bobert import BobertForPretraining
-from core.model.checkpoint import (
-    load_checkpoint,
-    load_state_for_inference,
-    setup_checkpoint,
-    strip_checkpoint_state,
-)
+from core.model.bobert import BobertEncoder
 from core.paths import RUNS_DIR
-from core.training.setup import find_latest_checkpoint
 from scripts.common.paths import PROJECT_ROOT, resolve_path
 
 
@@ -54,36 +48,31 @@ def collate_export(batch, max_seq_len: int):
     )
 
 
-def find_checkpoint(path: str | Path | None = None) -> Path:
+def find_model(
+    path: str | Path | None = None, version: str | None = None
+) -> Path:
     if path is not None:
-        ckpt = resolve_path(path)
-        if not ckpt.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
-        return ckpt
+        model_path = resolve_path(path).resolve()
+    elif version is not None:
+        model_path = RUNS_DIR / version / "bobert.pt"
+    else:
+        candidates = list(RUNS_DIR.glob("*/bobert.pt"))
+        if not candidates:
+            raise FileNotFoundError(f"No exported models found in {RUNS_DIR}")
+        model_path = max(candidates, key=lambda candidate: candidate.stat().st_mtime)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model not found: {model_path}")
+    return model_path
 
-    ckpt = find_latest_checkpoint(RUNS_DIR)
-    if ckpt is None:
-        raise FileNotFoundError(f"No checkpoint found in {RUNS_DIR}")
-    return ckpt
 
-
-def load_model(config, checkpoint_path: Path, device: torch.device):
-    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
-    config, state = setup_checkpoint(config, checkpoint)
-    OmegaConf.set_struct(config, False)
-    config.runtime.compile_model = False
-    OmegaConf.set_struct(config, True)
-
-    model = BobertForPretraining.from_config(config, device)
-    load_state_for_inference(model, strip_checkpoint_state(state))
-    print(f"Loaded checkpoint: {checkpoint_path}")
-    print(f"State load: loaded={len(state)}")
-    print(f"Model dim_feedforward={config.model.dim_feedforward}")
+def load_model(model_path: Path, device: torch.device):
+    model, normalizer = BobertEncoder.from_pretrained(model_path, device)
+    print(f"Loaded model: {model_path}")
     if device.type == "cuda":
         model.to(device).bfloat16().eval()
     else:
         model.to(device).float().eval()
-    return model, checkpoint
+    return model, normalizer
 
 
 def sample_ids(
@@ -193,7 +182,7 @@ def flush_embeddings(
 
 def export_embeddings(
     config_path: Path,
-    checkpoint_path: Path | None,
+    model_path: Path,
     dataset_dir: Path | None,
     output_path: Path,
     limit: int | None,
@@ -212,21 +201,19 @@ def export_embeddings(
 
     dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
     dataset_dir = resolve_path(dataset_dir)
-    ids = sample_ids(dataset_dir, limit, seed, min_sr, config.data.max_seq_len)
-    print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
-
-    ckpt_path = find_checkpoint(checkpoint_path)
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
     )
+    model, normalizer = load_model(find_model(model_path), device)
+    max_seq_len = model.max_seq_len
+    ids = sample_ids(dataset_dir, limit, seed, min_sr, max_seq_len)
+    print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
 
-    model, checkpoint = load_model(config, ckpt_path, device)
     with torch.inference_mode():
-        model.bert.rotary_emb(
-            torch.arange(config.data.max_seq_len, device=device),
-            seq_len=config.data.max_seq_len,
+        model.rotary_emb(
+            torch.arange(max_seq_len, device=device),
+            seq_len=max_seq_len,
         )
-    normalizer = BeatmapNormalizer(vector_stats=checkpoint["vector_stats"])
 
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     writer = None
@@ -243,7 +230,7 @@ def export_embeddings(
                 beatmaps = load_beatmap_dataset(
                     str(dataset_dir),
                     dataset_seed=seed,
-                    max_seq_len=config.data.max_seq_len,
+                    max_seq_len=max_seq_len,
                     ids_to_load=id_chunk,
                     min_sr=min_sr,
                     max_sr=None,
@@ -256,7 +243,7 @@ def export_embeddings(
                 batch_sampler = bucket_batch_sampler(
                     beatmaps,
                     batch_size,
-                    config.data.max_seq_len,
+                    max_seq_len,
                     [int(bucket) for bucket in config.data.length_buckets],
                     seed,
                 )
@@ -265,7 +252,7 @@ def export_embeddings(
                     "num_workers": 0,
                     "pin_memory": device.type == "cuda",
                     "collate_fn": lambda batch: collate_export(
-                        batch, config.data.max_seq_len
+                        batch, max_seq_len
                     ),
                 }
                 if batch_sampler is None:
@@ -309,17 +296,32 @@ def export_embeddings(
     if saved_count == 0:
         raise RuntimeError("No beatmaps loaded for export")
 
+    metadata_path = output_path.with_suffix(".json")
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "model": str(model_path),
+                "dataset": str(dataset_dir),
+                "min_sr": min_sr,
+                "limit": limit,
+                "seed": seed,
+                "count": saved_count,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     print(f"Saved {saved_count:,} embeddings to {output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Export Bobert embeddings")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
-    parser.add_argument(
-        "--checkpoint",
-        default=None,
-        help="Override checkpoint path; otherwise uses the latest run",
-    )
+    parser.add_argument("-v", "--version")
+    parser.add_argument("--model", help="Exported BoBERT .pt model")
     parser.add_argument(
         "--dataset", default=None, help="Defaults to config.data.dataset_path"
     )
@@ -334,13 +336,14 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
     args = parser.parse_args()
+    model_path = find_model(args.model, args.version)
 
     export_embeddings(
         config_path=resolve_path(args.config),
-        checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+        model_path=model_path,
         dataset_dir=Path(args.dataset) if args.dataset else None,
         output_path=resolve_path(
-            args.output or PROJECT_ROOT / "data" / "embeddings.parquet"
+            args.output or model_path.parent / "embeddings.parquet"
         ),
         limit=args.limit,
         min_sr=args.min_sr,

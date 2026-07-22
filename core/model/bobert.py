@@ -1,10 +1,12 @@
 # bobert.py
+from pathlib import Path
 from omegaconf import DictConfig
 import torch
 import torch.nn as nn
 from typing import Tuple, Dict, Any, Sequence, Type, TypeVar
 from rotary_embedding_torch import RotaryEmbedding
 
+from ..data.normalizer import BeatmapNormalizer
 from ..data.schema import FEATURE_INFO
 
 from .components import (
@@ -59,6 +61,19 @@ class BobertEncoder(nn.Module):
         self.activation_checkpointing = activation_checkpointing
         self.global_attention_layers = set(global_attention_layers)
         self.use_flash = use_flash
+        self.max_seq_len = max_seq_len
+        self.model_args = {
+            "d_model": d_model,
+            "n_heads": n_heads,
+            "n_layers": n_layers,
+            "dim_feedforward": dim_feedforward,
+            "local_attention_window": local_attention_window,
+            "local_attention_block_size": local_attention_block_size,
+            "global_attention_layers": list(global_attention_layers),
+            "dropout": dropout,
+            "max_seq_len": max_seq_len,
+            "feature_token_dim": feature_token_dim,
+        }
 
         self.feature_info = FEATURE_INFO
         self.feature_tokenizer = HitObjectFeatureTokenizer(
@@ -98,13 +113,11 @@ class BobertEncoder(nn.Module):
         data_config = config.data
         runtime_config = config.runtime
 
-        dim_feedforward = model_config.dim_feedforward
-
         return cls(
             d_model=model_config.d_model,
             n_heads=model_config.n_heads,
             n_layers=model_config.n_layers,
-            dim_feedforward=dim_feedforward,
+            dim_feedforward=model_config.dim_feedforward,
             dropout=model_config.dropout,
             local_attention_window=model_config.local_attention_window,
             local_attention_block_size=getattr(
@@ -115,6 +128,37 @@ class BobertEncoder(nn.Module):
             activation_checkpointing=runtime_config.activation_checkpointing,
             feature_token_dim=model_config.feature_token_dim,
             use_flash=use_flash,
+        )
+
+    @classmethod
+    def from_pretrained(
+        cls: Type[T], path: str | Path, device: torch.device
+    ) -> tuple[T, BeatmapNormalizer]:
+        artifact = torch.load(path, map_location="cpu", weights_only=True)
+        model = cls(
+            **artifact["model_args"],
+            activation_checkpointing=False,
+            use_flash=device.type == "cuda",
+        )
+        model.load_state_dict(artifact["state_dict"], strict=True)
+        model.to(device).eval()
+        return model, BeatmapNormalizer(artifact["vector_stats"])
+
+    def save_pretrained(
+        self,
+        path: str | Path,
+        normalizer: BeatmapNormalizer,
+    ) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {key: value.detach().cpu() for key, value in self.state_dict().items()}
+        torch.save(
+            {
+                "model_args": self.model_args,
+                "state_dict": state,
+                "vector_stats": normalizer.get_vector_stats(),
+            },
+            path,
         )
 
     def get_summary(self) -> Dict[str, Any]:
@@ -179,6 +223,79 @@ class BobertEncoder(nn.Module):
         )
         return packed_output, cu_seqlens, max_seqlen
 
+    def _get_embedding(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        pooled = torch.segment_reduce(
+            packed_output.float(), reduce="mean", lengths=lengths
+        )
+        return pooled.masked_fill(lengths[:, None] == 0, 0.0)
+
+    def embed_packed(
+        self,
+        packed_vectors: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> torch.Tensor:
+        packed_output, cu_seqlens, _ = self.encode_packed(
+            packed_vectors, cu_seqlens, max_seqlen
+        )
+        return self._get_embedding(packed_output, cu_seqlens)
+
+    def embed_col_packed(
+        self,
+        packed_vectors: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        beat_ids: torch.Tensor | None = None,
+    ) -> Dict[str, torch.Tensor]:
+        packed_output, cu_seqlens, _ = self.encode_packed(
+            packed_vectors, cu_seqlens, max_seqlen
+        )
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        map_index = torch.repeat_interleave(
+            torch.arange(lengths.numel(), device=packed_output.device), lengths
+        )
+        token_index = torch.arange(
+            packed_output.shape[0], device=packed_output.device
+        ) - torch.repeat_interleave(cu_seqlens[:-1].to(torch.long), lengths)
+        col_embedding = packed_output
+        col_map_index = map_index
+        col_index = token_index
+        if beat_ids is not None:
+            beat_ids = beat_ids.to(device=packed_output.device, dtype=torch.long)
+            if beat_ids.shape[0] != packed_output.shape[0]:
+                raise ValueError(
+                    f"beat_ids length must match packed tokens: "
+                    f"{beat_ids.shape[0]} != {packed_output.shape[0]}"
+                )
+            starts = torch.ones(
+                beat_ids.shape[0], device=beat_ids.device, dtype=torch.bool
+            )
+            starts[1:] = (beat_ids[1:] != beat_ids[:-1]) | (
+                map_index[1:] != map_index[:-1]
+            )
+            group_ids = starts.cumsum(0) - 1
+            group_count = int(group_ids[-1].item()) + 1 if group_ids.numel() else 0
+            col_embedding = torch.zeros(
+                group_count,
+                packed_output.shape[-1],
+                device=packed_output.device,
+                dtype=torch.float32,
+            )
+            col_embedding.index_add_(0, group_ids, packed_output.float())
+            col_map_index = map_index[starts]
+            col_index = beat_ids[starts]
+        return {
+            "embedding": self._get_embedding(packed_output, cu_seqlens),
+            "col_embedding": col_embedding,
+            "col_map_index": col_map_index,
+            "col_index": col_index,
+        }
+
 
 class BobertForPretraining(nn.Module):
     def __init__(
@@ -218,80 +335,6 @@ class BobertForPretraining(nn.Module):
 
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
-
-    def _get_embedding(
-        self,
-        packed_output: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> torch.Tensor:
-        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
-        pooled = torch.segment_reduce(
-            packed_output.float(), reduce="mean", lengths=lengths
-        )
-        return pooled.masked_fill(lengths[:, None] == 0, 0.0)
-
-    def embed_packed(
-        self,
-        packed_vectors: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> torch.Tensor:
-        packed_output, cu_seqlens, max_seqlen = self.bert.encode_packed(
-            packed_vectors, cu_seqlens, max_seqlen
-        )
-        return self._get_embedding(packed_output, cu_seqlens, max_seqlen)
-
-    def embed_col_packed(
-        self,
-        packed_vectors: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-        beat_ids: torch.Tensor | None = None,
-    ) -> Dict[str, torch.Tensor]:
-        packed_output, cu_seqlens, max_seqlen = self.bert.encode_packed(
-            packed_vectors, cu_seqlens, max_seqlen
-        )
-        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
-        map_index = torch.repeat_interleave(
-            torch.arange(lengths.numel(), device=packed_output.device), lengths
-        )
-        token_index = torch.arange(
-            packed_output.shape[0], device=packed_output.device
-        ) - torch.repeat_interleave(cu_seqlens[:-1].to(torch.long), lengths)
-        col_embedding = packed_output
-        col_map_index = map_index
-        col_index = token_index
-        if beat_ids is not None:
-            beat_ids = beat_ids.to(device=packed_output.device, dtype=torch.long)
-            if beat_ids.shape[0] != packed_output.shape[0]:
-                raise ValueError(
-                    f"beat_ids length must match packed tokens: "
-                    f"{beat_ids.shape[0]} != {packed_output.shape[0]}"
-                )
-            starts = torch.ones(
-                beat_ids.shape[0], device=beat_ids.device, dtype=torch.bool
-            )
-            starts[1:] = (beat_ids[1:] != beat_ids[:-1]) | (
-                map_index[1:] != map_index[:-1]
-            )
-            group_ids = starts.cumsum(0) - 1
-            group_count = int(group_ids[-1].item()) + 1 if group_ids.numel() else 0
-            col_embedding = torch.zeros(
-                group_count,
-                packed_output.shape[-1],
-                device=packed_output.device,
-                dtype=torch.float32,
-            )
-            col_embedding.index_add_(0, group_ids, packed_output.float())
-            col_map_index = map_index[starts]
-            col_index = beat_ids[starts]
-        return {
-            "embedding": self._get_embedding(packed_output, cu_seqlens, max_seqlen),
-            "col_embedding": col_embedding,
-            "col_map_index": col_map_index,
-            "col_index": col_index,
-        }
 
     def _predictions(
         self,

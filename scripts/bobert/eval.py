@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import json
 import re
 from dataclasses import dataclass
 from functools import cache
@@ -16,6 +18,7 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
+from core.paths import RUNS_DIR
 from scripts.collections.ngram import tokenize
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, resolve_path
 from scripts.data.rff import RHYTHM_WINDOW_STRATA
@@ -47,11 +50,14 @@ TOURNAMENT_SLOT_MIN_MAPS = 20
 TAG_MIN_SETS = 25
 RETRIEVAL_RECALL_K = 50
 MULTILABEL_TOP_K = 5
+EVAL_VERSION = 1
 
 
 @dataclass
 class TargetData:
     name: str
+    path: Path
+    run_dir: Path | None
     beatmap_ids: np.ndarray
     embeddings: np.ndarray
     id_to_index: dict[int, int]
@@ -69,6 +75,9 @@ class EvalResult:
     metrics: dict[str, dict[str, float]]
 
 
+EVAL_RESULTS: list[EvalResult] = []
+
+
 @dataclass
 class DifficultyData:
     ids: list[int]
@@ -78,13 +87,17 @@ class DifficultyData:
 
 
 def target_path(target: str) -> Path:
-    path = resolve_path(target)
+    path = resolve_path(target).resolve()
     if path.exists():
         return path
-    return DATA_DIR / f"embeddings-{target}.parquet"
+    if target == "graph":
+        return DATA_DIR / "graph.parquet"
+    return RUNS_DIR / target / "embeddings.parquet"
 
 
 def target_name(path: Path) -> str:
+    if path.name == "embeddings.parquet" and path.parent.parent == RUNS_DIR:
+        return path.parent.name
     stem = path.stem
     return stem.removeprefix("embeddings-")
 
@@ -132,11 +145,12 @@ def load_targets(targets: list[str], *, center: bool) -> list[TargetData]:
     for target in targets:
         path = target_path(target)
         name = target_name(path)
+        run_dir = path.parent if path.parent.parent == RUNS_DIR else None
         beatmap_ids, embeddings, id_to_index = load_embeddings(
             path, center=center and name != "graph"
         )
         loaded.append(
-            TargetData(name, beatmap_ids, embeddings, id_to_index)
+            TargetData(name, path, run_dir, beatmap_ids, embeddings, id_to_index)
         )
     return loaded
 
@@ -662,16 +676,11 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
     results = [
         evaluate_grouped_retrieval(target, groups, candidate_ids) for target in targets
     ]
-    keys = [
-        "query_mrr",
-        "mean_positive_rank",
-        "median_positive_rank",
-        f"macro_recall@{RETRIEVAL_RECALL_K}",
-    ]
-    print_metrics(
-        "Grouped Retrieval Metrics",
-        {result.name: result.metrics for result in results},
-        keys,
+    print_eval_result(
+        EvalResult(
+            "Grouped Retrieval",
+            {result.name: result.metrics for result in results},
+        )
     )
 
 
@@ -880,7 +889,9 @@ def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
     beatmap_ids, embeddings, id_to_index = load_embeddings(
         RFF_EVAL_PATH, center=False, normalize=False
     )
-    reference = TargetData("rff", beatmap_ids, embeddings, id_to_index)
+    reference = TargetData(
+        "rff", RFF_EVAL_PATH, None, beatmap_ids, embeddings, id_to_index
+    )
     ids = common_ids([*targets, reference])
     if len(ids) < YEAR_MIN_MAPS:
         return
@@ -1029,8 +1040,117 @@ def run_tournament_slot_eval(
 
 
 def print_eval_result(result: EvalResult) -> None:
+    EVAL_RESULTS.append(result)
     keys = list(next(iter(result.metrics.values())).keys())
     print_metrics(result.name, result.metrics, keys)
+
+
+def training_metrics(target: TargetData) -> dict | None:
+    if target.run_dir is None:
+        return None
+    path = target.run_dir / "metrics.csv"
+    if not path.exists():
+        return None
+    metrics = pl.read_csv(path, infer_schema_length=None)
+    if "val_loss" not in metrics.columns:
+        return None
+    validation = metrics.filter(pl.col("val_loss").is_not_null()).sort("step")
+    if validation.is_empty():
+        return None
+
+    def values(row: dict) -> dict:
+        return {
+            key: value
+            for key, value in row.items()
+            if value is not None and (key in {"epoch", "step"} or key.startswith("val_"))
+        }
+
+    final = values(validation.row(-1, named=True))
+    best = values(validation.sort("val_loss").row(0, named=True))
+    return {"final": final, "best": best}
+
+
+def print_training_metrics(targets: list[TargetData]) -> dict[str, dict]:
+    summaries = {
+        target.name: summary
+        for target in targets
+        if (summary := training_metrics(target)) is not None
+    }
+    if summaries:
+        available = {
+            key
+            for summary in summaries.values()
+            for key in summary["final"]
+        }
+        keys = [
+            key
+            for key in (
+                "val_loss",
+                "val_mlm_mlm_loss",
+                "val_map_effective_rank",
+                "val_map_anisotropy",
+                "val_map_pc1_ratio",
+                "val_token_anisotropy",
+            )
+            if key in available
+        ]
+        print_metrics(
+            "Final Training Metrics",
+            {name: summary["final"] for name, summary in summaries.items()},
+            keys,
+        )
+    return summaries
+
+
+def json_value(value):
+    if isinstance(value, dict):
+        return {key: json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_value(item) for item in value]
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    if isinstance(value, np.generic):
+        return json_value(value.item())
+    return value
+
+
+def save_eval_results(
+    targets: list[TargetData], training: dict[str, dict], *, center: bool
+) -> None:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    for target in targets:
+        if target.run_dir is None:
+            continue
+        embedding_metadata_path = target.path.with_suffix(".json")
+        embedding_metadata = (
+            json.loads(embedding_metadata_path.read_text(encoding="utf-8"))
+            if embedding_metadata_path.exists()
+            else None
+        )
+        evaluations = {
+            result.name: result.metrics[target.name]
+            for result in EVAL_RESULTS
+            if target.name in result.metrics
+        }
+        payload = json_value(
+            {
+                "eval_version": EVAL_VERSION,
+                "generated_at": generated_at,
+                "target": target.name,
+                "targets": [item.name for item in targets],
+                "embeddings": str(target.path),
+                "centered": center,
+                "embedding_metadata": embedding_metadata,
+                "training": training.get(target.name),
+                "evaluations": evaluations,
+            }
+        )
+        output = target.run_dir / "eval.json"
+        output.write_text(
+            json.dumps(payload, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        console.print(f"[dim]Saved {output}[/dim]")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1038,7 +1158,7 @@ def parse_args() -> argparse.Namespace:
         description="Compare embedding files with retrieval and linear probe evals"
     )
     parser.add_argument(
-        "targets", nargs="+", help="Embedding suffixes or paths, e.g. pretrain-v7 graph"
+        "targets", nargs="+", help="Run versions or embedding paths, e.g. v7_ab graph"
     )
     parser.add_argument("--eval", default=str(DATA_DIR / "eval.csv"))
     parser.add_argument(
@@ -1049,7 +1169,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    EVAL_RESULTS.clear()
     targets = load_targets(args.targets, center=not args.no_center)
+    training = print_training_metrics(targets)
     evals: list[tuple[str, Callable[[list[TargetData], argparse.Namespace], None]]] = [
         ("Grouped Retrieval", run_grouped_retrieval),
         ("Mapper Probe", run_mapper_eval),
@@ -1064,6 +1186,7 @@ def main() -> None:
     ]
     for _title, run_eval in evals:
         run_eval(targets, args)
+    save_eval_results(targets, training, center=not args.no_center)
 
 
 if __name__ == "__main__":

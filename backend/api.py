@@ -380,7 +380,7 @@ def get_runtime() -> Runtime:
             id_to_index=id_to_index,
             metadata_by_id=metadata_by_id,
             cache=cache,
-            inferencer=CpuInferencer(CONFIG_PATH, MODEL_PATH),
+            inferencer=CpuInferencer(MODEL_PATH),
             lock=threading.Lock(),
         )
         return _RUNTIME

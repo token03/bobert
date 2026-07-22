@@ -7,84 +7,47 @@ from typing import Any
 import numpy as np
 import polars as pl
 import torch
-from omegaconf import OmegaConf
 
-from core.config import load_config
-from core.data.schema import MAP_FEATURE_ATTRIBUTES
-from core.data.feature import build_feature_tensors, calculate_drain_times
+from core.data.feature import build_feature_tensors
 from core.data.normalizer import BeatmapNormalizer
 from core.data.parser import RawBeatmap, parse_osu_file
-from core.model.bobert import BobertForAlignment
-from core.model.checkpoint import (
-    load_checkpoint,
-    load_state_for_inference,
-    normalizer_from_checkpoint,
-    setup_checkpoint,
-)
+from core.model.bobert import BobertEncoder
 
 
 MIN_OBJECTS_PER_MAP = 1
 
 
 class CpuInferencer:
-    def __init__(self, config_path: Path, model_path: Path):
-        self.config_path = config_path
+    def __init__(self, model_path: Path):
         self.model_path = model_path
         self.device = torch.device("cpu")
-        self.config: Any | None = None
-        self.model: BobertForAlignment | None = None
+        self.model: BobertEncoder | None = None
         self.normalizer: BeatmapNormalizer | None = None
 
     def load(self) -> None:
         if self.model is not None:
             return
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"config not found: {self.config_path}")
         if not self.model_path.exists():
             raise FileNotFoundError(f"model not found: {self.model_path}")
 
-        config = load_config(self.config_path)
-        checkpoint = load_checkpoint(self.model_path, map_location="cpu")
-        config, state = setup_checkpoint(config, checkpoint, "alignment")
-        OmegaConf.set_struct(config, False)
-        config.runtime.compile_model = False
-        config.runtime.compile_dynamic = False
-        config.runtime.activation_checkpointing = False
-        config.alignment.trainer.precision = "32"
-        OmegaConf.set_struct(config, True)
-
-        model = BobertForAlignment.from_config(config, self.device)
-        load_state_for_inference(model, state)
+        model, normalizer = BobertEncoder.from_pretrained(self.model_path, self.device)
         model.to(self.device).float().eval()
 
-        self.config = config
         self.model = model
-        self.normalizer = normalizer_from_checkpoint(checkpoint)
+        self.normalizer = normalizer
 
     def embed_osu_bytes(self, content: bytes) -> np.ndarray:
         self.load()
-        assert self.config is not None
         assert self.model is not None
         assert self.normalizer is not None
 
         with tempfile.NamedTemporaryFile(suffix=".osu") as tmp:
             tmp.write(content)
             tmp.flush()
-            vectors, raw_map_features = _beatmap_inputs_from_osu(
-                Path(tmp.name), self.config.data.max_seq_len
-            )
+            vectors = _beatmap_inputs_from_osu(Path(tmp.name), self.model.max_seq_len)
 
         vectors = self.normalizer.normalize_vectors(vectors)
-        map_features = torch.tensor(
-            [
-                self.normalizer.normalize_attribute(
-                    name, raw_map_features.get(name, 0.0)
-                )
-                for name in MAP_FEATURE_ATTRIBUTES
-            ],
-            dtype=torch.float32,
-        ).unsqueeze(0)
-        packed_vectors = vectors[: self.config.data.max_seq_len].contiguous()
+        packed_vectors = vectors[: self.model.max_seq_len].contiguous()
         max_seqlen = packed_vectors.shape[0]
         cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
 
@@ -93,7 +56,6 @@ class CpuInferencer:
                 packed_vectors.to(self.device),
                 cu_seqlens.to(self.device),
                 max_seqlen,
-                map_features.to(self.device),
             )
 
         vector = embedding.float().cpu().numpy()[0]
@@ -109,16 +71,6 @@ def _beatmap_inputs_from_osu(path: Path, max_seq_len: int):
     assert raw_beatmap is not None
     beatmaps_df = pl.DataFrame([_extract_beatmap_record(raw_beatmap)])
     hitobjects_df = pl.DataFrame(_extract_hitobject_records(raw_beatmap))
-    drain_times = calculate_drain_times(beatmaps_df, hitobjects_df)
-    beatmaps_df = beatmaps_df.join(drain_times, on="beatmap_id", how="left")
-    if "drain_time" not in beatmaps_df.columns:
-        beatmaps_df = beatmaps_df.with_columns(
-            pl.lit(0.0).cast(pl.Float32).alias("drain_time")
-        )
-    else:
-        beatmaps_df = beatmaps_df.with_columns(
-            pl.col("drain_time").fill_null(0.0).cast(pl.Float32)
-        )
     vectors, _ids, _ = build_feature_tensors(
         beatmaps_df,
         hitobjects_df,
@@ -130,11 +82,7 @@ def _beatmap_inputs_from_osu(path: Path, max_seq_len: int):
 
     expanded_count = vectors[0].shape[0]
     truncate_len = min(expanded_count, max_seq_len)
-    row = beatmaps_df.row(0, named=True)
-    map_features = {
-        name: float(row.get(name, 0.0) or 0.0) for name in MAP_FEATURE_ATTRIBUTES
-    }
-    return vectors[0][:truncate_len], map_features
+    return vectors[0][:truncate_len]
 
 
 def _validate_beatmap(beatmap: RawBeatmap | None) -> bool:

@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--resume-ckpt")
-    parser.add_argument("--run")
+    parser.add_argument("-v", "--version")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--compile",
@@ -51,8 +51,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config(args: argparse.Namespace) -> DictConfig:
-    config = cast(DictConfig, load_bobert_config(args.config))
+def load_config(args: argparse.Namespace, checkpoint: dict | None = None) -> DictConfig:
+    config = cast(
+        DictConfig,
+        OmegaConf.create(checkpoint["config"])
+        if checkpoint is not None
+        else load_bobert_config(args.config),
+    )
     OmegaConf.set_struct(config, False)
 
     if args.ablate:
@@ -88,19 +93,30 @@ def load_config(args: argparse.Namespace) -> DictConfig:
 
 
 def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
-    if not args.resume_ckpt:
-        return None
     if args.resume_ckpt == "latest":
         checkpoint = find_latest_checkpoint()
         if checkpoint is None:
             raise FileNotFoundError(f"No checkpoint found in {RUNS_DIR}")
         return checkpoint
-    return Path(args.resume_ckpt)
+    if args.resume_ckpt:
+        return Path(args.resume_ckpt)
+    if args.version:
+        checkpoint = RUNS_DIR / args.version / "checkpoints" / "last.ckpt"
+        if checkpoint.exists():
+            return checkpoint
+    return None
 
 
 def main() -> int:
     args = parse_args()
-    config = load_config(args)
+    resume_checkpoint = resolve_resume_checkpoint(args)
+    checkpoint = (
+        torch.load(resume_checkpoint, map_location="cpu", weights_only=False)
+        if resume_checkpoint is not None
+        else None
+    )
+    config = load_config(args, checkpoint)
+    del checkpoint
 
     print(f"PyTorch version: {torch.__version__}")
     print(f"Using device: {setup_device()}")
@@ -111,21 +127,22 @@ def main() -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BobertForPretraining.from_config(config, device)
-    base_model = getattr(model, "_orig_mod", model)
-    summary = base_model.get_summary()
+    summary = model.get_summary()
 
     print("\n--- BERT Encoder Information ---")
     print(f"Total Parameters: {summary['trainable_parameters'] / 1e6:.2f}M")
-    print(f"Model Dimension: {base_model.bert.d_model}")
-    print(f"Number of Heads: {base_model.bert.n_heads}")
-    print(f"Number of Layers: {base_model.bert.n_layers}")
+    print(f"Model Dimension: {model.bert.d_model}")
+    print(f"Number of Heads: {model.bert.n_heads}")
+    print(f"Number of Layers: {model.bert.n_layers}")
 
-    resume_checkpoint = resolve_resume_checkpoint(args)
-    run_name = args.run
+    run_name = args.version
     if resume_checkpoint is not None and run_name is None:
         run_name = run_name_from_checkpoint(resume_checkpoint)
     module = BobertModule(model, config, datamodule, quiet=args.quiet)
     trainer = create_trainer(config, run_name=run_name, quiet=args.quiet)
+    run_dir = Path(trainer.log_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(config, run_dir / "config.yaml")
 
     print("\nPretraining setup complete.")
     print(f"Run directory: {trainer.log_dir}")
@@ -141,6 +158,12 @@ def main() -> int:
         ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
         weights_only=False if resume_checkpoint is not None else None,
     )
+
+    if datamodule.normalizer is None:
+        raise RuntimeError("Training completed without a fitted normalizer")
+    model_path = run_dir / "bobert.pt"
+    model.bert.save_pretrained(model_path, datamodule.normalizer)
+    print(f"Exported model: {model_path}")
 
     print("\nBoBERT pretraining completed!")
     return 0

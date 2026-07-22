@@ -15,7 +15,6 @@ from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metad
 from scripts.common.paths import resolve_path
 from scripts.common.query import (
     DEFAULT_BEATMAPS_DIR,
-    DEFAULT_CONFIG_PATH,
     DEFAULT_METADATA_PATH,
     LazyEmbedder,
     beatmap_map_style,
@@ -30,13 +29,12 @@ from scripts.common.query import (
     metadata_by_id,
 )
 from scripts.bobert.col import ColIndex
+from scripts.bobert.embed import find_model
 
 console = Console()
 MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
-DEFAULT_EMBEDDINGS_PATH = Path("data/embeddings.parquet")
-DEFAULT_COL_INDEX_PATH = Path("data/col")
 
 
 @dataclass
@@ -434,15 +432,11 @@ def parse_args():
     )
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
-    parser.add_argument(
-        "--checkpoint",
-        default=None,
-        help="Override the Bobert checkpoint used for lazy queries",
-    )
+    parser.add_argument("-v", "--version")
+    parser.add_argument("--model", help="Exported BoBERT .pt model")
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--maxsim", action="store_true")
-    parser.add_argument("--col-index", default=str(DEFAULT_COL_INDEX_PATH))
+    parser.add_argument("--col-index")
     parser.add_argument("--candidate-k", type=int, default=500)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
@@ -462,7 +456,9 @@ def query_mode(args: argparse.Namespace) -> str:
     return MODE_DEFAULT
 
 
-def load_query_data(args: argparse.Namespace, mode: str):
+def load_query_data(
+    args: argparse.Namespace, mode: str, model_path: Path | None
+):
     if mode == MODE_GRAPH:
         embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
         beatmap_ids, embeddings, id_to_index = load_embeddings(
@@ -474,7 +470,10 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
         return beatmap_ids, embeddings, id_to_index
-    embeddings_path = resolve_path(args.embeddings or DEFAULT_EMBEDDINGS_PATH)
+    assert model_path is not None
+    embeddings_path = resolve_path(
+        args.embeddings or model_path.parent / "embeddings.parquet"
+    )
     beatmap_ids, embeddings, id_to_index = load_embeddings(
         embeddings_path,
         dtype=np.float16,
@@ -489,21 +488,24 @@ def load_query_data(args: argparse.Namespace, mode: str):
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = query_mode(args)
-    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
+    model_path = (
+        find_model(args.model, args.version) if mode == MODE_DEFAULT else None
+    )
+    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode, model_path)
     embedding_transform = None
     if mode == MODE_DEFAULT and len(embeddings):
         embedding_transform = EmbeddingTransform.fit(embeddings)
         embeddings = embedding_transform.apply(embeddings)
-    checkpoint_path = resolve_path(args.checkpoint) if args.checkpoint else None
     embedder = (
         None
         if mode != MODE_DEFAULT
-        else LazyEmbedder(
-            resolve_path(args.config),
-            checkpoint_path,
-        )
+        else LazyEmbedder(model_path)
     )
-    col_index = ColIndex(resolve_path(args.col_index)) if args.maxsim else None
+    col_index = (
+        ColIndex(resolve_path(args.col_index or model_path.parent / "col"))
+        if args.maxsim
+        else None
+    )
 
     return QueryContext(
         beatmap_ids=beatmap_ids,

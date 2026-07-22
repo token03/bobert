@@ -130,6 +130,7 @@ def create_trainer(
                 monitor="val_loss",
                 mode="min",
                 save_last=True,
+                enable_version_counter=False,
             )
         )
     if not quiet:

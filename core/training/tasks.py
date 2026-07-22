@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 from typing import Any, Dict
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
@@ -12,12 +12,6 @@ from .loss import compute_loss
 from .metrics import GeometryMetrics, MLMMetrics
 from .setup import create_optimizer, create_scheduler
 from ..data.schema import FEATURE_INFO, VECTOR_DIM
-from ..model.checkpoint import (
-    add_normalizer_to_checkpoint,
-    model_spec_from_config,
-    normalize_lightning_state_dict,
-    restore_normalizer_from_checkpoint,
-)
 
 
 class BobertModule(pl.LightningModule):
@@ -34,7 +28,7 @@ class BobertModule(pl.LightningModule):
         self.datamodule = datamodule
         self.quiet = quiet
         self.batch_size = config.training.trainer.batch_size
-        self.save_hyperparameters(ignore=["model", "datamodule"])
+        self.save_hyperparameters("quiet")
         self.mlm_metrics = MLMMetrics(FEATURE_INFO, self.device)
         self.geometry_metrics = GeometryMetrics(model.bert.d_model)
 
@@ -50,16 +44,13 @@ class BobertModule(pl.LightningModule):
         return flat
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
-        checkpoint["model_spec"] = model_spec_from_config(self.config)
-        add_normalizer_to_checkpoint(checkpoint, self.datamodule.normalizer)
+        checkpoint["config"] = OmegaConf.to_container(self.config, resolve=True)
+        if self.datamodule.normalizer is not None:
+            checkpoint["vector_stats"] = self.datamodule.normalizer.get_vector_stats()
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        restore_normalizer_from_checkpoint(checkpoint, self.datamodule.normalizer)
-        state_dict = checkpoint.get("state_dict")
-        if state_dict:
-            checkpoint["state_dict"] = normalize_lightning_state_dict(
-                state_dict, hasattr(self.model, "_orig_mod")
-            )
+        if self.datamodule.normalizer is not None:
+            self.datamodule.normalizer.vector_stats = checkpoint["vector_stats"]
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config)

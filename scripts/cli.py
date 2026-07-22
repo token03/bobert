@@ -8,7 +8,7 @@ MODEL_COMMANDS = {
     "embed": "scripts.bobert.embed",
     "eval": "scripts.bobert.eval",
     "pretrain": "scripts.bobert.pretrain",
-    "strip": "scripts.bobert.strip",
+    "export-model": "scripts.bobert.export_model",
     "recommend": "scripts.query.recommend",
     "graph": "scripts.data.graph",
 }

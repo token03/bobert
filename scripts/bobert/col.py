@@ -15,7 +15,7 @@ from core.config import load_config
 from core.data.normalizer import BeatmapNormalizer
 from core.data.source import load_beatmap_dataset
 from scripts.bobert.embed import (
-    find_checkpoint,
+    find_model,
     load_model,
     sample_ids,
 )
@@ -116,7 +116,7 @@ def iter_col_outputs(
     model,
     beatmaps: list[dict],
     normalizer: BeatmapNormalizer,
-    config,
+    max_seq_len: int,
     device: torch.device,
     batch_size: int,
 ):
@@ -128,7 +128,7 @@ def iter_col_outputs(
         shuffle=False,
         num_workers=0,
         pin_memory=device.type == "cuda",
-        collate_fn=lambda batch: collate_col(batch, config.data.max_seq_len),
+        collate_fn=lambda batch: collate_col(batch, max_seq_len),
     )
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     emitted = 0
@@ -256,7 +256,13 @@ class ColIndex:
 
 def collect_fit_tokens(args, config, model, normalizer, device: torch.device) -> torch.Tensor:
     dataset_dir = resolve_path(args.dataset or config.data.dataset_path)
-    ids = sample_ids(dataset_dir, args.fit_limit or args.limit, args.seed, args.min_sr, config.data.max_seq_len)
+    ids = sample_ids(
+        dataset_dir,
+        args.fit_limit or args.limit,
+        args.seed,
+        args.min_sr,
+        model.max_seq_len,
+    )
     if not ids:
         raise RuntimeError("No beatmaps available for fitting")
     reservoir = torch.empty(
@@ -271,7 +277,7 @@ def collect_fit_tokens(args, config, model, normalizer, device: torch.device) ->
         beatmaps = load_beatmap_dataset(
             str(dataset_dir),
             dataset_seed=args.seed,
-            max_seq_len=config.data.max_seq_len,
+            max_seq_len=model.max_seq_len,
             ids_to_load=id_chunk,
             min_sr=args.min_sr,
             max_sr=None,
@@ -279,7 +285,7 @@ def collect_fit_tokens(args, config, model, normalizer, device: torch.device) ->
             include_beat_ids=True,
         )
         for _beatmap_id, tokens, _embedding in iter_col_outputs(
-            model, beatmaps, normalizer, config, device, args.batch_size
+            model, beatmaps, normalizer, model.max_seq_len, device, args.batch_size
         ):
             tokens = tokens.float()
             token_count = tokens.shape[0]
@@ -312,7 +318,8 @@ def build(args):
         raise SystemExit("Error: col index builds require --batch-size 32")
     if args.residual_bits != RESIDUAL_BITS:
         raise SystemExit(f"Error: only --residual-bits {RESIDUAL_BITS} is currently supported")
-    output = resolve_path(args.output)
+    model_path = find_model(args.model, args.version)
+    output = resolve_path(args.output or model_path.parent / "col")
     if output.exists():
         if not args.overwrite:
             raise SystemExit(f"Error: output already exists: {output}")
@@ -321,14 +328,12 @@ def build(args):
 
     config = load_config(resolve_path(args.config))
     dataset_dir = resolve_path(args.dataset or config.data.dataset_path)
-    checkpoint = find_checkpoint(Path(args.checkpoint) if args.checkpoint else None)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model, checkpoint_data = load_model(config, checkpoint, device)
-    normalizer = BeatmapNormalizer(vector_stats=checkpoint_data["vector_stats"])
+    model, normalizer = load_model(model_path, device)
     with torch.inference_mode():
-        model.bert.rotary_emb(
-            torch.arange(config.data.max_seq_len, device=device),
-            seq_len=config.data.max_seq_len,
+        model.rotary_emb(
+            torch.arange(model.max_seq_len, device=device),
+            seq_len=model.max_seq_len,
         )
 
     fit_tokens = collect_fit_tokens(args, config, model, normalizer, device)
@@ -340,7 +345,7 @@ def build(args):
     residual_bias.cpu().numpy().astype(np.float32).tofile(output / "residual_bias.f32")
     residual_scales.cpu().numpy().astype(np.float32).tofile(output / "residual_scales.f32")
 
-    ids = sample_ids(dataset_dir, args.limit, args.seed, args.min_sr, config.data.max_seq_len)
+    ids = sample_ids(dataset_dir, args.limit, args.seed, args.min_sr, model.max_seq_len)
     doc_ids = []
     lengths = []
     offsets = [0]
@@ -353,7 +358,7 @@ def build(args):
             beatmaps = load_beatmap_dataset(
                 str(dataset_dir),
                 dataset_seed=args.seed,
-                max_seq_len=config.data.max_seq_len,
+                max_seq_len=model.max_seq_len,
                 ids_to_load=id_chunk,
                 min_sr=args.min_sr,
                 max_sr=None,
@@ -361,7 +366,7 @@ def build(args):
                 include_beat_ids=True,
             )
             for beatmap_id, tokens, _embedding in iter_col_outputs(
-                model, beatmaps, normalizer, config, device, args.batch_size
+                model, beatmaps, normalizer, model.max_seq_len, device, args.batch_size
             ):
                 centroid_ids, packed = quantize_residuals(
                     tokens, centroids, residual_levels, residual_bias, residual_scales
@@ -407,9 +412,10 @@ def parse_args():
     subparsers = parser.add_subparsers(dest="command", required=True)
     build_parser = subparsers.add_parser("build")
     build_parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
-    build_parser.add_argument("--checkpoint", default=None)
+    build_parser.add_argument("-v", "--version")
+    build_parser.add_argument("--model")
     build_parser.add_argument("--dataset", default=None)
-    build_parser.add_argument("--output", default=str(PROJECT_ROOT / "data" / "col"))
+    build_parser.add_argument("--output")
     build_parser.add_argument("--limit", type=int, default=None)
     build_parser.add_argument("--fit-limit", type=int, default=50000)
     build_parser.add_argument("--fit-token-cap", type=int, default=500000)
