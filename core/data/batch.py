@@ -13,14 +13,12 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         batch_size: int,
         max_tokens: int,
         seed: int,
-        drop_last: bool = False,
         shuffle: bool = True,
     ):
         self.lengths = [int(length) for length in lengths]
         self.batch_size = int(batch_size)
         self.max_tokens = int(max_tokens)
         self.seed = int(seed)
-        self.drop_last = drop_last
         self.shuffle = shuffle
         self.epoch = 0
 
@@ -44,7 +42,7 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
                 max_len = 0
             batch.append(idx)
             max_len = max(max_len, length)
-        if batch and not self.drop_last:
+        if batch:
             batches.append(batch)
         return batches
 

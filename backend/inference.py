@@ -71,11 +71,10 @@ def _beatmap_inputs_from_osu(path: Path, max_seq_len: int):
     assert raw_beatmap is not None
     beatmaps_df = pl.DataFrame([_extract_beatmap_record(raw_beatmap)])
     hitobjects_df = pl.DataFrame(_extract_hitobject_records(raw_beatmap))
-    vectors, _ids, _ = build_feature_tensors(
+    vectors, _ids = build_feature_tensors(
         beatmaps_df,
         hitobjects_df,
         max_seq_len=max_seq_len,
-        return_original_counts=False,
     )
     if not vectors:
         raise ValueError(f"could not engineer hitobject features for {path}")

@@ -206,13 +206,12 @@ def load_beatmap_dataset(
             beatmaps_chunk,
             hitobjects_chunk,
             max_seq_len=max_seq_len,
-            return_original_counts=False,
             return_beat_ids=include_beat_ids,
         )
         if include_beat_ids:
-            hitobject_data, ids, _, beat_ids = features
+            hitobject_data, ids, beat_ids = features
         else:
-            hitobject_data, ids, _ = features
+            hitobject_data, ids = features
 
         for index, (bid, vectors) in enumerate(zip(ids, hitobject_data)):
             bid_int = int(bid)

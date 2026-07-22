@@ -1,4 +1,4 @@
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 from enum import Enum
 
 OSU_STAGE_WIDTH = 512
@@ -62,47 +62,95 @@ OBJECT_TYPE_SPINNER = 2
 class Feature(NamedTuple):
     name: str
     norm: NormalizationType
+    family: Literal["spatial", "rhythm", "attribute"]
     cardinality: int | None = None
     conditional: str | None = None
 
 
 FEATURES = [
-    Feature("norm_x", NormalizationType.NONE),
-    Feature("norm_y", NormalizationType.NONE),
-    Feature("incoming_dx", NormalizationType.STANDARD),
-    Feature("incoming_dy", NormalizationType.STANDARD),
-    Feature("log_onset_ioi_ms", NormalizationType.STANDARD),
-    Feature("log_span_duration_ms", NormalizationType.STANDARD, conditional="slider"),
-    Feature("log_span_length", NormalizationType.STANDARD, conditional="slider"),
-    Feature("span_end_dx", NormalizationType.STANDARD, conditional="slider"),
-    Feature("span_end_dy", NormalizationType.STANDARD, conditional="slider"),
-    Feature("curve_residual_1_dx", NormalizationType.STANDARD, conditional="slider"),
-    Feature("curve_residual_1_dy", NormalizationType.STANDARD, conditional="slider"),
-    Feature("curve_residual_2_dx", NormalizationType.STANDARD, conditional="slider"),
-    Feature("curve_residual_2_dy", NormalizationType.STANDARD, conditional="slider"),
+    Feature("norm_x", NormalizationType.NONE, "spatial"),
+    Feature("norm_y", NormalizationType.NONE, "spatial"),
+    Feature("incoming_dx", NormalizationType.STANDARD, "spatial"),
+    Feature("incoming_dy", NormalizationType.STANDARD, "spatial"),
+    Feature("log_onset_ioi_ms", NormalizationType.STANDARD, "rhythm"),
     Feature(
-        "log_spinner_duration_ms", NormalizationType.STANDARD, conditional="spinner"
+        "log_span_duration_ms",
+        NormalizationType.STANDARD,
+        "rhythm",
+        conditional="slider",
     ),
-    Feature("object_type", NormalizationType.CATEGORICAL, 3),
-    Feature("is_new_combo", NormalizationType.CATEGORICAL, 2),
-    Feature("onset_duration_bin", NormalizationType.CATEGORICAL, len(DURATION_BINS)),
-    Feature("beat_phase", NormalizationType.CATEGORICAL, BEAT_PHASE_CARDINALITY),
-    Feature("incoming_motion_valid", NormalizationType.CATEGORICAL, 2),
+    Feature(
+        "log_span_length", NormalizationType.STANDARD, "spatial", conditional="slider"
+    ),
+    Feature(
+        "span_end_dx", NormalizationType.STANDARD, "spatial", conditional="slider"
+    ),
+    Feature(
+        "span_end_dy", NormalizationType.STANDARD, "spatial", conditional="slider"
+    ),
+    Feature(
+        "curve_residual_1_dx",
+        NormalizationType.STANDARD,
+        "spatial",
+        conditional="slider",
+    ),
+    Feature(
+        "curve_residual_1_dy",
+        NormalizationType.STANDARD,
+        "spatial",
+        conditional="slider",
+    ),
+    Feature(
+        "curve_residual_2_dx",
+        NormalizationType.STANDARD,
+        "spatial",
+        conditional="slider",
+    ),
+    Feature(
+        "curve_residual_2_dy",
+        NormalizationType.STANDARD,
+        "spatial",
+        conditional="slider",
+    ),
+    Feature(
+        "log_spinner_duration_ms",
+        NormalizationType.STANDARD,
+        "rhythm",
+        conditional="spinner",
+    ),
+    Feature("object_type", NormalizationType.CATEGORICAL, "attribute", 3),
+    Feature("is_new_combo", NormalizationType.CATEGORICAL, "attribute", 2),
+    Feature(
+        "onset_duration_bin",
+        NormalizationType.CATEGORICAL,
+        "rhythm",
+        len(DURATION_BINS),
+    ),
+    Feature(
+        "beat_phase",
+        NormalizationType.CATEGORICAL,
+        "rhythm",
+        BEAT_PHASE_CARDINALITY,
+    ),
+    Feature("incoming_motion_valid", NormalizationType.CATEGORICAL, "spatial", 2),
     Feature(
         "span_duration_bin",
         NormalizationType.CATEGORICAL,
+        "rhythm",
         len(DURATION_BINS),
         conditional="slider",
     ),
     Feature(
         "span_count_bin",
         NormalizationType.CATEGORICAL,
+        "attribute",
         SPAN_COUNT_CARDINALITY,
         conditional="slider",
     ),
     Feature(
         "spinner_duration_bin",
         NormalizationType.CATEGORICAL,
+        "rhythm",
         len(DURATION_BINS),
         conditional="spinner",
     ),

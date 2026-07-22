@@ -1085,11 +1085,9 @@ def print_training_metrics(targets: list[TargetData]) -> dict[str, dict]:
             key
             for key in (
                 "val_loss",
-                "val_mlm_mlm_loss",
-                "val_map_effective_rank",
-                "val_map_anisotropy",
-                "val_map_pc1_ratio",
-                "val_token_anisotropy",
+                "val_spatial_loss",
+                "val_rhythm_loss",
+                "val_attribute_loss",
             )
             if key in available
         ]

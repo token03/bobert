@@ -326,13 +326,7 @@ class BobertForPretraining(nn.Module):
     ) -> "BobertForPretraining":
         use_flash = device.type == "cuda"
         base_model = BobertEncoder.from_config(config, use_flash=use_flash)
-        training_config = config.training
-
-        masking_strategy = SpanMasker(
-            d_model=base_model.d_model,
-            masking_ratio=training_config.masking.ratio,
-            mean_span_length=training_config.masking.mean_span_length,
-        )
+        masking_strategy = SpanMasker(d_model=base_model.d_model)
 
         mlm_head = MaskedLMHead(base_model.d_model)
         model = cls(base_model, masking_strategy, mlm_head)

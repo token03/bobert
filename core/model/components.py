@@ -484,14 +484,11 @@ class HitObjectFeatureTokenizer(nn.Module):
 
 
 class SpanMasker(nn.Module):
-    def __init__(self, d_model: int, masking_ratio: float, mean_span_length: float):
+    def __init__(self, d_model: int):
         super().__init__()
-        self.masking_ratio = masking_ratio
-        self.mean_span_length = mean_span_length
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, d_model))
 
         continuous = FEATURE_INFO["continuous"]
-        feature_count = len(FEATURE_INFO["names"])
         categorical = FEATURE_INFO["categorical"]
         right_delta = torch.tensor(
             [
@@ -501,23 +498,7 @@ class SpanMasker(nn.Module):
             ],
             dtype=torch.long,
         )
-        right_delta_mask = torch.zeros(feature_count, dtype=torch.bool)
-        right_delta_mask[right_delta] = True
         self.register_buffer("right_delta_indices", right_delta, persistent=False)
-        self.register_buffer("right_delta_mask", right_delta_mask, persistent=False)
-        min_len = 1
-        max_len = max(1, int(mean_span_length * 2))
-
-        lengths = torch.arange(min_len, max_len + 1, dtype=torch.float32)
-        std = mean_span_length / 3.0
-
-        probs = torch.exp(-0.5 * ((lengths - mean_span_length) / std) ** 2)
-        probs = probs / probs.sum()
-
-        self.register_buffer("span_length_probs", probs)
-        self.register_buffer("span_lengths_range", lengths.long())
-
-        self.max_span_len = max_len
 
     def corrupt_inputs_packed(
         self,

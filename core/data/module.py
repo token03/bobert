@@ -59,9 +59,10 @@ def load_data(data_config, max_seq_len, sample_size):
     return [row["hitobjects"] for row in rows]
 
 
-def split_loaded_data(data, val_split):
+def split_loaded_data(data, val_split, seed):
     val_size = int(len(data) * val_split)
-    return random_split(data, [len(data) - val_size, val_size])
+    generator = torch.Generator().manual_seed(int(seed))
+    return random_split(data, [len(data) - val_size, val_size], generator=generator)
 
 
 def dataloader_kwargs(data_config):
@@ -77,13 +78,12 @@ def dataloader_kwargs(data_config):
     return kwargs
 
 
-def make_loader(dataset, batch_size, collate_fn, data_config, compile_model, shuffle):
+def make_loader(dataset, batch_size, collate_fn, data_config, shuffle):
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=collate_fn,
-        drop_last=shuffle and bool(compile_model),
         **dataloader_kwargs(data_config),
     )
 
@@ -119,7 +119,6 @@ def bucketed_loader(dataset, collate_fn, datamodule, train):
             datamodule.batch_size,
             collate_fn,
             config.data,
-            config.runtime.compile_model,
             train,
         )
 
@@ -130,7 +129,6 @@ def bucketed_loader(dataset, collate_fn, datamodule, train):
         max_tokens=token_budget(sample_lengths, datamodule.batch_size),
         seed=config.data.dataset_seed,
         shuffle=train,
-        drop_last=train and bool(config.runtime.compile_model),
     )
     return make_batch_loader(dataset, collate_fn, config.data, batch_sampler)
 
@@ -157,7 +155,11 @@ class BobertDataModule(pl.LightningDataModule):
             self.max_seq_len,
             self.config.training.data.sample_size,
         )
-        train_data, val_data = split_loaded_data(data, self.config.data.val_split)
+        train_data, val_data = split_loaded_data(
+            data,
+            self.config.data.val_split,
+            self.config.data.dataset_seed,
+        )
         self.normalizer = BeatmapNormalizer.from_data(list(train_data))
         self.vector_dim = train_data[0].shape[1]
         self.train_dataset = BeatmapDataset(

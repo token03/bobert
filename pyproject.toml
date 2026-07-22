@@ -37,7 +37,6 @@ dependencies = [
     "structlog>=25.5.0",
     "tensorboard>=2.20.0",
     "torch==2.11.0",
-    "torchmetrics>=1.8.2",
     "tqdm>=4.67.1",
     "umap-learn>=0.5.9.post2",
     "uvicorn[standard]>=0.35.0",

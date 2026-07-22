@@ -1,5 +1,3 @@
-import logging
-import warnings
 from pathlib import Path
 from typing import List, Optional
 
@@ -137,23 +135,6 @@ def create_trainer(
         callbacks.append(TQDMProgressBar(refresh_rate=1))
     callbacks.extend(extra_callbacks or [])
 
-    warnings.filterwarnings(
-        "ignore", message=r"Checkpoint directory .* exists and is not empty\."
-    )
-    warnings.filterwarnings(
-        "ignore",
-        message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
-        category=FutureWarning,
-    )
-    logging.getLogger("pytorch_lightning.accelerators.cuda").addFilter(
-        lambda record: not record.getMessage().startswith("LOCAL_RANK:")
-    )
-    logging.getLogger("pytorch_lightning.utilities.rank_zero").addFilter(
-        lambda record: (
-            record.getMessage()
-            != "Loading `train_dataloader` to estimate number of stepping batches."
-        )
-    )
     return pl.Trainer(
         max_epochs=trainer_config.epochs,
         accelerator=setup_device(),

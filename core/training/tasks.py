@@ -5,13 +5,64 @@ from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from core.data.module import BobertDataModule, preallocation_batch_size
 
-from .loss import compute_loss
-from .metrics import GeometryMetrics, MLMMetrics
 from .setup import create_optimizer, create_scheduler
-from ..data.schema import FEATURE_INFO, VECTOR_DIM
+from ..data.schema import (
+    FEATURE_INFO,
+    FEATURES_BY_NAME,
+    OBJECT_TYPE_SLIDER,
+    OBJECT_TYPE_SPINNER,
+    VECTOR_DIM,
+)
+
+
+def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor):
+    zero = sum(output["continuous"].sum() * 0.0 for output in predictions.values())
+    losses = {name: zero for name in ("spatial", "rhythm", "attribute")}
+    if targets.shape[0] == 0:
+        return {**losses, "total": zero}
+
+    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
+    masks = {
+        "common": torch.ones_like(object_type, dtype=torch.bool),
+        "slider": object_type == OBJECT_TYPE_SLIDER,
+        "spinner": object_type == OBJECT_TYPE_SPINNER,
+    }
+    for group, mask in masks.items():
+        if not torch.any(mask):
+            continue
+
+        output = predictions[group]
+        continuous_names = [
+            name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
+        ]
+        if continuous_names:
+            indices = [FEATURE_INFO["continuous"][name] for name in continuous_names]
+            continuous_loss = F.smooth_l1_loss(
+                output["continuous"][mask],
+                targets[mask][:, indices],
+                beta=0.5,
+                reduction="none",
+            ).sum(dim=0)
+            for index, name in enumerate(continuous_names):
+                loss_group = FEATURES_BY_NAME[name].family
+                losses[loss_group] = losses[loss_group] + continuous_loss[index]
+
+        for name, logits in output["categorical"].items():
+            info = FEATURE_INFO["categorical"][name]
+            loss_group = FEATURES_BY_NAME[name].family
+            losses[loss_group] = losses[loss_group] + F.cross_entropy(
+                logits[mask],
+                targets[mask, info["index"]].long(),
+                reduction="sum",
+            )
+
+    count = targets.shape[0]
+    losses = {name: loss / count for name, loss in losses.items()}
+    return {**losses, "total": sum(losses.values())}
 
 
 class BobertModule(pl.LightningModule):
@@ -27,21 +78,7 @@ class BobertModule(pl.LightningModule):
         self.config = config
         self.datamodule = datamodule
         self.quiet = quiet
-        self.batch_size = config.training.trainer.batch_size
         self.save_hyperparameters("quiet")
-        self.mlm_metrics = MLMMetrics(FEATURE_INFO, self.device)
-        self.geometry_metrics = GeometryMetrics(model.bert.d_model)
-
-    @staticmethod
-    def flatten_metrics(metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
-        flat = {}
-        for key, value in metrics.items():
-            name = f"{prefix}_{key}" if prefix else key
-            if isinstance(value, dict):
-                flat.update(BobertModule.flatten_metrics(value, name))
-            else:
-                flat[name] = value
-        return flat
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         checkpoint["config"] = OmegaConf.to_container(self.config, resolve=True)
@@ -81,9 +118,9 @@ class BobertModule(pl.LightningModule):
         )
 
     def _shared_step(self, batch: Dict[str, Any]):
-        predictions, targets, mask = self(batch)
-        loss_dict = compute_loss(predictions, targets)
-        return predictions, targets, mask, loss_dict
+        predictions, targets, _ = self(batch)
+        losses = mlm_loss(predictions["mlm"], targets["mlm"])
+        return losses, max(1, targets["mlm"].shape[0])
 
     def on_fit_start(self):
         if self.global_rank == 0:
@@ -106,8 +143,8 @@ class BobertModule(pl.LightningModule):
             else nullcontext()
         )
         with autocast:
-            _, _, _, loss_dict = self._shared_step(warmup_batch)
-        loss_dict["total_loss"].backward()
+            losses, _ = self._shared_step(warmup_batch)
+        losses["total"].backward()
         optimizer.zero_grad(set_to_none=True)
 
         if self.global_rank == 0:
@@ -176,43 +213,34 @@ class BobertModule(pl.LightningModule):
         }
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        _, _, _, loss_dict = self._shared_step(batch)
+        losses, target_count = self._shared_step(batch)
         if not self.quiet:
             self.log_dict(
                 {
-                    "train_loss": loss_dict["total_loss"],
-                    "train_mlm_loss": loss_dict["mlm_loss"],
+                    "train_loss": losses["total"],
                     "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
                 },
                 prog_bar=True,
-                batch_size=self.batch_size,
+                batch_size=target_count,
             )
-        return loss_dict["total_loss"]
+        return losses["total"]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        predictions, targets, _mask, loss_dict = self._shared_step(batch)
-        packed_output, cu_seqlens, _ = self.model.bert.encode_packed(
-            batch["packed_vectors"], batch["cu_seqlens"], batch["max_seqlen"]
-        )
-        self.geometry_metrics.update(packed_output, cu_seqlens)
-        self.mlm_metrics.update(
-            predictions["mlm"], targets["mlm"], loss=loss_dict["mlm_loss"].item()
-        )
+        losses, target_count = self._shared_step(batch)
         self.log(
             "val_loss",
-            loss_dict["total_loss"],
+            losses["total"],
             prog_bar=True,
             sync_dist=True,
-            batch_size=self.batch_size,
+            batch_size=target_count,
         )
-        return loss_dict["total_loss"]
-
-    def on_validation_epoch_end(self):
-        mlm_results = self.flatten_metrics(self.mlm_metrics.compute(), prefix="val_mlm")
-        geometry_results = {
-            f"val_{name}": value
-            for name, value in self.geometry_metrics.compute().items()
-        }
-        self.log_dict({**mlm_results, **geometry_results}, sync_dist=True)
-        self.mlm_metrics.reset()
-        self.geometry_metrics.reset()
+        self.log_dict(
+            {
+                "val_spatial_loss": losses["spatial"],
+                "val_rhythm_loss": losses["rhythm"],
+                "val_attribute_loss": losses["attribute"],
+            },
+            sync_dist=True,
+            batch_size=target_count,
+        )
+        return losses["total"]

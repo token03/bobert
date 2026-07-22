@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -299,22 +299,13 @@ def build_feature_tensors(
     beatmaps_df: pl.DataFrame,
     hitobjects_df: pl.DataFrame,
     max_seq_len: Optional[int] = None,
-    return_original_counts: bool = True,
     return_beat_ids: bool = False,
 ):
     beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)
     if beatmaps_df.is_empty() or hitobjects_df.is_empty():
         if return_beat_ids:
-            return [], np.array([]), {}, []
-        return [], np.array([]), {}
-
-    if return_original_counts:
-        counts = hitobjects_df.group_by("beatmap_id", maintain_order=True).len()
-        original_counts: Dict[int, int] = dict(
-            zip(counts["beatmap_id"].to_list(), counts["len"].to_list())
-        )
-    else:
-        original_counts = {}
+            return [], np.array([]), []
+        return [], np.array([])
 
     df = _prepare_objects(hitobjects_df, max_seq_len)
     df = _apply_features(df, return_beat_ids)
@@ -327,5 +318,5 @@ def build_feature_tensors(
             values.astype(np.int64, copy=False)
             for values in np.split(df["beat_id"].to_numpy(), split_indices)
         ]
-        return vectors, unique_ids, original_counts, beat_ids
-    return vectors, unique_ids, original_counts
+        return vectors, unique_ids, beat_ids
+    return vectors, unique_ids
