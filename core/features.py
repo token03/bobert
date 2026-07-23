@@ -1,22 +1,158 @@
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 import polars as pl
 import torch
 
-from .parser import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
-from .schema import (
-    BEAT_PHASE_CARDINALITY,
-    BEAT_PHASE_DIVISIONS,
-    CANONICAL_BPM_MIN,
-    CENTER_X,
-    CENTER_Y,
-    DEFAULT_PRE_START_MS,
-    DURATION_BINS,
-    FIELD_NAMES,
-    OSU_STAGE_HEIGHT,
-    OSU_STAGE_WIDTH,
+from .osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+
+
+OSU_STAGE_WIDTH = 512
+OSU_STAGE_HEIGHT = 384
+CENTER_X = OSU_STAGE_WIDTH / 2.0
+CENTER_Y = OSU_STAGE_HEIGHT / 2.0
+DEFAULT_PRE_START_MS = 200.0
+
+DURATION_BINS = (
+    1 / 16,
+    1 / 12,
+    1 / 8,
+    1 / 6,
+    1 / 4,
+    1 / 3,
+    3 / 8,
+    1 / 2,
+    5 / 8,
+    2 / 3,
+    3 / 4,
+    5 / 6,
+    7 / 8,
+    1,
+    5 / 4,
+    4 / 3,
+    3 / 2,
+    5 / 3,
+    7 / 4,
+    2,
+    9 / 4,
+    5 / 2,
+    3,
+    7 / 2,
+    15 / 4,
+    4,
+    9 / 2,
+    5,
+    6,
+    8,
+    16,
+    32,
 )
+
+CANONICAL_BPM_MIN = 120.0
+BEAT_PHASE_DIVISIONS = 24
+BEAT_PHASE_CARDINALITY = BEAT_PHASE_DIVISIONS + 1
+SPAN_COUNT_CARDINALITY = 5
+
+
+@dataclass(frozen=True, slots=True)
+class Feature:
+    name: str
+    family: Literal["spatial", "rhythm", "attribute"]
+    standardize: bool = False
+    cardinality: int | None = None
+    conditional: Literal["slider", "spinner"] | None = None
+
+
+FEATURES = (
+    Feature("norm_x", "spatial"),
+    Feature("norm_y", "spatial"),
+    Feature("incoming_dx", "spatial", standardize=True),
+    Feature("incoming_dy", "spatial", standardize=True),
+    Feature("log_onset_ioi_ms", "rhythm", standardize=True),
+    Feature(
+        "log_span_duration_ms",
+        "rhythm",
+        standardize=True,
+        conditional="slider",
+    ),
+    Feature("log_span_length", "spatial", standardize=True, conditional="slider"),
+    Feature("span_end_dx", "spatial", standardize=True, conditional="slider"),
+    Feature("span_end_dy", "spatial", standardize=True, conditional="slider"),
+    Feature("curve_residual_1_dx", "spatial", standardize=True, conditional="slider"),
+    Feature("curve_residual_1_dy", "spatial", standardize=True, conditional="slider"),
+    Feature("curve_residual_2_dx", "spatial", standardize=True, conditional="slider"),
+    Feature("curve_residual_2_dy", "spatial", standardize=True, conditional="slider"),
+    Feature(
+        "log_spinner_duration_ms",
+        "rhythm",
+        standardize=True,
+        conditional="spinner",
+    ),
+    Feature("object_type", "attribute", cardinality=3),
+    Feature("is_new_combo", "attribute", cardinality=2),
+    Feature("onset_duration_bin", "rhythm", cardinality=len(DURATION_BINS)),
+    Feature("beat_phase", "rhythm", cardinality=BEAT_PHASE_CARDINALITY),
+    Feature("incoming_motion_valid", "spatial", cardinality=2),
+    Feature(
+        "span_duration_bin",
+        "rhythm",
+        cardinality=len(DURATION_BINS),
+        conditional="slider",
+    ),
+    Feature(
+        "span_count_bin",
+        "attribute",
+        cardinality=SPAN_COUNT_CARDINALITY,
+        conditional="slider",
+    ),
+    Feature(
+        "spinner_duration_bin",
+        "rhythm",
+        cardinality=len(DURATION_BINS),
+        conditional="spinner",
+    ),
+)
+
+FIELD_NAMES = tuple(feature.name for feature in FEATURES)
+VECTOR_DIM = len(FIELD_NAMES)
+FEATURE_INDEX = {name: index for index, name in enumerate(FIELD_NAMES)}
+FEATURES_BY_NAME = {feature.name: feature for feature in FEATURES}
+CATEGORICAL_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.cardinality is not None
+)
+CONTINUOUS_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.cardinality is None
+)
+STANDARDIZED_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.standardize
+)
+SLIDER_ONLY_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.conditional == "slider"
+)
+SPINNER_ONLY_FEATURES = tuple(
+    feature.name for feature in FEATURES if feature.conditional == "spinner"
+)
+FEATURE_INFO = {
+    "categorical": {
+        name: {
+            "index": FEATURE_INDEX[name],
+            "cardinality": FEATURES_BY_NAME[name].cardinality,
+        }
+        for name in CATEGORICAL_FEATURES
+    },
+    "continuous": {name: FEATURE_INDEX[name] for name in CONTINUOUS_FEATURES},
+    "slider": {name: FEATURE_INDEX[name] for name in SLIDER_ONLY_FEATURES},
+    "spinner": {name: FEATURE_INDEX[name] for name in SPINNER_ONLY_FEATURES},
+    "common": {
+        feature.name: FEATURE_INDEX[feature.name]
+        for feature in FEATURES
+        if feature.conditional is None
+    },
+    "names": FIELD_NAMES,
+}
+
+VectorStats = dict[str, tuple[torch.Tensor, torch.Tensor]]
 
 
 BEAT_PHASE_TOLERANCE_MS = 2.0
@@ -320,3 +456,54 @@ def build_feature_tensors(
         ]
         return vectors, unique_ids, beat_ids
     return vectors, unique_ids
+
+
+def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> VectorStats:
+    object_type_index = FEATURE_INDEX["object_type"]
+    stats = {}
+    for name in STANDARDIZED_FEATURES:
+        index = FEATURE_INDEX[name]
+        feature = FEATURES_BY_NAME[name]
+        count = 0
+        total = torch.tensor(0.0)
+        total_sq = torch.tensor(0.0)
+
+        for vectors in train_data:
+            values = vectors[:, index]
+            if feature.conditional == "slider":
+                values = values[vectors[:, object_type_index] == OBJECT_TYPE_SLIDER]
+            elif feature.conditional == "spinner":
+                values = values[vectors[:, object_type_index] == OBJECT_TYPE_SPINNER]
+            if values.numel() == 0:
+                continue
+
+            values = values.float()
+            count += values.numel()
+            total += values.sum()
+            total_sq += values.square().sum()
+
+        if count == 0:
+            stats[name] = (torch.tensor(0.0), torch.tensor(epsilon))
+            continue
+
+        mean = total / count
+        variance = (
+            (total_sq - total.square() / count) / (count - 1)
+            if count > 1
+            else torch.tensor(0.0)
+        )
+        stats[name] = (
+            mean,
+            torch.sqrt(variance.clamp_min(0.0)).clamp_min(epsilon),
+        )
+    return stats
+
+
+def normalize(
+    vectors: torch.Tensor, stats: VectorStats, epsilon: float = 1e-8
+) -> torch.Tensor:
+    normalized = vectors.float().clone()
+    for name, (mean, std) in stats.items():
+        index = FEATURE_INDEX[name]
+        normalized[:, index] = (normalized[:, index] - mean) / (std + epsilon)
+    return normalized

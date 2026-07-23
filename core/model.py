@@ -1,13 +1,9 @@
-# bobert.py
 from pathlib import Path
 from omegaconf import DictConfig
 import torch
 import torch.nn as nn
-from typing import Tuple, Dict, Any, Sequence, Type, TypeVar
+from typing import Any, Dict, Sequence, Type, TypeVar
 from rotary_embedding_torch import RotaryEmbedding
-
-from ..data.normalizer import BeatmapNormalizer
-from ..data.schema import FEATURE_INFO
 
 from .components import (
     EncoderLayer,
@@ -16,25 +12,10 @@ from .components import (
     RMSNorm,
     SpanMasker,
 )
+from .features import FEATURE_INFO, VectorStats
 
 
 T = TypeVar("T", bound="BobertEncoder")
-
-
-def _compile_encoder_only(model: nn.Module, config: DictConfig, label: str) -> None:
-    print(f"Compiling BERT {label} tokenizer and encoder with torch.compile...")
-    compile_mode = config.runtime.compile_mode
-    model.bert.embed_sequences = torch.compile(
-        model.bert.embed_sequences,
-        mode=compile_mode,
-        dynamic=False,
-    )
-    model.bert._encode = torch.compile(
-        model.bert._encode,
-        mode=compile_mode,
-        dynamic=False,
-    )
-    model.is_compiled = True
 
 
 class BobertEncoder(nn.Module):
@@ -129,7 +110,7 @@ class BobertEncoder(nn.Module):
     @classmethod
     def from_pretrained(
         cls: Type[T], path: str | Path, device: torch.device
-    ) -> tuple[T, BeatmapNormalizer]:
+    ) -> tuple[T, VectorStats]:
         artifact = torch.load(path, map_location="cpu", weights_only=True)
         model = cls(
             **artifact["model_args"],
@@ -138,12 +119,12 @@ class BobertEncoder(nn.Module):
         )
         model.load_state_dict(artifact["state_dict"], strict=True)
         model.to(device).eval()
-        return model, BeatmapNormalizer(artifact["vector_stats"])
+        return model, artifact["vector_stats"]
 
     def save_pretrained(
         self,
         path: str | Path,
-        normalizer: BeatmapNormalizer,
+        vector_stats: VectorStats,
     ) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,7 +133,7 @@ class BobertEncoder(nn.Module):
             {
                 "model_args": self.model_args,
                 "state_dict": state,
-                "vector_stats": normalizer.get_vector_stats(),
+                "vector_stats": vector_stats,
             },
             path,
         )
@@ -318,42 +299,20 @@ class BobertForPretraining(nn.Module):
         self.bert = bert_model
         self.masker = masker
         self.mlm_head = mlm_head
-        self.is_compiled = False
 
     @classmethod
     def from_config(
         cls, config: DictConfig, device: torch.device
     ) -> "BobertForPretraining":
-        use_flash = device.type == "cuda"
-        base_model = BobertEncoder.from_config(config, use_flash=use_flash)
-        masking_strategy = SpanMasker(d_model=base_model.d_model)
-
-        mlm_head = MaskedLMHead(base_model.d_model)
-        model = cls(base_model, masking_strategy, mlm_head)
-        model = model.to(device)
-
-        if config.runtime.compile_model:
-            _compile_encoder_only(model, config, "pre-training")
-
-        return model
+        bert = BobertEncoder.from_config(config, use_flash=device.type == "cuda")
+        return cls(
+            bert,
+            SpanMasker(bert.d_model),
+            MaskedLMHead(bert.d_model),
+        ).to(device)
 
     def get_summary(self) -> Dict[str, Any]:
         return self.bert.get_summary()
-
-    def _predictions(
-        self,
-        packed_input: torch.Tensor,
-        masked_idx: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> Dict[str, Any]:
-        encoded = self.bert.encode(
-            packed_input,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        masked_output = encoded.index_select(0, masked_idx)
-        return {"mlm": self.mlm_head(masked_output)}
 
     def forward_packed(
         self,
@@ -365,9 +324,8 @@ class BobertForPretraining(nn.Module):
         right_border_random_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-    ) -> Tuple[Dict[str, Any], Dict[str, torch.Tensor], torch.Tensor]:
+    ):
         packed_targets = {"mlm": packed_vectors.index_select(0, masked_idx)}
-
         encoder_vectors = self.masker.corrupt_inputs_packed(
             packed_vectors,
             right_border_zero_idx,
@@ -380,12 +338,10 @@ class BobertForPretraining(nn.Module):
             mask_token_idx,
             random_dst_idx,
         )
-
-        predictions = self._predictions(
+        encoded = self.bert.encode(
             packed_input,
-            masked_idx,
-            cu_seqlens,
-            max_seqlen,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
         )
-
+        predictions = {"mlm": self.mlm_head(encoded.index_select(0, masked_idx))}
         return predictions, packed_targets, masked_idx

@@ -6,10 +6,8 @@ from pathlib import Path
 from omegaconf import OmegaConf
 import torch
 
-from core.data.normalizer import BeatmapNormalizer
-from core.model.bobert import BobertForPretraining
-from core.training.setup import find_latest_checkpoint
-from scripts.common.paths import RUNS_DIR, resolve_path
+from core.model import BobertForPretraining
+from scripts.common.paths import RUNS_DIR, find_latest_checkpoint, resolve_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,8 +57,7 @@ def main() -> int:
         if key.startswith("model.")
     }
     model.load_state_dict(state, strict=True)
-    normalizer = BeatmapNormalizer(checkpoint["vector_stats"])
-    model.bert.save_pretrained(output_path, normalizer)
+    model.bert.save_pretrained(output_path, checkpoint["vector_stats"])
 
     print(f"Exported checkpoint: {checkpoint_path}")
     print(f"Saved model: {output_path}")

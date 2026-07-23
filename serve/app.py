@@ -32,9 +32,9 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from backend.cache import CachedEmbedding, RuntimeCache
-from backend.inference import CpuInferencer
-from backend.logging import (
+from serve.cache import CachedEmbedding, RuntimeCache
+from serve.inference import CpuInferencer
+from serve.logging import (
     RequestLoggingMiddleware,
     async_timed,
     configure_logging,
@@ -43,13 +43,13 @@ from backend.logging import (
     timed,
     timed_call,
 )
-from backend.osu import close_osu_http_client, fetch_osu_file, open_osu_http_client
+from serve.gateway import close_osu_http_client, fetch_osu_file, open_osu_http_client
 
 
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
 CACHE_DB = Path(os.getenv("BOBERT_CACHE_DB", "/app/cache/runtime.sqlite"))
 MODEL_PATH = Path(os.getenv("BOBERT_MODEL_PATH", DATA_DIR / "bobert.pt"))
-CONFIG_PATH = Path(os.getenv("BOBERT_CONFIG_PATH", "/app/config.backend.yaml"))
+CONFIG_PATH = Path(os.getenv("BOBERT_CONFIG_PATH", "/app/config.serve.yaml"))
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 API_SHARED_SECRET = os.getenv("API_SHARED_SECRET", "")
@@ -102,8 +102,7 @@ class DateWindow(str, Enum):
 API_CONFIG = OmegaConf.load(CONFIG_PATH).api
 MAX_RECOMMEND_TOP_K = int(API_CONFIG.max_recommend_top_k)
 DEFAULT_RECOMMEND_IDS = [
-    int(beatmap_id)
-    for beatmap_id in API_CONFIG.default_recommend_beatmap_ids
+    int(beatmap_id) for beatmap_id in API_CONFIG.default_recommend_beatmap_ids
 ]
 OSU_API_VERSION = str(API_CONFIG.osu_api_version)
 
@@ -168,10 +167,7 @@ class BeatmapUnavailableError(ValueError):
 
 def load_rate_limit_config() -> dict[str, int]:
     configured = API_CONFIG.rate_limits
-    return {
-        key: int(configured[key])
-        for key, default in DEFAULT_RATE_LIMITS.items()
-    }
+    return {key: int(configured[key]) for key, default in DEFAULT_RATE_LIMITS.items()}
 
 
 RATE_LIMIT_CONFIG = load_rate_limit_config()
@@ -275,7 +271,9 @@ async def recommend(
     with timed("recommend.runtime", beatmap_id=payload.beatmap_id):
         rt = get_runtime()
     try:
-        async with async_timed("recommend.query_embedding", beatmap_id=payload.beatmap_id):
+        async with async_timed(
+            "recommend.query_embedding", beatmap_id=payload.beatmap_id
+        ):
             query_embedding, cache_status, query_metadata = await get_query_embedding(
                 rt, payload.beatmap_id
             )
@@ -333,8 +331,13 @@ def get_runtime() -> Runtime:
             embeddings_df = pl.read_parquet(
                 embeddings_path, columns=["beatmap_id", "embedding"]
             )
-        if "beatmap_id" not in embeddings_df.columns or "embedding" not in embeddings_df.columns:
-            raise RuntimeError("embeddings.parquet must contain beatmap_id and embedding")
+        if (
+            "beatmap_id" not in embeddings_df.columns
+            or "embedding" not in embeddings_df.columns
+        ):
+            raise RuntimeError(
+                "embeddings.parquet must contain beatmap_id and embedding"
+            )
 
         with timed("startup.prepare_embeddings", rows=embeddings_df.height):
             embedding_ids = [int(x) for x in embeddings_df["beatmap_id"].to_list()]
@@ -346,7 +349,9 @@ def get_runtime() -> Runtime:
             raise RuntimeError("invalid embeddings.parquet shape")
 
         with timed("startup.build_metadata", rows=beatmaps.height):
-            id_to_index = {beatmap_id: idx for idx, beatmap_id in enumerate(embedding_ids)}
+            id_to_index = {
+                beatmap_id: idx for idx, beatmap_id in enumerate(embedding_ids)
+            }
             metadata_by_id = load_metadata_lookup(beatmaps)
             cache = RuntimeCache(CACHE_DB, embedding_dim=embeddings.shape[1])
 
@@ -362,9 +367,9 @@ def get_runtime() -> Runtime:
         if cached:
             start = len(embedding_ids)
             embedding_ids.extend(item.beatmap_id for item in cached)
-            embeddings = np.vstack([embeddings, [item.embedding for item in cached]]).astype(
-                np.float32
-            )
+            embeddings = np.vstack(
+                [embeddings, [item.embedding for item in cached]]
+            ).astype(np.float32)
             id_to_index.update(
                 {item.beatmap_id: start + idx for idx, item in enumerate(cached)}
             )
@@ -506,7 +511,9 @@ def append_embedding(
         return
     rt.id_to_index[beatmap_id] = len(rt.embedding_ids) + len(rt.dynamic_embedding_ids)
     rt.dynamic_embedding_ids.append(beatmap_id)
-    rt.dynamic_embeddings.append(normalize_rows(embedding[None, :]).astype(np.float32)[0])
+    rt.dynamic_embeddings.append(
+        normalize_rows(embedding[None, :]).astype(np.float32)[0]
+    )
     rt.metadata_by_id[beatmap_id] = metadata
 
 
@@ -668,9 +675,10 @@ def metadata_complete(metadata: dict[str, Any] | None) -> bool:
     ]
     if any(json_value(value) is None for value in required):
         return False
-    return json_value(metadata.get("status")) is not None or json_value(
-        metadata.get("ranked")
-    ) is not None
+    return (
+        json_value(metadata.get("status")) is not None
+        or json_value(metadata.get("ranked")) is not None
+    )
 
 
 def search(
@@ -689,7 +697,9 @@ def search(
 
     scores = embeddings @ query_embedding
     if dynamic_embeddings:
-        dynamic_scores = np.asarray(dynamic_embeddings, dtype=np.float32) @ query_embedding
+        dynamic_scores = (
+            np.asarray(dynamic_embeddings, dtype=np.float32) @ query_embedding
+        )
         scores = np.concatenate([scores, dynamic_scores])
     query_set_id = metadata_set_id(query_metadata)
     date_cutoff = date_window_cutoff(filters.date_window)
@@ -745,7 +755,9 @@ def candidate_index_batches(scores: np.ndarray, top_k: int):
         if candidate_count >= count:
             yield np.argsort(-scores)
             return
-        partition_indices = np.argpartition(-scores, candidate_count - 1)[:candidate_count]
+        partition_indices = np.argpartition(-scores, candidate_count - 1)[
+            :candidate_count
+        ]
         yield partition_indices[np.argsort(-scores[partition_indices])]
 
     yield np.argsort(-scores)
@@ -782,7 +794,8 @@ def public_metadata(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]
         "ranked_date": json_value(metadata.get("ranked_date")),
         "submitted_date": json_value(metadata.get("submitted_date")),
         "release_date": json_value(metadata_release_date(metadata)),
-        "url": json_value(metadata.get("url")) or f"https://osu.ppy.sh/b/{int(beatmap_id)}",
+        "url": json_value(metadata.get("url"))
+        or f"https://osu.ppy.sh/b/{int(beatmap_id)}",
     }
 
 
@@ -846,7 +859,9 @@ def metadata_release_date(metadata: dict[str, Any]) -> Any:
 
 def is_ranked_status(metadata: dict[str, Any]) -> bool:
     values = [metadata.get("status"), metadata.get("ranked")]
-    return any(str(json_value(value)).lower() in RANKED_STATUS_VALUES for value in values)
+    return any(
+        str(json_value(value)).lower() in RANKED_STATUS_VALUES for value in values
+    )
 
 
 def date_window_cutoff(window: DateWindow | None) -> datetime | None:

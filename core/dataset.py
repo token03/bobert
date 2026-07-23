@@ -1,14 +1,81 @@
 from pathlib import Path
+import random
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import polars as pl
+import torch
+from torch.utils.data import Sampler
 from tqdm import tqdm
 
-from .feature import build_feature_tensors
+from .features import build_feature_tensors
 
 HITOBJECT_ID_RANGE = 100_000
+
+
+class LengthBucketBatchSampler(Sampler[List[int]]):
+    def __init__(
+        self,
+        lengths: Sequence[int],
+        batch_size: int,
+        max_tokens: int,
+        seed: int,
+        shuffle: bool = True,
+    ):
+        self.lengths = [int(length) for length in lengths]
+        self.batch_size = int(batch_size)
+        self.max_tokens = int(max_tokens)
+        self.seed = int(seed)
+        self.shuffle = shuffle
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        return len(self._batches())
+
+    def _batches(self) -> List[List[int]]:
+        indices = sorted(range(len(self.lengths)), key=self.lengths.__getitem__)
+        batches = []
+        batch: List[int] = []
+        max_len = 0
+        for index in indices:
+            length = self.lengths[index]
+            next_max_len = max(max_len, length)
+            if batch and (
+                len(batch) == self.batch_size
+                or next_max_len * (len(batch) + 1) > self.max_tokens
+            ):
+                batches.append(batch)
+                batch = []
+                max_len = 0
+            batch.append(index)
+            max_len = max(max_len, length)
+        if batch:
+            batches.append(batch)
+        return batches
+
+    def __iter__(self):
+        batches = self._batches()
+        if self.shuffle:
+            random.Random(self.seed + self.epoch).shuffle(batches)
+        self.epoch += 1
+        yield from batches
+
+
+def batch_packed_vectors(
+    vectors: Sequence[torch.Tensor], max_seq_len: int
+) -> Dict[str, torch.Tensor | int]:
+    lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    return {
+        "packed_vectors": torch.cat(
+            [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
+        ),
+        "cu_seqlens": torch.nn.functional.pad(
+            torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
+        ),
+        "max_seqlen": max(lengths),
+    }
 
 
 def scan_dataset_parquet(path: str | Path) -> pl.LazyFrame:

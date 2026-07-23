@@ -7,16 +7,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core.data.module import BobertDataModule, preallocation_batch_size
-
-from .setup import create_optimizer, create_scheduler
-from ..data.schema import (
+from core.features import (
     FEATURE_INFO,
     FEATURES_BY_NAME,
-    OBJECT_TYPE_SLIDER,
-    OBJECT_TYPE_SPINNER,
     VECTOR_DIM,
 )
+from core.osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+
+from .loader import BobertDataModule, preallocation_batch_size
+from .setup import create_optimizer, create_scheduler
+
+
+def compile_encoder(model: nn.Module, config: DictConfig) -> None:
+    if not config.runtime.compile_model:
+        return
+    print("Compiling BERT pre-training tokenizer and encoder with torch.compile...")
+    compile_mode = config.runtime.compile_mode
+    model.bert.embed_sequences = torch.compile(
+        model.bert.embed_sequences,
+        mode=compile_mode,
+        dynamic=False,
+    )
+    model.bert._encode = torch.compile(
+        model.bert._encode,
+        mode=compile_mode,
+        dynamic=False,
+    )
 
 
 def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor):
@@ -82,12 +98,14 @@ class BobertModule(pl.LightningModule):
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
         checkpoint["config"] = OmegaConf.to_container(self.config, resolve=True)
-        if self.datamodule.normalizer is not None:
-            checkpoint["vector_stats"] = self.datamodule.normalizer.get_vector_stats()
+        if self.datamodule.vector_stats is not None:
+            checkpoint["vector_stats"] = self.datamodule.vector_stats
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        if self.datamodule.normalizer is not None:
-            self.datamodule.normalizer.vector_stats = checkpoint["vector_stats"]
+        if self.datamodule.vector_stats is not None:
+            self.datamodule.vector_stats = checkpoint["vector_stats"]
+            self.datamodule.train_dataset.vector_stats = self.datamodule.vector_stats
+            self.datamodule.val_dataset.vector_stats = self.datamodule.vector_stats
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config)

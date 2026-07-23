@@ -7,12 +7,8 @@ import torch.nn.functional as F
 from rotary_embedding_torch import apply_rotary_emb
 from torch.utils.checkpoint import checkpoint
 
-from ..data.schema import (
-    FEATURE_INFO,
-    OBJECT_TYPE_CIRCLE,
-    OBJECT_TYPE_SLIDER,
-    OBJECT_TYPE_SPINNER,
-)
+from .features import FEATURE_INFO
+from .osu import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
 try:
     import torch.distributed.tensor  # noqa: F401
@@ -487,18 +483,20 @@ class SpanMasker(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, d_model))
-
         continuous = FEATURE_INFO["continuous"]
         categorical = FEATURE_INFO["categorical"]
-        right_delta = torch.tensor(
-            [
-                continuous["incoming_dx"],
-                continuous["incoming_dy"],
-                categorical["incoming_motion_valid"]["index"],
-            ],
-            dtype=torch.long,
+        self.register_buffer(
+            "right_delta_indices",
+            torch.tensor(
+                [
+                    continuous["incoming_dx"],
+                    continuous["incoming_dy"],
+                    categorical["incoming_motion_valid"]["index"],
+                ],
+                dtype=torch.long,
+            ),
+            persistent=False,
         )
-        self.register_buffer("right_delta_indices", right_delta, persistent=False)
 
     def corrupt_inputs_packed(
         self,
@@ -580,15 +578,9 @@ class MaskedLMHead(nn.Module):
         )
         self.proj = nn.Linear(d_model, sum(self.flat_output_sizes))
 
-    def forward(
-        self,
-        packed_output: torch.Tensor,
-        is_masked: torch.Tensor | None = None,
-    ) -> Dict[str, Any]:
-        masked_output = packed_output if is_masked is None else packed_output[is_masked]
-
+    def forward(self, packed_output: torch.Tensor) -> Dict[str, Any]:
         outputs = {}
-        pieces = self.proj(masked_output).split(self.flat_output_sizes, dim=-1)
+        pieces = self.proj(packed_output).split(self.flat_output_sizes, dim=-1)
         offset = 0
         for group in self.groups:
             count = len(self.output_sizes[group])

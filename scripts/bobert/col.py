@@ -12,8 +12,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from core.data.normalizer import BeatmapNormalizer
-from core.data.source import load_beatmap_dataset
+from core.dataset import load_beatmap_dataset
+from core.features import VectorStats, normalize as normalize_features
 from scripts.bobert.embed import (
     find_model,
     load_model,
@@ -38,17 +38,16 @@ def pack_2bit(codes: np.ndarray) -> np.ndarray:
         raise ValueError("2-bit residual codes must be in 0..3")
     c = codes.reshape(codes.shape[0], RESIDUAL_BYTES, 4)
     return (
-        c[:, :, 0]
-        | (c[:, :, 1] << 2)
-        | (c[:, :, 2] << 4)
-        | (c[:, :, 3] << 6)
+        c[:, :, 0] | (c[:, :, 1] << 2) | (c[:, :, 2] << 4) | (c[:, :, 3] << 6)
     ).astype(np.uint8, copy=False)
 
 
 def unpack_2bit(packed: np.ndarray) -> np.ndarray:
     packed = np.asarray(packed, dtype=np.uint8)
     if packed.ndim != 2 or packed.shape[1] != RESIDUAL_BYTES:
-        raise ValueError(f"expected packed shape [n, {RESIDUAL_BYTES}], got {packed.shape}")
+        raise ValueError(
+            f"expected packed shape [n, {RESIDUAL_BYTES}], got {packed.shape}"
+        )
     out = np.empty((packed.shape[0], COL_DIM), dtype=np.uint8)
     out[:, 0::4] = packed & 0b00000011
     out[:, 1::4] = (packed >> 2) & 0b00000011
@@ -76,9 +75,9 @@ def exact_batch_beatmaps(beatmaps: list[dict], batch_size: int) -> list[dict]:
 
 
 class ColDataset(Dataset):
-    def __init__(self, beatmaps: list[dict], normalizer: BeatmapNormalizer):
+    def __init__(self, beatmaps: list[dict], vector_stats: VectorStats):
         self.beatmaps = beatmaps
-        self.normalizer = normalizer
+        self.vector_stats = vector_stats
 
     def __len__(self):
         return len(self.beatmaps)
@@ -87,7 +86,7 @@ class ColDataset(Dataset):
         item = self.beatmaps[idx]
         return (
             int(item["beatmap_id"]),
-            self.normalizer.normalize_vectors(item["hitobjects"]),
+            normalize_features(item["hitobjects"], self.vector_stats),
             torch.from_numpy(item["beat_ids"]),
         )
 
@@ -99,7 +98,8 @@ def collate_col(batch, max_seq_len: int):
         [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
     )
     packed_beats = torch.cat(
-        [beats[:length].to(torch.long) for beats, length in zip(beat_ids, lengths)], dim=0
+        [beats[:length].to(torch.long) for beats, length in zip(beat_ids, lengths)],
+        dim=0,
     )
     cu_seqlens = torch.zeros(len(lengths) + 1, dtype=torch.int32)
     cu_seqlens[1:] = torch.tensor(lengths, dtype=torch.int32).cumsum(0)
@@ -115,13 +115,13 @@ def collate_col(batch, max_seq_len: int):
 def iter_col_outputs(
     model,
     beatmaps: list[dict],
-    normalizer: BeatmapNormalizer,
+    vector_stats: VectorStats,
     max_seq_len: int,
     device: torch.device,
     batch_size: int,
 ):
     padded = exact_batch_beatmaps(beatmaps, batch_size)
-    dataset = ColDataset(padded, normalizer)
+    dataset = ColDataset(padded, vector_stats)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -135,7 +135,9 @@ def iter_col_outputs(
     with torch.inference_mode():
         for beatmap_ids, vectors, beat_ids, cu_seqlens, max_seqlen in loader:
             if beatmap_ids.numel() != batch_size:
-                raise RuntimeError(f"encoder batch must be {batch_size}, got {beatmap_ids.numel()}")
+                raise RuntimeError(
+                    f"encoder batch must be {batch_size}, got {beatmap_ids.numel()}"
+                )
             vectors = vectors.to(device, non_blocking=True)
             beat_ids = beat_ids.to(device, non_blocking=True)
             cu_seqlens = cu_seqlens.to(device, non_blocking=True)
@@ -149,9 +151,12 @@ def iter_col_outputs(
                 )
             packed = normalize(outputs["col_embedding"])
             embedding = outputs["embedding"].float()
-            counts = torch.bincount(
-                outputs["col_map_index"], minlength=batch_size
-            ).cpu().numpy().astype(np.int64)
+            counts = (
+                torch.bincount(outputs["col_map_index"], minlength=batch_size)
+                .cpu()
+                .numpy()
+                .astype(np.int64)
+            )
             offsets = np.concatenate(([0], counts.cumsum()))
             for i, beatmap_id in enumerate(beatmap_ids.tolist()):
                 if emitted >= len(beatmaps):
@@ -164,22 +169,32 @@ def iter_col_outputs(
 
 def fit_kmeans(tokens: torch.Tensor, k: int, iterations: int) -> torch.Tensor:
     if tokens.shape[0] < k:
-        raise ValueError(f"token sample has {tokens.shape[0]} rows, fewer than centroids={k}")
-    centroids = tokens[torch.randperm(tokens.shape[0], device=tokens.device)[:k]].clone()
+        raise ValueError(
+            f"token sample has {tokens.shape[0]} rows, fewer than centroids={k}"
+        )
+    centroids = tokens[
+        torch.randperm(tokens.shape[0], device=tokens.device)[:k]
+    ].clone()
     for _ in tqdm(range(iterations), desc="Fitting centroids"):
         assignments = assign_centroids(tokens, centroids)
         counts = torch.bincount(assignments, minlength=k).float()
         updated = torch.zeros_like(centroids)
         updated.index_add_(0, assignments, tokens)
-        centroids = torch.where(counts[:, None] > 0, updated / counts.clamp_min(1)[:, None], centroids)
+        centroids = torch.where(
+            counts[:, None] > 0, updated / counts.clamp_min(1)[:, None], centroids
+        )
         centroids = normalize(centroids)
     return centroids
 
 
-def assign_centroids(tokens: torch.Tensor, centroids: torch.Tensor, block_size: int = 8192) -> torch.Tensor:
+def assign_centroids(
+    tokens: torch.Tensor, centroids: torch.Tensor, block_size: int = 8192
+) -> torch.Tensor:
     assignments = []
     for start in range(0, tokens.shape[0], block_size):
-        assignments.append((tokens[start : start + block_size] @ centroids.T).argmax(dim=1))
+        assignments.append(
+            (tokens[start : start + block_size] @ centroids.T).argmax(dim=1)
+        )
     return torch.cat(assignments, dim=0)
 
 
@@ -219,30 +234,55 @@ class ColIndex:
         self.num_docs = int(self.meta["num_docs"])
         self.total_tokens = int(self.meta["total_tokens"])
         self.dim = int(self.meta["dim"])
-        self.doc_ids = np.memmap(self.path / "doc_ids.i64", dtype=np.int64, mode="r", shape=(self.num_docs,))
-        self.offsets = np.memmap(self.path / "offsets.i64", dtype=np.int64, mode="r", shape=(self.num_docs + 1,))
-        self.lengths = np.memmap(self.path / "lengths.i32", dtype=np.int32, mode="r", shape=(self.num_docs,))
-        self.centroid_ids = np.memmap(self.path / "centroid_ids.u16", dtype=np.uint16, mode="r", shape=(self.total_tokens,))
+        self.doc_ids = np.memmap(
+            self.path / "doc_ids.i64", dtype=np.int64, mode="r", shape=(self.num_docs,)
+        )
+        self.offsets = np.memmap(
+            self.path / "offsets.i64",
+            dtype=np.int64,
+            mode="r",
+            shape=(self.num_docs + 1,),
+        )
+        self.lengths = np.memmap(
+            self.path / "lengths.i32", dtype=np.int32, mode="r", shape=(self.num_docs,)
+        )
+        self.centroid_ids = np.memmap(
+            self.path / "centroid_ids.u16",
+            dtype=np.uint16,
+            mode="r",
+            shape=(self.total_tokens,),
+        )
         self.residuals = np.memmap(
             self.path / "residuals.2bit.u8",
             dtype=np.uint8,
             mode="r",
             shape=(self.total_tokens, self.meta["residual_bytes_per_token"]),
         )
-        self.centroids = np.fromfile(self.path / "centroids.f16", dtype=np.float16).reshape(
-            self.meta["num_centroids"], self.dim
+        self.centroids = np.fromfile(
+            self.path / "centroids.f16", dtype=np.float16
+        ).reshape(self.meta["num_centroids"], self.dim)
+        self.residual_levels = np.fromfile(
+            self.path / "residual_levels.f32", dtype=np.float32
         )
-        self.residual_levels = np.fromfile(self.path / "residual_levels.f32", dtype=np.float32)
-        self.residual_bias = np.fromfile(self.path / "residual_bias.f32", dtype=np.float32)
-        self.residual_scales = np.fromfile(self.path / "residual_scales.f32", dtype=np.float32)
-        self.id_to_index = {int(beatmap_id): i for i, beatmap_id in enumerate(self.doc_ids)}
+        self.residual_bias = np.fromfile(
+            self.path / "residual_bias.f32", dtype=np.float32
+        )
+        self.residual_scales = np.fromfile(
+            self.path / "residual_scales.f32", dtype=np.float32
+        )
+        self.id_to_index = {
+            int(beatmap_id): i for i, beatmap_id in enumerate(self.doc_ids)
+        }
 
     def reconstruct_index(self, index: int) -> np.ndarray:
         start = int(self.offsets[index])
         end = int(self.offsets[index + 1])
         centroid_ids = np.asarray(self.centroid_ids[start:end], dtype=np.int64)
         codes = unpack_2bit(np.asarray(self.residuals[start:end]))
-        residual = self.residual_levels[codes].astype(np.float32) * self.residual_scales + self.residual_bias
+        residual = (
+            self.residual_levels[codes].astype(np.float32) * self.residual_scales
+            + self.residual_bias
+        )
         vectors = self.centroids[centroid_ids].astype(np.float32) + residual
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         return (vectors / np.maximum(norms, 1e-12)).astype(np.float32)
@@ -254,7 +294,9 @@ class ColIndex:
         return self.reconstruct_index(index)
 
 
-def collect_fit_tokens(args, config, model, normalizer, device: torch.device) -> torch.Tensor:
+def collect_fit_tokens(
+    args, config, model, vector_stats, device: torch.device
+) -> torch.Tensor:
     dataset_dir = resolve_path(args.dataset or config.data.dataset_path)
     ids = sample_ids(
         dataset_dir,
@@ -273,7 +315,9 @@ def collect_fit_tokens(args, config, model, normalizer, device: torch.device) ->
     )
     count = 0
     filled = 0
-    for id_chunk in tqdm(list(chunked(ids, args.load_chunk_size)), desc="Loading fit data"):
+    for id_chunk in tqdm(
+        list(chunked(ids, args.load_chunk_size)), desc="Loading fit data"
+    ):
         beatmaps = load_beatmap_dataset(
             str(dataset_dir),
             dataset_seed=args.seed,
@@ -285,7 +329,7 @@ def collect_fit_tokens(args, config, model, normalizer, device: torch.device) ->
             include_beat_ids=True,
         )
         for _beatmap_id, tokens, _embedding in iter_col_outputs(
-            model, beatmaps, normalizer, model.max_seq_len, device, args.batch_size
+            model, beatmaps, vector_stats, model.max_seq_len, device, args.batch_size
         ):
             tokens = tokens.float()
             token_count = tokens.shape[0]
@@ -303,7 +347,9 @@ def collect_fit_tokens(args, config, model, normalizer, device: torch.device) ->
                     device=device,
                     dtype=torch.long,
                 )
-                indices = (torch.rand(token_count, device=device) * positions).to(torch.long)
+                indices = (torch.rand(token_count, device=device) * positions).to(
+                    torch.long
+                )
                 keep = indices < args.fit_token_cap
                 if keep.any():
                     reservoir[indices[keep]] = tokens[keep]
@@ -317,7 +363,9 @@ def build(args):
     if args.batch_size != 32:
         raise SystemExit("Error: col index builds require --batch-size 32")
     if args.residual_bits != RESIDUAL_BITS:
-        raise SystemExit(f"Error: only --residual-bits {RESIDUAL_BITS} is currently supported")
+        raise SystemExit(
+            f"Error: only --residual-bits {RESIDUAL_BITS} is currently supported"
+        )
     model_path = find_model(args.model, args.version)
     output = resolve_path(args.output or model_path.parent / "col")
     if output.exists():
@@ -328,33 +376,46 @@ def build(args):
 
     config = OmegaConf.load(resolve_path(args.config))
     dataset_dir = resolve_path(args.dataset or config.data.dataset_path)
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model, normalizer = load_model(model_path, device)
+    device = torch.device(
+        args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    model, vector_stats = load_model(model_path, device)
     with torch.inference_mode():
         model.rotary_emb(
             torch.arange(model.max_seq_len, device=device),
             seq_len=model.max_seq_len,
         )
 
-    fit_tokens = collect_fit_tokens(args, config, model, normalizer, device)
+    fit_tokens = collect_fit_tokens(args, config, model, vector_stats, device)
     centroids = fit_kmeans(fit_tokens, args.centroids, args.kmeans_iters)
-    residual_levels, residual_bias, residual_scales = fit_residual_quantizer(fit_tokens, centroids)
+    residual_levels, residual_bias, residual_scales = fit_residual_quantizer(
+        fit_tokens, centroids
+    )
 
     centroids.cpu().numpy().astype(np.float16).tofile(output / "centroids.f16")
-    residual_levels.cpu().numpy().astype(np.float32).tofile(output / "residual_levels.f32")
+    residual_levels.cpu().numpy().astype(np.float32).tofile(
+        output / "residual_levels.f32"
+    )
     residual_bias.cpu().numpy().astype(np.float32).tofile(output / "residual_bias.f32")
-    residual_scales.cpu().numpy().astype(np.float32).tofile(output / "residual_scales.f32")
+    residual_scales.cpu().numpy().astype(np.float32).tofile(
+        output / "residual_scales.f32"
+    )
 
     ids = sample_ids(dataset_dir, args.limit, args.seed, args.min_sr, model.max_seq_len)
     doc_ids = []
     lengths = []
     offsets = [0]
     total_tokens = 0
-    with (output / "centroid_ids.u16").open("wb") as centroid_file, (
-        output / "residuals.2bit.u8"
-    ).open("wb") as residual_file:
+    with (
+        (output / "centroid_ids.u16").open("wb") as centroid_file,
+        (output / "residuals.2bit.u8").open("wb") as residual_file,
+    ):
         total_chunks = math.ceil(len(ids) / args.load_chunk_size)
-        for id_chunk in tqdm(chunked(ids, args.load_chunk_size), total=total_chunks, desc="Writing col index"):
+        for id_chunk in tqdm(
+            chunked(ids, args.load_chunk_size),
+            total=total_chunks,
+            desc="Writing col index",
+        ):
             beatmaps = load_beatmap_dataset(
                 str(dataset_dir),
                 dataset_seed=args.seed,
@@ -366,7 +427,12 @@ def build(args):
                 include_beat_ids=True,
             )
             for beatmap_id, tokens, _embedding in iter_col_outputs(
-                model, beatmaps, normalizer, model.max_seq_len, device, args.batch_size
+                model,
+                beatmaps,
+                vector_stats,
+                model.max_seq_len,
+                device,
+                args.batch_size,
             ):
                 centroid_ids, packed = quantize_residuals(
                     tokens, centroids, residual_levels, residual_bias, residual_scales
@@ -408,7 +474,9 @@ def build(args):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Build BoBERT contextual late-interaction index")
+    parser = argparse.ArgumentParser(
+        description="Build BoBERT contextual late-interaction index"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     build_parser = subparsers.add_parser("build")
     build_parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))

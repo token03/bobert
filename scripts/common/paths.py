@@ -21,3 +21,21 @@ def resolve_path(path: str | Path) -> Path:
     if path.is_absolute() or path.exists():
         return path
     return PROJECT_ROOT / path
+
+
+def find_latest_checkpoint(runs_dir: str | Path = RUNS_DIR) -> Path | None:
+    runs_dir = Path(runs_dir)
+    candidates = list(runs_dir.rglob("checkpoints/last*.ckpt"))
+    if not candidates:
+        candidates = list(runs_dir.rglob("checkpoints/*.ckpt"))
+    return (
+        max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+    )
+
+
+def run_name_from_checkpoint(checkpoint: Path) -> str:
+    return (
+        checkpoint.parent.parent.name
+        if checkpoint.parent.name == "checkpoints"
+        else checkpoint.stem
+    )

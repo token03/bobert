@@ -13,17 +13,20 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from core.data.batch import LengthBucketBatchSampler, batch_packed_vectors
-from core.data.normalizer import BeatmapNormalizer
-from core.data.source import load_beatmap_dataset
-from core.model.bobert import BobertEncoder
+from core.dataset import (
+    LengthBucketBatchSampler,
+    batch_packed_vectors,
+    load_beatmap_dataset,
+)
+from core.features import VectorStats, normalize
+from core.model import BobertEncoder
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
 
 class ExportDataset(Dataset):
-    def __init__(self, beatmaps, normalizer: BeatmapNormalizer):
+    def __init__(self, beatmaps, vector_stats: VectorStats):
         self.beatmaps = beatmaps
-        self.normalizer = normalizer
+        self.vector_stats = vector_stats
 
     def __len__(self):
         return len(self.beatmaps)
@@ -32,7 +35,7 @@ class ExportDataset(Dataset):
         item = self.beatmaps[idx]
         return (
             int(item["beatmap_id"]),
-            self.normalizer.normalize_vectors(item["hitobjects"]),
+            normalize(item["hitobjects"], self.vector_stats),
         )
 
 
@@ -47,9 +50,7 @@ def collate_export(batch, max_seq_len: int):
     )
 
 
-def find_model(
-    path: str | Path | None = None, version: str | None = None
-) -> Path:
+def find_model(path: str | Path | None = None, version: str | None = None) -> Path:
     if path is not None:
         model_path = resolve_path(path).resolve()
     elif version is not None:
@@ -65,13 +66,13 @@ def find_model(
 
 
 def load_model(model_path: Path, device: torch.device):
-    model, normalizer = BobertEncoder.from_pretrained(model_path, device)
+    model, vector_stats = BobertEncoder.from_pretrained(model_path, device)
     print(f"Loaded model: {model_path}")
     if device.type == "cuda":
         model.to(device).bfloat16().eval()
     else:
         model.to(device).float().eval()
-    return model, normalizer
+    return model, vector_stats
 
 
 def sample_ids(
@@ -203,7 +204,7 @@ def export_embeddings(
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model, normalizer = load_model(find_model(model_path), device)
+    model, vector_stats = load_model(find_model(model_path), device)
     max_seq_len = model.max_seq_len
     ids = sample_ids(dataset_dir, limit, seed, min_sr, max_seq_len)
     print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
@@ -238,7 +239,7 @@ def export_embeddings(
                 if not beatmaps:
                     continue
 
-                dataset = ExportDataset(beatmaps, normalizer)
+                dataset = ExportDataset(beatmaps, vector_stats)
                 batch_sampler = bucket_batch_sampler(
                     beatmaps,
                     batch_size,
@@ -250,9 +251,7 @@ def export_embeddings(
                     "shuffle": False,
                     "num_workers": 0,
                     "pin_memory": device.type == "cuda",
-                    "collate_fn": lambda batch: collate_export(
-                        batch, max_seq_len
-                    ),
+                    "collate_fn": lambda batch: collate_export(batch, max_seq_len),
                 }
                 if batch_sampler is None:
                     loader_kwargs["batch_size"] = batch_size

@@ -15,8 +15,8 @@ import yaml
 from numba import njit
 from tqdm import tqdm
 
-from core.data.parser import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
-from core.data.source import scan_dataset_parquet
+from core.dataset import scan_dataset_parquet
+from core.osu import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 from scripts.common.paths import resolve_path
 
 

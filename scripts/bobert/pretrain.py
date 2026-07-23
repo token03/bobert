@@ -7,16 +7,18 @@ from typing import cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from core.data.module import BobertDataModule
-from core.model.bobert import BobertForPretraining
-from core.training.tasks import BobertModule
-from core.training.setup import (
+from core.model import BobertForPretraining
+from training.loader import BobertDataModule
+from training.pretrain import BobertModule, compile_encoder
+from training.setup import (
     create_trainer,
-    find_latest_checkpoint,
-    run_name_from_checkpoint,
     setup_device,
 )
-from scripts.common.paths import RUNS_DIR
+from scripts.common.paths import (
+    RUNS_DIR,
+    find_latest_checkpoint,
+    run_name_from_checkpoint,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,7 +95,7 @@ def load_config(args: argparse.Namespace, checkpoint: dict | None = None) -> Dic
 
 def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
     if args.resume_ckpt == "latest":
-        checkpoint = find_latest_checkpoint()
+        checkpoint = find_latest_checkpoint(RUNS_DIR)
         if checkpoint is None:
             raise FileNotFoundError(f"No checkpoint found in {RUNS_DIR}")
         return checkpoint
@@ -126,6 +128,7 @@ def main() -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BobertForPretraining.from_config(config, device)
+    compile_encoder(model, config)
     summary = model.get_summary()
 
     print("\n--- BERT Encoder Information ---")
@@ -138,7 +141,7 @@ def main() -> int:
     if resume_checkpoint is not None and run_name is None:
         run_name = run_name_from_checkpoint(resume_checkpoint)
     module = BobertModule(model, config, datamodule, quiet=args.quiet)
-    trainer = create_trainer(config, run_name=run_name, quiet=args.quiet)
+    trainer = create_trainer(config, RUNS_DIR, run_name=run_name, quiet=args.quiet)
     run_dir = Path(trainer.log_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(config, run_dir / "config.yaml")
@@ -158,10 +161,10 @@ def main() -> int:
         weights_only=False if resume_checkpoint is not None else None,
     )
 
-    if datamodule.normalizer is None:
-        raise RuntimeError("Training completed without a fitted normalizer")
+    if datamodule.vector_stats is None:
+        raise RuntimeError("Training completed without fitted normalization statistics")
     model_path = run_dir / "bobert.pt"
-    model.bert.save_pretrained(model_path, datamodule.normalizer)
+    model.bert.save_pretrained(model_path, datamodule.vector_stats)
     print(f"Exported model: {model_path}")
 
     print("\nBoBERT pretraining completed!")

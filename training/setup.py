@@ -12,29 +12,9 @@ import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
-from scripts.common.paths import RUNS_DIR
-
 
 def setup_device() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
-
-
-def find_latest_checkpoint(runs_dir: str | Path = RUNS_DIR) -> Optional[Path]:
-    runs_dir = Path(runs_dir)
-    candidates = list(runs_dir.rglob("checkpoints/last*.ckpt"))
-    if not candidates:
-        candidates = list(runs_dir.rglob("checkpoints/*.ckpt"))
-    return (
-        max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
-    )
-
-
-def run_name_from_checkpoint(checkpoint: Path) -> str:
-    return (
-        checkpoint.parent.parent.name
-        if checkpoint.parent.name == "checkpoints"
-        else checkpoint.stem
-    )
 
 
 def create_optimizer(model: nn.Module, config: DictConfig) -> Optimizer:
@@ -108,15 +88,16 @@ def create_scheduler(
 
 def create_trainer(
     config: DictConfig,
+    runs_dir: str | Path,
     run_name: str | None = None,
     extra_callbacks: Optional[List[pl.Callback]] = None,
     quiet: bool = False,
 ) -> pl.Trainer:
     trainer_config = config.training.trainer
-    csv_logger = CSVLogger(save_dir=RUNS_DIR, name="", version=run_name)
+    csv_logger = CSVLogger(save_dir=runs_dir, name="", version=run_name)
     loggers = [
         csv_logger,
-        TensorBoardLogger(save_dir=RUNS_DIR, name="", version=csv_logger.version),
+        TensorBoardLogger(save_dir=runs_dir, name="", version=csv_logger.version),
     ]
     callbacks = []
     if trainer_config.save_checkpoints:

@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import requests
+from core.features import normalize
 from scripts.common.osu import (
     API_TIERS,
     DOWNLOAD_HEADERS,
@@ -165,11 +166,13 @@ def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -
 
 
 def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
-    from core.data.feature import build_feature_tensors
-    from core.data.parser import parse_osu_file
-    from scripts.data.dataset import (
+    from core.features import build_feature_tensors
+    from core.osu import (
         extract_beatmap_record,
         extract_hitobject_records,
+        parse_osu_file,
+    )
+    from scripts.data.dataset import (
         validate_beatmap,
     )
 
@@ -190,11 +193,13 @@ def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
 
 
 def beatmap_col_inputs_from_osu(path: Path, max_seq_len: int):
-    from core.data.feature import build_feature_tensors
-    from core.data.parser import parse_osu_file
-    from scripts.data.dataset import (
+    from core.features import build_feature_tensors
+    from core.osu import (
         extract_beatmap_record,
         extract_hitobject_records,
+        parse_osu_file,
+    )
+    from scripts.data.dataset import (
         validate_beatmap,
     )
 
@@ -225,7 +230,7 @@ class LazyEmbedder:
         self.model_path = model_path
         self.device_name = device
         self.model = None
-        self.normalizer = None
+        self.vector_stats = None
         self.device = None
 
     def load(self):
@@ -239,7 +244,7 @@ class LazyEmbedder:
         self.device = torch.device(
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        self.model, self.normalizer = load_model(
+        self.model, self.vector_stats = load_model(
             find_model(self.model_path), self.device
         )
 
@@ -248,7 +253,7 @@ class LazyEmbedder:
 
         self.load()
         vectors = beatmap_vectors_from_osu(path, self.model.max_seq_len)
-        vectors = self.normalizer.normalize_vectors(vectors)
+        vectors = normalize(vectors, self.vector_stats)
         packed = vectors[: self.model.max_seq_len].contiguous()
         max_seqlen = packed.shape[0]
         cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
@@ -272,7 +277,7 @@ class LazyEmbedder:
 
         self.load()
         vectors, beat_ids = beatmap_col_inputs_from_osu(path, self.model.max_seq_len)
-        vectors = self.normalizer.normalize_vectors(vectors)
+        vectors = normalize(vectors, self.vector_stats)
         packed = vectors[: self.model.max_seq_len].contiguous()
         beat_ids = torch.from_numpy(beat_ids[: self.model.max_seq_len])
         max_seqlen = packed.shape[0]

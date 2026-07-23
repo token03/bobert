@@ -13,7 +13,12 @@ import polars as pl
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-from core.data.parser import parse_osu_file, RawBeatmap
+from core.osu import (
+    RawBeatmap,
+    extract_beatmap_record,
+    extract_hitobject_records,
+    parse_osu_file,
+)
 
 MAX_BUFFER_HITOBJECT_ROWS = 100_000
 MIN_OBJECTS_PER_MAP = 1
@@ -98,59 +103,6 @@ def log_worker_failure(
     }
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=True) + "\n")
-
-
-def extract_beatmap_record(beatmap: RawBeatmap) -> Dict:
-    return {
-        "beatmap_id": beatmap.beatmap_id,
-        "category": beatmap.category,
-        "hp_drain": beatmap.hp_drain,
-        "cs": beatmap.cs,
-        "od": beatmap.od,
-        "ar": beatmap.ar,
-        "slider_multiplier": beatmap.slider_multiplier,
-        "slider_tick": beatmap.slider_tick,
-        "difficulty_rating": beatmap.difficulty_rating,
-    }
-
-
-def extract_hitobject_records(beatmap: RawBeatmap) -> List[Dict]:
-    records = []
-    for ho in beatmap.hit_objects:
-        records.append(
-            {
-                "beatmap_id": beatmap.beatmap_id,
-                "category": beatmap.category,
-                "object_index": ho.object_index,
-                "x": ho.x,
-                "y": ho.y,
-                "time": ho.time,
-                "object_type": ho.object_type,
-                "is_new_combo": ho.is_new_combo,
-                "hit_sound": ho.hit_sound,
-                "end_time": ho.end_time,
-                "pixel_length": ho.pixel_length or 0.0,
-                "bpm": ho.bpm,
-                "timing_origin": ho.timing_origin,
-                "end_bpm": ho.end_bpm,
-                "end_timing_origin": ho.end_timing_origin,
-                "curve_type_char": ho.curve_type or "",
-                "num_anchors": ho.num_anchors,
-                "kiai_time": ho.kiai_time,
-                "slider_repeats": (ho.slides - 1) if ho.slides is not None else 0,
-                "hard_anchor_ratio": ho.hard_anchor_ratio,
-                "slider_end_x": ho.slider_end_x,
-                "slider_end_y": ho.slider_end_y,
-                "slider_path_valid": ho.slider_path_valid,
-                "span_end_dx": ho.span_end_dx,
-                "span_end_dy": ho.span_end_dy,
-                "curve_residual_1_dx": ho.curve_residual_1_dx,
-                "curve_residual_1_dy": ho.curve_residual_1_dy,
-                "curve_residual_2_dx": ho.curve_residual_2_dx,
-                "curve_residual_2_dy": ho.curve_residual_2_dy,
-            }
-        )
-    return records
 
 
 def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):

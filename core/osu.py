@@ -77,6 +77,59 @@ class RawBeatmap(NamedTuple):
     hit_objects: List[RawHitObject]
 
 
+def extract_beatmap_record(beatmap: RawBeatmap) -> dict:
+    return {
+        "beatmap_id": beatmap.beatmap_id,
+        "category": beatmap.category,
+        "hp_drain": beatmap.hp_drain,
+        "cs": beatmap.cs,
+        "od": beatmap.od,
+        "ar": beatmap.ar,
+        "slider_multiplier": beatmap.slider_multiplier,
+        "slider_tick": beatmap.slider_tick,
+        "difficulty_rating": beatmap.difficulty_rating,
+    }
+
+
+def extract_hitobject_records(beatmap: RawBeatmap) -> list[dict]:
+    return [
+        {
+            "beatmap_id": beatmap.beatmap_id,
+            "category": beatmap.category,
+            "object_index": hitobject.object_index,
+            "x": hitobject.x,
+            "y": hitobject.y,
+            "time": hitobject.time,
+            "object_type": hitobject.object_type,
+            "is_new_combo": hitobject.is_new_combo,
+            "hit_sound": hitobject.hit_sound,
+            "end_time": hitobject.end_time,
+            "pixel_length": hitobject.pixel_length or 0.0,
+            "bpm": hitobject.bpm,
+            "timing_origin": hitobject.timing_origin,
+            "end_bpm": hitobject.end_bpm,
+            "end_timing_origin": hitobject.end_timing_origin,
+            "curve_type_char": hitobject.curve_type or "",
+            "num_anchors": hitobject.num_anchors,
+            "kiai_time": hitobject.kiai_time,
+            "slider_repeats": (
+                hitobject.slides - 1 if hitobject.slides is not None else 0
+            ),
+            "hard_anchor_ratio": hitobject.hard_anchor_ratio,
+            "slider_end_x": hitobject.slider_end_x,
+            "slider_end_y": hitobject.slider_end_y,
+            "slider_path_valid": hitobject.slider_path_valid,
+            "span_end_dx": hitobject.span_end_dx,
+            "span_end_dy": hitobject.span_end_dy,
+            "curve_residual_1_dx": hitobject.curve_residual_1_dx,
+            "curve_residual_1_dy": hitobject.curve_residual_1_dy,
+            "curve_residual_2_dx": hitobject.curve_residual_2_dx,
+            "curve_residual_2_dy": hitobject.curve_residual_2_dy,
+        }
+        for hitobject in beatmap.hit_objects
+    ]
+
+
 class TimingSection(NamedTuple):
     start_time: int
     beat_length: float
