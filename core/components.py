@@ -16,12 +16,6 @@ try:
 except (ImportError, AttributeError):
     liger_rms_norm = None
 
-try:
-    from liger_kernel.ops import LigerSiLUMulFunction
-except (ImportError, AttributeError):
-    LigerSiLUMulFunction = None
-
-
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-5):
         super().__init__()
@@ -29,14 +23,14 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        use_liger = liger_rms_norm is not None and x.device.type == "cuda"
-        if use_liger and torch.compiler.is_compiling():
-            use_liger = not torch.is_grad_enabled() or not (
-                x.requires_grad or self.weight.requires_grad
+        if liger_rms_norm is not None and x.device.type == "cuda":
+            compiled_backward = (
+                torch.compiler.is_compiling()
+                and torch.is_grad_enabled()
+                and (x.requires_grad or self.weight.requires_grad)
             )
-
-        if use_liger:
-            return liger_rms_norm(x, self.weight, self.eps, in_place=False)
+            if not compiled_backward:
+                return liger_rms_norm(x, self.weight, self.eps, in_place=False)
 
         output = x.float()
         output = output * torch.rsqrt(
@@ -224,21 +218,7 @@ class SwiGLU(nn.Module):
     def forward(self, x):
         x13 = self.w13(x)
         x1, x3 = torch.chunk(x13, 2, dim=-1)
-        use_liger = (
-            LigerSiLUMulFunction is not None
-            and x1.device.type == "cuda"
-            and x1.dtype in (torch.float16, torch.bfloat16)
-        )
-        if use_liger and torch.compiler.is_compiling():
-            use_liger = not torch.is_grad_enabled() or not (
-                x1.requires_grad or x3.requires_grad
-            )
-
-        if use_liger:
-            hidden = LigerSiLUMulFunction.apply(x1, x3)
-        else:
-            hidden = F.silu(x1) * x3
-        return self.w2(hidden)
+        return self.w2(F.silu(x1) * x3)
 
 
 class EncoderLayer(nn.Module):
