@@ -43,8 +43,25 @@ dependencies = [
 ]
 
 [project.scripts]
-bobert = "scripts.cli:main"
-recommend = "scripts.query.recommend:main"
+pretrain = "scripts.model.pretrain:main"
+embed = "scripts.model.embed:main"
+eval = "scripts.evaluation.run:main"
+recommend = "scripts.evaluation.recommend:main"
+umap = "scripts.evaluation.umap:main"
+export-model = "scripts.model.export:main"
+build-dataset = "scripts.dataset.build:main"
+build-ratings = "scripts.dataset.ratings:main"
+fetch-beatmaps = "scripts.sources.beatmaps.metadata:main"
+download-beatmaps = "scripts.sources.beatmaps.files:main"
+fetch-beatmapsets = "scripts.sources.beatmaps.sets:main"
+shard-beatmaps = "scripts.sources.beatmaps.shard:main"
+fetch-collection-vertices = "scripts.sources.collections.vertices:main"
+fetch-collection-edges = "scripts.sources.collections.edges:main"
+fetch-tournaments = "scripts.sources.collections.tournaments:main"
+build-eval-graph = "scripts.evaluation.graph:main"
+build-eval-motifs = "scripts.evaluation.motifs:main"
+build-eval-rff = "scripts.evaluation.rff:main"
+build-eval-ngrams = "scripts.evaluation.ngrams:main"
 
 [build-system]
 requires = ["hatchling"]

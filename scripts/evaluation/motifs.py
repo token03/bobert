@@ -94,44 +94,6 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _f32(value: float) -> float:
-    return float(value)
-
-
-def _quantile_sorted(values: np.ndarray, quantile: float) -> float:
-    size = values.size
-    if size == 0:
-        return 0.0
-    if size == 1:
-        return float(values[0])
-    position = (size - 1) * quantile
-    lower = int(position)
-    upper = min(lower + 1, size - 1)
-    fraction = position - lower
-    return float(values[lower] * (1.0 - fraction) + values[upper] * fraction)
-
-
-def _linearity(points: np.ndarray) -> float:
-    n_points = points.shape[0]
-    if n_points < 3:
-        return 1.0
-    x = points[:, 0]
-    y = points[:, 1]
-    dx = x - float(np.sum(x) / n_points)
-    dy = y - float(np.sum(y) / n_points)
-    denom = max(n_points - 1, 1)
-    xx = float(np.dot(dx, dx)) / denom
-    xy = float(np.dot(dx, dy)) / denom
-    yy = float(np.dot(dy, dy)) / denom
-    trace = xx + yy
-    discriminant = math.sqrt(max((xx - yy) * (xx - yy) + 4.0 * xy * xy, 0.0))
-    largest = 0.5 * (trace + discriminant)
-    smallest = 0.5 * (trace - discriminant)
-    if largest <= EPS:
-        return 0.0
-    return _f32(1.0 - smallest / (largest + EPS))
-
-
 def _classify_rhythms(dt: np.ndarray, bpm: np.ndarray, tolerance: float) -> np.ndarray:
     rhythm = np.full(dt.shape[0], "", dtype=object)
     beat_length = np.divide(
@@ -213,135 +175,6 @@ def _iter_containers(
 
         previous_break = break_after
         edge_start = next_edge
-
-
-def _spacing_descriptors(
-    distances: np.ndarray,
-) -> tuple[float, float, float, float, float]:
-    if distances.size == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
-
-    sorted_distances = np.sort(distances)
-    median = _quantile_sorted(sorted_distances, 0.5)
-    min_ratio = float(sorted_distances[0]) / (median + EPS)
-    max_distance = float(sorted_distances[-1])
-    max_ratio = max_distance / (median + EPS)
-
-    if distances.size >= 2:
-        x = np.arange(distances.size, dtype=np.float64)
-        x -= float(np.sum(x) / x.size)
-        slope = float(
-            np.dot(x, distances - float(np.sum(distances) / distances.size))
-            / (np.dot(x, x) + EPS)
-        )
-        trend = slope / (median + EPS)
-    else:
-        trend = 0.0
-
-    deviations = np.abs(distances - median)
-    localized = float((max_distance - median) / (np.sum(deviations) + EPS))
-    return _f32(median), _f32(min_ratio), _f32(max_ratio), _f32(trend), _f32(localized)
-
-
-def _turn_descriptors(vectors: np.ndarray) -> tuple[float, float]:
-    if vectors.shape[0] < 2:
-        return 0.0, 0.0
-
-    v0 = vectors[:-1]
-    v1 = vectors[1:]
-    lengths = np.sqrt(v0[:, 0] * v0[:, 0] + v0[:, 1] * v0[:, 1]) * np.sqrt(
-        v1[:, 0] * v1[:, 0] + v1[:, 1] * v1[:, 1]
-    )
-    dot = v0[:, 0] * v1[:, 0] + v0[:, 1] * v1[:, 1]
-    cos = np.divide(dot, lengths, out=np.ones_like(dot), where=lengths > EPS)
-    turns = np.arccos(np.clip(cos, -1.0, 1.0))
-    cross = v0[:, 0] * v1[:, 1] - v0[:, 1] * v1[:, 0]
-
-    signs = np.zeros_like(cross, dtype=np.float64)
-    signs[cross > EPS] = 1.0
-    signs[cross < -EPS] = -1.0
-    nonzero = signs[signs != 0]
-    if nonzero.size > 0:
-        consistency = abs(float(np.sum(nonzero) / nonzero.size))
-    else:
-        consistency = 0.0
-
-    abs_turns = np.abs(turns)
-    return _f32(float(np.sum(abs_turns) / abs_turns.size)), _f32(consistency)
-
-
-def _area_ratio(points: np.ndarray, spacing_median: float) -> float:
-    n_points = points.shape[0]
-    if n_points < 3:
-        return 0.0
-    x = points[:, 0]
-    y = points[:, 1]
-    area = 0.5 * abs(
-        float(
-            np.dot(x[:-1], y[1:]) + x[-1] * y[0] - np.dot(y[:-1], x[1:]) - y[-1] * x[0]
-        )
-    )
-    return _f32(area / (((spacing_median + EPS) ** 2) * n_points))
-
-
-def _slider_descriptors(
-    is_slider: np.ndarray,
-    times: np.ndarray,
-    end_times: np.ndarray,
-) -> tuple[float, float]:
-    if is_slider.size == 0:
-        return 0.0, 0.0
-
-    slider_frac = float(np.count_nonzero(is_slider) / is_slider.size)
-    occupancy = 0.0
-    for i in np.flatnonzero(is_slider):
-        if i + 1 >= times.size:
-            continue
-        next_dt = float(times[i + 1] - times[i])
-        duration = float(end_times[i] - times[i])
-        if next_dt > 0:
-            occupancy = max(occupancy, duration / (next_dt + EPS))
-    return _f32(slider_frac), _f32(occupancy)
-
-
-def _window_descriptors(
-    points: np.ndarray,
-    times: np.ndarray,
-    is_slider: np.ndarray,
-    end_times: np.ndarray,
-) -> dict[str, float]:
-    vectors = points[1:] - points[:-1]
-    distances = np.sqrt(vectors[:, 0] * vectors[:, 0] + vectors[:, 1] * vectors[:, 1])
-    (
-        spacing_median,
-        min_spacing_ratio,
-        spacing_max_ratio,
-        spacing_trend,
-        localized_anomaly_ratio,
-    ) = _spacing_descriptors(distances)
-    mean_abs_turn, turn_sign_consistency = _turn_descriptors(vectors)
-    path_length = float(np.sum(distances))
-    closure_ratio = (
-        math.hypot(points[-1, 0] - points[0, 0], points[-1, 1] - points[0, 1])
-        / (path_length + EPS)
-        if points.shape[0] > 1
-        else 0.0
-    )
-    slider_frac, max_slider_occupancy = _slider_descriptors(is_slider, times, end_times)
-    return {
-        "spacing_median": spacing_median,
-        "min_spacing_ratio": min_spacing_ratio,
-        "spacing_max_ratio": spacing_max_ratio,
-        "spacing_trend": spacing_trend,
-        "linearity": _f32(_linearity(points)),
-        "area_ratio": _area_ratio(points, spacing_median),
-        "mean_abs_turn": mean_abs_turn,
-        "turn_sign_consistency": turn_sign_consistency,
-        "closure_ratio": _f32(closure_ratio),
-        "localized_anomaly_ratio": localized_anomaly_ratio,
-        "slider_frac": slider_frac,
-        "max_slider_occupancy": max_slider_occupancy,
-    }
 
 
 @njit(cache=True)
@@ -540,28 +373,6 @@ def _window_descriptors_precomputed_jit(
     )
 
 
-def _window_descriptors_precomputed(
-    start_idx: int,
-    end_idx: int,
-    points: np.ndarray,
-    distances: np.ndarray,
-    abs_turns: np.ndarray,
-    turn_signs: np.ndarray,
-    slider_prefix: np.ndarray,
-    slider_occupancy: np.ndarray,
-) -> tuple[float, ...]:
-    return _window_descriptors_precomputed_jit(
-        start_idx,
-        end_idx,
-        points,
-        distances,
-        abs_turns,
-        turn_signs,
-        slider_prefix,
-        slider_occupancy,
-    )
-
-
 def _new_record_columns(schema: dict[str, pl.DataType]) -> dict[str, list]:
     return {name: [] for name in schema}
 
@@ -678,7 +489,7 @@ def _process_beatmap(
         if n_onsets <= 2:
             continue
 
-        descriptors = _window_descriptors_precomputed(
+        descriptors = _window_descriptors_precomputed_jit(
             start_idx,
             end_idx,
             points,
@@ -708,7 +519,7 @@ def _process_beatmap(
             for local_start in range(0, n_onsets - window_len + 1):
                 window_start = start_idx + local_start
                 window_end = window_start + window_len - 1
-                desc = _window_descriptors_precomputed(
+                desc = _window_descriptors_precomputed_jit(
                     window_start,
                     window_end,
                     points,
@@ -730,12 +541,6 @@ def _process_beatmap(
         container_id += 1
 
     return containers, windows
-
-
-def _process_beatmap_worker(
-    args: tuple[pl.DataFrame, float, float, int | None],
-) -> tuple[dict[str, list], dict[str, list]]:
-    return _process_beatmap(*args)
 
 
 def _empty_df(schema: dict[str, pl.DataType]) -> pl.DataFrame:

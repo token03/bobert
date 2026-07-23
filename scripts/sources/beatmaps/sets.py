@@ -1,3 +1,4 @@
+import argparse
 import json
 import signal
 from pathlib import Path
@@ -89,6 +90,8 @@ def load_intersection_data():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Fetch beatmapset metadata from osu!")
+    parser.parse_args()
     DATA_DIR.mkdir(exist_ok=True)
 
     # Load intersection data
@@ -204,7 +207,9 @@ def main():
                         beatmapset.language["id"] if beatmapset.language else None  # type: ignore
                     )
                     language_name = (
-                        beatmapset.language["name"] if beatmapset.language else "Unknown"  # type: ignore
+                        beatmapset.language["name"]
+                        if beatmapset.language
+                        else "Unknown"  # type: ignore
                     )
 
                     if genre_id is not None:

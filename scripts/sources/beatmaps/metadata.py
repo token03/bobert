@@ -1,3 +1,4 @@
+import argparse
 import json
 import signal
 
@@ -160,6 +161,8 @@ def fetch_missing_beatmaps(ids=None):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Fetch beatmap metadata from osu!")
+    parser.parse_args()
     fetch_missing_beatmaps()
 
 

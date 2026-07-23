@@ -236,57 +236,6 @@ class BobertEncoder(nn.Module):
         )
         return self._get_embedding(packed_output, cu_seqlens)
 
-    def embed_col_packed(
-        self,
-        packed_vectors: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-        beat_ids: torch.Tensor | None = None,
-    ) -> Dict[str, torch.Tensor]:
-        packed_output, cu_seqlens, _ = self.encode_packed(
-            packed_vectors, cu_seqlens, max_seqlen
-        )
-        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
-        map_index = torch.repeat_interleave(
-            torch.arange(lengths.numel(), device=packed_output.device), lengths
-        )
-        token_index = torch.arange(
-            packed_output.shape[0], device=packed_output.device
-        ) - torch.repeat_interleave(cu_seqlens[:-1].to(torch.long), lengths)
-        col_embedding = packed_output
-        col_map_index = map_index
-        col_index = token_index
-        if beat_ids is not None:
-            beat_ids = beat_ids.to(device=packed_output.device, dtype=torch.long)
-            if beat_ids.shape[0] != packed_output.shape[0]:
-                raise ValueError(
-                    f"beat_ids length must match packed tokens: "
-                    f"{beat_ids.shape[0]} != {packed_output.shape[0]}"
-                )
-            starts = torch.ones(
-                beat_ids.shape[0], device=beat_ids.device, dtype=torch.bool
-            )
-            starts[1:] = (beat_ids[1:] != beat_ids[:-1]) | (
-                map_index[1:] != map_index[:-1]
-            )
-            group_ids = starts.cumsum(0) - 1
-            group_count = int(group_ids[-1].item()) + 1 if group_ids.numel() else 0
-            col_embedding = torch.zeros(
-                group_count,
-                packed_output.shape[-1],
-                device=packed_output.device,
-                dtype=torch.float32,
-            )
-            col_embedding.index_add_(0, group_ids, packed_output.float())
-            col_map_index = map_index[starts]
-            col_index = beat_ids[starts]
-        return {
-            "embedding": self._get_embedding(packed_output, cu_seqlens),
-            "col_embedding": col_embedding,
-            "col_map_index": col_map_index,
-            "col_index": col_index,
-        }
-
 
 class BobertForPretraining(nn.Module):
     def __init__(

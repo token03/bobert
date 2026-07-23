@@ -7,7 +7,6 @@ import re
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import polars as pl
@@ -18,9 +17,9 @@ from scipy.stats import spearmanr
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
-from scripts.collections.ngram import tokenize
+from scripts.common.text import tokenize
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
-from scripts.data.rff import RHYTHM_WINDOW_STRATA
+from scripts.evaluation.rff import RHYTHM_WINDOW_STRATA
 
 console = Console()
 
@@ -483,7 +482,9 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
         )
     )
     ratings = (
-        ratings.with_columns(pl.col("seq_len").max().over("beatmap_id").alias("_max_len"))
+        ratings.with_columns(
+            pl.col("seq_len").max().over("beatmap_id").alias("_max_len")
+        )
         .filter(pl.col("seq_len") == pl.col("_max_len"))
         .unique("beatmap_id", keep="last")
         .drop("_max_len")
@@ -783,9 +784,7 @@ def difficulty_neighbor_metrics(
         scores = embeddings[start:stop] @ embeddings.T
         scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
         neighbors = scores.topk(max_k, dim=1).indices
-        expected_batch = torch.as_tensor(
-            expected[start:stop], device=embeddings.device
-        )
+        expected_batch = torch.as_tensor(expected[start:stop], device=embeddings.device)
         query_difficulty = difficulty[start:stop, None, :]
 
         for top_k in DIFFICULTY_NEIGHBOR_KS:
@@ -799,12 +798,9 @@ def difficulty_neighbor_metrics(
             ordering = 1.0 - 6.0 * (rank_delta * rank_delta).sum(dim=1) / (
                 top_k * (top_k * top_k - 1)
             )
-            recall = (
-                (selected[:, :, None] == expected_batch[:, None, :top_k])
-                .any(dim=2)
-                .sum(dim=1)
-                / top_k
-            )
+            recall = (selected[:, :, None] == expected_batch[:, None, :top_k]).any(
+                dim=2
+            ).sum(dim=1) / top_k
             totals["distance"][top_k] += float(distance.mean(dim=1).sum().item())
             totals["variance"][top_k] += float(
                 selected_difficulty.var(dim=1, correction=0).mean(dim=1).sum().item()
@@ -828,7 +824,9 @@ def run_difficulty_neighbor_eval(
     max_k = max(DIFFICULTY_NEIGHBOR_KS)
     largest_group = max(np.unique(data.groups, return_counts=True)[1])
     if len(data.ids) - largest_group < max_k:
-        console.print("[yellow]Skipping Difficulty Neighbors: too few candidates.[/yellow]")
+        console.print(
+            "[yellow]Skipping Difficulty Neighbors: too few candidates.[/yellow]"
+        )
         return
 
     device = probe_device()
@@ -949,9 +947,18 @@ def title_ngrams(title: object, valid_ngrams: set[str]) -> set[str]:
 def run_collection_ngram_eval(
     targets: list[TargetData], _args: argparse.Namespace
 ) -> None:
-    if not COLLECTION_NGRAMS_EVAL_PATH.exists():
+    missing = [
+        path
+        for path in (
+            COLLECTION_NGRAMS_EVAL_PATH,
+            COLLECTION_VERTICES_EVAL_PATH,
+            COLLECTION_EDGES_EVAL_PATH,
+        )
+        if not path.exists()
+    ]
+    if missing:
         console.print(
-            f"[yellow]Skipping Collection Ngram Probe: {COLLECTION_NGRAMS_EVAL_PATH} not found.[/yellow]"
+            f"[yellow]Skipping Collection Ngram Probe: {missing[0]} not found.[/yellow]"
         )
         return
     valid_ngrams = load_valid_ngrams(COLLECTION_NGRAMS_EVAL_PATH)
@@ -1016,6 +1023,11 @@ def slot_label(mod: object, map_index: object) -> str | None:
 def run_tournament_slot_eval(
     targets: list[TargetData], _args: argparse.Namespace
 ) -> None:
+    if not TOURNAMENTS_EVAL_PATH.exists():
+        console.print(
+            f"[yellow]Skipping Tournament Slot Probe: {TOURNAMENTS_EVAL_PATH} not found.[/yellow]"
+        )
+        return
     standard_ids = set(load_standard_beatmaps([])["beatmap_id"].to_list())
     ids_by_target = set(common_ids(targets, standard_ids))
     rows = pl.read_parquet(
@@ -1061,7 +1073,8 @@ def training_metrics(target: TargetData) -> dict | None:
         return {
             key: value
             for key, value in row.items()
-            if value is not None and (key in {"epoch", "step"} or key.startswith("val_"))
+            if value is not None
+            and (key in {"epoch", "step"} or key.startswith("val_"))
         }
 
     final = values(validation.row(-1, named=True))
@@ -1076,11 +1089,7 @@ def print_training_metrics(targets: list[TargetData]) -> dict[str, dict]:
         if (summary := training_metrics(target)) is not None
     }
     if summaries:
-        available = {
-            key
-            for summary in summaries.values()
-            for key in summary["final"]
-        }
+        available = {key for summary in summaries.values() for key in summary["final"]}
         keys = [
             key
             for key in (
@@ -1169,19 +1178,19 @@ def main() -> None:
     EVAL_RESULTS.clear()
     targets = load_targets(args.targets, center=not args.no_center)
     training = print_training_metrics(targets)
-    evals: list[tuple[str, Callable[[list[TargetData], argparse.Namespace], None]]] = [
-        ("Grouped Retrieval", run_grouped_retrieval),
-        ("Mapper Probe", run_mapper_eval),
-        ("Ranked Probe", run_ranked_eval),
-        ("Submitted Year Probe", run_year_eval),
-        ("Difficulty Neighbors", run_difficulty_neighbor_eval),
-        ("Difficulty Linear Probe", run_difficulty_probe),
-        ("RFF Probe", run_rff_eval),
-        ("Community Tag PU Probe", run_tag_eval),
-        ("Collection Ngram Probe", run_collection_ngram_eval),
-        ("Tournament Slot Probe", run_tournament_slot_eval),
+    evals = [
+        run_grouped_retrieval,
+        run_mapper_eval,
+        run_ranked_eval,
+        run_year_eval,
+        run_difficulty_neighbor_eval,
+        run_difficulty_probe,
+        run_rff_eval,
+        run_tag_eval,
+        run_collection_ngram_eval,
+        run_tournament_slot_eval,
     ]
-    for _title, run_eval in evals:
+    for run_eval in evals:
         run_eval(targets, args)
     save_eval_results(targets, training, center=not args.no_center)
 

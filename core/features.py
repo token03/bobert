@@ -266,7 +266,7 @@ def _prepare_objects(df: pl.DataFrame, max_seq_len: Optional[int]) -> pl.DataFra
     )
 
 
-def _apply_features(df: pl.DataFrame, return_beat_ids: bool) -> pl.DataFrame:
+def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
     is_slider = pl.col("object_type") == OBJECT_TYPE_SLIDER
     is_spinner = pl.col("object_type") == OBJECT_TYPE_SPINNER
     incoming_valid = (
@@ -403,13 +403,6 @@ def _apply_features(df: pl.DataFrame, return_beat_ids: bool) -> pl.DataFrame:
             ).alias("beat_phase"),
         )
     )
-    if return_beat_ids:
-        df = df.with_columns(
-            (pl.col("_onset_beats").cum_sum().over("beatmap_id") + 1e-4)
-            .floor()
-            .cast(pl.Int64)
-            .alias("beat_id")
-        )
     return df
 
 
@@ -435,26 +428,17 @@ def build_feature_tensors(
     beatmaps_df: pl.DataFrame,
     hitobjects_df: pl.DataFrame,
     max_seq_len: Optional[int] = None,
-    return_beat_ids: bool = False,
 ):
     beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)
     if beatmaps_df.is_empty() or hitobjects_df.is_empty():
-        if return_beat_ids:
-            return [], np.array([]), []
         return [], np.array([])
 
     df = _prepare_objects(hitobjects_df, max_seq_len)
-    df = _apply_features(df, return_beat_ids)
+    df = _apply_features(df)
     ids = df["beatmap_id"].to_numpy()
     split_indices = np.flatnonzero(ids[:-1] != ids[1:]) + 1
     vectors = _finalize_vectors(df, split_indices)
     unique_ids = ids[np.concatenate(([0], split_indices))]
-    if return_beat_ids:
-        beat_ids = [
-            values.astype(np.int64, copy=False)
-            for values in np.split(df["beat_id"].to_numpy(), split_indices)
-        ]
-        return vectors, unique_ids, beat_ids
     return vectors, unique_ids
 
 

@@ -44,7 +44,7 @@ class BaseEdgeFetcher(ABC):
         """
         if not self.vertex_path.exists():
             print(
-                "[yellow]No vertex data found. Please run `uv run bobert collections vertices` first.[/yellow]"
+                "[yellow]No vertex data found. Please run `uv run fetch-collection-vertices` first.[/yellow]"
             )
             return {}
 
@@ -184,7 +184,12 @@ class OsuStatsEdgeFetcher(BaseEdgeFetcher):
         if not self.osu_session:
             raise ValueError("osu_session cookie not found in environment variables")
 
-        cookies = {"osu_session": self.osu_session, "osu_stats_session": self.osu_stats_session, "sessionData": self.session_data, "XSRF-TOKEN": self.xsrf_token}
+        cookies = {
+            "osu_session": self.osu_session,
+            "osu_stats_session": self.osu_stats_session,
+            "sessionData": self.session_data,
+            "XSRF-TOKEN": self.xsrf_token,
+        }
         response = client.get(f"{self.base_url}/{cid}/download", cookies=cookies)
         response.raise_for_status()
 

@@ -129,11 +129,15 @@ def process(
     if center:
         print("Centering embeddings...")
         matrix_cpu -= matrix_cpu.mean(axis=0, keepdims=True)
-        matrix_cpu /= np.clip(np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None)
+        matrix_cpu /= np.clip(
+            np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None
+        )
 
     try:
         backend = "GPU" if use_gpu else "CPU"
-        print(f"Calculating {n_export_neighbors} nearest neighbors (FAISS {backend})...")
+        print(
+            f"Calculating {n_export_neighbors} nearest neighbors (FAISS {backend})..."
+        )
         kn_dists, kn_indices = _nearest_neighbors_faiss(
             matrix_cpu, max(n_export_neighbors, umap_neighbors), use_gpu=use_gpu
         )
@@ -238,16 +242,24 @@ def process(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create visualizer UMAP files from beatmap embeddings")
+    parser = argparse.ArgumentParser(
+        description="Create visualizer UMAP files from beatmap embeddings"
+    )
     parser.add_argument(
         "--embeddings",
         default=str(EMBEDDINGS_PATH),
         help="Embedding parquet with beatmap_id and embedding columns",
     )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
-    parser.add_argument("--limit", type=int, default=None, help="Optional random sample size")
-    parser.add_argument("--min-star", type=float, default=None, help="Minimum star rating to include")
-    parser.add_argument("--max-star", type=float, default=None, help="Maximum star rating to include")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Optional random sample size"
+    )
+    parser.add_argument(
+        "--min-star", type=float, default=None, help="Minimum star rating to include"
+    )
+    parser.add_argument(
+        "--max-star", type=float, default=None, help="Maximum star rating to include"
+    )
     parser.add_argument("--cpu", action="store_true", help="Force CPU backend")
     parser.add_argument(
         "--center",

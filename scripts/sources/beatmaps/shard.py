@@ -100,7 +100,9 @@ def shard_beatmaps(
         return
 
     print(f"Found {total_files} importable beatmap files.")
-    print(f"Files will be distributed across {len(shard_groups)} shard directories (00-99)")
+    print(
+        f"Files will be distributed across {len(shard_groups)} shard directories (00-99)"
+    )
     print(f"Output directory: {output_path}")
     print(f"Skipped invalid filenames: {skipped_invalid_name}")
     print(f"Skipped invalid .osu files: {skipped_invalid_file}")
@@ -152,7 +154,9 @@ def shard_beatmaps(
     print(
         f"\n{'Would move' if dry_run else 'Moved'} {moved_count} files into {len(shard_groups)} shard directories"
     )
-    print(f"{'Would overwrite' if dry_run else 'Overwrote'} {overwritten_count} existing files")
+    print(
+        f"{'Would overwrite' if dry_run else 'Overwrote'} {overwritten_count} existing files"
+    )
     print(f"Skipped {skipped_existing_count} files that already exist")
     if error_count > 0:
         print(f"Encountered {error_count} errors")

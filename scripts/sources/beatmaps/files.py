@@ -10,7 +10,7 @@ import tqdm
 
 from scripts.common.osu import get_api_tiers, get_sharded_path, is_valid_osu_file
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
-from scripts.fetch.maps import fetch_missing_beatmaps
+from scripts.sources.beatmaps.metadata import fetch_missing_beatmaps
 
 BEATMAPS_DIR = DATA_DIR / "beatmaps"
 DATASET_BEATMAPS_DIR = DATA_DIR / "dataset" / "beatmaps"
@@ -92,7 +92,9 @@ def load_collection_ids() -> list[str]:
     return [str(bid) for bid in ids.drop_duplicates()]
 
 
-def ensure_metadata(requested_ids: set[str] | None, fetch_metadata: bool) -> pd.DataFrame:
+def ensure_metadata(
+    requested_ids: set[str] | None, fetch_metadata: bool
+) -> pd.DataFrame:
     if fetch_metadata:
         fetch_missing_beatmaps(requested_ids)
     if not BEATMAPS_PATH.exists():
@@ -138,7 +140,10 @@ async def download_job(
 
 
 async def download_jobs(
-    jobs: list[dict], tiers: list[dict], concurrency: int, existing_failed_ids: dict[str, str]
+    jobs: list[dict],
+    tiers: list[dict],
+    concurrency: int,
+    existing_failed_ids: dict[str, str],
 ) -> tuple[int, dict[str, str]]:
     failed_ids = {}
     failures_since_checkpoint = 0
@@ -226,7 +231,10 @@ def main():
         "--retry-failed", action="store_true", help="Retry previously failed downloads"
     )
     parser.add_argument(
-        "--ids-file", type=str, default=None, help="Optional newline-delimited beatmap IDs"
+        "--ids-file",
+        type=str,
+        default=None,
+        help="Optional newline-delimited beatmap IDs",
     )
     parser.add_argument(
         "--force", action="store_true", help="Download maps even if they already exist"
@@ -257,7 +265,9 @@ def main():
     requested_ids = set(load_ids_file(args.ids_file)) if args.ids_file else None
     if args.include_collections:
         collection_ids = set(load_collection_ids())
-        requested_ids = collection_ids if requested_ids is None else requested_ids | collection_ids
+        requested_ids = (
+            collection_ids if requested_ids is None else requested_ids | collection_ids
+        )
 
     print(f"--- Output directory: {BEATMAPS_DIR} ---")
     print("Loading beatmap metadata...")

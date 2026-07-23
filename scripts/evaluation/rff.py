@@ -92,8 +92,12 @@ def _load_stratum_stats(windows_path: Path) -> tuple[np.ndarray, np.ndarray]:
     )
 
     lookup = {pair: index for index, pair in enumerate(RHYTHM_WINDOW_STRATA)}
-    mean = np.zeros((len(RHYTHM_WINDOW_STRATA), len(DESCRIPTOR_COLUMNS)), dtype=np.float32)
-    std = np.ones((len(RHYTHM_WINDOW_STRATA), len(DESCRIPTOR_COLUMNS)), dtype=np.float32)
+    mean = np.zeros(
+        (len(RHYTHM_WINDOW_STRATA), len(DESCRIPTOR_COLUMNS)), dtype=np.float32
+    )
+    std = np.ones(
+        (len(RHYTHM_WINDOW_STRATA), len(DESCRIPTOR_COLUMNS)), dtype=np.float32
+    )
     for row in stats.iter_rows(named=True):
         key = (int(row["rhythm_class"]), int(row["window_len"]))
         if key not in lookup:
@@ -174,7 +178,9 @@ def build_rff_signatures(
 
     rng = np.random.default_rng(seed)
     sigma = float(bandwidth_scale) * np.sqrt(descriptor_dim)
-    weights = rng.normal(0.0, 1.0 / sigma, size=(n_strata, descriptor_dim, rff_dim)).astype(np.float32)
+    weights = rng.normal(
+        0.0, 1.0 / sigma, size=(n_strata, descriptor_dim, rff_dim)
+    ).astype(np.float32)
     phases = rng.uniform(0.0, 2.0 * np.pi, size=(n_strata, rff_dim)).astype(np.float32)
 
     weights_t = torch.from_numpy(weights).to(device)
@@ -204,7 +210,9 @@ def build_rff_signatures(
         batches += 1
         schema = batch.schema
         arrays = {
-            name: batch.column(schema.get_field_index(name)).to_numpy(zero_copy_only=False)
+            name: batch.column(schema.get_field_index(name)).to_numpy(
+                zero_copy_only=False
+            )
             for name in READ_COLUMNS
         }
         beatmap_id = arrays["beatmap_id"].astype(np.int64, copy=False)
@@ -271,24 +279,32 @@ def build_rff_signatures(
     prevalence = torch.log1p(counts).cpu().numpy()
     embeddings = np.concatenate((embeddings, prevalence), axis=1)
     if l2_normalize:
-        embeddings /= np.clip(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-9, None)
+        embeddings /= np.clip(
+            np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-9, None
+        )
     embeddings = embeddings.astype(np.float32, copy=False)
 
     df = pl.DataFrame(
         {
             "beatmap_id": beatmap_ids,
-            "embedding": pl.Series("embedding", embeddings, dtype=pl.Array(pl.Float32, output_dim)),
+            "embedding": pl.Series(
+                "embedding", embeddings, dtype=pl.Array(pl.Float32, output_dim)
+            ),
         }
     ).filter(pl.Series(window_counts > 0))
     df.write_parquet(output_path)
 
     elapsed = time.perf_counter() - start
     print(f"Wrote {df.height:,} RFF embeddings to {output_path}")
-    print(f"Processed {rows_seen:,} rows ({rows_used:,} valid) in {elapsed:.1f}s; projection/aggregation {gpu_seconds:.1f}s")
+    print(
+        f"Processed {rows_seen:,} rows ({rows_used:,} valid) in {elapsed:.1f}s; projection/aggregation {gpu_seconds:.1f}s"
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build random Fourier motif signatures from motif windows.")
+    parser = argparse.ArgumentParser(
+        description="Build random Fourier motif signatures from motif windows."
+    )
     parser.add_argument("--motifs-dir", type=str, default=DEFAULT_MOTIFS_DIR)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--rff-dim", type=int, default=32)

@@ -172,7 +172,7 @@ def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
         extract_hitobject_records,
         parse_osu_file,
     )
-    from scripts.data.dataset import (
+    from scripts.dataset.build import (
         validate_beatmap,
     )
 
@@ -192,35 +192,6 @@ def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
     return vectors[0][:max_seq_len]
 
 
-def beatmap_col_inputs_from_osu(path: Path, max_seq_len: int):
-    from core.features import build_feature_tensors
-    from core.osu import (
-        extract_beatmap_record,
-        extract_hitobject_records,
-        parse_osu_file,
-    )
-    from scripts.data.dataset import (
-        validate_beatmap,
-    )
-
-    raw_beatmap = parse_osu_file(str(path))
-    if not validate_beatmap(raw_beatmap):
-        raise ValueError(f"Could not parse a valid beatmap from {path}")
-
-    beatmaps_df = pl.DataFrame([extract_beatmap_record(raw_beatmap)])
-    hitobjects_df = pl.DataFrame(extract_hitobject_records(raw_beatmap))
-    vectors, _ids, beat_ids = build_feature_tensors(
-        beatmaps_df,
-        hitobjects_df,
-        max_seq_len=max_seq_len,
-        return_beat_ids=True,
-    )
-    if not vectors:
-        raise ValueError(f"Could not engineer hitobject features for {path}")
-    truncate_len = min(vectors[0].shape[0], max_seq_len)
-    return vectors[0][:truncate_len], beat_ids[0][:truncate_len]
-
-
 class LazyEmbedder:
     def __init__(
         self,
@@ -236,7 +207,7 @@ class LazyEmbedder:
     def load(self):
         import torch
 
-        from scripts.bobert.embed import find_model, load_model
+        from scripts.model.embed import find_model, load_model
 
         if self.model is not None:
             return
@@ -271,35 +242,6 @@ class LazyEmbedder:
 
         embedding = embedding.float().cpu().numpy()[0]
         return embedding.astype(np.float32)
-
-    def embed_col_osu(self, path: Path) -> np.ndarray:
-        import torch
-
-        self.load()
-        vectors, beat_ids = beatmap_col_inputs_from_osu(path, self.model.max_seq_len)
-        vectors = normalize(vectors, self.vector_stats)
-        packed = vectors[: self.model.max_seq_len].contiguous()
-        beat_ids = torch.from_numpy(beat_ids[: self.model.max_seq_len])
-        max_seqlen = packed.shape[0]
-        cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
-        packed = packed.to(self.device)
-        beat_ids = beat_ids.to(self.device)
-        cu_seqlens = cu_seqlens.to(self.device)
-        amp_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
-
-        with torch.no_grad():
-            with torch.autocast(
-                device_type=self.device.type,
-                dtype=amp_dtype,
-                enabled=self.device.type == "cuda",
-            ):
-                outputs = self.model.embed_col_packed(
-                    packed, cu_seqlens, max_seqlen, beat_ids
-                )
-
-        tokens = outputs["col_embedding"].float().cpu().numpy()
-        norms = np.linalg.norm(tokens, axis=1, keepdims=True)
-        return (tokens / np.maximum(norms, 1e-12)).astype(np.float32)
 
 
 def format_number(value, decimals: int = 2):

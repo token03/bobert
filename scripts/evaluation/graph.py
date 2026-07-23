@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from scripts.collections.ngram import tokenize
+from scripts.common.text import tokenize
 from scripts.common.collections import deduplicate_collections
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
@@ -123,7 +123,9 @@ def prune_graph_edges(df):
             return df
 
 
-def compute_normalized_adj(user_indices, item_indices, edge_weights, num_users, num_items):
+def compute_normalized_adj(
+    user_indices, item_indices, edge_weights, num_users, num_items
+):
     num_nodes = num_users + num_items
 
     row = torch.cat([user_indices, item_indices + num_users])
@@ -164,7 +166,9 @@ def ngram_collections(df):
         COLLECTION_VERTICES_PATH,
         columns=["collection_id", "source", "name"],
     )
-    vertices["collection_key"] = list(zip(vertices["collection_id"], vertices["source"]))
+    vertices["collection_key"] = list(
+        zip(vertices["collection_id"], vertices["source"])
+    )
     names = dict(zip(vertices["collection_key"], vertices["name"]))
 
     valid_cols = []
@@ -212,8 +216,12 @@ def sample_bpr_batch(
     degree_offsets,
     degree_positions,
 ):
-    batch_users = torch.randint(0, collection_lengths.numel(), (BPR_BATCH_SIZE,), device=DEVICE)
-    local = (torch.rand(BPR_BATCH_SIZE, device=DEVICE) * collection_lengths[batch_users]).long()
+    batch_users = torch.randint(
+        0, collection_lengths.numel(), (BPR_BATCH_SIZE,), device=DEVICE
+    )
+    local = (
+        torch.rand(BPR_BATCH_SIZE, device=DEVICE) * collection_lengths[batch_users]
+    ).long()
     batch_pos = collection_items[collection_offsets[batch_users] + local]
 
     degrees = item_degrees[batch_pos]
@@ -277,8 +285,8 @@ def train(source_filter=None):
         torch.set_float32_matmul_precision("high")
 
     print(f"--- Setting up ({DEVICE}) ---")
-    df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx = load_and_process_data(
-        source_filter
+    df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx = (
+        load_and_process_data(source_filter)
     )
     num_users = len(unique_collections)
     num_items = len(unique_beatmaps)
@@ -297,9 +305,9 @@ def train(source_filter=None):
         dtype=torch.float32,
         device=DEVICE,
     )
-    popularity_weights = (item_degrees[item_indices].float() / MIN_COLLECTIONS_PER_MAP).pow(
-        -POPULAR_BEATMAP_PENALTY
-    )
+    popularity_weights = (
+        item_degrees[item_indices].float() / MIN_COLLECTIONS_PER_MAP
+    ).pow(-POPULAR_BEATMAP_PENALTY)
     edge_weights = collection_weights * popularity_weights
     collection_items, collection_offsets, collection_lengths = build_collection_items(
         df, col_to_idx, bm_to_idx, num_users
@@ -340,7 +348,9 @@ def train(source_filter=None):
         )
 
         user_emb, item_emb = model(sparse_adj)
-        rec_loss = bpr_loss(user_emb[batch_users], item_emb[batch_pos], item_emb[batch_neg])
+        rec_loss = bpr_loss(
+            user_emb[batch_users], item_emb[batch_pos], item_emb[batch_neg]
+        )
 
         reg = (
             model.user_embedding(batch_users).pow(2).sum(dim=-1).mean()

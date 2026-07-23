@@ -189,7 +189,6 @@ def load_beatmap_dataset(
     chunk_size: int = 5000,
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
-    include_beat_ids: bool = False,
 ) -> List[Dict[str, Any]]:
     dataset_path = Path(dataset_path).expanduser()
     ratings_path = Path(ratings_path).expanduser()
@@ -269,25 +268,18 @@ def load_beatmap_dataset(
         if hitobjects_chunk.is_empty():
             continue
 
-        features = build_feature_tensors(
+        hitobject_data, ids = build_feature_tensors(
             beatmaps_chunk,
             hitobjects_chunk,
             max_seq_len=max_seq_len,
-            return_beat_ids=include_beat_ids,
         )
-        if include_beat_ids:
-            hitobject_data, ids, beat_ids = features
-        else:
-            hitobject_data, ids = features
 
-        for index, (bid, vectors) in enumerate(zip(ids, hitobject_data)):
+        for bid, vectors in zip(ids, hitobject_data):
             bid_int = int(bid)
             item = {
                 "beatmap_id": bid_int,
                 "hitobjects": vectors,
             }
-            if include_beat_ids:
-                item["beat_ids"] = beat_ids[index][: vectors.shape[0]]
             all_beatmap_data.append(item)
 
     print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")

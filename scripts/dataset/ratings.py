@@ -273,7 +273,7 @@ def calculate_missing_ratings(
 
     batches = list(chunked(tasks_to_run, batch_size))
     worker_fn = importlib.import_module(
-        "scripts.data.ratings"
+        "scripts.dataset.ratings"
     )._calculate_difficulty_attributes_batch_worker
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
         future_to_task = {
@@ -292,7 +292,9 @@ def calculate_missing_ratings(
         ) as pbar:
             for future in concurrent.futures.as_completed(future_to_task):
                 batch = future_to_task[future]
-                batch_ratings, batch_cached, batch_failed, batch_timed_out = future.result()
+                batch_ratings, batch_cached, batch_failed, batch_timed_out = (
+                    future.result()
+                )
                 new_ratings.extend(batch_ratings)
                 num_already_cached += batch_cached
                 num_failed += batch_failed
