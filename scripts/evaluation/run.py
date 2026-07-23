@@ -13,13 +13,10 @@ import polars as pl
 import torch
 from rich.console import Console
 from rich.table import Table
-from scipy.stats import spearmanr
-from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
 from scripts.common.text import tokenize
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
-from scripts.evaluation.rff import RHYTHM_WINDOW_STRATA
 
 console = Console()
 
@@ -31,24 +28,20 @@ COLLECTION_NGRAMS_EVAL_PATH = COLLECTIONS_DIR / "ngrams.txt"
 TOURNAMENTS_EVAL_PATH = COLLECTIONS_DIR / "tournaments.parquet"
 RATINGS_EVAL_PATH = DATA_DIR / "ratings.parquet"
 RFF_EVAL_PATH = DATA_DIR / "motifs" / "rff.parquet"
-TAGS_EVAL_PATH = DATA_DIR / "tags.csv"
 
 PROBE_SEED = 0
 PROBE_FOLDS = 4
 PROBE_RIDGE_ALPHA = 1e-3
 MAPPER_MIN_MAPS = 50
-YEAR_MIN_MAPS = 1000
+MIN_PROBE_MAPS = 1000
 RATING_MAX_STARS = 20.0
 RATING_MAX_SEQ_LEN = 4096
 DIFFICULTY_COLUMNS = ["stars", "aim", "speed", "slider_factor"]
-DIFFICULTY_NEIGHBOR_KS = [10, 50, 100]
+DIFFICULTY_NEIGHBOR_K = 50
 DIFFICULTY_BATCH_SIZE = 256
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
-TAG_MIN_SETS = 25
-RETRIEVAL_RECALL_K = 50
-MULTILABEL_TOP_K = 5
-EVAL_VERSION = 1
+RETRIEVAL_RECALL_KS = [10, 50, 100]
 
 
 @dataclass
@@ -59,12 +52,6 @@ class TargetData:
     beatmap_ids: np.ndarray
     embeddings: np.ndarray
     id_to_index: dict[int, int]
-
-
-@dataclass
-class TargetResult:
-    name: str
-    metrics: dict[str, float]
 
 
 @dataclass
@@ -79,7 +66,7 @@ EVAL_RESULTS: list[EvalResult] = []
 @dataclass
 class DifficultyData:
     ids: list[int]
-    values: np.ndarray
+    stars: np.ndarray
     normalized: np.ndarray
     groups: np.ndarray
 
@@ -191,7 +178,7 @@ def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
     candidate_ids: list[int],
-) -> TargetResult:
+) -> dict[str, float]:
     eval_ids = sorted({beatmap_id for ids in groups.values() for beatmap_id in ids})
     candidate_set = set(candidate_ids)
     covered = set(eval_ids) & candidate_set
@@ -227,20 +214,20 @@ def evaluate_grouped_retrieval(
         ranks_by_query[query_id] = ranks
 
     positive_ranks = [rank for ranks in ranks_by_query.values() for rank in ranks]
-    metrics = {
-        "query_mrr": mean([1.0 / min(ranks) for ranks in ranks_by_query.values()]),
-        "mean_positive_rank": mean(positive_ranks),
+    return {
         "median_positive_rank": float(np.median(positive_ranks))
         if positive_ranks
         else float("nan"),
-        f"macro_recall@{RETRIEVAL_RECALL_K}": mean(
-            [
-                sum(rank <= RETRIEVAL_RECALL_K for rank in ranks) / len(ranks)
-                for ranks in ranks_by_query.values()
-            ]
-        ),
+        **{
+            f"macro_recall@{top_k}": mean(
+                [
+                    sum(rank <= top_k for rank in ranks) / len(ranks)
+                    for ranks in ranks_by_query.values()
+                ]
+            )
+            for top_k in RETRIEVAL_RECALL_KS
+        },
     }
-    return TargetResult(target.name, metrics)
 
 
 def format_metric(value: float) -> str:
@@ -362,8 +349,6 @@ def ridge_multiclass_metrics(
     tp = torch.zeros(n_classes, device=x.device)
     pred_counts = torch.zeros_like(tp)
     true_counts = torch.zeros_like(tp)
-    correct = 0
-    top5_correct = 0
     for train_idx, test_idx in folds:
         x_mean = x[train_idx].mean(dim=0)
         x_train = x[train_idx] - x_mean
@@ -376,22 +361,12 @@ def ridge_multiclass_metrics(
         scores = (x[test_idx] - x_mean) @ weights + bias
         target = y[test_idx]
         pred = scores.argmax(dim=1)
-        correct += int((pred == target).sum())
-        if n_classes > 5:
-            top5_correct += int(
-                (scores.topk(5, dim=1).indices == target[:, None]).any(dim=1).sum()
-            )
         tp += torch.bincount(target[pred == target], minlength=n_classes)
         pred_counts += torch.bincount(pred, minlength=n_classes)
         true_counts += torch.bincount(target, minlength=n_classes)
-    metrics = {
-        "accuracy": correct / len(y),
-        "balanced_accuracy": float((tp / true_counts.clamp_min(1)).mean().item()),
+    return {
         "macro_f1": macro_f1_from_counts(tp, pred_counts - tp, true_counts - tp),
     }
-    if n_classes > 5:
-        metrics["top5_accuracy"] = top5_correct / len(y)
-    return metrics
 
 
 def encode_labels(labels: list[object]) -> tuple[list[int], list[object]]:
@@ -429,40 +404,6 @@ def multiclass_probe(
     return EvalResult(title, metrics)
 
 
-def torch_r2(pred: torch.Tensor, target: torch.Tensor) -> float:
-    ss_res = torch.sum((target - pred) ** 2)
-    ss_tot = torch.sum((target - target.mean()) ** 2)
-    return float((1.0 - ss_res / ss_tot.clamp_min(1e-12)).item())
-
-
-def regression_probe(
-    targets: list[TargetData],
-    ids: list[int],
-    values: np.ndarray,
-    *,
-    title: str,
-    suffix: str,
-) -> EvalResult | None:
-    if len(ids) < YEAR_MIN_MAPS:
-        return None
-    device = probe_device()
-    folds = fold_indices(beatmapset_groups(ids), device)
-    y = torch.tensor(values, dtype=torch.float32, device=device)
-    metrics = {}
-    for target in targets:
-        x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
-        pred = ridge_oof(x, y, folds)
-        error = torch.abs(pred - y)
-        metrics[target.name] = {
-            f"mae_{suffix}": float(error.mean().item()),
-            f"median_ae_{suffix}": float(error.median().item()),
-            "r2": torch_r2(pred, y),
-            "spearman": float(spearmanr(pred.cpu().numpy(), y.cpu().numpy()).statistic),
-        }
-        del x, pred, error
-    return EvalResult(title, metrics)
-
-
 def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
     if not RATINGS_EVAL_PATH.exists():
         console.print(
@@ -492,7 +433,7 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
     ids = common_ids(targets, set(ratings["beatmap_id"].to_list()))
     ratings = ratings.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
     ids = [int(beatmap_id) for beatmap_id in ratings["beatmap_id"]]
-    if len(ids) < YEAR_MIN_MAPS:
+    if len(ids) < MIN_PROBE_MAPS:
         console.print(
             f"[yellow]Skipping difficulty eval: only {len(ids):,} shared ratings.[/yellow]"
         )
@@ -503,27 +444,7 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
     if np.any(scale <= 1e-6):
         raise ValueError("Difficulty attributes must have non-zero variance")
     normalized = (values - values.mean(axis=0)) / scale
-    return DifficultyData(ids, values, normalized, beatmapset_groups(ids))
-
-
-def average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
-    order = scores.argsort(descending=True)
-    sorted_true = y_true[order]
-    precision = sorted_true.cumsum(dim=0) / torch.arange(
-        1, len(y_true) + 1, device=y_true.device
-    )
-    return (precision * sorted_true).sum() / y_true.sum().clamp_min(1)
-
-
-def sample_average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> float:
-    order = scores.argsort(dim=1, descending=True)
-    sorted_true = torch.gather(y_true, dim=1, index=order)
-    precision = sorted_true.cumsum(dim=1) / torch.arange(
-        1, y_true.shape[1] + 1, device=y_true.device
-    )
-    positives = y_true.sum(dim=1).clamp_min(1)
-    ap = (precision * sorted_true).sum(dim=1) / positives
-    return float(ap.mean().item())
+    return DifficultyData(ids, values[:, 0], normalized, beatmapset_groups(ids))
 
 
 def macro_label_average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> float:
@@ -536,17 +457,6 @@ def macro_label_average_precision(y_true: torch.Tensor, scores: torch.Tensor) ->
     positives = y_true.sum(dim=0).clamp_min(1)
     ap = (precision * sorted_true).sum(dim=0) / positives
     return float(ap.mean().item())
-
-
-def multilabel_scores(y_true: torch.Tensor, scores: torch.Tensor) -> dict[str, float]:
-    top_k = min(MULTILABEL_TOP_K, scores.shape[1])
-    top = scores.topk(top_k, dim=1).indices
-    hits = torch.gather(y_true, 1, top).sum(dim=1)
-    return {
-        "sample_ap": sample_average_precision(y_true, scores),
-        "macro_label_ap": macro_label_average_precision(y_true, scores),
-        f"precision@{top_k}": float((hits / top_k).mean().item()),
-    }
 
 
 def multilabel_probe(
@@ -586,83 +496,11 @@ def multilabel_probe(
     for target in targets:
         x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
         scores = ridge_oof(x, y, folds)
-        metrics[target.name] = multilabel_scores(y, scores)
+        metrics[target.name] = {
+            "macro_label_ap": macro_label_average_precision(y, scores)
+        }
         del x, scores
     return EvalResult(title, metrics)
-
-
-def pu_tag_scores(votes: torch.Tensor, scores: torch.Tensor) -> dict[str, float]:
-    y_true = (votes > 0).float()
-    return {
-        "macro_label_ap": macro_label_average_precision(y_true, scores),
-        "micro_ap": float(average_precision(y_true.flatten(), scores.flatten()).item()),
-        "macro_auroc": float(
-            roc_auc_score(y_true.cpu().numpy(), scores.cpu().numpy(), average="macro")
-        ),
-    }
-
-
-def run_tag_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    if not TAGS_EVAL_PATH.exists():
-        console.print(
-            f"[yellow]Skipping Community Tag PU Probe: {TAGS_EVAL_PATH} not found.[/yellow]"
-        )
-        return
-
-    tags = pl.read_csv(TAGS_EVAL_PATH, infer_schema_length=None)
-    if "beatmapset_id" not in tags.columns:
-        raise ValueError(f"Expected beatmapset_id column in {TAGS_EVAL_PATH}")
-    tag_names = [column for column in tags.columns if column != "beatmapset_id"]
-    beatmaps = load_standard_beatmaps(["beatmapset_id"]).drop_nulls(
-        ["beatmap_id", "beatmapset_id"]
-    )
-    shared_ids = set(common_ids(targets, set(beatmaps["beatmap_id"].to_list())))
-    beatmaps = beatmaps.filter(pl.col("beatmap_id").is_in(shared_ids)).unique(
-        "beatmap_id"
-    )
-    map_ids_by_set = {
-        int(beatmapset_id): sorted(map(int, beatmap_ids))
-        for beatmapset_id, beatmap_ids in beatmaps.group_by("beatmapset_id")
-        .agg(pl.col("beatmap_id"))
-        .iter_rows()
-    }
-    tags = tags.filter(pl.col("beatmapset_id").is_in(map_ids_by_set)).sort(
-        "beatmapset_id"
-    )
-    if tags.height < 100:
-        console.print(
-            f"[yellow]Skipping Community Tag PU Probe: only {tags.height:,} shared mapsets.[/yellow]"
-        )
-        return
-
-    votes = tags.select(tag_names).fill_null(0).cast(pl.Float32).to_numpy()
-    positives = (votes > 0).sum(axis=0)
-    keep = (positives >= TAG_MIN_SETS) & (positives < votes.shape[0])
-    if np.count_nonzero(keep) < 2:
-        return
-
-    votes = votes[:, keep]
-    beatmapset_ids = tags["beatmapset_id"].to_list()
-    device = probe_device()
-    y = torch.tensor(votes, dtype=torch.float32, device=device)
-    folds = fold_indices(np.asarray(beatmapset_ids), device)
-    metrics = {}
-    for target in targets:
-        set_embeddings = np.stack(
-            [
-                target_matrix(target, map_ids_by_set[int(beatmapset_id)]).mean(axis=0)
-                for beatmapset_id in beatmapset_ids
-            ]
-        )
-        set_embeddings /= np.maximum(
-            np.linalg.norm(set_embeddings, axis=1, keepdims=True), 1e-12
-        )
-        x = torch.tensor(set_embeddings, dtype=torch.float32, device=device)
-        scores = ridge_oof(x, torch.log1p(y), folds)
-        metrics[target.name] = pu_tag_scores(y, scores)
-        del x, scores
-
-    print_eval_result(EvalResult("Community Tag PU Probe", metrics))
 
 
 def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -> None:
@@ -673,13 +511,13 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
         )
         return
     candidate_ids = common_ids(targets)
-    results = [
-        evaluate_grouped_retrieval(target, groups, candidate_ids) for target in targets
-    ]
     print_eval_result(
         EvalResult(
             "Grouped Retrieval",
-            {result.name: result.metrics for result in results},
+            {
+                target.name: evaluate_grouped_retrieval(target, groups, candidate_ids)
+                for target in targets
+            },
         )
     )
 
@@ -700,130 +538,31 @@ def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> Non
         print_eval_result(result)
 
 
-def run_ranked_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    beatmaps = load_standard_beatmaps(["ranked"]).drop_nulls(["beatmap_id", "ranked"])
-    ids_by_target = common_ids(targets, set(beatmaps["beatmap_id"].to_list()))
-    ranked_by_id = dict(
-        beatmaps.filter(pl.col("beatmap_id").is_in(ids_by_target))
-        .select("beatmap_id", "ranked")
-        .iter_rows()
-    )
-    ids = [beatmap_id for beatmap_id in ids_by_target if beatmap_id in ranked_by_id]
-    labels = [
-        "ranked" if str(ranked_by_id[beatmap_id]) == "1" else "unranked"
-        for beatmap_id in ids
-    ]
-    result = multiclass_probe(targets, ids, labels, title="Ranked Probe")
-    if result:
-        print_eval_result(result)
-
-
-def run_year_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    beatmaps = load_standard_beatmaps(["submitted_date"]).drop_nulls(
-        ["beatmap_id", "submitted_date"]
-    )
-    beatmaps = beatmaps.with_columns(
-        pl.col("submitted_date")
-        .str.slice(0, 4)
-        .cast(pl.Int32, strict=False)
-        .alias("year")
-    ).drop_nulls(["year"])
-    ids_by_target = common_ids(targets, set(beatmaps["beatmap_id"].to_list()))
-    years_by_id = dict(
-        beatmaps.filter(pl.col("beatmap_id").is_in(ids_by_target))
-        .select("beatmap_id", "year")
-        .iter_rows()
-    )
-    ids = [beatmap_id for beatmap_id in ids_by_target if beatmap_id in years_by_id]
-    years = np.array(
-        [float(years_by_id[beatmap_id]) for beatmap_id in ids], dtype=np.float32
-    )
-    result = regression_probe(
-        targets, ids, years, title="Submitted Year Probe", suffix="years"
-    )
-    if result:
-        print_eval_result(result)
-
-
-def difficulty_neighbor_indices(
-    difficulty: torch.Tensor, groups: torch.Tensor, top_k: int
-) -> np.ndarray:
-    neighbors = np.empty((len(difficulty), top_k), dtype=np.int64)
-    squared_norm = (difficulty * difficulty).sum(dim=1)
-    for start in range(0, len(difficulty), DIFFICULTY_BATCH_SIZE):
-        stop = min(start + DIFFICULTY_BATCH_SIZE, len(difficulty))
-        query = difficulty[start:stop]
-        scores = (
-            2 * query @ difficulty.T
-            - (query * query).sum(dim=1, keepdim=True)
-            - squared_norm[None, :]
-        )
-        scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
-        neighbors[start:stop] = scores.topk(top_k, dim=1).indices.cpu().numpy()
-    return neighbors
-
-
 def difficulty_neighbor_metrics(
     embeddings: torch.Tensor,
     difficulty: torch.Tensor,
     groups: torch.Tensor,
-    expected: np.ndarray,
 ) -> dict[str, float]:
-    totals = {
-        metric: {top_k: 0.0 for top_k in DIFFICULTY_NEIGHBOR_KS}
-        for metric in ["distance", "variance", "recall", "ordering_spearman"]
-    }
-    rank = {
-        top_k: torch.arange(top_k, device=embeddings.device, dtype=torch.float32)
-        for top_k in DIFFICULTY_NEIGHBOR_KS
-    }
-    max_k = max(DIFFICULTY_NEIGHBOR_KS)
+    total = 0.0
 
     for start in range(0, len(embeddings), DIFFICULTY_BATCH_SIZE):
         stop = min(start + DIFFICULTY_BATCH_SIZE, len(embeddings))
         scores = embeddings[start:stop] @ embeddings.T
         scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
-        neighbors = scores.topk(max_k, dim=1).indices
-        expected_batch = torch.as_tensor(expected[start:stop], device=embeddings.device)
-        query_difficulty = difficulty[start:stop, None, :]
+        neighbors = scores.topk(DIFFICULTY_NEIGHBOR_K, dim=1).indices
+        distance = torch.linalg.vector_norm(
+            difficulty[neighbors] - difficulty[start:stop, None, :], dim=2
+        )
+        total += float(distance.mean(dim=1).sum().item())
 
-        for top_k in DIFFICULTY_NEIGHBOR_KS:
-            selected = neighbors[:, :top_k]
-            selected_difficulty = difficulty[selected]
-            distance = torch.linalg.vector_norm(
-                selected_difficulty - query_difficulty, dim=2
-            )
-            difficulty_rank = distance.argsort(dim=1).argsort(dim=1).float()
-            rank_delta = difficulty_rank - rank[top_k]
-            ordering = 1.0 - 6.0 * (rank_delta * rank_delta).sum(dim=1) / (
-                top_k * (top_k * top_k - 1)
-            )
-            recall = (selected[:, :, None] == expected_batch[:, None, :top_k]).any(
-                dim=2
-            ).sum(dim=1) / top_k
-            totals["distance"][top_k] += float(distance.mean(dim=1).sum().item())
-            totals["variance"][top_k] += float(
-                selected_difficulty.var(dim=1, correction=0).mean(dim=1).sum().item()
-            )
-            totals["recall"][top_k] += float(recall.sum().item())
-            totals["ordering_spearman"][top_k] += float(ordering.sum().item())
-
-    return {
-        f"{metric}@{top_k}": totals[metric][top_k] / len(embeddings)
-        for top_k in DIFFICULTY_NEIGHBOR_KS
-        for metric in ["distance", "variance", "recall", "ordering_spearman"]
-    }
+    return {f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(embeddings)}
 
 
 def run_difficulty_neighbor_eval(
-    targets: list[TargetData], _args: argparse.Namespace
+    targets: list[TargetData], data: DifficultyData
 ) -> None:
-    data = load_difficulty_data(targets)
-    if data is None:
-        return
-    max_k = max(DIFFICULTY_NEIGHBOR_KS)
     largest_group = max(np.unique(data.groups, return_counts=True)[1])
-    if len(data.ids) - largest_group < max_k:
+    if len(data.ids) - largest_group < DIFFICULTY_NEIGHBOR_K:
         console.print(
             "[yellow]Skipping Difficulty Neighbors: too few candidates.[/yellow]"
         )
@@ -832,49 +571,41 @@ def run_difficulty_neighbor_eval(
     device = probe_device()
     difficulty = torch.tensor(data.normalized, dtype=torch.float32, device=device)
     groups = torch.tensor(data.groups, dtype=torch.long, device=device)
-    expected = difficulty_neighbor_indices(difficulty, groups, max_k)
     metrics = {}
     for target in targets:
         embeddings = torch.tensor(
             target_matrix(target, data.ids), dtype=torch.float32, device=device
         )
         metrics[target.name] = difficulty_neighbor_metrics(
-            embeddings, difficulty, groups, expected
+            embeddings, difficulty, groups
         )
         del embeddings
     print_eval_result(EvalResult("Difficulty Neighbors", metrics))
 
 
-def run_difficulty_probe(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    data = load_difficulty_data(targets)
-    if data is None:
-        return
+def run_difficulty_probe(targets: list[TargetData], data: DifficultyData) -> None:
     device = probe_device()
     folds = fold_indices(data.groups, device)
-    y = torch.tensor(data.values, dtype=torch.float32, device=device)
-    scale = y.std(dim=0, correction=0)
+    y = torch.tensor(data.stars, dtype=torch.float32, device=device)
     metrics = {}
     for target in targets:
         x = torch.tensor(
             target_matrix(target, data.ids), dtype=torch.float32, device=device
         )
         pred = ridge_oof(x, y, folds)
-        normalized_error = torch.linalg.vector_norm((pred - y) / scale, dim=1)
-        r2 = [torch_r2(pred[:, idx], y[:, idx]) for idx in range(y.shape[1])]
-        pred_cpu = pred.cpu().numpy()
-        spearman = [
-            float(spearmanr(pred_cpu[:, idx], data.values[:, idx]).statistic)
-            for idx in range(y.shape[1])
-        ]
         metrics[target.name] = {
-            "mean_z_error": float(normalized_error.mean().item()),
-            "median_z_error": float(normalized_error.median().item()),
-            "mae_stars": float(torch.abs(pred[:, 0] - y[:, 0]).mean().item()),
-            "mean_r2": mean(r2),
-            "mean_spearman": mean(spearman),
+            "mae_stars": float(torch.abs(pred - y).mean().item()),
         }
-        del x, pred, normalized_error
+        del x, pred
     print_eval_result(EvalResult("Difficulty Linear Probe", metrics))
+
+
+def run_difficulty_evals(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    data = load_difficulty_data(targets)
+    if data is None:
+        return
+    run_difficulty_neighbor_eval(targets, data)
+    run_difficulty_probe(targets, data)
 
 
 def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
@@ -890,7 +621,7 @@ def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
         "rff", RFF_EVAL_PATH, None, beatmap_ids, embeddings, id_to_index
     )
     ids = common_ids([*targets, reference])
-    if len(ids) < YEAR_MIN_MAPS:
+    if len(ids) < MIN_PROBE_MAPS:
         return
 
     device = probe_device()
@@ -899,27 +630,18 @@ def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
     y_mean = y.mean(dim=0)
     y_std = y.std(dim=0)
     valid = y_std > 1e-6
-    motif_dims = y.shape[1] - len(RHYTHM_WINDOW_STRATA)
-    motif_mask = valid.clone()
-    motif_mask[motif_dims:] = False
-    prevalence_mask = valid.clone()
-    prevalence_mask[:motif_dims] = False
 
-    def r2(mask: torch.Tensor, pred: torch.Tensor) -> float:
-        scale = y_std[mask]
-        residual = torch.sum(((y[:, mask] - pred[:, mask]) / scale) ** 2)
-        total = torch.sum(((y[:, mask] - y_mean[mask]) / scale) ** 2)
+    def r2(pred: torch.Tensor) -> float:
+        scale = y_std[valid]
+        residual = torch.sum(((y[:, valid] - pred[:, valid]) / scale) ** 2)
+        total = torch.sum(((y[:, valid] - y_mean[valid]) / scale) ** 2)
         return float((1.0 - residual / total.clamp_min(1e-12)).item())
 
     metrics = {}
     for target in targets:
         x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
         pred = ridge_oof(x, y, folds)
-        metrics[target.name] = {
-            "overall_r2": r2(valid, pred),
-            "motif_r2": r2(motif_mask, pred),
-            "prevalence_r2": r2(prevalence_mask, pred),
-        }
+        metrics[target.name] = {"overall_r2": r2(pred)}
         del x, pred
     print_eval_result(EvalResult("RFF Probe", metrics))
 
@@ -1056,58 +778,6 @@ def print_eval_result(result: EvalResult) -> None:
     print_metrics(result.name, result.metrics, keys)
 
 
-def training_metrics(target: TargetData) -> dict | None:
-    if target.run_dir is None:
-        return None
-    path = target.run_dir / "metrics.csv"
-    if not path.exists():
-        return None
-    metrics = pl.read_csv(path, infer_schema_length=None)
-    if "val_loss" not in metrics.columns:
-        return None
-    validation = metrics.filter(pl.col("val_loss").is_not_null()).sort("step")
-    if validation.is_empty():
-        return None
-
-    def values(row: dict) -> dict:
-        return {
-            key: value
-            for key, value in row.items()
-            if value is not None
-            and (key in {"epoch", "step"} or key.startswith("val_"))
-        }
-
-    final = values(validation.row(-1, named=True))
-    best = values(validation.sort("val_loss").row(0, named=True))
-    return {"final": final, "best": best}
-
-
-def print_training_metrics(targets: list[TargetData]) -> dict[str, dict]:
-    summaries = {
-        target.name: summary
-        for target in targets
-        if (summary := training_metrics(target)) is not None
-    }
-    if summaries:
-        available = {key for summary in summaries.values() for key in summary["final"]}
-        keys = [
-            key
-            for key in (
-                "val_loss",
-                "val_spatial_loss",
-                "val_rhythm_loss",
-                "val_attribute_loss",
-            )
-            if key in available
-        ]
-        print_metrics(
-            "Final Training Metrics",
-            {name: summary["final"] for name, summary in summaries.items()},
-            keys,
-        )
-    return summaries
-
-
 def json_value(value):
     if isinstance(value, dict):
         return {key: json_value(item) for key, item in value.items()}
@@ -1120,9 +790,7 @@ def json_value(value):
     return value
 
 
-def save_eval_results(
-    targets: list[TargetData], training: dict[str, dict], *, center: bool
-) -> None:
+def save_eval_results(targets: list[TargetData], *, center: bool) -> None:
     generated_at = datetime.now(timezone.utc).isoformat()
     for target in targets:
         if target.run_dir is None:
@@ -1140,14 +808,12 @@ def save_eval_results(
         }
         payload = json_value(
             {
-                "eval_version": EVAL_VERSION,
                 "generated_at": generated_at,
                 "target": target.name,
                 "targets": [item.name for item in targets],
                 "embeddings": str(target.path),
                 "centered": center,
                 "embedding_metadata": embedding_metadata,
-                "training": training.get(target.name),
                 "evaluations": evaluations,
             }
         )
@@ -1177,22 +843,17 @@ def main() -> None:
     args = parse_args()
     EVAL_RESULTS.clear()
     targets = load_targets(args.targets, center=not args.no_center)
-    training = print_training_metrics(targets)
     evals = [
         run_grouped_retrieval,
         run_mapper_eval,
-        run_ranked_eval,
-        run_year_eval,
-        run_difficulty_neighbor_eval,
-        run_difficulty_probe,
+        run_difficulty_evals,
         run_rff_eval,
-        run_tag_eval,
         run_collection_ngram_eval,
         run_tournament_slot_eval,
     ]
     for run_eval in evals:
         run_eval(targets, args)
-    save_eval_results(targets, training, center=not args.no_center)
+    save_eval_results(targets, center=not args.no_center)
 
 
 if __name__ == "__main__":

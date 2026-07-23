@@ -45,7 +45,7 @@ dependencies = [
 [project.scripts]
 pretrain = "scripts.model.pretrain:main"
 embed = "scripts.model.embed:main"
-eval = "scripts.evaluation.run:main"
+evaluate = "scripts.evaluation.run:main"
 recommend = "scripts.evaluation.recommend:main"
 umap = "scripts.evaluation.umap:main"
 export-model = "scripts.model.export:main"
