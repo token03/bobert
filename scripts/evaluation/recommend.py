@@ -11,7 +11,7 @@ from rich.table import Table
 
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
-from scripts.common.paths import resolve_path
+from scripts.common.paths import RUNS_DIR, resolve_path
 from scripts.common.query import (
     DEFAULT_BEATMAPS_DIR,
     DEFAULT_METADATA_PATH,
@@ -47,6 +47,8 @@ class QueryContext:
     top_k: int
     include_same_set: bool
     allow_download: bool
+    model: str | None
+    version: str | None
     mode: str = MODE_DEFAULT
     embedding_transform: EmbeddingTransform | None = None
     cache: dict[int, np.ndarray] = field(default_factory=dict)
@@ -123,7 +125,11 @@ def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = N
         embedding = ctx.embeddings[ctx.id_to_index[beatmap_id]]
     else:
         if ctx.embedder is None:
-            raise ValueError(f"{beatmap_id} is not available in the loaded embeddings")
+            if ctx.mode != MODE_DEFAULT:
+                raise ValueError(
+                    f"{beatmap_id} is not available in the loaded embeddings"
+                )
+            ctx.embedder = LazyEmbedder(find_model(ctx.model, ctx.version))
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
         embedding = ctx.embedder.embed_osu(osu_path)
         if ctx.embedding_transform is not None:
@@ -393,6 +399,9 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
+    parser.add_argument(
+        "--no-center", action="store_true", help="Only L2-normalize embeddings"
+    )
     return parser.parse_args()
 
 
@@ -401,7 +410,7 @@ def validate_args(args: argparse.Namespace):
         raise SystemExit("Error: provide at most two beatmap ids or URLs")
 
 
-def load_query_data(args: argparse.Namespace, mode: str, model_path: Path | None):
+def load_query_data(args: argparse.Namespace, mode: str):
     if mode == MODE_GRAPH:
         embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
         beatmap_ids, embeddings, id_to_index = load_embeddings(
@@ -413,10 +422,14 @@ def load_query_data(args: argparse.Namespace, mode: str, model_path: Path | None
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
         return beatmap_ids, embeddings, id_to_index
-    assert model_path is not None
-    embeddings_path = resolve_path(
-        args.embeddings or model_path.parent / "embeddings.parquet"
-    )
+    if args.embeddings:
+        embeddings_path = resolve_path(args.embeddings)
+    elif args.version:
+        embeddings_path = RUNS_DIR / args.version / "embeddings.parquet"
+    elif args.model:
+        embeddings_path = resolve_path(args.model).parent / "embeddings.parquet"
+    else:
+        embeddings_path = find_model().parent / "embeddings.parquet"
     beatmap_ids, embeddings, id_to_index = load_embeddings(
         embeddings_path,
         dtype=np.float16,
@@ -431,25 +444,28 @@ def load_query_data(args: argparse.Namespace, mode: str, model_path: Path | None
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = MODE_GRAPH if args.graph else MODE_DEFAULT
-    model_path = find_model(args.model, args.version) if mode == MODE_DEFAULT else None
-    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode, model_path)
+    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
     embedding_transform = None
     if mode == MODE_DEFAULT and len(embeddings):
-        embedding_transform = EmbeddingTransform.fit(embeddings)
+        embedding_transform = (
+            EmbeddingTransform(np.zeros((1, embeddings.shape[1]), dtype=np.float32))
+            if args.no_center
+            else EmbeddingTransform.fit(embeddings)
+        )
         embeddings = embedding_transform.apply(embeddings)
-    embedder = LazyEmbedder(model_path) if mode == MODE_DEFAULT else None
-
     return QueryContext(
         beatmap_ids=beatmap_ids,
         embeddings=embeddings,
         id_to_index=id_to_index,
         metadata_lookup=metadata_by_id(load_metadata(resolve_path(args.metadata))),
-        embedder=embedder,
+        embedder=None,
         beatmaps_dir=resolve_path(args.beatmaps_dir),
         metadata_path=resolve_path(args.metadata),
         top_k=args.top_k,
         include_same_set=args.include_same_set,
         allow_download=not args.no_download,
+        model=args.model,
+        version=args.version,
         mode=mode,
         embedding_transform=embedding_transform,
     )

@@ -232,12 +232,18 @@ class BobertModule(pl.LightningModule):
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
         losses, target_count = self._shared_step(batch)
+        optimizer = self.trainer.optimizers[0]
+        self.log_dict(
+            {
+                "muon_lr": optimizer.param_groups[0]["lr"],
+                "adam_lr": optimizer.param_groups[1]["lr"],
+            },
+            batch_size=target_count,
+        )
         if not self.quiet:
-            self.log_dict(
-                {
-                    "train_loss": losses["total"],
-                    "lr": self.trainer.optimizers[0].param_groups[0]["lr"],
-                },
+            self.log(
+                "train_loss",
+                losses["total"],
                 prog_bar=True,
                 batch_size=target_count,
             )

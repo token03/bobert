@@ -35,7 +35,7 @@ runtime:
 
 training:
   trainer:
-    epochs: 6
+    epochs: 30
     batch_size: 64
     grad_accum: 2
     grad_clip: 1.0
@@ -44,7 +44,7 @@ training:
     use_length_buckets: true
 
   data:
-    sample_size: 60000
+    sample_size: 300000
 
   optimizer:
     adam_lr: 2e-4
@@ -54,11 +54,8 @@ training:
     muon_wd: 0.01
 
   scheduler:
-    adam_min_lr: 1e-6
-    warmup_ratio: 0.1
-    stable_ratio: 0.1
-    cooldown: "cosine"
-    num_cycles: 0.5
+    warmup_ratio: 0.01
+    min_lr_ratio: 0.005
 
   masking:
     ratio: 0.30

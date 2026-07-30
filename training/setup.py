@@ -6,11 +6,10 @@ from omegaconf import DictConfig
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
-from pytorch_optimizer import get_wsd_schedule
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
+from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 
 def setup_device() -> str:
@@ -57,33 +56,31 @@ def create_scheduler(
     optimizer_config = config.training.optimizer
     scheduler_config = config.training.scheduler
     warmup_steps = int(float(scheduler_config.warmup_ratio) * total_steps)
-    stable_steps = int(float(scheduler_config.stable_ratio) * total_steps)
-    if warmup_steps + stable_steps >= total_steps:
-        raise ValueError(
-            "Warmup and stable steps must total less than all training steps."
-        )
-    decay_steps = total_steps - warmup_steps - stable_steps
-    min_lr_ratio = (
-        float(scheduler_config.adam_min_lr) / float(optimizer_config.adam_lr)
-        if optimizer_config.adam_lr > 0
-        else 0.0
-    )
+    if warmup_steps >= total_steps:
+        raise ValueError("Warmup steps must be less than all training steps.")
+    decay_steps = total_steps - warmup_steps
+    min_lr_ratio = float(scheduler_config.min_lr_ratio)
+    adam_min_lr = float(optimizer_config.adam_lr) * min_lr_ratio
+    muon_min_lr = float(optimizer_config.muon_lr) * min_lr_ratio
     print(
-        f"Scheduler: WSD with {warmup_steps} warmup, {stable_steps} stable, "
+        f"Scheduler: linear warmup-decay with {warmup_steps} warmup, "
         f"{decay_steps} decay steps."
     )
     print(
-        f"Cooldown type: {scheduler_config.cooldown}, Min LR Ratio: {min_lr_ratio:.4f}"
+        f"Min LR ratio: {min_lr_ratio:.4f} "
+        f"(Adam {adam_min_lr:.2e}, Muon {muon_min_lr:.2e})"
     )
-    return get_wsd_schedule(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_stable_steps=stable_steps,
-        num_decay_steps=decay_steps,
-        min_lr_ratio=min_lr_ratio,
-        cooldown_type=scheduler_config.cooldown,
-        num_cycles=float(scheduler_config.num_cycles),
-    )
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        if current_step >= total_steps:
+            return min_lr_ratio
+
+        progress = float(current_step - warmup_steps) / float(max(1, decay_steps))
+        return 1.0 - progress * (1.0 - min_lr_ratio)
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def create_trainer(

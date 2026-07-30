@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import re
+import sys
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -52,6 +53,7 @@ class TargetData:
     beatmap_ids: np.ndarray
     embeddings: np.ndarray
     id_to_index: dict[int, int]
+    centered: bool
 
 
 @dataclass
@@ -125,17 +127,18 @@ def load_embeddings(
     return beatmap_ids, embeddings, id_to_index
 
 
-def load_targets(targets: list[str], *, center: bool) -> list[TargetData]:
+def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]:
     loaded = []
     for target in targets:
         path = target_path(target)
         name = target_name(path)
         run_dir = path.parent if path.parent.parent == RUNS_DIR else None
-        beatmap_ids, embeddings, id_to_index = load_embeddings(
-            path, center=center and name != "graph"
-        )
+        center = target not in no_center and name != "graph"
+        beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=center)
         loaded.append(
-            TargetData(name, path, run_dir, beatmap_ids, embeddings, id_to_index)
+            TargetData(
+                name, path, run_dir, beatmap_ids, embeddings, id_to_index, center
+            )
         )
     return loaded
 
@@ -618,7 +621,7 @@ def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
         RFF_EVAL_PATH, center=False, normalize=False
     )
     reference = TargetData(
-        "rff", RFF_EVAL_PATH, None, beatmap_ids, embeddings, id_to_index
+        "rff", RFF_EVAL_PATH, None, beatmap_ids, embeddings, id_to_index, False
     )
     ids = common_ids([*targets, reference])
     if len(ids) < MIN_PROBE_MAPS:
@@ -790,7 +793,7 @@ def json_value(value):
     return value
 
 
-def save_eval_results(targets: list[TargetData], *, center: bool) -> None:
+def save_eval_results(targets: list[TargetData]) -> None:
     generated_at = datetime.now(timezone.utc).isoformat()
     for target in targets:
         if target.run_dir is None:
@@ -812,7 +815,7 @@ def save_eval_results(targets: list[TargetData], *, center: bool) -> None:
                 "target": target.name,
                 "targets": [item.name for item in targets],
                 "embeddings": str(target.path),
-                "centered": center,
+                "centered": target.centered,
                 "embedding_metadata": embedding_metadata,
                 "evaluations": evaluations,
             }
@@ -825,7 +828,7 @@ def save_eval_results(targets: list[TargetData], *, center: bool) -> None:
         console.print(f"[dim]Saved {output}[/dim]")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare embedding files with retrieval and linear probe evals"
     )
@@ -834,15 +837,31 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--eval", default=str(DATA_DIR / "eval.csv"))
     parser.add_argument(
-        "--no-center", action="store_true", help="Only L2-normalize embeddings"
+        "--no-center",
+        action="store_true",
+        help="Only L2-normalize the preceding target",
     )
-    return parser.parse_args()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    no_center = set()
+    for index in range(len(argv) - 1, -1, -1):
+        if argv[index] != "--no-center":
+            continue
+        if index == 0 or argv[index - 1].startswith("-"):
+            parser.error("--no-center must follow a target")
+        no_center.add(argv[index - 1])
+        del argv[index]
+    args = parser.parse_args(argv)
+    invalid = no_center.difference(args.targets)
+    if invalid:
+        parser.error("--no-center must immediately follow a target")
+    args.no_center = no_center
+    return args
 
 
 def main() -> None:
     args = parse_args()
     EVAL_RESULTS.clear()
-    targets = load_targets(args.targets, center=not args.no_center)
+    targets = load_targets(args.targets, no_center=args.no_center)
     evals = [
         run_grouped_retrieval,
         run_mapper_eval,
@@ -853,7 +872,7 @@ def main() -> None:
     ]
     for run_eval in evals:
         run_eval(targets, args)
-    save_eval_results(targets, center=not args.no_center)
+    save_eval_results(targets)
 
 
 if __name__ == "__main__":

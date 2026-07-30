@@ -5,7 +5,13 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from scripts.common.paths import BEATMAPS_PATH, DATA_DIR, PROJECT_ROOT, resolve_path
+from scripts.common.paths import (
+    BEATMAPS_PATH,
+    DATA_DIR,
+    PROJECT_ROOT,
+    RUNS_DIR,
+    resolve_path,
+)
 
 EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
@@ -24,27 +30,29 @@ def _sample_df(df: pd.DataFrame, limit: int | None) -> pd.DataFrame:
     return df.sample(n=limit).reset_index(drop=True)
 
 
-def _nearest_neighbors_faiss(matrix: np.ndarray, n_neighbors: int, use_gpu: bool):
-    import faiss
-
-    matrix = np.ascontiguousarray(matrix.astype(np.float32, copy=False))
-    index = faiss.IndexFlatIP(matrix.shape[1])
-    gpu_resources = None
-    if use_gpu:
-        gpu_resources = faiss.StandardGpuResources()
-        index = faiss.index_cpu_to_gpu(gpu_resources, 0, index)
-    index.add(matrix)
-    similarities, indices = index.search(matrix, n_neighbors + 1)
-    distances = np.clip(1.0 - similarities, 0.0, 2.0).astype(np.float32, copy=False)
-    return distances, indices.astype(np.int32, copy=False)
-
-
 def _nearest_neighbors_cpu(matrix: np.ndarray, n_neighbors: int):
     from sklearn.neighbors import NearestNeighbors
 
     knn = NearestNeighbors(n_neighbors=n_neighbors + 1, metric="cosine")
     knn.fit(matrix)
     return knn.kneighbors(matrix)
+
+
+def _nearest_neighbors_gpu(matrix: np.ndarray, n_neighbors: int):
+    import torch
+
+    vectors = torch.from_numpy(matrix).cuda()
+    distances = np.empty((len(matrix), n_neighbors + 1), dtype=np.float32)
+    indices = np.empty((len(matrix), n_neighbors + 1), dtype=np.int32)
+    with torch.inference_mode():
+        for start in tqdm(range(0, len(matrix), 4096), desc="GPU KNN"):
+            end = min(start + 4096, len(matrix))
+            similarities, neighbors = torch.topk(
+                vectors[start:end] @ vectors.T, n_neighbors + 1, dim=1
+            )
+            distances[start:end] = (1.0 - similarities).clamp_(0.0, 2.0).cpu()
+            indices[start:end] = neighbors.cpu().numpy().astype(np.int32, copy=False)
+    return distances, indices
 
 
 def _umap_cpu(
@@ -134,17 +142,17 @@ def process(
         )
 
     try:
-        backend = "GPU" if use_gpu else "CPU"
-        print(
-            f"Calculating {n_export_neighbors} nearest neighbors (FAISS {backend})..."
-        )
-        kn_dists, kn_indices = _nearest_neighbors_faiss(
-            matrix_cpu, max(n_export_neighbors, umap_neighbors), use_gpu=use_gpu
-        )
+        n_neighbors = max(n_export_neighbors, umap_neighbors)
+        if use_gpu:
+            print(f"Calculating {n_export_neighbors} nearest neighbors (PyTorch GPU)...")
+            kn_dists, kn_indices = _nearest_neighbors_gpu(matrix_cpu, n_neighbors)
+        else:
+            print(f"Calculating {n_export_neighbors} nearest neighbors (CPU)...")
+            kn_dists, kn_indices = _nearest_neighbors_cpu(matrix_cpu, n_neighbors)
         cpu_indices = kn_indices[:, 1 : n_export_neighbors + 1]
         cpu_dists = kn_dists[:, 1 : n_export_neighbors + 1]
 
-        print("Running UMAP (CPU, FAISS precomputed neighbors)...")
+        print("Running UMAP (CPU, precomputed neighbors)...")
         embedding_2d = _umap_cpu(
             matrix_cpu,
             umap_neighbors,
@@ -157,7 +165,7 @@ def process(
     except Exception as exc:
         if use_gpu:
             raise
-        print(f"FAISS backend unavailable ({exc}); falling back to sklearn KNN")
+        print(f"GPU backend unavailable ({exc}); falling back to sklearn KNN")
         print("Using CPU UMAP/KNN backend")
         print(f"Calculating {n_export_neighbors} nearest neighbors (CPU)...")
         cpu_dists, cpu_indices = _nearest_neighbors_cpu(matrix_cpu, n_export_neighbors)
@@ -247,9 +255,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--embeddings",
-        default=str(EMBEDDINGS_PATH),
+        default=None,
         help="Embedding parquet with beatmap_id and embedding columns",
     )
+    parser.add_argument("-v", "--version")
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
     parser.add_argument(
         "--limit", type=int, default=None, help="Optional random sample size"
@@ -271,7 +280,13 @@ def main() -> None:
     args = parser.parse_args()
 
     process(
-        embeddings_path=Path(args.embeddings),
+        embeddings_path=(
+            Path(args.embeddings)
+            if args.embeddings
+            else RUNS_DIR / args.version / "embeddings.parquet"
+            if args.version
+            else EMBEDDINGS_PATH
+        ),
         output_dir=Path(args.output_dir),
         limit=args.limit,
         min_star=args.min_star,
