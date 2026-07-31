@@ -44,7 +44,7 @@ training:
     use_length_buckets: true
 
   data:
-    sample_size: 300000
+    sample_size: null
 
   optimizer:
     adam_lr: 2e-4
