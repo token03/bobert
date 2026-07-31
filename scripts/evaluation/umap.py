@@ -17,7 +17,7 @@ EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
 
 N_EXPORT_NEIGHBORS = 25
-UMAP_NEIGHBORS = 10
+UMAP_NEIGHBORS = 15
 
 
 def _resolve_path(path: str | Path) -> Path:

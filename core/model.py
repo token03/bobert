@@ -169,6 +169,7 @@ class BobertEncoder(nn.Module):
         packed_embeddings: torch.Tensor,
         cu_seqlens: torch.Tensor,
         positions: torch.Tensor,
+        global_embeddings: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         packed_output = packed_embeddings
         max_seqlen = positions.shape[0]
@@ -187,13 +188,17 @@ class BobertEncoder(nn.Module):
                 total_tokens, 1, self.d_model // self.n_heads
             )
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             packed_output = layer(
                 packed_output,
                 rotary_freqs=rotary_freqs,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
+            if global_embeddings is not None and i in self.global_attention_layers:
+                global_embeddings.append(
+                    self._get_embedding(self.final_norm(packed_output), cu_seqlens)
+                )
 
         packed_output = self.final_norm(packed_output)
 
@@ -231,10 +236,16 @@ class BobertEncoder(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
-        packed_output, cu_seqlens, _ = self.encode_packed(
-            packed_vectors, cu_seqlens, max_seqlen
+        packed_input = self.embed_sequences(packed_vectors)
+        positions = torch.arange(max_seqlen, device=packed_vectors.device)
+        global_embeddings: list[torch.Tensor] = []
+        self._encode(
+            packed_input,
+            cu_seqlens,
+            positions,
+            global_embeddings=global_embeddings,
         )
-        return self._get_embedding(packed_output, cu_seqlens)
+        return torch.stack(global_embeddings).mean(dim=0)
 
 
 class BobertForPretraining(nn.Module):
