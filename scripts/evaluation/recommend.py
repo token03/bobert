@@ -5,15 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
-from scripts.common.io import atomic_pyarrow_table
 from scripts.common.paths import RUNS_DIR, resolve_path
 from scripts.common.query import (
     DEFAULT_BEATMAPS_DIR,
@@ -29,9 +26,8 @@ from scripts.common.query import (
     load_embeddings,
     load_metadata,
     metadata_by_id,
-    sharded_osu_path,
 )
-from scripts.model.embed import embedding_table, find_model
+from scripts.model.embed import find_model
 
 console = Console()
 MODE_DEFAULT = "default"
@@ -48,7 +44,6 @@ class QueryContext:
     embedder: LazyEmbedder | None
     beatmaps_dir: Path
     metadata_path: Path
-    embeddings_path: Path | None
     top_k: int
     include_same_set: bool
     allow_download: bool
@@ -136,20 +131,7 @@ def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = N
                 )
             ctx.embedder = LazyEmbedder(find_model(ctx.model, ctx.version))
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
-        dataset_path = sharded_osu_path(beatmap_id, DEFAULT_BEATMAPS_DIR)
-        if osu_path != dataset_path and not dataset_path.exists():
-            dataset_path.parent.mkdir(parents=True, exist_ok=True)
-            dataset_path.write_bytes(osu_path.read_bytes())
         embedding = ctx.embedder.embed_osu(osu_path)
-        if ctx.embeddings_path is not None:
-            table = pq.read_table(ctx.embeddings_path)
-            if beatmap_id not in table.column("beatmap_id").to_pylist():
-                atomic_pyarrow_table(
-                    pa.concat_tables(
-                        [table, embedding_table([beatmap_id], embedding[None, :])]
-                    ),
-                    ctx.embeddings_path,
-                )
         if ctx.embedding_transform is not None:
             embedding = ctx.embedding_transform.apply(embedding)
 
@@ -439,7 +421,7 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
-        return beatmap_ids, embeddings, id_to_index, embeddings_path
+        return beatmap_ids, embeddings, id_to_index
     if args.embeddings:
         embeddings_path = resolve_path(args.embeddings)
     elif args.version:
@@ -457,12 +439,12 @@ def load_query_data(args: argparse.Namespace, mode: str):
         f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
         f"[dim]{escape(str(embeddings_path))}[/dim]"
     )
-    return beatmap_ids, embeddings, id_to_index, embeddings_path
+    return beatmap_ids, embeddings, id_to_index
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = MODE_GRAPH if args.graph else MODE_DEFAULT
-    beatmap_ids, embeddings, id_to_index, embeddings_path = load_query_data(args, mode)
+    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
     embedding_transform = None
     if mode == MODE_DEFAULT and len(embeddings):
         embedding_transform = (
@@ -479,7 +461,6 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         embedder=None,
         beatmaps_dir=resolve_path(args.beatmaps_dir),
         metadata_path=resolve_path(args.metadata),
-        embeddings_path=embeddings_path,
         top_k=args.top_k,
         include_same_set=args.include_same_set,
         allow_download=not args.no_download,
