@@ -83,6 +83,7 @@ class BobertEncoder(nn.Module):
         self.rotary_emb = RotaryEmbedding(
             dim=d_model // n_heads, cache_max_seq_len=max_seq_len
         )
+        self.rotary_emb(torch.arange(max_seq_len), seq_len=max_seq_len)
 
     @classmethod
     def from_config(cls: Type[T], config: DictConfig, *, use_flash: bool) -> T:
@@ -161,7 +162,7 @@ class BobertEncoder(nn.Module):
         positions = torch.arange(max_seqlen, device=packed_embeddings.device)
         torch._dynamo.mark_dynamic(packed_embeddings, 0)
         torch._dynamo.mark_dynamic(cu_seqlens, 0)
-        torch._dynamo.mark_dynamic(positions, 0)
+        torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
         return self._encode(packed_embeddings, cu_seqlens, positions)
 
     def _encode(
