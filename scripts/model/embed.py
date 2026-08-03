@@ -65,9 +65,10 @@ def find_model(path: str | Path | None = None, version: str | None = None) -> Pa
     return model_path
 
 
-def load_model(model_path: Path, device: torch.device):
+def load_model(model_path: Path, device: torch.device, quiet: bool = False):
     model, vector_stats = BobertEncoder.from_pretrained(model_path, device)
-    print(f"Loaded model: {model_path}")
+    if not quiet:
+        print(f"Loaded model: {model_path}")
     if device.type == "cuda":
         model.to(device).bfloat16().eval()
     else:
@@ -192,6 +193,7 @@ def export_embeddings(
     flush_size: int,
     seed: int,
     device_name: str | None,
+    quiet: bool = False,
 ):
     config = OmegaConf.load(config_path)
     if load_chunk_size <= 0:
@@ -204,10 +206,11 @@ def export_embeddings(
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model, vector_stats = load_model(find_model(model_path), device)
+    model, vector_stats = load_model(find_model(model_path), device, quiet)
     max_seq_len = model.max_seq_len
     ids = sample_ids(dataset_dir, limit, seed, min_sr, max_seq_len)
-    print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
+    if not quiet:
+        print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
 
     with torch.inference_mode():
         model.rotary_emb(
@@ -225,7 +228,10 @@ def export_embeddings(
         with torch.inference_mode():
             chunk_count = math.ceil(len(ids) / load_chunk_size)
             for id_chunk in tqdm(
-                chunked(ids, load_chunk_size), total=chunk_count, desc="Loading chunks"
+                chunked(ids, load_chunk_size),
+                total=chunk_count,
+                desc="Loading chunks",
+                disable=quiet,
             ):
                 beatmaps = load_beatmap_dataset(
                     str(dataset_dir),
@@ -235,6 +241,7 @@ def export_embeddings(
                     min_sr=min_sr,
                     max_sr=None,
                     chunk_size=max(1, int(load_chunk_size / 10)),
+                    quiet=quiet,
                 )
                 if not beatmaps:
                     continue
@@ -260,7 +267,7 @@ def export_embeddings(
                 loader = DataLoader(dataset, **loader_kwargs)
 
                 for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
-                    loader, desc="Embedding", leave=False
+                    loader, desc="Embedding", leave=False, disable=quiet
                 ):
                     vectors = vectors.to(device, non_blocking=True)
                     cu_seqlens = cu_seqlens.to(device, non_blocking=True)
@@ -312,7 +319,8 @@ def export_embeddings(
         + "\n",
         encoding="utf-8",
     )
-    print(f"Saved {saved_count:,} embeddings to {output_path}")
+    if not quiet:
+        print(f"Saved {saved_count:,} embeddings to {output_path}")
 
 
 def main():
@@ -333,6 +341,7 @@ def main():
     parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
+    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     model_path = find_model(args.model, args.version)
 
@@ -350,6 +359,7 @@ def main():
         flush_size=args.flush_size,
         seed=args.seed,
         device_name=args.device,
+        quiet=args.quiet,
     )
 
 
