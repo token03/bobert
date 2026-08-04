@@ -23,6 +23,7 @@ console = Console()
 
 
 BEATMAPS_EVAL_PATH = DATA_DIR / "beatmaps.parquet"
+BEATMAPSETS_EVAL_PATH = DATA_DIR / "beatmapsets.parquet"
 COLLECTION_EDGES_EVAL_PATH = COLLECTIONS_DIR / "edges.parquet"
 COLLECTION_VERTICES_EVAL_PATH = COLLECTIONS_DIR / "vertices.parquet"
 COLLECTION_NGRAMS_EVAL_PATH = COLLECTIONS_DIR / "ngrams.txt"
@@ -33,11 +34,18 @@ RFF_EVAL_PATH = DATA_DIR / "motifs" / "rff.parquet"
 PROBE_SEED = 0
 PROBE_FOLDS = 4
 PROBE_RIDGE_ALPHA = 1e-3
-MAPPER_MIN_MAPS = 50
+PROBE_MIN_LABEL_MAPS = 50
 MIN_PROBE_MAPS = 1000
 RATING_MAX_STARS = 20.0
 RATING_MAX_SEQ_LEN = 4096
 DIFFICULTY_COLUMNS = ["stars", "aim", "speed", "slider_factor"]
+MAP_ATTRIBUTE_COLUMNS = {
+    "ar": "ar",
+    "cs": "cs",
+    "od": "accuracy",
+    "hp": "drain",
+    "submitted_date": "submitted_date",
+}
 DIFFICULTY_NEIGHBOR_K = 50
 DIFFICULTY_BATCH_SIZE = 256
 COLLECTION_TAG_MIN_MAPS = 100
@@ -68,7 +76,6 @@ EVAL_RESULTS: list[EvalResult] = []
 @dataclass
 class DifficultyData:
     ids: list[int]
-    stars: np.ndarray
     normalized: np.ndarray
     groups: np.ndarray
 
@@ -343,6 +350,19 @@ def ridge_oof(
     return pred[:, 0] if vector_target else pred
 
 
+def oof_r2(
+    y: torch.Tensor,
+    pred: torch.Tensor,
+    folds: list[tuple[torch.Tensor, torch.Tensor]],
+) -> torch.Tensor:
+    baseline = torch.empty_like(y)
+    for train_idx, test_idx in folds:
+        baseline[test_idx] = y[train_idx].mean(dim=0)
+    residual = ((y - pred) ** 2).sum(dim=0)
+    total = ((y - baseline) ** 2).sum(dim=0)
+    return 1.0 - residual / total.clamp_min(1e-12)
+
+
 def ridge_multiclass_metrics(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -353,14 +373,20 @@ def ridge_multiclass_metrics(
     pred_counts = torch.zeros_like(tp)
     true_counts = torch.zeros_like(tp)
     for train_idx, test_idx in folds:
-        x_mean = x[train_idx].mean(dim=0)
-        x_train = x[train_idx] - x_mean
-        gram = x_train.T @ x_train / train_idx.numel()
+        train_labels = y[train_idx]
+        class_counts = torch.bincount(train_labels, minlength=n_classes).float()
+        sample_weights = class_counts[train_labels].reciprocal()
+        weight_sum = sample_weights.sum()
+        x_train = x[train_idx]
+        x_mean = (x_train * sample_weights[:, None]).sum(dim=0) / weight_sum
+        x_train = x_train - x_mean
+        weighted_x = x_train * sample_weights[:, None]
+        gram = x_train.T @ weighted_x / weight_sum
         gram.diagonal().add_(PROBE_RIDGE_ALPHA)
         cross = torch.zeros((x.shape[1], n_classes), device=x.device)
-        cross.index_add_(1, y[train_idx], x_train.T)
-        weights = torch.linalg.solve(gram, cross / train_idx.numel())
-        bias = torch.bincount(y[train_idx], minlength=n_classes) / train_idx.numel()
+        cross.index_add_(1, train_labels, weighted_x.T)
+        weights = torch.linalg.solve(gram, cross / weight_sum)
+        bias = torch.full((n_classes,), 1 / n_classes, device=x.device)
         scores = (x[test_idx] - x_mean) @ weights + bias
         target = y[test_idx]
         pred = scores.argmax(dim=1)
@@ -447,7 +473,7 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
     if np.any(scale <= 1e-6):
         raise ValueError("Difficulty attributes must have non-zero variance")
     normalized = (values - values.mean(axis=0)) / scale
-    return DifficultyData(ids, values[:, 0], normalized, beatmapset_groups(ids))
+    return DifficultyData(ids, normalized, beatmapset_groups(ids))
 
 
 def macro_label_average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> float:
@@ -525,20 +551,96 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
     )
 
 
-def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    beatmaps = load_standard_beatmaps(["user_id"]).drop_nulls(["beatmap_id", "user_id"])
+def run_categorical_probe(
+    targets: list[TargetData], beatmaps: pl.DataFrame, column: str, title: str
+) -> None:
+    beatmaps = beatmaps.drop_nulls(["beatmap_id", column]).unique("beatmap_id")
     ids_by_target = common_ids(targets, set(beatmaps["beatmap_id"].to_list()))
     labels_by_id = dict(
         beatmaps.filter(pl.col("beatmap_id").is_in(ids_by_target))
-        .select("beatmap_id", "user_id")
+        .select("beatmap_id", column)
         .iter_rows()
     )
     ids = [beatmap_id for beatmap_id in ids_by_target if beatmap_id in labels_by_id]
-    labels = [int(labels_by_id[beatmap_id]) for beatmap_id in ids]
-    ids, labels = filter_min_count(ids, labels, MAPPER_MIN_MAPS)
-    result = multiclass_probe(targets, ids, labels, title="Mapper Probe")
+    labels = [labels_by_id[beatmap_id] for beatmap_id in ids]
+    ids, labels = filter_min_count(ids, labels, PROBE_MIN_LABEL_MAPS)
+    result = multiclass_probe(targets, ids, labels, title=title)
     if result:
         print_eval_result(result)
+
+
+def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    run_categorical_probe(
+        targets,
+        load_standard_beatmaps(["user_id"]),
+        "user_id",
+        "Mapper Probe",
+    )
+
+
+def run_artist_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    run_categorical_probe(
+        targets,
+        load_standard_beatmaps(["artist"]),
+        "artist",
+        "Artist Probe",
+    )
+
+
+def run_genre_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    if not BEATMAPSETS_EVAL_PATH.exists():
+        console.print(
+            f"[yellow]Skipping Genre Probe: {BEATMAPSETS_EVAL_PATH} not found.[/yellow]"
+        )
+        return
+    standard_ids = set(load_standard_beatmaps([])["beatmap_id"].to_list())
+    beatmaps = pl.read_parquet(
+        BEATMAPSETS_EVAL_PATH, columns=["beatmap_id", "genre_id"]
+    ).filter(pl.col("beatmap_id").is_in(standard_ids))
+    run_categorical_probe(targets, beatmaps, "genre_id", "Genre Probe")
+
+
+def run_map_attribute_eval(
+    targets: list[TargetData], _args: argparse.Namespace
+) -> None:
+    source_columns = list(MAP_ATTRIBUTE_COLUMNS.values())
+    beatmaps = load_standard_beatmaps(source_columns).with_columns(
+        (
+            pl.col("submitted_date")
+            .str.to_datetime("%Y-%m-%d %H:%M:%S%z", strict=False)
+            .dt.epoch("s")
+            / 86_400
+        ).alias("submitted_date")
+    )
+    beatmaps = beatmaps.drop_nulls(["beatmap_id", *source_columns])
+    beatmaps = beatmaps.filter(
+        pl.all_horizontal([pl.col(column).is_finite() for column in source_columns])
+    )
+    ids = common_ids(targets, set(beatmaps["beatmap_id"].to_list()))
+    beatmaps = beatmaps.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
+    ids = [int(beatmap_id) for beatmap_id in beatmaps["beatmap_id"]]
+    if len(ids) < MIN_PROBE_MAPS:
+        console.print(
+            f"[yellow]Skipping Map Attribute Probe: only {len(ids):,} shared maps.[/yellow]"
+        )
+        return
+
+    device = probe_device()
+    folds = fold_indices(beatmapset_groups(ids), device)
+    y = torch.tensor(
+        beatmaps.select(source_columns).to_numpy(), dtype=torch.float32, device=device
+    )
+    metrics = {}
+    for target in targets:
+        x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
+        pred = ridge_oof(x, y, folds)
+        scores = oof_r2(y, pred, folds)
+        metrics[target.name] = {
+            f"r2_{name}": float(scores[index].item())
+            for index, name in enumerate(MAP_ATTRIBUTE_COLUMNS)
+        }
+        del x, pred, scores
+    print_eval_result(EvalResult("Map Attribute Probe", metrics))
 
 
 def difficulty_neighbor_metrics(
@@ -589,17 +691,19 @@ def run_difficulty_neighbor_eval(
 def run_difficulty_probe(targets: list[TargetData], data: DifficultyData) -> None:
     device = probe_device()
     folds = fold_indices(data.groups, device)
-    y = torch.tensor(data.stars, dtype=torch.float32, device=device)
+    y = torch.tensor(data.normalized, dtype=torch.float32, device=device)
     metrics = {}
     for target in targets:
         x = torch.tensor(
             target_matrix(target, data.ids), dtype=torch.float32, device=device
         )
         pred = ridge_oof(x, y, folds)
+        scores = oof_r2(y, pred, folds)
         metrics[target.name] = {
-            "mae_stars": float(torch.abs(pred - y).mean().item()),
+            f"r2_{column}": float(scores[index].item())
+            for index, column in enumerate(DIFFICULTY_COLUMNS)
         }
-        del x, pred
+        del x, pred, scores
     print_eval_result(EvalResult("Difficulty Linear Probe", metrics))
 
 
@@ -865,6 +969,9 @@ def main() -> None:
     evals = [
         run_grouped_retrieval,
         run_mapper_eval,
+        run_artist_eval,
+        run_genre_eval,
+        run_map_attribute_eval,
         run_difficulty_evals,
         run_rff_eval,
         run_collection_ngram_eval,
