@@ -51,6 +51,10 @@ DURATION_BINS = (
 
 DURATION_OFF_GRID = len(DURATION_BINS)
 DURATION_CARDINALITY = len(DURATION_BINS) + 1
+DURATION_BIN_VALUES = pl.Series(DURATION_BINS)
+DURATION_MIDPOINTS = pl.Series(
+    [(left + right) / 2 for left, right in zip(DURATION_BINS, DURATION_BINS[1:])]
+)
 BEAT_PHASE_DIVISIONS = 24
 BEAT_PHASE_CARDINALITY = BEAT_PHASE_DIVISIONS + 1
 ONSET_DURATION_TOLERANCE_MS = 2.0
@@ -162,20 +166,18 @@ BEAT_PHASE_TOLERANCE_MS = 2.0
 BEAT_PHASE_OFF_GRID = BEAT_PHASE_CARDINALITY - 1
 
 
-def _duration_bin_expr(
-    duration_ms: pl.Expr, beat_length_ms: pl.Expr, tolerance_ms: float
-) -> pl.Expr:
-    nearest = pl.lit(DURATION_OFF_GRID, dtype=pl.Int32)
-    best_error = pl.lit(float("inf"))
-    for index, duration in enumerate(DURATION_BINS):
-        error = (duration_ms - duration * beat_length_ms).abs()
-        nearest = pl.when(error < best_error).then(index).otherwise(nearest)
-        best_error = pl.min_horizontal(best_error, error)
-    return (
-        pl.when(best_error <= tolerance_ms)
-        .then(nearest)
-        .otherwise(DURATION_OFF_GRID)
-        .cast(pl.Int32)
+def _duration_bins(
+    duration_ms: pl.Series, beat_length_ms: pl.Series, tolerance_ms: float
+) -> pl.Series:
+    nearest = DURATION_MIDPOINTS.search_sorted(
+        duration_ms / beat_length_ms, side="left"
+    )
+    error = (
+        duration_ms - DURATION_BIN_VALUES.gather(nearest) * beat_length_ms
+    ).abs()
+    return nearest.cast(pl.Int32).set(
+        error.fill_null(float("inf")).fill_nan(float("inf")) > tolerance_ms,
+        DURATION_OFF_GRID,
     )
 
 
@@ -364,33 +366,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .alias("curve_residual_2_dy"),
         )
         .with_columns(
-            _duration_bin_expr(
-                pl.col("onset_ioi_ms"),
-                pl.col("_active_beat_length_ms"),
-                ONSET_DURATION_TOLERANCE_MS,
-            ).alias("onset_duration_bin"),
-            pl.when(is_slider)
-            .then(
-                _duration_bin_expr(
-                    pl.col("_span_duration_ms"),
-                    pl.col("_active_beat_length_ms"),
-                    SUSTAIN_DURATION_TOLERANCE_MS,
-                )
-            )
-            .otherwise(DURATION_OFF_GRID)
-            .cast(pl.Int32)
-            .alias("span_duration_bin"),
-            pl.when(is_spinner)
-            .then(
-                _duration_bin_expr(
-                    pl.col("_spinner_duration_ms"),
-                    pl.col("_active_beat_length_ms"),
-                    SUSTAIN_DURATION_TOLERANCE_MS,
-                )
-            )
-            .otherwise(DURATION_OFF_GRID)
-            .cast(pl.Int32)
-            .alias("spinner_duration_bin"),
             _beat_phase_expr(
                 pl.col("_beat_fraction"), pl.col("_active_beat_length_ms")
             ).alias("beat_phase"),
@@ -407,7 +382,28 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .alias("span_count_bin"),
         )
     )
-    return df
+    df = df.with_columns(
+        _duration_bins(
+            df["onset_ioi_ms"],
+            df["_active_beat_length_ms"],
+            ONSET_DURATION_TOLERANCE_MS,
+        ).alias("onset_duration_bin"),
+        _duration_bins(
+            df["_span_duration_ms"] + df["_spinner_duration_ms"],
+            df["_active_beat_length_ms"],
+            SUSTAIN_DURATION_TOLERANCE_MS,
+        ).alias("_sustain_duration_bin"),
+    )
+    return df.with_columns(
+        pl.when(is_slider)
+        .then(pl.col("_sustain_duration_bin"))
+        .otherwise(DURATION_OFF_GRID)
+        .alias("span_duration_bin"),
+        pl.when(is_spinner)
+        .then(pl.col("_sustain_duration_bin"))
+        .otherwise(DURATION_OFF_GRID)
+        .alias("spinner_duration_bin"),
+    )
 
 
 def _finalize_vectors(
@@ -448,35 +444,42 @@ def build_feature_tensors(
 
 def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> VectorStats:
     object_type_index = FEATURE_INDEX["object_type"]
+    indices = torch.tensor([FEATURE_INDEX[name] for name in STANDARDIZED_FEATURES])
+    slider_indices = [
+        index
+        for index, name in enumerate(STANDARDIZED_FEATURES)
+        if FEATURES_BY_NAME[name].conditional == "slider"
+    ]
+    spinner_indices = [
+        index
+        for index, name in enumerate(STANDARDIZED_FEATURES)
+        if FEATURES_BY_NAME[name].conditional == "spinner"
+    ]
+    counts = torch.zeros(len(STANDARDIZED_FEATURES), dtype=torch.int64)
+    totals = torch.zeros(len(STANDARDIZED_FEATURES))
+    totals_sq = torch.zeros(len(STANDARDIZED_FEATURES))
+    for vectors in train_data:
+        values = vectors.index_select(1, indices).float()
+        counts += len(vectors)
+        counts[slider_indices] -= len(vectors) - (
+            vectors[:, object_type_index] == OBJECT_TYPE_SLIDER
+        ).sum()
+        counts[spinner_indices] -= len(vectors) - (
+            vectors[:, object_type_index] == OBJECT_TYPE_SPINNER
+        ).sum()
+        totals += values.sum(dim=0)
+        totals_sq += values.square().sum(dim=0)
+
     stats = {}
-    for name in STANDARDIZED_FEATURES:
-        index = FEATURE_INDEX[name]
-        feature = FEATURES_BY_NAME[name]
-        count = 0
-        total = torch.tensor(0.0)
-        total_sq = torch.tensor(0.0)
-
-        for vectors in train_data:
-            values = vectors[:, index]
-            if feature.conditional == "slider":
-                values = values[vectors[:, object_type_index] == OBJECT_TYPE_SLIDER]
-            elif feature.conditional == "spinner":
-                values = values[vectors[:, object_type_index] == OBJECT_TYPE_SPINNER]
-            if values.numel() == 0:
-                continue
-
-            values = values.float()
-            count += values.numel()
-            total += values.sum()
-            total_sq += values.square().sum()
-
+    for position, name in enumerate(STANDARDIZED_FEATURES):
+        count = counts[position]
         if count == 0:
             stats[name] = (torch.tensor(0.0), torch.tensor(epsilon))
             continue
 
-        mean = total / count
+        mean = totals[position] / count
         variance = (
-            (total_sq - total.square() / count) / (count - 1)
+            (totals_sq[position] - totals[position].square() / count) / (count - 1)
             if count > 1
             else torch.tensor(0.0)
         )
@@ -490,8 +493,8 @@ def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> Vect
 def normalize(
     vectors: torch.Tensor, stats: VectorStats, epsilon: float = 1e-8
 ) -> torch.Tensor:
-    normalized = vectors.float().clone()
+    normalized = vectors.to(dtype=torch.float32, copy=True)
     for name, (mean, std) in stats.items():
         index = FEATURE_INDEX[name]
-        normalized[:, index] = (normalized[:, index] - mean) / (std + epsilon)
+        normalized[:, index].sub_(mean).div_(std + epsilon)
     return normalized

@@ -60,6 +60,7 @@ def collate_pretrain(
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
+    vector_stats,
 ):
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in batch]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
@@ -84,8 +85,11 @@ def collate_pretrain(
     )
     right_split = torch.rand(right_border_idx.numel())
     return {
-        "packed_vectors": torch.cat(
-            [vector[:length] for vector, length in zip(batch, lengths)], dim=0
+        "packed_vectors": normalize(
+            torch.cat(
+                [vector[:length] for vector, length in zip(batch, lengths)], dim=0
+            ),
+            vector_stats,
         ),
         "masked_idx": masked_idx,
         "mask_token_idx": masked_idx[split < 0.8],
@@ -99,9 +103,10 @@ def collate_pretrain(
     }
 
 
-def prepare_vector(vec, vector_stats, augment, max_seq_len):
-    vec = vec.clone()[:max_seq_len]
+def prepare_vector(vec, augment, max_seq_len):
+    vec = vec[:max_seq_len]
     if augment:
+        vec = vec.clone()
         aug_type = int(torch.randint(0, 4, (1,)).item())
         flip_x = aug_type in (1, 3)
         flip_y = aug_type in (2, 3)
@@ -113,13 +118,12 @@ def prepare_vector(vec, vector_stats, augment, max_seq_len):
             for name, index in FEATURE_INFO["continuous"].items():
                 if name == "norm_y" or name.endswith("_dy"):
                     vec[:, index] *= -1
-    return normalize(vec, vector_stats)
+    return vec
 
 
 class BeatmapDataset(Dataset):
-    def __init__(self, data, vector_stats, max_seq_len, augment):
+    def __init__(self, data, max_seq_len, augment):
         self.beatmap_data = data
-        self.vector_stats = vector_stats
         self.max_seq_len = int(max_seq_len)
         self.augment = augment
 
@@ -129,7 +133,6 @@ class BeatmapDataset(Dataset):
     def __getitem__(self, idx):
         return prepare_vector(
             self.beatmap_data[idx],
-            self.vector_stats,
             self.augment,
             self.max_seq_len,
         )
@@ -249,14 +252,10 @@ class BobertDataModule(pl.LightningDataModule):
             self.config.data.val_split,
             self.config.data.dataset_seed,
         )
-        self.vector_stats = fit_stats(list(train_data))
+        self.vector_stats = fit_stats(train_data)
         self.vector_dim = train_data[0].shape[1]
-        self.train_dataset = BeatmapDataset(
-            train_data, self.vector_stats, self.max_seq_len, True
-        )
-        self.val_dataset = BeatmapDataset(
-            val_data, self.vector_stats, self.max_seq_len, False
-        )
+        self.train_dataset = BeatmapDataset(train_data, self.max_seq_len, True)
+        self.val_dataset = BeatmapDataset(val_data, self.max_seq_len, False)
         print(
             f"Data split: {len(self.train_dataset)} training, "
             f"{len(self.val_dataset)} validation"
@@ -269,6 +268,7 @@ class BobertDataModule(pl.LightningDataModule):
             max_seq_len=self.max_seq_len,
             masking_ratio=config.ratio,
             mean_span_length=config.mean_span_length,
+            vector_stats=self.vector_stats,
         )
 
     def train_dataloader(self):

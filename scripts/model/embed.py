@@ -24,27 +24,23 @@ from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
 
 class ExportDataset(Dataset):
-    def __init__(self, beatmaps, vector_stats: VectorStats):
+    def __init__(self, beatmaps):
         self.beatmaps = beatmaps
-        self.vector_stats = vector_stats
 
     def __len__(self):
         return len(self.beatmaps)
 
     def __getitem__(self, idx):
         item = self.beatmaps[idx]
-        return (
-            int(item["beatmap_id"]),
-            normalize(item["hitobjects"], self.vector_stats),
-        )
+        return int(item["beatmap_id"]), item["hitobjects"]
 
 
-def collate_export(batch, max_seq_len: int):
+def collate_export(batch, max_seq_len: int, vector_stats: VectorStats):
     beatmap_ids, vectors = zip(*batch)
     vector_batch = batch_packed_vectors(vectors, max_seq_len)
     return (
         torch.tensor(beatmap_ids, dtype=torch.long),
-        vector_batch["packed_vectors"],
+        normalize(vector_batch["packed_vectors"], vector_stats),
         vector_batch["cu_seqlens"],
         vector_batch["max_seqlen"],
     )
@@ -246,7 +242,7 @@ def export_embeddings(
                 if not beatmaps:
                     continue
 
-                dataset = ExportDataset(beatmaps, vector_stats)
+                dataset = ExportDataset(beatmaps)
                 batch_sampler = bucket_batch_sampler(
                     beatmaps,
                     batch_size,
@@ -258,7 +254,9 @@ def export_embeddings(
                     "shuffle": False,
                     "num_workers": 0,
                     "pin_memory": device.type == "cuda",
-                    "collate_fn": lambda batch: collate_export(batch, max_seq_len),
+                    "collate_fn": lambda batch: collate_export(
+                        batch, max_seq_len, vector_stats
+                    ),
                 }
                 if batch_sampler is None:
                     loader_kwargs["batch_size"] = batch_size
