@@ -49,9 +49,12 @@ DURATION_BINS = (
     32,
 )
 
-CANONICAL_BPM_MIN = 120.0
+DURATION_OFF_GRID = len(DURATION_BINS)
+DURATION_CARDINALITY = len(DURATION_BINS) + 1
 BEAT_PHASE_DIVISIONS = 24
 BEAT_PHASE_CARDINALITY = BEAT_PHASE_DIVISIONS + 1
+ONSET_DURATION_TOLERANCE_MS = 2.0
+SUSTAIN_DURATION_TOLERANCE_MS = 3.0
 SPAN_COUNT_CARDINALITY = 5
 
 
@@ -91,13 +94,13 @@ FEATURES = (
     ),
     Feature("object_type", "attribute", cardinality=3),
     Feature("is_new_combo", "attribute", cardinality=2),
-    Feature("onset_duration_bin", "rhythm", cardinality=len(DURATION_BINS)),
+    Feature("onset_duration_bin", "rhythm", cardinality=DURATION_CARDINALITY),
     Feature("beat_phase", "rhythm", cardinality=BEAT_PHASE_CARDINALITY),
     Feature("incoming_motion_valid", "spatial", cardinality=2),
     Feature(
         "span_duration_bin",
         "rhythm",
-        cardinality=len(DURATION_BINS),
+        cardinality=DURATION_CARDINALITY,
         conditional="slider",
     ),
     Feature(
@@ -109,7 +112,7 @@ FEATURES = (
     Feature(
         "spinner_duration_bin",
         "rhythm",
-        cardinality=len(DURATION_BINS),
+        cardinality=DURATION_CARDINALITY,
         conditional="spinner",
     ),
 )
@@ -159,24 +162,21 @@ BEAT_PHASE_TOLERANCE_MS = 2.0
 BEAT_PHASE_OFF_GRID = BEAT_PHASE_CARDINALITY - 1
 
 
-def _canonical_bpm_expr(bpm: pl.Expr) -> pl.Expr:
-    bpm = bpm.cast(pl.Float64)
-    octave = ((bpm / CANONICAL_BPM_MIN).log() / pl.lit(2.0).log()).floor()
-    canonical = bpm / pl.lit(2.0).pow(octave)
+def _duration_bin_expr(
+    duration_ms: pl.Expr, beat_length_ms: pl.Expr, tolerance_ms: float
+) -> pl.Expr:
+    nearest = pl.lit(DURATION_OFF_GRID, dtype=pl.Int32)
+    best_error = pl.lit(float("inf"))
+    for index, duration in enumerate(DURATION_BINS):
+        error = (duration_ms - duration * beat_length_ms).abs()
+        nearest = pl.when(error < best_error).then(index).otherwise(nearest)
+        best_error = pl.min_horizontal(best_error, error)
     return (
-        pl.when(bpm.is_finite() & (bpm > 0))
-        .then(canonical)
-        .otherwise(None)
-        .cast(pl.Float32)
+        pl.when(best_error <= tolerance_ms)
+        .then(nearest)
+        .otherwise(DURATION_OFF_GRID)
+        .cast(pl.Int32)
     )
-
-
-def _duration_bin_expr(values: pl.Expr) -> pl.Expr:
-    result = pl.lit(0, dtype=pl.Int32)
-    for index in range(1, len(DURATION_BINS)):
-        midpoint = (DURATION_BINS[index - 1] * DURATION_BINS[index]) ** 0.5
-        result = pl.when(values > midpoint).then(index).otherwise(result)
-    return pl.when(values <= 0).then(0).otherwise(result).cast(pl.Int32)
 
 
 def _beat_phase_expr(phase: pl.Expr, beat_length_ms: pl.Expr) -> pl.Expr:
@@ -288,7 +288,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             incoming_valid.fill_null(False)
             .cast(pl.Int32)
             .alias("incoming_motion_valid"),
-            _canonical_bpm_expr(pl.col("bpm")).alias("_canonical_bpm"),
             (60000.0 / pl.col("bpm")).alias("_active_beat_length_ms"),
         )
         .with_columns(
@@ -306,7 +305,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             )
             .clip(lower_bound=0)
             .alias("onset_ioi_ms"),
-            (60000.0 / pl.col("_canonical_bpm")).alias("_beat_length_ms"),
             (
                 (pl.col("time") - pl.col("timing_origin"))
                 / pl.col("_active_beat_length_ms")
@@ -325,18 +323,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(
             pl.col("onset_ioi_ms").log1p().alias("log_onset_ioi_ms"),
-            (pl.col("onset_ioi_ms") / pl.col("_beat_length_ms"))
-            .fill_nan(0.0)
-            .fill_null(0.0)
-            .alias("_onset_beats"),
-            (pl.col("_span_duration_ms") / pl.col("_beat_length_ms"))
-            .fill_nan(0.0)
-            .fill_null(0.0)
-            .alias("_span_beats"),
-            (pl.col("_spinner_duration_ms") / pl.col("_beat_length_ms"))
-            .fill_nan(0.0)
-            .fill_null(0.0)
-            .alias("_spinner_beats"),
             (pl.col("_absolute_beats") - pl.col("_absolute_beats").floor()).alias(
                 "_beat_fraction"
             ),
@@ -378,12 +364,38 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .alias("curve_residual_2_dy"),
         )
         .with_columns(
-            _duration_bin_expr(pl.col("_onset_beats")).alias("onset_duration_bin"),
+            _duration_bin_expr(
+                pl.col("onset_ioi_ms"),
+                pl.col("_active_beat_length_ms"),
+                ONSET_DURATION_TOLERANCE_MS,
+            ).alias("onset_duration_bin"),
             pl.when(is_slider)
-            .then(_duration_bin_expr(pl.col("_span_beats")))
-            .otherwise(0)
+            .then(
+                _duration_bin_expr(
+                    pl.col("_span_duration_ms"),
+                    pl.col("_active_beat_length_ms"),
+                    SUSTAIN_DURATION_TOLERANCE_MS,
+                )
+            )
+            .otherwise(DURATION_OFF_GRID)
             .cast(pl.Int32)
             .alias("span_duration_bin"),
+            pl.when(is_spinner)
+            .then(
+                _duration_bin_expr(
+                    pl.col("_spinner_duration_ms"),
+                    pl.col("_active_beat_length_ms"),
+                    SUSTAIN_DURATION_TOLERANCE_MS,
+                )
+            )
+            .otherwise(DURATION_OFF_GRID)
+            .cast(pl.Int32)
+            .alias("spinner_duration_bin"),
+            _beat_phase_expr(
+                pl.col("_beat_fraction"), pl.col("_active_beat_length_ms")
+            ).alias("beat_phase"),
+        )
+        .with_columns(
             pl.when(~is_slider)
             .then(0)
             .when(pl.col("_span_count") <= 3)
@@ -393,14 +405,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .otherwise(4)
             .cast(pl.Int32)
             .alias("span_count_bin"),
-            pl.when(is_spinner)
-            .then(_duration_bin_expr(pl.col("_spinner_beats")))
-            .otherwise(0)
-            .cast(pl.Int32)
-            .alias("spinner_duration_bin"),
-            _beat_phase_expr(
-                pl.col("_beat_fraction"), pl.col("_active_beat_length_ms")
-            ).alias("beat_phase"),
         )
     )
     return df

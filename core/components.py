@@ -368,7 +368,6 @@ class HitObjectFeatureTokenizer(nn.Module):
             torch.tensor(category_offsets, dtype=torch.long),
             persistent=False,
         )
-
         self.out = nn.Linear(14 * d_feat, d_model * 2, bias=False)
         self.norm = RMSNorm(d_model)
 

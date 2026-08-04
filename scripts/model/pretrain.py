@@ -6,6 +6,7 @@ from typing import cast
 
 import torch
 from omegaconf import DictConfig, OmegaConf
+import pytorch_lightning as pl
 
 from core.model import BobertForPretraining
 from training.loader import BobertDataModule
@@ -118,6 +119,7 @@ def main() -> int:
     )
     config = load_config(args, checkpoint)
     del checkpoint
+    pl.seed_everything(config.data.dataset_seed, workers=True)
 
     print(f"PyTorch version: {torch.__version__}")
     print(f"Using device: {setup_device()}")

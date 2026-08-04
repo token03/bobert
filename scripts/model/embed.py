@@ -336,7 +336,7 @@ def main():
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
     parser.add_argument("--min_sr", type=float, default=None)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--load-chunk-size", type=int, default=100000)
     parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)

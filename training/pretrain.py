@@ -6,6 +6,8 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchmetrics import MeanAbsoluteError
+from torchmetrics.classification import MulticlassF1Score
 
 from core.features import (
     FEATURE_INFO,
@@ -35,7 +37,7 @@ def compile_encoder(model: nn.Module, config: DictConfig) -> None:
     )
 
 
-def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor):
+def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor, metrics=None):
     zero = sum(output["continuous"].sum() * 0.0 for output in predictions.values())
     losses = {name: zero for name in ("spatial", "rhythm", "attribute")}
     if targets.shape[0] == 0:
@@ -66,15 +68,24 @@ def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor):
             for index, name in enumerate(continuous_names):
                 loss_group = FEATURES_BY_NAME[name].family
                 losses[loss_group] = losses[loss_group] + continuous_loss[index]
+                if metrics is not None:
+                    metrics["mae"][name].update(
+                        output["continuous"][mask, index], targets[mask, indices[index]]
+                    )
 
         for name, logits in output["categorical"].items():
             info = FEATURE_INFO["categorical"][name]
             loss_group = FEATURES_BY_NAME[name].family
-            losses[loss_group] = losses[loss_group] + F.cross_entropy(
+            categorical_loss = F.cross_entropy(
                 logits[mask],
                 targets[mask, info["index"]].long(),
                 reduction="sum",
             )
+            losses[loss_group] = losses[loss_group] + categorical_loss
+            if metrics is not None:
+                metrics["f1"][name].update(
+                    logits[mask], targets[mask, info["index"]].long()
+                )
 
     count = targets.shape[0]
     losses = {name: loss / count for name, loss in losses.items()}
@@ -94,6 +105,24 @@ class BobertModule(pl.LightningModule):
         self.config = config
         self.datamodule = datamodule
         self.quiet = quiet
+        self.val_metrics = nn.ModuleDict(
+            {
+                "f1": nn.ModuleDict(
+                    {
+                        name: MulticlassF1Score(
+                            num_classes=info["cardinality"], average="weighted"
+                        )
+                        for name, info in FEATURE_INFO["categorical"].items()
+                    }
+                ),
+                "mae": nn.ModuleDict(
+                    {
+                        name: MeanAbsoluteError()
+                        for name in FEATURE_INFO["continuous"]
+                    }
+                ),
+            }
+        )
         self.save_hyperparameters("quiet")
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
@@ -135,9 +164,9 @@ class BobertModule(pl.LightningModule):
             batch["max_seqlen"],
         )
 
-    def _shared_step(self, batch: Dict[str, Any]):
+    def _shared_step(self, batch: Dict[str, Any], metrics=None):
         predictions, targets, _ = self(batch)
-        losses = mlm_loss(predictions["mlm"], targets["mlm"])
+        losses = mlm_loss(predictions["mlm"], targets["mlm"], metrics)
         return losses, max(1, targets["mlm"].shape[0])
 
     def on_fit_start(self):
@@ -250,7 +279,7 @@ class BobertModule(pl.LightningModule):
         return losses["total"]
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
-        losses, target_count = self._shared_step(batch)
+        losses, target_count = self._shared_step(batch, self.val_metrics)
         self.log(
             "val_loss",
             losses["total"],
@@ -266,5 +295,15 @@ class BobertModule(pl.LightningModule):
             },
             sync_dist=True,
             batch_size=target_count,
+        )
+        self.log_dict(
+            {
+                f"val_{name}_{kind}": metric
+                for kind, metrics in self.val_metrics.items()
+                for name, metric in metrics.items()
+            },
+            on_step=False,
+            on_epoch=True,
+            sync_dist=True,
         )
         return losses["total"]

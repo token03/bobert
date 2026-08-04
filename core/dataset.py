@@ -189,6 +189,7 @@ def load_beatmap_dataset(
     chunk_size: int = 5000,
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
+    quiet: bool = False,
 ) -> List[Dict[str, Any]]:
     dataset_path = Path(dataset_path).expanduser()
     ratings_path = Path(ratings_path).expanduser()
@@ -202,7 +203,8 @@ def load_beatmap_dataset(
         raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
     if ids_to_load:
         ids_to_load = [int(bid) for bid in ids_to_load]
-        print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
+        if not quiet:
+            print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
 
     selected_beatmaps = _selected_beatmaps_lf(
         beatmaps_path,
@@ -223,9 +225,11 @@ def load_beatmap_dataset(
             pl.col("beatmap_id").is_in(all_beatmap_ids)
         )
 
-    print(
-        f"Selected {len(all_beatmap_ids)} beatmaps. Processing in chunks of {chunk_size}..."
-    )
+    if not quiet:
+        print(
+            f"Selected {len(all_beatmap_ids)} beatmaps. "
+            f"Processing in chunks of {chunk_size}..."
+        )
     all_beatmap_data = []
 
     hitobject_cols = [
@@ -253,7 +257,7 @@ def load_beatmap_dataset(
     ]
 
     chunks = _chunk_beatmap_ids(all_beatmap_ids, chunk_size)
-    for chunk_ids in tqdm(chunks, desc="Processing Chunks"):
+    for chunk_ids in tqdm(chunks, desc="Processing Chunks", disable=quiet):
         beatmaps_chunk = selected_beatmaps.filter(pl.col("beatmap_id").is_in(chunk_ids))
         lo = int(chunk_ids[0])
         hi = int(chunk_ids[-1])
@@ -282,5 +286,6 @@ def load_beatmap_dataset(
             }
             all_beatmap_data.append(item)
 
-    print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")
+    if not quiet:
+        print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")
     return all_beatmap_data
