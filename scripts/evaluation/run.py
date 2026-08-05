@@ -224,9 +224,13 @@ def evaluate_grouped_retrieval(
         ranks_by_query[query_id] = ranks
 
     positive_ranks = [rank for ranks in ranks_by_query.values() for rank in ranks]
+    query_median_ranks = [float(np.median(ranks)) for ranks in ranks_by_query.values()]
     return {
         "median_positive_rank": float(np.median(positive_ranks))
         if positive_ranks
+        else float("nan"),
+        "p90_positive_rank": float(np.percentile(query_median_ranks, 90))
+        if query_median_ranks
         else float("nan"),
         **{
             f"macro_recall@{top_k}": mean(
