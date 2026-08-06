@@ -12,7 +12,7 @@ from .components import (
     RMSNorm,
     SpanMasker,
 )
-from .features import FEATURE_INFO, VectorStats
+from .features import VectorStats
 
 
 T = TypeVar("T", bound="BobertEncoder")
@@ -55,9 +55,7 @@ class BobertEncoder(nn.Module):
             "feature_token_dim": feature_token_dim,
         }
 
-        self.feature_info = FEATURE_INFO
         self.feature_tokenizer = HitObjectFeatureTokenizer(
-            feature_info=self.feature_info,
             d_feat=feature_token_dim,
             d_model=d_model,
         )

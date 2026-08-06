@@ -16,6 +16,7 @@ try:
 except (ImportError, AttributeError):
     liger_rms_norm = None
 
+
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-5):
         super().__init__()
@@ -285,35 +286,29 @@ class EncoderLayer(nn.Module):
 
 
 class HitObjectFeatureTokenizer(nn.Module):
-    def __init__(
-        self,
-        feature_info: Dict[str, Dict],
-        d_feat: int,
-        d_model: int,
-    ):
+    def __init__(self, d_feat: int, d_model: int):
         super().__init__()
-        self.feature_info = feature_info
-        self.continuous = feature_info["continuous"]
-        self.categorical = feature_info["categorical"]
+        self.continuous = FEATURE_INFO["continuous"]
+        self.categorical = FEATURE_INFO["categorical"]
         common_numeric = (
             ("norm_x", "norm_y"),
             ("incoming_dx", "incoming_dy"),
-            ("log_onset_ioi_ms",),
+            ("log_onset_ioi_ms", "log_beat_length_ms"),
         )
-        slider_numeric = (
+        geometry_numeric = (
             ("span_end_dx", "span_end_dy"),
             ("curve_residual_1_dx", "curve_residual_1_dy"),
             ("curve_residual_2_dx", "curve_residual_2_dy"),
         )
         numeric_indices = []
         numeric_mask = []
-        numeric_sizes = [2, 2, 1, 3, 2, 2, 2]
-        for feature_names in common_numeric + slider_numeric:
+        numeric_sizes = [*map(len, common_numeric), 3, *map(len, geometry_numeric)]
+        for feature_names in common_numeric + geometry_numeric:
             indices = [self.continuous[feature] for feature in feature_names]
             numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
             numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
-        self.numeric_weight = nn.Parameter(torch.zeros(7, 3, d_feat))
-        self.numeric_bias = nn.Parameter(torch.empty(7, d_feat))
+        self.numeric_weight = nn.Parameter(torch.zeros(len(numeric_sizes), 3, d_feat))
+        self.numeric_bias = nn.Parameter(torch.empty(len(numeric_sizes), d_feat))
         for group, size in enumerate(numeric_sizes):
             nn.init.kaiming_uniform_(self.numeric_weight[group, :size].T, a=5**0.5)
             bound = 1 / size**0.5
@@ -337,6 +332,7 @@ class HitObjectFeatureTokenizer(nn.Module):
             "incoming_motion_valid",
             "span_duration_bin",
             "span_count_bin",
+            "spinner_duration_bin",
             "object_type",
         )
         categorical_indices = []
@@ -368,7 +364,7 @@ class HitObjectFeatureTokenizer(nn.Module):
             torch.tensor(category_offsets, dtype=torch.long),
             persistent=False,
         )
-        self.out = nn.Linear(14 * d_feat, d_model * 2, bias=False)
+        self.out = nn.Linear(11 * d_feat, d_model, bias=False)
         self.norm = RMSNorm(d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -386,7 +382,6 @@ class HitObjectFeatureTokenizer(nn.Module):
         numeric_inputs = x[..., self.numeric_indices]
         numeric_inputs = numeric_inputs * self.numeric_mask.to(dtype=x.dtype)
         common_inputs = numeric_inputs[..., :3, :]
-        slider_inputs = numeric_inputs[..., 3:, :]
         sustain_inputs = torch.stack(
             (
                 x[..., self.span_duration_index] * slider_scale
@@ -397,7 +392,12 @@ class HitObjectFeatureTokenizer(nn.Module):
             dim=-1,
         )
         numeric_inputs = torch.cat(
-            (common_inputs, sustain_inputs.unsqueeze(-2), slider_inputs), dim=-2
+            (
+                common_inputs,
+                sustain_inputs.unsqueeze(-2),
+                numeric_inputs[..., 3:, :],
+            ),
+            dim=-2,
         )
         numeric_hidden = torch.einsum(
             "...gi,gif->...gf", numeric_inputs, self.numeric_weight
@@ -420,42 +420,55 @@ class HitObjectFeatureTokenizer(nn.Module):
         numeric_tokens = numeric_tokens * numeric_active[..., None]
 
         categorical_lookup = categorical_ids + self.category_offsets
-        categorical_lookup = torch.cat(
+        categorical_active = torch.stack(
             (
-                torch.where(
-                    categorical_ids[..., :1] != 0,
-                    categorical_lookup[..., :1],
-                    torch.zeros_like(categorical_lookup[..., :1]),
-                ),
-                categorical_lookup[..., 1:3],
-                torch.where(
-                    incoming_valid[..., None],
-                    torch.zeros_like(categorical_lookup[..., 3:4]),
-                    categorical_lookup[..., 3:4],
-                ),
-                torch.where(
-                    is_slider[..., None],
-                    categorical_lookup[..., 4:6],
-                    torch.zeros_like(categorical_lookup[..., 4:6]),
-                ),
-                torch.where(
-                    (object_type != OBJECT_TYPE_CIRCLE)[..., None],
-                    categorical_lookup[..., 6:7],
-                    torch.zeros_like(categorical_lookup[..., 6:7]),
-                ),
+                categorical_ids[..., 0] != 0,
+                torch.ones_like(incoming_valid),
+                torch.ones_like(incoming_valid),
+                ~incoming_valid,
+                is_slider,
+                is_slider,
+                is_spinner,
+                object_type != OBJECT_TYPE_CIRCLE,
             ),
             dim=-1,
+        )
+        categorical_lookup = torch.where(
+            categorical_active,
+            categorical_lookup,
+            torch.zeros_like(categorical_lookup),
         )
         categorical_tokens = F.embedding(
             categorical_lookup,
             self.categorical_weight,
             padding_idx=0,
         )
+        sustain_token = numeric_tokens[..., 3, :] + categorical_tokens[..., 4:7, :].sum(
+            dim=-2
+        )
+        geometry_tokens = torch.stack(
+            (
+                numeric_tokens[..., 4, :],
+                numeric_tokens[..., 5:, :].sum(dim=-2),
+            ),
+            dim=-2,
+        )
+        numeric_tokens = torch.cat(
+            (
+                numeric_tokens[..., :3, :],
+                sustain_token.unsqueeze(-2),
+                geometry_tokens,
+            ),
+            dim=-2,
+        )
+        categorical_tokens = torch.cat(
+            (categorical_tokens[..., :4, :], categorical_tokens[..., 7:, :]),
+            dim=-2,
+        )
         features = torch.cat(
             (numeric_tokens.flatten(-2), categorical_tokens.flatten(-2)), dim=-1
         )
-        gate, value = self.out(features).chunk(2, dim=-1)
-        return self.norm(F.silu(gate) * value)
+        return self.norm(self.out(features))
 
 
 class SpanMasker(nn.Module):

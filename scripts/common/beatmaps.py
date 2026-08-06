@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ossapi import Ossapi
 
+from scripts.common.api import ossapi_request
 from scripts.common.io import append_dedup_parquet
 
 
@@ -58,7 +59,7 @@ def beatmap_to_dict(bm) -> dict:
 
 
 def fetch_beatmap_metadata(api: Ossapi, beatmap_id: int) -> dict:
-    beatmaps = api.beatmaps([beatmap_id])
+    beatmaps = ossapi_request(api.beatmaps, [beatmap_id])
     if not beatmaps:
         raise ValueError(f"osu! API returned no beatmap for {beatmap_id}")
     return beatmap_to_dict(beatmaps[0])

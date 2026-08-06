@@ -11,7 +11,6 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 import pandas as pd
-import time
 
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import beatmap_to_dict
@@ -23,7 +22,6 @@ FAILED_BEATMAPS_PATH = DATA_DIR / ".failed_beatmaps.json"
 
 BATCH_SIZE = 50
 SAVE_INTERVAL = 5000
-API_RATE_LIMIT_DELAY = 0.9
 
 
 def load_existing_beatmaps():
@@ -86,6 +84,7 @@ def fetch_missing_beatmaps(ids=None):
     api = osu_api()
     new_data = []
     is_shutting_down = False
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
     def handle_interrupt(signum, frame):
         nonlocal is_shutting_down
@@ -142,9 +141,8 @@ def fetch_missing_beatmaps(ids=None):
 
                     new_data = []
 
-                time.sleep(API_RATE_LIMIT_DELAY)
-
     finally:
+        signal.signal(signal.SIGINT, previous_sigint_handler)
         if new_data:
             print(
                 f"[green]Final Save: Writing {len(new_data)} items to disk...[/green]"

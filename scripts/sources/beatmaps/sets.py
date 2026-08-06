@@ -14,7 +14,6 @@ from rich.progress import (
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import time
 
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.io import atomic_json, atomic_pyarrow_table
@@ -33,7 +32,6 @@ FAILED_BEATMAPSETS_PATH = DATA_DIR / ".failed_beatmapsets.json"
 SAVE_INTERVAL = 2000
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1
-API_RATE_LIMIT_DELAY = 0.8
 
 BEATMAPSETS_SCHEMA = pa.schema(
     [
@@ -267,9 +265,6 @@ def main():
 
                     atomic_json(progress, PROGRESS_STATE_PATH, indent=2)
                     atomic_json(failed_state, FAILED_BEATMAPSETS_PATH, indent=2)
-
-                if success:
-                    time.sleep(API_RATE_LIMIT_DELAY)
 
     finally:
         # Final save

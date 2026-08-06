@@ -77,6 +77,7 @@ FEATURES = (
     Feature("incoming_dx", "spatial", standardize=True),
     Feature("incoming_dy", "spatial", standardize=True),
     Feature("log_onset_ioi_ms", "rhythm", standardize=True),
+    Feature("log_beat_length_ms", "rhythm", standardize=True),
     Feature(
         "log_span_duration_ms",
         "rhythm",
@@ -100,7 +101,7 @@ FEATURES = (
     Feature("is_new_combo", "attribute", cardinality=2),
     Feature("onset_duration_bin", "rhythm", cardinality=DURATION_CARDINALITY),
     Feature("beat_phase", "rhythm", cardinality=BEAT_PHASE_CARDINALITY),
-    Feature("incoming_motion_valid", "spatial", cardinality=2),
+    Feature("incoming_motion_valid", "spatial", cardinality=3),
     Feature(
         "span_duration_bin",
         "rhythm",
@@ -172,9 +173,7 @@ def _duration_bins(
     nearest = DURATION_MIDPOINTS.search_sorted(
         duration_ms / beat_length_ms, side="left"
     )
-    error = (
-        duration_ms - DURATION_BIN_VALUES.gather(nearest) * beat_length_ms
-    ).abs()
+    error = (duration_ms - DURATION_BIN_VALUES.gather(nearest) * beat_length_ms).abs()
     return nearest.cast(pl.Int32).set(
         error.fill_null(float("inf")).fill_nan(float("inf")) > tolerance_ms,
         DURATION_OFF_GRID,
@@ -271,6 +270,8 @@ def _prepare_objects(df: pl.DataFrame, max_seq_len: Optional[int]) -> pl.DataFra
 def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
     is_slider = pl.col("object_type") == OBJECT_TYPE_SLIDER
     is_spinner = pl.col("object_type") == OBJECT_TYPE_SPINNER
+    gap_ms = pl.col("time") - pl.col("_prev_time")
+    is_break = pl.col("_prev_time").is_not_null() & (gap_ms >= 5000)
     incoming_valid = (
         pl.col("_prev_time").is_not_null()
         & pl.col("_prev_exit_x").is_not_null()
@@ -279,16 +280,17 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             (pl.col("_prev_type") == OBJECT_TYPE_SLIDER)
             & (pl.col("time") < pl.col("_prev_end_time"))
         )
+        & ~is_break
     )
     duration_ms = (pl.col("end_time") - pl.col("time")).clip(lower_bound=0)
-    span_duration_ms = duration_ms / pl.col("_span_count")
 
     df = (
         df.with_columns(
             (((pl.col("x") - CENTER_X) / CENTER_X).clip(-1.0, 1.0)).alias("norm_x"),
             (((pl.col("y") - CENTER_Y) / CENTER_Y).clip(-1.0, 1.0)).alias("norm_y"),
-            incoming_valid.fill_null(False)
-            .cast(pl.Int32)
+            pl.when(is_break)
+            .then(2)
+            .otherwise(incoming_valid.fill_null(False).cast(pl.Int32))
             .alias("incoming_motion_valid"),
             (60000.0 / pl.col("bpm")).alias("_active_beat_length_ms"),
         )
@@ -306,6 +308,7 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
                 - pl.col("_prev_time").fill_null(pl.col("time") - DEFAULT_PRE_START_MS)
             )
             .clip(lower_bound=0)
+            .clip(upper_bound=5000)
             .alias("onset_ioi_ms"),
             (
                 (pl.col("time") - pl.col("timing_origin"))
@@ -315,7 +318,7 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .fill_null(0.0)
             .alias("_absolute_beats"),
             pl.when(is_slider)
-            .then(span_duration_ms)
+            .then(duration_ms)
             .otherwise(0.0)
             .alias("_span_duration_ms"),
             pl.when(is_spinner)
@@ -325,6 +328,7 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(
             pl.col("onset_ioi_ms").log1p().alias("log_onset_ioi_ms"),
+            pl.col("_active_beat_length_ms").log1p().alias("log_beat_length_ms"),
             (pl.col("_absolute_beats") - pl.col("_absolute_beats").floor()).alias(
                 "_beat_fraction"
             ),
@@ -395,6 +399,10 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
         ).alias("_sustain_duration_bin"),
     )
     return df.with_columns(
+        pl.when(is_break)
+        .then(DURATION_OFF_GRID)
+        .otherwise(pl.col("onset_duration_bin"))
+        .alias("onset_duration_bin"),
         pl.when(is_slider)
         .then(pl.col("_sustain_duration_bin"))
         .otherwise(DURATION_OFF_GRID)
@@ -461,12 +469,12 @@ def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> Vect
     for vectors in train_data:
         values = vectors.index_select(1, indices).float()
         counts += len(vectors)
-        counts[slider_indices] -= len(vectors) - (
-            vectors[:, object_type_index] == OBJECT_TYPE_SLIDER
-        ).sum()
-        counts[spinner_indices] -= len(vectors) - (
-            vectors[:, object_type_index] == OBJECT_TYPE_SPINNER
-        ).sum()
+        counts[slider_indices] -= (
+            len(vectors) - (vectors[:, object_type_index] == OBJECT_TYPE_SLIDER).sum()
+        )
+        counts[spinner_indices] -= (
+            len(vectors) - (vectors[:, object_type_index] == OBJECT_TYPE_SPINNER).sum()
+        )
         totals += values.sum(dim=0)
         totals_sq += values.square().sum(dim=0)
 
