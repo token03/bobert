@@ -19,7 +19,8 @@ COLLECTION_EDGES_PATH = COLLECTIONS_DIR / "edges.parquet"
 
 FAILED_DOWNLOADS_CHECKPOINT_INTERVAL = 100
 DEFAULT_CONCURRENCY = 4
-MAX_RATE_LIMIT_RETRIES = 3
+MAX_RATE_LIMIT_RETRIES = 11
+MAX_RATE_LIMIT_BACKOFF = 600
 
 
 class RateLimiter:
@@ -36,6 +37,12 @@ class RateLimiter:
                 await asyncio.sleep(wait_time)
                 now = time.monotonic()
             self.next_request_time = now + self.delay
+
+    async def backoff(self, delay: float) -> None:
+        async with self.lock:
+            self.next_request_time = max(
+                self.next_request_time, time.monotonic() + delay
+            )
 
 
 def load_failed_downloads() -> dict[str, str]:
@@ -127,7 +134,7 @@ async def download_job(
             backoff = float(retry_after) if retry_after else 2**attempt
         except ValueError:
             backoff = 2**attempt
-        await asyncio.sleep(backoff)
+        await rate_limiter.backoff(min(backoff, MAX_RATE_LIMIT_BACKOFF))
 
     if response.status_code == 200 and is_valid_osu_file(response.content):
         with open(file_path, "wb") as outfile:
@@ -149,7 +156,8 @@ async def download_jobs(
     failures_since_checkpoint = 0
     successes = 0
     completed = 0
-    workers_per_source = max(1, concurrency // len(tiers))
+    worker_count = max(concurrency, len(tiers))
+    workers_per_source, extra_workers = divmod(worker_count, len(tiers))
     attempted = {job["id"]: set() for job in jobs}
     failure_reasons = {job["id"]: [] for job in jobs}
     queues = {tier["name"]: asyncio.Queue() for tier in tiers}
@@ -157,7 +165,7 @@ async def download_jobs(
     done = asyncio.Event()
     lock = asyncio.Lock()
     limits = httpx.Limits(
-        max_connections=concurrency, max_keepalive_connections=concurrency
+        max_connections=worker_count, max_keepalive_connections=worker_count
     )
 
     for i, job in enumerate(jobs):
@@ -216,8 +224,8 @@ async def download_jobs(
         with tqdm.tqdm(total=len(jobs), desc="Downloading", unit="maps") as progress:
             workers = [
                 asyncio.create_task(run_worker(tier))
-                for tier in tiers
-                for _ in range(workers_per_source)
+                for i, tier in enumerate(tiers)
+                for _ in range(workers_per_source + (i < extra_workers))
             ]
             await done.wait()
             await asyncio.gather(*workers)
@@ -253,7 +261,10 @@ def main():
         "--concurrency",
         type=int,
         default=DEFAULT_CONCURRENCY,
-        help=f"Maximum concurrent download workers (default: {DEFAULT_CONCURRENCY})",
+        help=(
+            "Concurrent download workers, with at least one per source "
+            f"(default: {DEFAULT_CONCURRENCY})"
+        ),
     )
     args = parser.parse_args()
     if args.concurrency < 1:

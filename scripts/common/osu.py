@@ -15,7 +15,13 @@ API_TIERS = [
         "delay": 0.5,
         "name": "osu.ppy.sh",
         "headers": DOWNLOAD_HEADERS,
-    }
+    },
+    {
+        "url": "https://catboy.best/osu/{id}",
+        "delay": 0.5,
+        "name": "catboy.best",
+        "headers": DOWNLOAD_HEADERS,
+    },
 ]
 
 
