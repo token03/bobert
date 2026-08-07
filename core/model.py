@@ -37,8 +37,6 @@ class BobertEncoder(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
-        self.n_layers = n_layers
-        self.activation_checkpointing = activation_checkpointing
         self.global_attention_layers = set(global_attention_layers)
         self.use_flash = use_flash
         self.max_seq_len = max_seq_len

@@ -137,7 +137,7 @@ def main() -> int:
     print(f"Total Parameters: {summary['trainable_parameters'] / 1e6:.2f}M")
     print(f"Model Dimension: {model.bert.d_model}")
     print(f"Number of Heads: {model.bert.n_heads}")
-    print(f"Number of Layers: {model.bert.n_layers}")
+    print(f"Number of Layers: {len(model.bert.layers)}")
 
     run_name = args.version
     if resume_checkpoint is not None and run_name is None:

@@ -236,7 +236,6 @@ class EncoderLayer(nn.Module):
         local_block_size: int = 256,
     ):
         super().__init__()
-        self.is_global = is_global
         self.activation_checkpointing = activation_checkpointing
 
         self.self_attn = MultiHeadAttentionWithRoPE(

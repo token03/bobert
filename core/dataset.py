@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import polars as pl
-import torch
 from torch.utils.data import Sampler
 from tqdm import tqdm
 
@@ -60,22 +59,6 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
             random.Random(self.seed + self.epoch).shuffle(batches)
         self.epoch += 1
         yield from batches
-
-
-def batch_packed_vectors(
-    vectors: Sequence[torch.Tensor], max_seq_len: int
-) -> Dict[str, torch.Tensor | int]:
-    lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
-    seqlens = torch.tensor(lengths, dtype=torch.int32)
-    return {
-        "packed_vectors": torch.cat(
-            [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
-        ),
-        "cu_seqlens": torch.nn.functional.pad(
-            torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
-        ),
-        "max_seqlen": max(lengths),
-    }
 
 
 def scan_dataset_parquet(path: str | Path) -> pl.LazyFrame:
@@ -245,7 +228,6 @@ def load_beatmap_dataset(
         "bpm",
         "timing_origin",
         "end_bpm",
-        "end_timing_origin",
         "slider_repeats",
         "slider_path_valid",
         "span_end_dx",

@@ -4,7 +4,6 @@ data:
 
   max_seq_len: 4096
   load_chunk_size: 10000
-  length_buckets: [512, 768, 1024, 1536, 2048, 3072, 4096]
   val_split: 0.1
 
   min_sr: 2.0

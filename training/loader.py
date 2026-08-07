@@ -170,25 +170,6 @@ def dataloader_kwargs(data_config):
     return kwargs
 
 
-def make_loader(dataset, batch_size, collate_fn, data_config, shuffle):
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=collate_fn,
-        **dataloader_kwargs(data_config),
-    )
-
-
-def make_batch_loader(dataset, collate_fn, data_config, batch_sampler):
-    return DataLoader(
-        dataset,
-        batch_sampler=batch_sampler,
-        collate_fn=collate_fn,
-        **dataloader_kwargs(data_config),
-    )
-
-
 def lengths(dataset):
     return [min(int(vec.shape[0]), dataset.max_seq_len) for vec in dataset.beatmap_data]
 
@@ -200,18 +181,16 @@ def token_budget(sample_lengths, batch_size):
 
 def bucketed_loader(dataset, collate_fn, datamodule, train):
     config = datamodule.config
-    buckets = (
-        [int(bucket) for bucket in config.data.length_buckets]
-        if config.training.trainer.use_length_buckets
-        else []
-    )
-    if not buckets:
-        return make_loader(
+    loader_kwargs = {
+        "collate_fn": collate_fn,
+        **dataloader_kwargs(config.data),
+    }
+    if not config.training.trainer.use_length_buckets:
+        return DataLoader(
             dataset,
-            datamodule.batch_size,
-            collate_fn,
-            config.data,
-            train,
+            batch_size=datamodule.batch_size,
+            shuffle=train,
+            **loader_kwargs,
         )
 
     sample_lengths = lengths(dataset)
@@ -222,7 +201,7 @@ def bucketed_loader(dataset, collate_fn, datamodule, train):
         seed=config.data.dataset_seed,
         shuffle=train,
     )
-    return make_batch_loader(dataset, collate_fn, config.data, batch_sampler)
+    return DataLoader(dataset, batch_sampler=batch_sampler, **loader_kwargs)
 
 
 def preallocation_batch_size(dataset, batch_size, max_seq_len):
@@ -253,7 +232,6 @@ class BobertDataModule(pl.LightningDataModule):
             self.config.data.dataset_seed,
         )
         self.vector_stats = fit_stats(train_data)
-        self.vector_dim = train_data[0].shape[1]
         self.train_dataset = BeatmapDataset(train_data, self.max_seq_len, True)
         self.val_dataset = BeatmapDataset(val_data, self.max_seq_len, False)
         print(

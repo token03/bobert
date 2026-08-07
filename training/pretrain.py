@@ -116,10 +116,7 @@ class BobertModule(pl.LightningModule):
                     }
                 ),
                 "mae": nn.ModuleDict(
-                    {
-                        name: MeanAbsoluteError()
-                        for name in FEATURE_INFO["continuous"]
-                    }
+                    {name: MeanAbsoluteError() for name in FEATURE_INFO["continuous"]}
                 ),
             }
         )
@@ -133,8 +130,6 @@ class BobertModule(pl.LightningModule):
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
         if self.datamodule.vector_stats is not None:
             self.datamodule.vector_stats = checkpoint["vector_stats"]
-            self.datamodule.train_dataset.vector_stats = self.datamodule.vector_stats
-            self.datamodule.val_dataset.vector_stats = self.datamodule.vector_stats
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config)
@@ -207,10 +202,9 @@ class BobertModule(pl.LightningModule):
             self.config.training.trainer.batch_size,
             max_seq_len,
         )
-        vector_dim = self.datamodule.vector_dim or VECTOR_DIM
         packed_vectors = torch.randn(
             batch_size * max_seq_len,
-            vector_dim,
+            VECTOR_DIM,
             device=self.device,
             dtype=torch.float32,
         )

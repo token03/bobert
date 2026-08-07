@@ -15,7 +15,6 @@ from tqdm import tqdm
 
 from core.dataset import (
     LengthBucketBatchSampler,
-    batch_packed_vectors,
     load_beatmap_dataset,
 )
 from core.features import VectorStats, normalize
@@ -37,12 +36,19 @@ class ExportDataset(Dataset):
 
 def collate_export(batch, max_seq_len: int, vector_stats: VectorStats):
     beatmap_ids, vectors = zip(*batch)
-    vector_batch = batch_packed_vectors(vectors, max_seq_len)
+    lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
+    seqlens = torch.tensor(lengths, dtype=torch.int32)
+    packed_vectors = torch.cat(
+        [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
+    )
+    cu_seqlens = torch.nn.functional.pad(
+        torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
+    )
     return (
         torch.tensor(beatmap_ids, dtype=torch.long),
-        normalize(vector_batch["packed_vectors"], vector_stats),
-        vector_batch["cu_seqlens"],
-        vector_batch["max_seqlen"],
+        normalize(packed_vectors, vector_stats),
+        cu_seqlens,
+        max(lengths),
     )
 
 
@@ -127,10 +133,10 @@ def bucket_batch_sampler(
     beatmaps: list[dict],
     batch_size: int,
     max_seq_len: int,
-    buckets: list[int],
+    use_length_buckets: bool,
     seed: int,
 ):
-    if not buckets:
+    if not use_length_buckets:
         return None
 
     lengths = [min(int(item["hitobjects"].shape[0]), max_seq_len) for item in beatmaps]
@@ -247,7 +253,7 @@ def export_embeddings(
                     beatmaps,
                     batch_size,
                     max_seq_len,
-                    [int(bucket) for bucket in config.data.length_buckets],
+                    bool(config.training.trainer.use_length_buckets),
                     seed,
                 )
                 loader_kwargs = {

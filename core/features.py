@@ -157,7 +157,6 @@ FEATURE_INFO = {
         for feature in FEATURES
         if feature.conditional is None
     },
-    "names": FIELD_NAMES,
 }
 
 VectorStats = dict[str, tuple[torch.Tensor, torch.Tensor]]

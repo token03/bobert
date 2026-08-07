@@ -28,7 +28,6 @@ DIFFICULTY_KEYS = {
 class RawTimingPoint(NamedTuple):
     time: int
     beat_length: float
-    meter: int
     uninherited: bool
     effects: int
 
@@ -414,7 +413,6 @@ def _preprocess_timing_points(
             last_uninherited = RawTimingPoint(
                 time=point.time,
                 beat_length=500.0,
-                meter=4,
                 uninherited=True,
                 effects=0,
             )
@@ -514,7 +512,6 @@ def parse_osu_file(
                             RawTimingPoint(
                                 time=int(float(parts[0])),
                                 beat_length=beat_length,
-                                meter=int(parts[2]) if len(parts) >= 3 else 4,
                                 uninherited=len(parts) >= 7 and parts[6] == "1",
                                 effects=int(parts[7]) if len(parts) >= 8 else 0,
                             )
