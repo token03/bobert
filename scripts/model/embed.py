@@ -90,27 +90,27 @@ def sample_ids(
     ids = np.array(sorted(beatmaps_df["beatmap_id"].unique().to_list()), dtype=np.int64)
 
     if min_sr is not None:
-        ratings_path = PROJECT_ROOT / "data" / "ratings.parquet"
-        if not ratings_path.exists():
-            raise FileNotFoundError(f"Ratings file not found: {ratings_path}")
+        strains_path = PROJECT_ROOT / "data" / "strains.parquet"
+        if not strains_path.exists():
+            raise FileNotFoundError(f"Strains file not found: {strains_path}")
 
-        ratings_lf = pl.scan_parquet(ratings_path)
-        if "seq_len" in ratings_lf.collect_schema().names() and max_seq_len is not None:
-            ratings_lf = ratings_lf.with_columns(
+        strains_lf = pl.scan_parquet(strains_path)
+        if "seq_len" in strains_lf.collect_schema().names() and max_seq_len is not None:
+            strains_lf = strains_lf.with_columns(
                 pl.when(pl.col("seq_len") == 0)
                 .then(pl.lit(2_147_483_647))
                 .otherwise(pl.col("seq_len"))
-                .alias("_rating_order")
+                .alias("_strain_order")
             ).filter((pl.col("seq_len") > 0) & (pl.col("seq_len") <= max_seq_len))
-            best_lengths = ratings_lf.group_by("beatmap_id").agg(
-                pl.col("_rating_order").max().alias("_rating_order")
+            best_lengths = strains_lf.group_by("beatmap_id").agg(
+                pl.col("_strain_order").max().alias("_strain_order")
             )
-            ratings_lf = ratings_lf.join(
-                best_lengths, on=["beatmap_id", "_rating_order"], how="inner"
+            strains_lf = strains_lf.join(
+                best_lengths, on=["beatmap_id", "_strain_order"], how="inner"
             )
 
         eligible_ids = set(
-            ratings_lf.filter(pl.col("stars") >= min_sr)
+            strains_lf.filter(pl.col("stars") >= min_sr)
             .select("beatmap_id")
             .unique()
             .collect()["beatmap_id"]

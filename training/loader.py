@@ -56,13 +56,15 @@ def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tenso
 
 
 def collate_pretrain(
-    batch: List[torch.Tensor],
+    batch: List[dict],
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
     vector_stats,
+    strain_stats,
 ):
-    lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in batch]
+    vectors = [item["hitobjects"] for item in batch]
+    lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
     cu_seqlens = torch.nn.functional.pad(
         torch.cumsum(seqlens, dim=0, dtype=torch.int32), (1, 0)
@@ -84,13 +86,16 @@ def collate_pretrain(
         ]
     )
     right_split = torch.rand(right_border_idx.numel())
+    strain = torch.tensor([item["strain"] for item in batch], dtype=torch.float32)
+    strain_targets = (strain - strain_stats["mean"]) / strain_stats["std"]
     return {
         "packed_vectors": normalize(
             torch.cat(
-                [vector[:length] for vector, length in zip(batch, lengths)], dim=0
+                [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
             ),
             vector_stats,
         ),
+        "strain_targets": strain_targets,
         "masked_idx": masked_idx,
         "mask_token_idx": masked_idx[split < 0.8],
         "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
@@ -131,11 +136,15 @@ class BeatmapDataset(Dataset):
         return len(self.beatmap_data)
 
     def __getitem__(self, idx):
-        return prepare_vector(
-            self.beatmap_data[idx],
-            self.augment,
-            self.max_seq_len,
-        )
+        item = self.beatmap_data[idx]
+        return {
+            **item,
+            "hitobjects": prepare_vector(
+                item["hitobjects"],
+                self.augment,
+                self.max_seq_len,
+            ),
+        }
 
 
 def load_data(data_config, max_seq_len, sample_size):
@@ -147,8 +156,10 @@ def load_data(data_config, max_seq_len, sample_size):
         chunk_size=int(getattr(data_config, "load_chunk_size", 5000)),
         min_sr=data_config.min_sr,
         max_sr=data_config.max_sr,
+        strains_path=data_config.strains_path,
+        include_strains=True,
     )
-    return [row["hitobjects"] for row in rows]
+    return rows
 
 
 def split_loaded_data(data, val_split, seed):
@@ -171,7 +182,10 @@ def dataloader_kwargs(data_config):
 
 
 def lengths(dataset):
-    return [min(int(vec.shape[0]), dataset.max_seq_len) for vec in dataset.beatmap_data]
+    return [
+        min(int(item["hitobjects"].shape[0]), dataset.max_seq_len)
+        for item in dataset.beatmap_data
+    ]
 
 
 def token_budget(sample_lengths, batch_size):
@@ -215,6 +229,8 @@ class BobertDataModule(pl.LightningDataModule):
         super().__init__()
         self.config = config
         self.batch_size = config.training.trainer.batch_size
+        self.vector_stats = None
+        self.strain_stats = None
 
     @property
     def max_seq_len(self):
@@ -231,7 +247,14 @@ class BobertDataModule(pl.LightningDataModule):
             self.config.data.val_split,
             self.config.data.dataset_seed,
         )
-        self.vector_stats = fit_stats(train_data)
+        self.vector_stats = fit_stats([item["hitobjects"] for item in train_data])
+        strain = torch.tensor(
+            [item["strain"] for item in train_data], dtype=torch.float32
+        )
+        strain_std = strain.std(dim=0, correction=0)
+        if torch.any(strain_std <= 1e-6):
+            raise ValueError("Strain targets must have non-zero variance")
+        self.strain_stats = {"mean": strain.mean(dim=0), "std": strain_std}
         self.train_dataset = BeatmapDataset(train_data, self.max_seq_len, True)
         self.val_dataset = BeatmapDataset(val_data, self.max_seq_len, False)
         print(
@@ -247,6 +270,7 @@ class BobertDataModule(pl.LightningDataModule):
             masking_ratio=config.ratio,
             mean_span_length=config.mean_span_length,
             vector_stats=self.vector_stats,
+            strain_stats=self.strain_stats,
         )
 
     def train_dataloader(self):

@@ -121,6 +121,7 @@ dependencies = [
     { name = "omegaconf" },
     { name = "ossapi" },
     { name = "pandas" },
+    { name = "parsecore", extra = ["fast"] },
     { name = "plotly" },
     { name = "polars" },
     { name = "pyarrow" },
@@ -130,7 +131,6 @@ dependencies = [
     { name = "rapidfuzz" },
     { name = "requests" },
     { name = "rich" },
-    { name = "rosu-pp-py" },
     { name = "rotary-embedding-torch" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -157,6 +157,7 @@ requires-dist = [
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "ossapi", specifier = ">=5.3.3" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "parsecore", extras = ["fast"], git = "https://github.com/token03/parsecore.git" },
     { name = "plotly", specifier = ">=6.3.0" },
     { name = "polars", specifier = ">=1.35.1" },
     { name = "pyarrow", specifier = ">=21.0.0" },
@@ -166,7 +167,6 @@ requires-dist = [
     { name = "rapidfuzz", specifier = ">=3.14.5" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "rich", specifier = ">=14.1.0" },
-    { name = "rosu-pp-py", specifier = ">=3.1.0" },
     { name = "rotary-embedding-torch", specifier = ">=0.8.9" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
     { name = "scipy", specifier = ">=1.16.2" },
@@ -858,6 +858,20 @@ wheels = [
 ]
 
 [[package]]
+name = "parsecore"
+version = "1.0.1"
+source = { git = "https://github.com/token03/parsecore.git#65ffdd3ccf274cc79a90d35bf07d2fd9eb5dd528" }
+dependencies = [
+    { name = "requests" },
+]
+
+[package.optional-dependencies]
+fast = [
+    { name = "numba" },
+    { name = "numpy" },
+]
+
+[[package]]
 name = "pillow"
 version = "12.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1105,16 +1119,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
-]
-
-[[package]]
-name = "rosu-pp-py"
-version = "4.0.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/03/7f/4c694e79653f9d5a9007d27f491ceb46225889baf4b365c5f10cc06b0753/rosu_pp_py-4.0.2.tar.gz", hash = "sha256:6653c66ff031de3f4ee3a93e74257ecfd0b0a9c6389f940af0adb211efa7fde5", size = 40788, upload-time = "2026-04-22T22:17:29.897Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/80/67e4d10250bba8859f65fc7c69a46670eac223981db60b21bd323c80d965/rosu_pp_py-4.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8b3b266f460ed44e983d43fd65d339875a982d76ac44a78b6da9a00ab0b03261", size = 612527, upload-time = "2026-04-22T22:16:50.278Z" },
-    { url = "https://files.pythonhosted.org/packages/00/88/dba563f14dfcdd81b706766163d2569e451331dcd611e0512a5fe7374efb/rosu_pp_py-4.0.2-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:d9f82e86b603cb026f310b1862164e5b073d1ac9468440be4d4ac31572ce5716", size = 825844, upload-time = "2026-04-22T22:16:23.076Z" },
 ]
 
 [[package]]

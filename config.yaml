@@ -1,5 +1,6 @@
 data:
   dataset_path: "./data/dataset"
+  strains_path: "./data/strains.parquet"
   dataset_seed: 42
 
   max_seq_len: 4096
@@ -34,7 +35,7 @@ runtime:
 
 training:
   trainer:
-    epochs: 30
+    epochs: 20
     batch_size: 64
     grad_accum: 2
     grad_clip: 1.0

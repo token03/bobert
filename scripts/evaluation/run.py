@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
 
@@ -16,8 +16,9 @@ from rich.console import Console
 from rich.table import Table
 from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
-from scripts.common.text import tokenize
+from core import STRAIN_COLUMNS
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
+from scripts.common.text import tokenize
 
 console = Console()
 
@@ -28,7 +29,7 @@ COLLECTION_EDGES_EVAL_PATH = COLLECTIONS_DIR / "edges.parquet"
 COLLECTION_VERTICES_EVAL_PATH = COLLECTIONS_DIR / "vertices.parquet"
 COLLECTION_NGRAMS_EVAL_PATH = COLLECTIONS_DIR / "ngrams.txt"
 TOURNAMENTS_EVAL_PATH = COLLECTIONS_DIR / "tournaments.parquet"
-RATINGS_EVAL_PATH = DATA_DIR / "ratings.parquet"
+STRAINS_EVAL_PATH = DATA_DIR / "strains.parquet"
 RFF_EVAL_PATH = DATA_DIR / "motifs" / "rff.parquet"
 
 PROBE_SEED = 0
@@ -38,7 +39,7 @@ PROBE_MIN_LABEL_MAPS = 50
 MIN_PROBE_MAPS = 1000
 RATING_MAX_STARS = 20.0
 RATING_MAX_SEQ_LEN = 4096
-DIFFICULTY_COLUMNS = ["stars", "aim", "speed", "slider_factor"]
+DIFFICULTY_COLUMNS = ["stars", *STRAIN_COLUMNS]
 MAP_ATTRIBUTE_COLUMNS = {
     "ar": "ar",
     "cs": "cs",
@@ -141,12 +142,21 @@ def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]
         name = target_name(path)
         run_dir = path.parent if path.parent.parent == RUNS_DIR else None
         center = target not in no_center and name != "graph"
-        beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=center)
+        beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=False)
         loaded.append(
             TargetData(
                 name, path, run_dir, beatmap_ids, embeddings, id_to_index, center
             )
         )
+    shared_ids = common_ids(loaded)
+    for target in loaded:
+        if target.centered:
+            target.embeddings -= target_matrix(target, shared_ids).mean(
+                axis=0, keepdims=True
+            )
+            target.embeddings /= np.maximum(
+                np.linalg.norm(target.embeddings, axis=1, keepdims=True), 1e-12
+            )
     return loaded
 
 
@@ -438,14 +448,14 @@ def multiclass_probe(
 
 
 def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
-    if not RATINGS_EVAL_PATH.exists():
+    if not STRAINS_EVAL_PATH.exists():
         console.print(
-            f"[yellow]Skipping difficulty eval: {RATINGS_EVAL_PATH} not found.[/yellow]"
+            f"[yellow]Skipping difficulty eval: {STRAINS_EVAL_PATH} not found.[/yellow]"
         )
         return None
 
-    ratings = pl.read_parquet(
-        RATINGS_EVAL_PATH, columns=["beatmap_id", "seq_len", *DIFFICULTY_COLUMNS]
+    strains = pl.read_parquet(
+        STRAINS_EVAL_PATH, columns=["beatmap_id", "seq_len", *DIFFICULTY_COLUMNS]
     ).filter(
         (pl.col("seq_len") > 0)
         & (pl.col("seq_len") <= RATING_MAX_SEQ_LEN)
@@ -455,24 +465,25 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
             [pl.col(column).is_finite() for column in DIFFICULTY_COLUMNS]
         )
     )
-    ratings = (
-        ratings.with_columns(
+    strains = (
+        strains.with_columns(
             pl.col("seq_len").max().over("beatmap_id").alias("_max_len")
         )
         .filter(pl.col("seq_len") == pl.col("_max_len"))
         .unique("beatmap_id", keep="last")
         .drop("_max_len")
     )
-    ids = common_ids(targets, set(ratings["beatmap_id"].to_list()))
-    ratings = ratings.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
-    ids = [int(beatmap_id) for beatmap_id in ratings["beatmap_id"]]
+    ids = common_ids(targets, set(strains["beatmap_id"].to_list()))
+    strains = strains.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
+    ids = [int(beatmap_id) for beatmap_id in strains["beatmap_id"]]
     if len(ids) < MIN_PROBE_MAPS:
         console.print(
-            f"[yellow]Skipping difficulty eval: only {len(ids):,} shared ratings.[/yellow]"
+            f"[yellow]Skipping difficulty eval: only {len(ids):,} "
+            "shared strains.[/yellow]"
         )
         return None
 
-    values = ratings.select(DIFFICULTY_COLUMNS).cast(pl.Float32).to_numpy()
+    values = strains.select(DIFFICULTY_COLUMNS).cast(pl.Float32).to_numpy()
     scale = values.std(axis=0)
     if np.any(scale <= 1e-6):
         raise ValueError("Difficulty attributes must have non-zero variance")
@@ -649,7 +660,7 @@ def run_map_attribute_eval(
 
 def difficulty_neighbor_metrics(
     embeddings: torch.Tensor,
-    difficulty: torch.Tensor,
+    stars: torch.Tensor,
     groups: torch.Tensor,
 ) -> dict[str, float]:
     total = 0.0
@@ -659,9 +670,7 @@ def difficulty_neighbor_metrics(
         scores = embeddings[start:stop] @ embeddings.T
         scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
         neighbors = scores.topk(DIFFICULTY_NEIGHBOR_K, dim=1).indices
-        distance = torch.linalg.vector_norm(
-            difficulty[neighbors] - difficulty[start:stop, None, :], dim=2
-        )
+        distance = torch.abs(stars[neighbors] - stars[start:stop, None])
         total += float(distance.mean(dim=1).sum().item())
 
     return {f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(embeddings)}
@@ -678,7 +687,11 @@ def run_difficulty_neighbor_eval(
         return
 
     device = probe_device()
-    difficulty = torch.tensor(data.normalized, dtype=torch.float32, device=device)
+    stars = torch.tensor(
+        data.normalized[:, DIFFICULTY_COLUMNS.index("stars")],
+        dtype=torch.float32,
+        device=device,
+    )
     groups = torch.tensor(data.groups, dtype=torch.long, device=device)
     metrics = {}
     for target in targets:
@@ -686,7 +699,7 @@ def run_difficulty_neighbor_eval(
             target_matrix(target, data.ids), dtype=torch.float32, device=device
         )
         metrics[target.name] = difficulty_neighbor_metrics(
-            embeddings, difficulty, groups
+            embeddings, stars, groups
         )
         del embeddings
     print_eval_result(EvalResult("Difficulty Neighbors", metrics))

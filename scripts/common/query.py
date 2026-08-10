@@ -83,6 +83,8 @@ def load_metadata(path: Path) -> pl.DataFrame:
     wanted = [
         "id",
         "beatmapset_id",
+        "user_id",
+        "owners",
         "artist",
         "title",
         "creator",

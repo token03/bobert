@@ -5,12 +5,14 @@ import torch.nn as nn
 from typing import Any, Dict, Sequence, Type, TypeVar
 from rotary_embedding_torch import RotaryEmbedding
 
+from . import STRAIN_COLUMNS
 from .components import (
     EncoderLayer,
     HitObjectFeatureTokenizer,
     MaskedLMHead,
     RMSNorm,
     SpanMasker,
+    StrainHead,
 )
 from .features import VectorStats
 
@@ -161,6 +163,25 @@ class BobertEncoder(nn.Module):
         torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
         return self._encode(packed_embeddings, cu_seqlens, positions)
 
+    def encode_with_embedding(
+        self,
+        packed_embeddings: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        positions = torch.arange(max_seqlen, device=packed_embeddings.device)
+        torch._dynamo.mark_dynamic(packed_embeddings, 0)
+        torch._dynamo.mark_dynamic(cu_seqlens, 0)
+        torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
+        global_embeddings: list[torch.Tensor] = []
+        packed_output = self._encode(
+            packed_embeddings,
+            cu_seqlens,
+            positions,
+            global_embeddings=global_embeddings,
+        )
+        return packed_output, torch.stack(global_embeddings).mean(dim=0)
+
     def _encode(
         self,
         packed_embeddings: torch.Tensor,
@@ -234,15 +255,12 @@ class BobertEncoder(nn.Module):
         max_seqlen: int,
     ) -> torch.Tensor:
         packed_input = self.embed_sequences(packed_vectors)
-        positions = torch.arange(max_seqlen, device=packed_vectors.device)
-        global_embeddings: list[torch.Tensor] = []
-        self._encode(
+        _, embedding = self.encode_with_embedding(
             packed_input,
             cu_seqlens,
-            positions,
-            global_embeddings=global_embeddings,
+            max_seqlen,
         )
-        return torch.stack(global_embeddings).mean(dim=0)
+        return embedding
 
 
 class BobertForPretraining(nn.Module):
@@ -251,11 +269,13 @@ class BobertForPretraining(nn.Module):
         bert_model: BobertEncoder,
         masker: SpanMasker,
         mlm_head: MaskedLMHead,
+        strain_head: StrainHead,
     ):
         super().__init__()
         self.bert = bert_model
         self.masker = masker
         self.mlm_head = mlm_head
+        self.strain_head = strain_head
 
     @classmethod
     def from_config(
@@ -266,6 +286,7 @@ class BobertForPretraining(nn.Module):
             bert,
             SpanMasker(bert.d_model),
             MaskedLMHead(bert.d_model),
+            StrainHead(bert.d_model, len(STRAIN_COLUMNS)),
         ).to(device)
 
     def get_summary(self) -> Dict[str, Any]:
@@ -295,10 +316,13 @@ class BobertForPretraining(nn.Module):
             mask_token_idx,
             random_dst_idx,
         )
-        encoded = self.bert.encode(
+        encoded, embedding = self.bert.encode_with_embedding(
             packed_input,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
         )
-        predictions = {"mlm": self.mlm_head(encoded.index_select(0, masked_idx))}
+        predictions = {
+            "mlm": self.mlm_head(encoded.index_select(0, masked_idx)),
+            "strain": self.strain_head(embedding),
+        }
         return predictions, packed_targets, masked_idx

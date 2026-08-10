@@ -8,6 +8,7 @@ import polars as pl
 from torch.utils.data import Sampler
 from tqdm import tqdm
 
+from . import STRAIN_COLUMNS
 from .features import build_feature_tensors
 
 HITOBJECT_ID_RANGE = 100_000
@@ -82,37 +83,38 @@ def _scan_hitobject_range(path: Path, lower: int, upper: int) -> pl.LazyFrame:
     return pl.scan_parquet(ranged_files)
 
 
-def _best_supported_ratings_lf(
-    ratings_lf: pl.LazyFrame, seq_len: Optional[int]
+def _best_supported_strains_lf(
+    strains_lf: pl.LazyFrame, seq_len: Optional[int]
 ) -> pl.LazyFrame:
-    ratings_lf = ratings_lf.with_columns(
+    strains_lf = strains_lf.with_columns(
         pl.when(pl.col("seq_len") == 0)
         .then(pl.lit(2_147_483_647))
         .otherwise(pl.col("seq_len"))
-        .alias("_rating_order")
+        .alias("_strain_order")
     )
     if seq_len is not None:
-        ratings_lf = ratings_lf.filter(
+        strains_lf = strains_lf.filter(
             (pl.col("seq_len") > 0) & (pl.col("seq_len") <= seq_len)
         )
 
-    best_lengths = ratings_lf.group_by("beatmap_id").agg(
-        pl.col("_rating_order").max().alias("_rating_order")
+    best_lengths = strains_lf.group_by("beatmap_id").agg(
+        pl.col("_strain_order").max().alias("_strain_order")
     )
     return (
-        ratings_lf.join(best_lengths, on=["beatmap_id", "_rating_order"], how="inner")
+        strains_lf.join(best_lengths, on=["beatmap_id", "_strain_order"], how="inner")
         .unique(["beatmap_id", "seq_len"], keep="first")
-        .drop("_rating_order")
+        .drop("_strain_order")
     )
 
 
 def _selected_beatmaps_lf(
     beatmaps_path: str | Path,
-    ratings_path: str | Path,
+    strains_path: str | Path,
     ids_to_load: Optional[List[int]],
-    rating_seq_len: Optional[int],
+    strain_seq_len: Optional[int],
     min_sr: Optional[float],
     max_sr: Optional[float],
+    include_strains: bool,
 ) -> pl.LazyFrame:
     beatmaps_lf = (
         scan_dataset_parquet(beatmaps_path).select("beatmap_id").unique("beatmap_id")
@@ -121,16 +123,24 @@ def _selected_beatmaps_lf(
     if ids_to_load:
         beatmaps_lf = beatmaps_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
 
-    ratings_lf = _best_supported_ratings_lf(
-        scan_dataset_parquet(ratings_path), rating_seq_len
+    if min_sr is None and max_sr is None and not include_strains:
+        return beatmaps_lf
+
+    strains_lf = _best_supported_strains_lf(
+        scan_dataset_parquet(strains_path), strain_seq_len
+    )
+    strains_lf = strains_lf.filter(
+        pl.all_horizontal(
+            [pl.col(column).is_finite() for column in ("stars", *STRAIN_COLUMNS)]
+        )
     )
 
     if min_sr is not None:
-        ratings_lf = ratings_lf.filter(pl.col("stars") >= min_sr)
+        strains_lf = strains_lf.filter(pl.col("stars") >= min_sr)
     if max_sr is not None:
-        ratings_lf = ratings_lf.filter(pl.col("stars") <= max_sr)
+        strains_lf = strains_lf.filter(pl.col("stars") <= max_sr)
 
-    return beatmaps_lf.join(ratings_lf, on="beatmap_id", how="inner")
+    return beatmaps_lf.join(strains_lf, on="beatmap_id", how="inner")
 
 
 def _sample_beatmap_ids(
@@ -165,19 +175,20 @@ def load_beatmap_dataset(
     dataset_path: str,
     dataset_seed: int,
     max_seq_len: Optional[int] = None,
-    rating_seq_len: Optional[int] = None,
+    strain_seq_len: Optional[int] = None,
     ids_to_load: Optional[List[int]] = None,
     sample_size: Optional[int] = None,
-    ratings_path: str = "./data/ratings.parquet",
+    strains_path: str = "./data/strains.parquet",
     chunk_size: int = 5000,
     min_sr: Optional[float] = None,
     max_sr: Optional[float] = None,
+    include_strains: bool = False,
     quiet: bool = False,
 ) -> List[Dict[str, Any]]:
     dataset_path = Path(dataset_path).expanduser()
-    ratings_path = Path(ratings_path).expanduser()
+    strains_path = Path(strains_path).expanduser()
 
-    rating_seq_len = max_seq_len if rating_seq_len is None else rating_seq_len
+    strain_seq_len = max_seq_len if strain_seq_len is None else strain_seq_len
 
     beatmaps_path = dataset_path / "beatmaps"
     hitobjects_path = dataset_path / "hitobjects"
@@ -191,11 +202,12 @@ def load_beatmap_dataset(
 
     selected_beatmaps = _selected_beatmaps_lf(
         beatmaps_path,
-        ratings_path,
+        strains_path,
         ids_to_load,
-        rating_seq_len,
+        strain_seq_len,
         min_sr,
         max_sr,
+        include_strains,
     ).collect(engine="streaming")
 
     all_beatmap_ids = _sample_beatmap_ids(
@@ -259,6 +271,18 @@ def load_beatmap_dataset(
             hitobjects_chunk,
             max_seq_len=max_seq_len,
         )
+        strains_by_id = (
+            {
+                int(row["beatmap_id"]): tuple(
+                    float(row[name]) for name in STRAIN_COLUMNS
+                )
+                for row in beatmaps_chunk.select(
+                    "beatmap_id", *STRAIN_COLUMNS
+                ).iter_rows(named=True)
+            }
+            if include_strains
+            else {}
+        )
 
         for bid, vectors in zip(ids, hitobject_data):
             bid_int = int(bid)
@@ -266,6 +290,8 @@ def load_beatmap_dataset(
                 "beatmap_id": bid_int,
                 "hitobjects": vectors,
             }
+            if include_strains:
+                item["strain"] = strains_by_id[bid_int]
             all_beatmap_data.append(item)
 
     if not quiet:

@@ -584,3 +584,12 @@ class MaskedLMHead(nn.Module):
                 ),
             }
         return outputs
+
+
+class StrainHead(nn.Module):
+    def __init__(self, d_model: int, output_size: int):
+        super().__init__()
+        self.proj = nn.Linear(d_model, output_size)
+
+    def forward(self, embedding: torch.Tensor) -> torch.Tensor:
+        return self.proj(embedding)

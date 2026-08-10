@@ -5,13 +5,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from scripts.common.api import osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
-from scripts.common.paths import RUNS_DIR, resolve_path
+from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 from scripts.common.query import (
     DEFAULT_BEATMAPS_DIR,
     DEFAULT_METADATA_PATH,
@@ -33,6 +34,7 @@ console = Console()
 MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
+DEFAULT_STRAINS_PATH = PROJECT_ROOT / "data" / "strains.parquet"
 
 
 @dataclass
@@ -84,6 +86,26 @@ def metadata_set_id(row: dict | None) -> int | None:
     return int(value) if value is not None else None
 
 
+def metadata_mapper_ids(row: dict | None) -> set[int]:
+    owners = str(clean_value((row or {}).get("owners"), "")).split()
+    if owners:
+        return {int(owner) for owner in owners}
+    value = clean_value((row or {}).get("user_id"), None)
+    return {int(value)} if value is not None else set()
+
+
+def apply_strain_stars(metadata_lookup: dict[int, dict]) -> None:
+    strains = (
+        pl.read_parquet(DEFAULT_STRAINS_PATH, columns=["beatmap_id", "seq_len", "stars"])
+        .sort("seq_len", descending=True)
+        .unique("beatmap_id", keep="first")
+    )
+    for row in strains.iter_rows(named=True):
+        metadata = metadata_lookup.get(int(row["beatmap_id"]))
+        if metadata is not None:
+            metadata["difficulty_rating"] = row["stars"]
+
+
 def refresh_missing_metadata(
     results: list[tuple[int, float, dict | None]], ctx: QueryContext
 ):
@@ -94,7 +116,10 @@ def refresh_missing_metadata(
             try:
                 api = api or osu_api()
                 console.print(f"[dim]Fetching metadata for {beatmap_id}...[/dim]")
+                strain_stars = (row or {}).get("difficulty_rating")
                 row = fetch_beatmap_metadata(api, beatmap_id)
+                if strain_stars is not None:
+                    row["difficulty_rating"] = strain_stars
                 upsert_beatmap_metadata(row, ctx.metadata_path)
                 ctx.metadata_lookup[beatmap_id] = row
             except Exception as exc:
@@ -153,7 +178,9 @@ def add_map_columns(table: Table, *, score: str | None = None, side: bool = Fals
     table.add_column("Dur", justify="right", no_wrap=True)
 
 
-def map_cells(beatmap_id: int, row: dict | None):
+def map_cells(
+    beatmap_id: int, row: dict | None, query_mapper_ids: set[int] | None = None
+):
     bid, title, creator, version, stars, bpm, length = beatmap_table_values(
         beatmap_id, row
     )
@@ -162,7 +189,9 @@ def map_cells(beatmap_id: int, row: dict | None):
         f"[link=https://osu.ppy.sh/b/{bid}]{bid}[/link]",
         stars,
         f"[{style}]{escape(title)}[/{style}]",
-        escape(creator),
+        f"[bright_magenta]{escape(creator)}[/bright_magenta]"
+        if query_mapper_ids and metadata_mapper_ids(row) & query_mapper_ids
+        else escape(creator),
         escape(version),
         bpm,
         length,
@@ -187,7 +216,8 @@ def is_ranked_like(row: dict | None) -> bool:
 def print_query_table(beatmap_id: int, ctx: QueryContext, row: dict | None = None):
     table = Table(title="Query", show_header=True, header_style="bold magenta")
     add_map_columns(table)
-    table.add_row(*map_cells(beatmap_id, row or ctx.metadata_lookup.get(beatmap_id)))
+    row = row or ctx.metadata_lookup.get(beatmap_id)
+    table.add_row(*map_cells(beatmap_id, row, metadata_mapper_ids(row)))
     console.print()
     console.print(table)
 
@@ -197,11 +227,14 @@ def print_result_table(
     *,
     title: str | None = None,
     score: str = "Sim",
+    query_mapper_ids: set[int] | None = None,
 ):
     table = Table(title=title, show_header=True, header_style="bold magenta")
     add_map_columns(table, score=score)
     for beatmap_id, value, row in results:
-        table.add_row(f"{value:.3f}", *map_cells(beatmap_id, row))
+        table.add_row(
+            f"{value:.3f}", *map_cells(beatmap_id, row, query_mapper_ids)
+        )
     console.print(table)
 
 
@@ -293,8 +326,9 @@ def graph_recommend(raw_input: str, ctx: QueryContext):
             break
 
     print_query_table(beatmap_id, ctx)
+    query_mapper_ids = metadata_mapper_ids(ctx.metadata_lookup.get(beatmap_id))
     for title, results in (("Ranked", ranked_results), ("Unranked", unranked_results)):
-        print_result_table(results, title=title)
+        print_result_table(results, title=title, query_mapper_ids=query_mapper_ids)
     console.print()
 
 
@@ -334,7 +368,10 @@ def recommend(raw_input: str, ctx: QueryContext):
     if query_set_id is not None and not ctx.include_same_set:
         console.print(f"[dim]Excluding same beatmapset: {query_set_id}[/dim]")
 
-    print_result_table(refresh_missing_metadata(results, ctx))
+    print_result_table(
+        refresh_missing_metadata(results, ctx),
+        query_mapper_ids=metadata_mapper_ids(query_row),
+    )
     console.print()
 
 
@@ -453,11 +490,13 @@ def build_context(args: argparse.Namespace) -> QueryContext:
             else EmbeddingTransform.fit(embeddings)
         )
         embeddings = embedding_transform.apply(embeddings)
+    metadata_lookup = metadata_by_id(load_metadata(resolve_path(args.metadata)))
+    apply_strain_stars(metadata_lookup)
     return QueryContext(
         beatmap_ids=beatmap_ids,
         embeddings=embeddings,
         id_to_index=id_to_index,
-        metadata_lookup=metadata_by_id(load_metadata(resolve_path(args.metadata))),
+        metadata_lookup=metadata_lookup,
         embedder=None,
         beatmaps_dir=resolve_path(args.beatmaps_dir),
         metadata_path=resolve_path(args.metadata),

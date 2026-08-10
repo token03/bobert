@@ -1,14 +1,15 @@
 from contextlib import nullcontext
 from typing import Any, Dict
 
-from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
 from torchmetrics import MeanAbsoluteError
 from torchmetrics.classification import MulticlassF1Score
 
+from core import STRAIN_COLUMNS
 from core.features import (
     FEATURE_INFO,
     FEATURES_BY_NAME,
@@ -126,10 +127,14 @@ class BobertModule(pl.LightningModule):
         checkpoint["config"] = OmegaConf.to_container(self.config, resolve=True)
         if self.datamodule.vector_stats is not None:
             checkpoint["vector_stats"] = self.datamodule.vector_stats
+        if self.datamodule.strain_stats is not None:
+            checkpoint["strain_stats"] = self.datamodule.strain_stats
 
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
         if self.datamodule.vector_stats is not None:
             self.datamodule.vector_stats = checkpoint["vector_stats"]
+        if self.datamodule.strain_stats is not None:
+            self.datamodule.strain_stats = checkpoint["strain_stats"]
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config)
@@ -162,7 +167,34 @@ class BobertModule(pl.LightningModule):
     def _shared_step(self, batch: Dict[str, Any], metrics=None):
         predictions, targets, _ = self(batch)
         losses = mlm_loss(predictions["mlm"], targets["mlm"], metrics)
-        return losses, max(1, targets["mlm"].shape[0])
+        losses["mlm"] = losses["total"]
+        strain_losses = F.smooth_l1_loss(
+            predictions["strain"], batch["strain_targets"], reduction="none"
+        ).mean(dim=0)
+        strain_by_target = dict(zip(STRAIN_COLUMNS, strain_losses, strict=True))
+        losses["strain_aim"] = strain_by_target["aim"]
+        losses["strain_speed"] = strain_by_target["speed"]
+        losses["strain_aim_children"] = torch.stack(
+            [
+                strain_by_target[name]
+                for name in ("slider", "snap", "flow", "agility")
+            ]
+        ).mean()
+        losses["strain_speed_children"] = torch.stack(
+            [strain_by_target[name] for name in ("tap", "rhythm")]
+        ).mean()
+        losses["strain"] = sum(
+            losses[name]
+            for name in (
+                "strain_aim",
+                "strain_speed",
+                "strain_aim_children",
+                "strain_speed_children",
+            )
+        )
+        losses["strain_by_target"] = strain_losses
+        losses["total"] = losses["mlm"] + losses["strain"]
+        return losses, batch["strain_targets"].shape[0]
 
     def on_fit_start(self):
         if self.global_rank == 0:
@@ -241,6 +273,12 @@ class BobertModule(pl.LightningModule):
         right_split = torch.rand(right_border_idx.numel(), device=self.device)
         return {
             "packed_vectors": packed_vectors,
+            "strain_targets": torch.randn(
+                batch_size,
+                len(STRAIN_COLUMNS),
+                device=self.device,
+                dtype=torch.float32,
+            ),
             "masked_idx": masked_idx,
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
@@ -286,6 +324,20 @@ class BobertModule(pl.LightningModule):
                 "val_spatial_loss": losses["spatial"],
                 "val_rhythm_loss": losses["rhythm"],
                 "val_attribute_loss": losses["attribute"],
+                "val_mlm_loss": losses["mlm"],
+                "val_strain_loss": losses["strain"],
+                "val_strain_aim_loss": losses["strain_aim"],
+                "val_strain_speed_loss": losses["strain_speed"],
+                "val_strain_aim_children_loss": losses["strain_aim_children"],
+                "val_strain_speed_children_loss": losses[
+                    "strain_speed_children"
+                ],
+                **{
+                    f"val_strain_{name}_loss": loss
+                    for name, loss in zip(
+                        STRAIN_COLUMNS, losses["strain_by_target"], strict=True
+                    )
+                },
             },
             sync_dist=True,
             batch_size=target_count,

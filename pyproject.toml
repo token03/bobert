@@ -18,6 +18,7 @@ dependencies = [
     "omegaconf>=2.3.0",
     "ossapi>=5.3.3",
     "pandas>=2.3.3",
+    "parsecore[fast]",
     "plotly>=6.3.0",
     "polars>=1.35.1",
     "pyarrow>=21.0.0",
@@ -27,7 +28,6 @@ dependencies = [
     "rapidfuzz>=3.14.5",
     "requests>=2.32.5",
     "rich>=14.1.0",
-    "rosu-pp-py>=3.1.0",
     "rotary-embedding-torch>=0.8.9",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
@@ -48,7 +48,7 @@ recommend = "scripts.evaluation.recommend:main"
 umap = "scripts.evaluation.umap:main"
 export-model = "scripts.model.export:main"
 build-dataset = "scripts.dataset.build:main"
-build-ratings = "scripts.dataset.ratings:main"
+build-strains = "scripts.dataset.strains:main"
 fetch-beatmaps = "scripts.sources.beatmaps.metadata:main"
 download-beatmaps = "scripts.sources.beatmaps.files:main"
 fetch-beatmapsets = "scripts.sources.beatmaps.sets:main"
@@ -71,6 +71,7 @@ packages = ["serve", "training", "scripts", "core"]
 
 [tool.ruff.lint.per-file-ignores]
 "serve/app.py" = ["E402"]
+"scripts/dataset/strains.py" = ["BLE001"]
 
 [tool.uv]
 environments = [
@@ -90,3 +91,4 @@ explicit = true
 torch = { index = "pytorch-cu128" }
 muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+parsecore = { git = "https://github.com/token03/parsecore.git" }
