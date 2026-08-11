@@ -1,4 +1,5 @@
 import bisect
+import io
 import math
 import os
 from collections.abc import Iterable, Iterator
@@ -439,11 +440,21 @@ def parse_osu_file(
     file_path: str,
     max_hitobject_lines: int | None = None,
     max_curve_points: int | None = None,
+    *,
+    _content: bytes | None = None,
+    _beatmap_id: int | None = None,
 ) -> Optional[RawBeatmap]:
-    try:
-        filename_beatmap_id = int(os.path.splitext(os.path.basename(file_path))[0])
-    except ValueError:
-        filename_beatmap_id = None
+    if _content is None:
+        try:
+            filename_beatmap_id = int(os.path.splitext(os.path.basename(file_path))[0])
+        except ValueError:
+            filename_beatmap_id = None
+        category = os.path.basename(os.path.dirname(file_path))
+        source = open(file_path, "r", encoding="utf-8", errors="ignore")
+    else:
+        filename_beatmap_id = _beatmap_id
+        category = ""
+        source = io.StringIO(_content.decode("utf-8", errors="ignore"))
 
     data = {
         "beatmap_id": filename_beatmap_id,
@@ -453,7 +464,7 @@ def parse_osu_file(
         "ar": 5.0,
         "slider_multiplier": 1.4,
         "slider_tick": 1.0,
-        "category": os.path.basename(os.path.dirname(file_path)),
+        "category": category,
         "difficulty_rating": 0.0,
     }
 
@@ -467,7 +478,7 @@ def parse_osu_file(
     curve_point_count = 0
     section_name = ""
 
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
+    with source as file:
         for raw_line in file:
             if section_name not in {
                 "metadata",
@@ -698,3 +709,18 @@ def parse_osu_file(
     if data["beatmap_id"] is None or not timing_points or not hit_objects:
         return None
     return RawBeatmap(**data, timing_points=timing_points, hit_objects=hit_objects)
+
+
+def parse_osu_bytes(
+    content: bytes,
+    beatmap_id: int | None = None,
+    max_hitobject_lines: int | None = None,
+    max_curve_points: int | None = None,
+) -> Optional[RawBeatmap]:
+    return parse_osu_file(
+        "",
+        max_hitobject_lines=max_hitobject_lines,
+        max_curve_points=max_curve_points,
+        _content=content,
+        _beatmap_id=beatmap_id,
+    )

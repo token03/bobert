@@ -1,5 +1,7 @@
 from pathlib import Path
+from dataclasses import dataclass
 from omegaconf import DictConfig
+import numpy as np
 import torch
 import torch.nn as nn
 from typing import Any, Dict, Sequence, Type, TypeVar
@@ -14,10 +16,52 @@ from .components import (
     SpanMasker,
     StrainHead,
 )
-from .features import VectorStats
+from .features import VectorStats, build_beatmap_tensor, normalize
+from .osu import parse_osu_bytes
 
 
 T = TypeVar("T", bound="BobertEncoder")
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingTransform:
+    mean: np.ndarray
+
+    @staticmethod
+    def _normalize_inplace(embeddings: np.ndarray) -> None:
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings /= np.maximum(norms, 1e-12)
+
+    @classmethod
+    def fit_transform_inplace(
+        cls, embeddings: np.ndarray, chunk_size: int = 16384
+    ) -> "EmbeddingTransform":
+        if embeddings.dtype != np.float32 or embeddings.ndim != 2:
+            raise ValueError("embeddings must be a two-dimensional float32 array")
+        if not len(embeddings):
+            raise ValueError("cannot fit an empty embedding matrix")
+
+        total = np.zeros(embeddings.shape[1], dtype=np.float64)
+        for start in range(0, len(embeddings), chunk_size):
+            chunk = embeddings[start : start + chunk_size]
+            cls._normalize_inplace(chunk)
+            total += chunk.sum(axis=0, dtype=np.float64)
+
+        transform = cls((total / len(embeddings)).astype(np.float32))
+        for start in range(0, len(embeddings), chunk_size):
+            chunk = embeddings[start : start + chunk_size]
+            chunk -= transform.mean
+            cls._normalize_inplace(chunk)
+        return transform
+
+    def apply(self, embeddings: np.ndarray) -> np.ndarray:
+        vector = embeddings.ndim == 1
+        values = np.asarray(embeddings, dtype=np.float32)
+        values = np.array(values[None, :] if vector else values, copy=True)
+        self._normalize_inplace(values)
+        values -= self.mean
+        self._normalize_inplace(values)
+        return values[0] if vector else values
 
 
 class BobertEncoder(nn.Module):
@@ -261,6 +305,40 @@ class BobertEncoder(nn.Module):
             max_seqlen,
         )
         return embedding
+
+    def embed_osu_bytes(
+        self,
+        content: bytes,
+        vector_stats: VectorStats,
+        beatmap_id: int | None = None,
+    ) -> np.ndarray:
+        beatmap = parse_osu_bytes(
+            content,
+            beatmap_id=beatmap_id,
+            max_hitobject_lines=16384,
+            max_curve_points=32768,
+        )
+        if beatmap is None:
+            raise ValueError("could not parse a valid beatmap")
+
+        vectors = normalize(
+            build_beatmap_tensor(beatmap, self.max_seq_len), vector_stats
+        )
+        device = next(self.parameters()).device
+        vectors = vectors.to(device)
+        length = vectors.shape[0]
+        cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device=device)
+        amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        with (
+            torch.inference_mode(),
+            torch.autocast(
+                device_type=device.type,
+                dtype=amp_dtype,
+                enabled=device.type == "cuda",
+            ),
+        ):
+            embedding = self.embed_packed(vectors, cu_seqlens, length)
+        return embedding[0].float().cpu().numpy().astype(np.float32)
 
 
 class BobertForPretraining(nn.Module):

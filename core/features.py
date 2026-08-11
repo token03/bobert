@@ -5,7 +5,12 @@ import numpy as np
 import polars as pl
 import torch
 
-from .osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+from .osu import (
+    OBJECT_TYPE_SLIDER,
+    OBJECT_TYPE_SPINNER,
+    RawBeatmap,
+    extract_hitobject_records,
+)
 
 
 OSU_STAGE_WIDTH = 512
@@ -447,6 +452,19 @@ def build_feature_tensors(
     vectors = _finalize_vectors(df, split_indices)
     unique_ids = ids[np.concatenate(([0], split_indices))]
     return vectors, unique_ids
+
+
+def build_beatmap_tensor(
+    beatmap: RawBeatmap, max_seq_len: int | None = None
+) -> torch.Tensor:
+    vectors, _ = build_feature_tensors(
+        pl.DataFrame({"beatmap_id": [beatmap.beatmap_id]}),
+        pl.DataFrame(extract_hitobject_records(beatmap)),
+        max_seq_len=max_seq_len,
+    )
+    if not vectors:
+        raise ValueError("could not engineer hitobject features")
+    return vectors[0]
 
 
 def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> VectorStats:

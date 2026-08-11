@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import requests
-from core.features import normalize
 from scripts.common.osu import (
     API_TIERS,
     DOWNLOAD_HEADERS,
@@ -167,33 +166,6 @@ def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -
     raise RuntimeError(f"Failed to download {beatmap_id}: {'; '.join(errors)}")
 
 
-def beatmap_vectors_from_osu(path: Path, max_seq_len: int):
-    from core.features import build_feature_tensors
-    from core.osu import (
-        extract_beatmap_record,
-        extract_hitobject_records,
-        parse_osu_file,
-    )
-    from scripts.dataset.build import (
-        validate_beatmap,
-    )
-
-    raw_beatmap = parse_osu_file(str(path))
-    if not validate_beatmap(raw_beatmap):
-        raise ValueError(f"Could not parse a valid beatmap from {path}")
-
-    beatmaps_df = pl.DataFrame([extract_beatmap_record(raw_beatmap)])
-    hitobjects_df = pl.DataFrame(extract_hitobject_records(raw_beatmap))
-    vectors, _ids = build_feature_tensors(
-        beatmaps_df,
-        hitobjects_df,
-        max_seq_len=max_seq_len,
-    )
-    if not vectors:
-        raise ValueError(f"Could not engineer hitobject features for {path}")
-    return vectors[0][:max_seq_len]
-
-
 class LazyEmbedder:
     def __init__(
         self,
@@ -222,28 +194,14 @@ class LazyEmbedder:
         )
 
     def embed_osu(self, path: Path) -> np.ndarray:
-        import torch
-
         self.load()
-        vectors = beatmap_vectors_from_osu(path, self.model.max_seq_len)
-        vectors = normalize(vectors, self.vector_stats)
-        packed = vectors[: self.model.max_seq_len].contiguous()
-        max_seqlen = packed.shape[0]
-        cu_seqlens = torch.tensor([0, max_seqlen], dtype=torch.int32)
-        packed = packed.to(self.device)
-        cu_seqlens = cu_seqlens.to(self.device)
-        amp_dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
-
-        with torch.no_grad():
-            with torch.autocast(
-                device_type=self.device.type,
-                dtype=amp_dtype,
-                enabled=self.device.type == "cuda",
-            ):
-                embedding = self.model.embed_packed(packed, cu_seqlens, max_seqlen)
-
-        embedding = embedding.float().cpu().numpy()[0]
-        return embedding.astype(np.float32)
+        try:
+            beatmap_id = int(path.stem)
+        except ValueError:
+            beatmap_id = None
+        return self.model.embed_osu_bytes(
+            path.read_bytes(), self.vector_stats, beatmap_id=beatmap_id
+        )
 
 
 def format_number(value, decimals: int = 2):

@@ -7,14 +7,16 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/app/data:ro
+      - ./runs:/app/runs:ro
       - ./cache:/app/cache
+      - ./logs:/app/logs
     environment:
       APP_ENV: production
-      FRONTEND_ORIGIN: https://bobert-web.pages.dev
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-https://bobert-web.pages.dev}
       BOBERT_DATA_DIR: /app/data
+      BOBERT_RUN_DIR: /app/runs/current
       BOBERT_CACHE_DB: /app/cache/runtime.sqlite
-      BOBERT_MODEL_PATH: /app/data/bobert.pt
-      BOBERT_CONFIG_PATH: /app/config.serve.yaml
+      BOBERT_MODEL_PATH: /app/runs/current/bobert.pt
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY}
       API_SHARED_SECRET: ${API_SHARED_SECRET}
       OSU_CLIENT_ID: ${OSU_CLIENT_ID}
@@ -24,6 +26,12 @@ services:
       MKL_NUM_THREADS: "2"
       POLARS_MAX_THREADS: "2"
       TORCH_NUM_THREADS: "2"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -35,7 +43,8 @@ services:
     # IPV6 CAUSE IM CHEAP AND DONT WANNA PAY FOR IPV4 ON HETZNER
     command: tunnel --no-autoupdate --protocol http2 --edge-ip-version 6 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     security_opt:
       - no-new-privileges:true
     cap_drop:

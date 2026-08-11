@@ -29,6 +29,7 @@ from scripts.common.query import (
     metadata_by_id,
 )
 from scripts.model.embed import find_model
+from core.model import EmbeddingTransform
 
 console = Console()
 MODE_DEFAULT = "default"
@@ -56,31 +57,6 @@ class QueryContext:
     cache: dict[int, np.ndarray] = field(default_factory=dict)
 
 
-@dataclass
-class EmbeddingTransform:
-    mean: np.ndarray
-
-    @staticmethod
-    def normalize(embeddings: np.ndarray) -> np.ndarray:
-        x = embeddings.astype(np.float32, copy=False)
-        norms = np.linalg.norm(x, axis=1, keepdims=True)
-        return x / np.maximum(norms, 1e-12)
-
-    @classmethod
-    def fit(cls, embeddings: np.ndarray) -> EmbeddingTransform:
-        x = cls.normalize(embeddings).astype(np.float64, copy=False)
-        mean = x.mean(axis=0, keepdims=True)
-        return cls(mean=mean.astype(np.float32))
-
-    def apply(self, embeddings: np.ndarray) -> np.ndarray:
-        was_vector = embeddings.ndim == 1
-        x = embeddings[None, :] if was_vector else embeddings
-        x = self.normalize(x)
-        x = x - self.mean
-        x = self.normalize(x)
-        return x[0] if was_vector else x
-
-
 def metadata_set_id(row: dict | None) -> int | None:
     value = clean_value((row or {}).get("beatmapset_id"), None)
     return int(value) if value is not None else None
@@ -96,7 +72,9 @@ def metadata_mapper_ids(row: dict | None) -> set[int]:
 
 def apply_strain_stars(metadata_lookup: dict[int, dict]) -> None:
     strains = (
-        pl.read_parquet(DEFAULT_STRAINS_PATH, columns=["beatmap_id", "seq_len", "stars"])
+        pl.read_parquet(
+            DEFAULT_STRAINS_PATH, columns=["beatmap_id", "seq_len", "stars"]
+        )
         .sort("seq_len", descending=True)
         .unique("beatmap_id", keep="first")
     )
@@ -232,9 +210,7 @@ def print_result_table(
     table = Table(title=title, show_header=True, header_style="bold magenta")
     add_map_columns(table, score=score)
     for beatmap_id, value, row in results:
-        table.add_row(
-            f"{value:.3f}", *map_cells(beatmap_id, row, query_mapper_ids)
-        )
+        table.add_row(f"{value:.3f}", *map_cells(beatmap_id, row, query_mapper_ids))
     console.print(table)
 
 
@@ -484,12 +460,14 @@ def build_context(args: argparse.Namespace) -> QueryContext:
     beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
     embedding_transform = None
     if mode == MODE_DEFAULT and len(embeddings):
-        embedding_transform = (
-            EmbeddingTransform(np.zeros((1, embeddings.shape[1]), dtype=np.float32))
-            if args.no_center
-            else EmbeddingTransform.fit(embeddings)
-        )
-        embeddings = embedding_transform.apply(embeddings)
+        if args.no_center:
+            embedding_transform = EmbeddingTransform(
+                np.zeros(embeddings.shape[1], dtype=np.float32)
+            )
+            embeddings = embedding_transform.apply(embeddings)
+        else:
+            embeddings = embeddings.astype(np.float32, copy=True)
+            embedding_transform = EmbeddingTransform.fit_transform_inplace(embeddings)
     metadata_lookup = metadata_by_id(load_metadata(resolve_path(args.metadata)))
     apply_strain_stars(metadata_lookup)
     return QueryContext(
