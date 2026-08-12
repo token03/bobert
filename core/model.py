@@ -312,6 +312,8 @@ class BobertEncoder(nn.Module):
         vector_stats: VectorStats,
         beatmap_id: int | None = None,
     ) -> np.ndarray:
+        if self.rotary_emb.cached_freqs.device.type == "cpu":
+            self.rotary_emb.cached_freqs = self.rotary_emb.cached_freqs.bfloat16()
         beatmap = parse_osu_bytes(
             content,
             beatmap_id=beatmap_id,
