@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -11,10 +12,9 @@ import time
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from dotenv import load_dotenv
 
 
-TARGET = "bobert-vps"
-REMOTE_ROOT = "~/bobert"
 ARTIFACTS = ("bobert.pt", "embeddings.parquet", "embeddings.json")
 CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet")
 
@@ -22,7 +22,7 @@ CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet")
 def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
     model_path = run_dir / "bobert.pt"
     embeddings_path = run_dir / "embeddings.parquet"
-    metadata = json.loads((run_dir / "embeddings.json").read_text(encoding="utf-8"))
+    sidecar = json.loads((run_dir / "embeddings.json").read_text(encoding="utf-8"))
     parquet = pq.ParquetFile(embeddings_path)
     schema = parquet.schema_arrow
     if schema.names != ["beatmap_id", "embedding"]:
@@ -37,7 +37,7 @@ def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
         raise ValueError(
             f"embedding dimension {embedding_type.list_size} does not match model dimension {dimension}"
         )
-    if int(metadata.get("count", -1)) != parquet.metadata.num_rows:
+    if int(sidecar.get("count", -1)) != parquet.metadata.num_rows:
         raise ValueError("embeddings.json count does not match embeddings.parquet")
 
     if metadata:
@@ -67,6 +67,11 @@ def main() -> int:
         )
 
     root = Path(__file__).resolve().parents[1]
+    load_dotenv(root / ".env")
+    target = os.getenv("DEPLOY_SSH_TARGET")
+    remote_root = os.getenv("DEPLOY_REMOTE_ROOT")
+    if not target or not remote_root:
+        parser.error("DEPLOY_SSH_TARGET and DEPLOY_REMOTE_ROOT are required in .env")
     run_dir = root / "runs" / args.version
     required = [*(run_dir / name for name in ARTIFACTS)]
     if args.metadata:
@@ -89,10 +94,10 @@ def main() -> int:
         "-o",
         "RequestTTY=no",
     ]
-    ssh = ["ssh", *ssh_options, TARGET]
-    remote_run = f"{REMOTE_ROOT}/runs/{args.version}"
+    ssh = ["ssh", *ssh_options, target]
+    remote_run = f"{remote_root}/runs/{args.version}"
     previous = subprocess.run(
-        [*ssh, f"readlink {REMOTE_ROOT}/runs/current"],
+        [*ssh, f"readlink {remote_root}/runs/current"],
         check=False,
         capture_output=True,
         text=True,
@@ -103,41 +108,41 @@ def main() -> int:
             "scp",
             *ssh_options,
             *(str(run_dir / name) for name in ARTIFACTS),
-            f"{TARGET}:{remote_run}/",
+            f"{target}:{remote_run}/",
         ],
         check=True,
     )
     if args.metadata:
-        remote_metadata = f"{REMOTE_ROOT}/data/.deploy-{args.version}"
+        remote_metadata = f"{remote_root}/data/.deploy-{args.version}"
         subprocess.run([*ssh, f"mkdir -p {remote_metadata}"], check=True)
         subprocess.run(
             [
                 "scp",
                 *ssh_options,
                 *(str(root / "data" / name) for name in CATALOGS),
-                f"{TARGET}:{remote_metadata}/",
+                f"{target}:{remote_metadata}/",
             ],
             check=True,
         )
         subprocess.run(
             [
                 *ssh,
-                f"mv -f {remote_metadata}/beatmaps.parquet {remote_metadata}/beatmapsets.parquet {REMOTE_ROOT}/data/ && rmdir {remote_metadata}",
+                f"mv -f {remote_metadata}/beatmaps.parquet {remote_metadata}/beatmapsets.parquet {remote_root}/data/ && rmdir {remote_metadata}",
             ],
             check=True,
         )
     subprocess.run(
         [
             *ssh,
-            f"cd {REMOTE_ROOT}/runs && ln -sfn -- {shlex.quote(args.version)} .current && mv -Tf -- .current current",
+            f"cd {remote_root}/runs && ln -sfn -- {shlex.quote(args.version)} .current && mv -Tf -- .current current",
         ],
         check=True,
     )
     subprocess.run(
-        [*ssh, f"cd {REMOTE_ROOT} && docker compose restart api"], check=True
+        [*ssh, f"cd {remote_root} && docker compose restart api"], check=True
     )
 
-    health = f"cd {REMOTE_ROOT} && docker compose exec -T api python -c " + shlex.quote(
+    health = f"cd {remote_root} && docker compose exec -T api python -c " + shlex.quote(
         "import urllib.request; "
         "urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
     )
@@ -154,12 +159,12 @@ def main() -> int:
         subprocess.run(
             [
                 *ssh,
-                f"cd {REMOTE_ROOT}/runs && ln -sfn -- {shlex.quote(rollback)} .current && mv -Tf -- .current current",
+                f"cd {remote_root}/runs && ln -sfn -- {shlex.quote(rollback)} .current && mv -Tf -- .current current",
             ],
             check=True,
         )
         subprocess.run(
-            [*ssh, f"cd {REMOTE_ROOT} && docker compose restart api"], check=True
+            [*ssh, f"cd {remote_root} && docker compose restart api"], check=True
         )
     raise RuntimeError("API health check failed; restored previous run")
 
