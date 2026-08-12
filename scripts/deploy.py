@@ -13,12 +13,13 @@ import pyarrow.parquet as pq
 import torch
 
 
-TARGET = "bobert"
+TARGET = "bobert-vps"
 REMOTE_ROOT = "~/bobert"
 ARTIFACTS = ("bobert.pt", "embeddings.parquet", "embeddings.json")
+CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet")
 
 
-def validate_run(root: Path, run_dir: Path) -> None:
+def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
     model_path = run_dir / "bobert.pt"
     embeddings_path = run_dir / "embeddings.parquet"
     metadata = json.loads((run_dir / "embeddings.json").read_text(encoding="utf-8"))
@@ -39,19 +40,25 @@ def validate_run(root: Path, run_dir: Path) -> None:
     if int(metadata.get("count", -1)) != parquet.metadata.num_rows:
         raise ValueError("embeddings.json count does not match embeddings.parquet")
 
-    catalogs = {
-        root / "data" / "beatmaps.parquet": {"id", "beatmapset_id"},
-        root / "data" / "beatmapsets.parquet": {"beatmap_id", "beatmapset_id"},
-    }
-    for path, columns in catalogs.items():
-        missing = columns - set(pq.read_schema(path).names)
-        if missing:
-            raise ValueError(f"{path.name} is missing columns: {sorted(missing)}")
+    if metadata:
+        catalogs = {
+            root / "data" / "beatmaps.parquet": {"id", "beatmapset_id"},
+            root / "data" / "beatmapsets.parquet": {"beatmap_id", "beatmapset_id"},
+        }
+        for path, columns in catalogs.items():
+            missing = columns - set(pq.read_schema(path).names)
+            if missing:
+                raise ValueError(f"{path.name} is missing columns: {sorted(missing)}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deploy a BoBERT run.")
     parser.add_argument("-v", "--version", required=True)
+    parser.add_argument(
+        "--metadata",
+        action="store_true",
+        help="Also upload data/beatmaps.parquet and data/beatmapsets.parquet.",
+    )
     args = parser.parse_args()
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.version):
@@ -61,20 +68,27 @@ def main() -> int:
 
     root = Path(__file__).resolve().parents[1]
     run_dir = root / "runs" / args.version
-    required = [
-        *(run_dir / name for name in ARTIFACTS),
-        root / "data" / "beatmaps.parquet",
-        root / "data" / "beatmapsets.parquet",
-    ]
+    required = [*(run_dir / name for name in ARTIFACTS)]
+    if args.metadata:
+        required.extend(root / "data" / name for name in CATALOGS)
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
         parser.error(f"missing required files: {', '.join(missing)}")
     try:
-        validate_run(root, run_dir)
+        validate_run(root, run_dir, metadata=args.metadata)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
 
-    ssh_options = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+    ssh_options = [
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "RemoteCommand=none",
+        "-o",
+        "RequestTTY=no",
+    ]
     ssh = ["ssh", *ssh_options, TARGET]
     remote_run = f"{REMOTE_ROOT}/runs/{args.version}"
     previous = subprocess.run(
@@ -93,6 +107,25 @@ def main() -> int:
         ],
         check=True,
     )
+    if args.metadata:
+        remote_metadata = f"{REMOTE_ROOT}/data/.deploy-{args.version}"
+        subprocess.run([*ssh, f"mkdir -p {remote_metadata}"], check=True)
+        subprocess.run(
+            [
+                "scp",
+                *ssh_options,
+                *(str(root / "data" / name) for name in CATALOGS),
+                f"{TARGET}:{remote_metadata}/",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                *ssh,
+                f"mv -f {remote_metadata}/beatmaps.parquet {remote_metadata}/beatmapsets.parquet {REMOTE_ROOT}/data/ && rmdir {remote_metadata}",
+            ],
+            check=True,
+        )
     subprocess.run(
         [
             *ssh,
