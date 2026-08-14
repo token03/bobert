@@ -53,15 +53,61 @@ def load_failed_state():
         return {"failed_ids": {}}
 
 
-def fetch_missing_beatmaps(ids=None):
+def fetch_status_beatmaps(api, statuses):
+    beatmaps = {}
+
+    for status in statuses:
+        cursor = None
+        with Progress(
+            SpinnerColumn(),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+            TimeRemainingColumn(),
+            expand=True,
+        ) as bar:
+            task = bar.add_task(f"Finding {status} beatmaps...", total=None)
+
+            while True:
+                result = ossapi_request(
+                    api.search_beatmapsets,
+                    category=status,
+                    explicit_content="show",
+                    cursor=cursor,
+                )
+                bar.update(task, total=result.total)
+
+                for beatmapset in result.beatmapsets:
+                    for beatmap in beatmapset.beatmaps or []:
+                        beatmap._beatmapset = beatmapset
+                        beatmaps[beatmap.id] = beatmap_to_dict(beatmap)
+
+                bar.update(task, advance=len(result.beatmapsets))
+                cursor = result.cursor
+                if cursor is None:
+                    break
+
+        print(
+            f"[green]Found {len(beatmaps)} unique beatmaps across selected statuses.[/green]"
+        )
+
+    return beatmaps
+
+
+def fetch_missing_beatmaps(ids=None, statuses=None):
     DATA_DIR.mkdir(exist_ok=True)
 
-    if ids is None and not COLLECTION_BEATMAPS_PATH.exists():
+    if ids is None and not statuses and not COLLECTION_BEATMAPS_PATH.exists():
         beatmaps_df, _ = load_existing_beatmaps()
         if not beatmaps_df.empty:
             return beatmaps_df
         print(f"[red]Error: Source file not found at {COLLECTION_BEATMAPS_PATH}[/red]")
         return pd.DataFrame()
+
+    api = osu_api() if statuses else None
+    status_beatmaps = fetch_status_beatmaps(api, statuses) if statuses else None
+    if status_beatmaps is not None:
+        ids = status_beatmaps
 
     source_ids = (
         pd.Series(sorted(ids, key=str)).dropna().unique()
@@ -81,7 +127,16 @@ def fetch_missing_beatmaps(ids=None):
 
     print(f"[cyan]Total left to fetch: {len(todo_ids)}[/cyan]")
 
-    api = osu_api()
+    if status_beatmaps is not None:
+        beatmaps_df = pd.concat(
+            [beatmaps_df, pd.DataFrame(status_beatmaps[bid] for bid in todo_ids)],
+            ignore_index=True,
+        )
+        atomic_parquet(beatmaps_df, BEATMAPS_PATH)
+        print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
+        return beatmaps_df
+
+    api = api or osu_api()
     new_data = []
     is_shutting_down = False
     previous_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -160,8 +215,17 @@ def fetch_missing_beatmaps(ids=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch beatmap metadata from osu!")
-    parser.parse_args()
-    fetch_missing_beatmaps()
+    for status in ("wip", "pending", "qualified", "graveyard"):
+        parser.add_argument(
+            f"--{status}", action="store_true", help=f"fetch {status} beatmaps"
+        )
+    args = parser.parse_args()
+    statuses = [
+        status
+        for status in ("wip", "pending", "qualified", "graveyard")
+        if getattr(args, status)
+    ]
+    fetch_missing_beatmaps(statuses=statuses)
 
 
 if __name__ == "__main__":
