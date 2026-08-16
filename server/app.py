@@ -34,8 +34,8 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from serve.osu import BeatmapUnavailableError, OsuClient
-from serve.runtime import Runtime, metadata_complete, public_summary
+from server.osu import BeatmapUnavailableError, OsuClient
+from server.runtime import Runtime, metadata_complete, public_summary
 
 MAX_RECOMMEND_TOP_K = 1000
 DEFAULT_RECOMMEND_IDS = [

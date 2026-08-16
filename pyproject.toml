@@ -67,10 +67,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["serve", "training", "scripts", "core"]
+packages = ["server", "training", "scripts", "core"]
 
 [tool.ruff.lint.per-file-ignores]
-"serve/app.py" = ["E402"]
+"server/app.py" = ["E402"]
 "scripts/dataset/strains.py" = ["BLE001"]
 
 [tool.uv]

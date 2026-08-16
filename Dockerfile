@@ -18,6 +18,6 @@ COPY requirements.txt ./
 RUN uv pip install --system --no-cache --torch-backend=cpu -r requirements.txt
 
 COPY core ./core
-COPY serve ./serve
+COPY server ./server
 
-CMD ["uvicorn", "serve.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--no-access-log"]
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--no-access-log"]
