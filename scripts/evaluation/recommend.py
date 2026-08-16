@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from itertools import islice
+import json
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from scripts.common.api import ossapi_request, osu_api
-from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
+from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmaps_metadata
 from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings, mapper_ids
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 from scripts.common.query import (
@@ -29,6 +30,7 @@ from scripts.common.query import (
     load_embeddings,
     load_metadata,
     metadata_by_id,
+    sharded_osu_path,
 )
 from scripts.model.embed import find_model
 from core.model import EmbeddingTransform
@@ -86,23 +88,30 @@ def refresh_missing_metadata(
 ):
     api = None
     refreshed = []
+    fetched = []
     for beatmap_id, similarity, row in results:
         if beatmap_table_values_missing(row):
             try:
                 api = api or osu_api()
                 console.print(f"[dim]Fetching metadata for {beatmap_id}...[/dim]")
                 strain_stars = (row or {}).get("difficulty_rating")
-                row = fetch_beatmap_metadata(api, beatmap_id)
+                row = fetch_beatmap_metadata(
+                    api,
+                    beatmap_id,
+                    metadata_set_id(row),
+                    sharded_osu_path(beatmap_id, ctx.beatmaps_dir),
+                )
                 if strain_stars is not None:
                     row["difficulty_rating"] = strain_stars
-                upsert_beatmap_metadata(row, ctx.metadata_path)
                 ctx.metadata_lookup[beatmap_id] = row
+                fetched.append(row)
             except Exception as exc:
                 console.print(
                     f"[yellow]Warning:[/yellow] could not refresh {beatmap_id}: "
                     f"{escape(str(exc))}"
                 )
         refreshed.append((beatmap_id, similarity, row))
+    upsert_beatmaps_metadata(fetched, ctx.metadata_path)
     return refreshed
 
 
@@ -513,9 +522,6 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
-    parser.add_argument(
-        "--no-center", action="store_true", help="Only L2-normalize embeddings"
-    )
     return parser.parse_args()
 
 
@@ -537,7 +543,7 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
-        return beatmap_ids, embeddings, id_to_index
+        return beatmap_ids, embeddings, id_to_index, embeddings_path
     if args.embeddings:
         embeddings_path = resolve_path(args.embeddings)
     elif args.version:
@@ -555,22 +561,24 @@ def load_query_data(args: argparse.Namespace, mode: str):
         f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
         f"[dim]{escape(str(embeddings_path))}[/dim]"
     )
-    return beatmap_ids, embeddings, id_to_index
+    return beatmap_ids, embeddings, id_to_index, embeddings_path
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = MODE_GRAPH if args.graph else MODE_MAPPER if args.mapper else MODE_DEFAULT
-    beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
+    beatmap_ids, embeddings, id_to_index, embeddings_path = load_query_data(args, mode)
     embedding_transform = None
     if mode != MODE_GRAPH and len(embeddings):
-        if args.no_center:
-            embedding_transform = EmbeddingTransform(
-                np.zeros(embeddings.shape[1], dtype=np.float32)
-            )
-            embeddings = embedding_transform.apply(embeddings)
-        else:
-            embeddings = embeddings.astype(np.float32, copy=True)
-            embedding_transform = EmbeddingTransform.fit_transform_inplace(embeddings)
+        sidecar = json.loads(
+            embeddings_path.with_suffix(".json").read_text(encoding="utf-8")
+        )
+        embedding_transform = EmbeddingTransform(
+            np.asarray(sidecar["layer_means"], dtype=np.float32)
+        )
+        embeddings = embeddings.astype(np.float32, copy=True)
+        embeddings /= np.maximum(
+            np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
+        )
     metadata_lookup = metadata_by_id(load_metadata(resolve_path(args.metadata)))
     if mode != MODE_MAPPER:
         apply_strain_stars(metadata_lookup)

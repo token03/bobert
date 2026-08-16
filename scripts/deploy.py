@@ -39,6 +39,17 @@ def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
         )
     if int(sidecar.get("count", -1)) != parquet.metadata.num_rows:
         raise ValueError("embeddings.json count does not match embeddings.parquet")
+    if sidecar.get("pooling") == "layer_centered_mean":
+        layer_means = sidecar.get("layer_means")
+        global_layers = sorted(artifact["model_args"]["global_attention_layers"])
+        if (
+            not sidecar.get("centered")
+            or sidecar.get("layers") != global_layers
+            or not isinstance(layer_means, list)
+            or len(layer_means) != len(global_layers)
+            or any(not isinstance(mean, list) or len(mean) != dimension for mean in layer_means)
+        ):
+            raise ValueError("invalid layer-centered embedding metadata")
 
     if metadata:
         catalogs = {

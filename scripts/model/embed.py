@@ -18,7 +18,7 @@ from core.dataset import (
     load_beatmap_dataset,
 )
 from core.features import VectorStats, normalize
-from core.model import BobertEncoder
+from core.model import BobertEncoder, EmbeddingTransform
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
 
@@ -163,26 +163,6 @@ def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
     )
 
 
-def flush_embeddings(
-    writer: pq.ParquetWriter | None,
-    output_path: Path,
-    beatmap_ids: list[int],
-    embedding_batches: list[np.ndarray],
-) -> tuple[pq.ParquetWriter | None, int]:
-    if not beatmap_ids:
-        return writer, 0
-
-    row_count = len(beatmap_ids)
-    table = embedding_table(beatmap_ids, np.concatenate(embedding_batches, axis=0))
-    if writer is None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        writer = pq.ParquetWriter(output_path, table.schema)
-    writer.write_table(table)
-    beatmap_ids.clear()
-    embedding_batches.clear()
-    return writer, row_count
-
-
 def export_embeddings(
     config_path: Path,
     model_path: Path,
@@ -221,95 +201,109 @@ def export_embeddings(
         )
 
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    writer = None
-    buffered_ids: list[int] = []
-    buffered_embeddings: list[np.ndarray] = []
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    layer_count = len(model.global_attention_layers)
+    layer_total = np.zeros((layer_count, model.d_model), dtype=np.float64)
+    layer_embeddings = np.empty(
+        (len(ids), layer_count, model.d_model), dtype=np.float16
+    )
+    embedded_ids = np.empty(len(ids), dtype=np.int64)
     saved_count = 0
 
-    try:
-        with torch.inference_mode():
-            chunk_count = math.ceil(len(ids) / load_chunk_size)
-            for id_chunk in tqdm(
-                chunked(ids, load_chunk_size),
-                total=chunk_count,
-                desc="Loading chunks",
-                disable=quiet,
-            ):
-                beatmaps = load_beatmap_dataset(
-                    str(dataset_dir),
-                    dataset_seed=seed,
-                    max_seq_len=max_seq_len,
-                    ids_to_load=id_chunk,
-                    min_sr=min_sr,
-                    max_sr=None,
-                    chunk_size=max(1, int(load_chunk_size / 10)),
-                    quiet=quiet,
-                )
-                if not beatmaps:
-                    continue
-
-                dataset = ExportDataset(beatmaps)
-                batch_sampler = bucket_batch_sampler(
-                    beatmaps,
-                    batch_size,
-                    max_seq_len,
-                    bool(config.training.trainer.use_length_buckets),
-                    seed,
-                )
-                loader_kwargs = {
-                    "shuffle": False,
-                    "num_workers": 0,
-                    "pin_memory": device.type == "cuda",
-                    "collate_fn": lambda batch: collate_export(
-                        batch, max_seq_len, vector_stats
-                    ),
-                }
-                if batch_sampler is None:
-                    loader_kwargs["batch_size"] = batch_size
-                else:
-                    loader_kwargs["batch_sampler"] = batch_sampler
-                loader = DataLoader(dataset, **loader_kwargs)
-
-                for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
-                    loader, desc="Embedding", leave=False, disable=quiet
-                ):
-                    vectors = vectors.to(device, non_blocking=True)
-                    cu_seqlens = cu_seqlens.to(device, non_blocking=True)
-                    with torch.autocast(
-                        device_type=device.type,
-                        dtype=amp_dtype,
-                        enabled=device.type == "cuda",
-                    ):
-                        embeddings = model.embed_packed(
-                            vectors, cu_seqlens, int(max_seqlen)
-                        )
-
-                    embeddings_np = embeddings.float().cpu().numpy()
-                    buffered_ids.extend(int(bid) for bid in beatmap_ids.tolist())
-                    buffered_embeddings.append(embeddings_np)
-
-                    if len(buffered_ids) >= flush_size:
-                        writer, flushed_count = flush_embeddings(
-                            writer, output_path, buffered_ids, buffered_embeddings
-                        )
-                        saved_count += flushed_count
-
-            writer, flushed_count = flush_embeddings(
-                writer, output_path, buffered_ids, buffered_embeddings
+    with torch.inference_mode():
+        chunk_count = math.ceil(len(ids) / load_chunk_size)
+        for id_chunk in tqdm(
+            chunked(ids, load_chunk_size),
+            total=chunk_count,
+            desc="Loading chunks",
+            disable=quiet,
+        ):
+            beatmaps = load_beatmap_dataset(
+                str(dataset_dir),
+                dataset_seed=seed,
+                max_seq_len=max_seq_len,
+                ids_to_load=id_chunk,
+                min_sr=min_sr,
+                max_sr=None,
+                chunk_size=max(1, int(load_chunk_size / 10)),
+                quiet=quiet,
             )
-            saved_count += flushed_count
-    finally:
-        if writer is not None:
-            writer.close()
+            if not beatmaps:
+                continue
+
+            dataset = ExportDataset(beatmaps)
+            batch_sampler = bucket_batch_sampler(
+                beatmaps,
+                batch_size,
+                max_seq_len,
+                bool(config.training.trainer.use_length_buckets),
+                seed,
+            )
+            loader_kwargs = {
+                "shuffle": False,
+                "num_workers": 0,
+                "pin_memory": device.type == "cuda",
+                "collate_fn": lambda batch: collate_export(
+                    batch, max_seq_len, vector_stats
+                ),
+            }
+            if batch_sampler is None:
+                loader_kwargs["batch_size"] = batch_size
+            else:
+                loader_kwargs["batch_sampler"] = batch_sampler
+            loader = DataLoader(dataset, **loader_kwargs)
+
+            for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
+                loader, desc="Embedding", leave=False, disable=quiet
+            ):
+                vectors = vectors.to(device, non_blocking=True)
+                cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=amp_dtype,
+                    enabled=device.type == "cuda",
+                ):
+                    embeddings = model.embed_packed(
+                        vectors, cu_seqlens, int(max_seqlen)
+                    )
+
+                stored = embeddings.permute(1, 0, 2).float().cpu().numpy().astype(
+                    np.float16
+                )
+                stop = saved_count + len(stored)
+                layer_embeddings[saved_count:stop] = stored
+                embedded_ids[saved_count:stop] = beatmap_ids.numpy()
+                normalized = stored.astype(np.float32)
+                normalized /= np.maximum(
+                    np.linalg.norm(normalized, axis=-1, keepdims=True), 1e-12
+                )
+                layer_total += normalized.sum(axis=0, dtype=np.float64)
+                saved_count = stop
 
     if saved_count == 0:
         raise RuntimeError("No beatmaps loaded for export")
+
+    transform = EmbeddingTransform((layer_total / saved_count).astype(np.float32))
+    writer = None
+    try:
+        for start in range(0, saved_count, flush_size):
+            stop = min(start + flush_size, saved_count)
+            table = embedding_table(
+                embedded_ids[start:stop].tolist(),
+                transform.apply(layer_embeddings[start:stop]),
+            )
+            if writer is None:
+                writer = pq.ParquetWriter(output_path, table.schema)
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
 
     metadata_path = output_path.with_suffix(".json")
     metadata_path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "model": str(model_path),
                 "dataset": str(dataset_dir),
@@ -317,6 +311,10 @@ def export_embeddings(
                 "limit": limit,
                 "seed": seed,
                 "count": saved_count,
+                "pooling": "layer_centered_mean",
+                "centered": True,
+                "layers": sorted(model.global_attention_layers),
+                "layer_means": transform.means.tolist(),
             },
             indent=2,
         )

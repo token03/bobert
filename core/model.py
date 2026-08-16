@@ -25,43 +25,26 @@ T = TypeVar("T", bound="BobertEncoder")
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingTransform:
-    mean: np.ndarray
+    means: np.ndarray
 
-    @staticmethod
-    def _normalize_inplace(embeddings: np.ndarray) -> None:
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        embeddings /= np.maximum(norms, 1e-12)
-
-    @classmethod
-    def fit_transform_inplace(
-        cls, embeddings: np.ndarray, chunk_size: int = 16384
-    ) -> "EmbeddingTransform":
-        if embeddings.dtype != np.float32 or embeddings.ndim != 2:
-            raise ValueError("embeddings must be a two-dimensional float32 array")
-        if not len(embeddings):
-            raise ValueError("cannot fit an empty embedding matrix")
-
-        total = np.zeros(embeddings.shape[1], dtype=np.float64)
-        for start in range(0, len(embeddings), chunk_size):
-            chunk = embeddings[start : start + chunk_size]
-            cls._normalize_inplace(chunk)
-            total += chunk.sum(axis=0, dtype=np.float64)
-
-        transform = cls((total / len(embeddings)).astype(np.float32))
-        for start in range(0, len(embeddings), chunk_size):
-            chunk = embeddings[start : start + chunk_size]
-            chunk -= transform.mean
-            cls._normalize_inplace(chunk)
-        return transform
+    def __post_init__(self) -> None:
+        means = np.asarray(self.means, dtype=np.float32)
+        if means.ndim != 2:
+            raise ValueError("layer means must be a two-dimensional array")
+        object.__setattr__(self, "means", means)
 
     def apply(self, embeddings: np.ndarray) -> np.ndarray:
-        vector = embeddings.ndim == 1
         values = np.asarray(embeddings, dtype=np.float32)
-        values = np.array(values[None, :] if vector else values, copy=True)
-        self._normalize_inplace(values)
-        values -= self.mean
-        self._normalize_inplace(values)
-        return values[0] if vector else values
+        single = values.ndim == 2
+        values = np.array(values[None] if single else values, copy=True)
+        if values.ndim != 3 or values.shape[1:] != self.means.shape:
+            raise ValueError("layer embeddings do not match fitted layer means")
+        values /= np.maximum(np.linalg.norm(values, axis=-1, keepdims=True), 1e-12)
+        values -= self.means
+        values /= np.maximum(np.linalg.norm(values, axis=-1, keepdims=True), 1e-12)
+        pooled = values.mean(axis=1)
+        pooled /= np.maximum(np.linalg.norm(pooled, axis=-1, keepdims=True), 1e-12)
+        return pooled[0] if single else pooled
 
 
 class BobertEncoder(nn.Module):
@@ -213,6 +196,19 @@ class BobertEncoder(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        packed_output, layer_embeddings = self.encode_with_layer_embeddings(
+            packed_embeddings,
+            cu_seqlens,
+            max_seqlen,
+        )
+        return packed_output, layer_embeddings.mean(dim=0)
+
+    def encode_with_layer_embeddings(
+        self,
+        packed_embeddings: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         positions = torch.arange(max_seqlen, device=packed_embeddings.device)
         torch._dynamo.mark_dynamic(packed_embeddings, 0)
         torch._dynamo.mark_dynamic(cu_seqlens, 0)
@@ -224,7 +220,7 @@ class BobertEncoder(nn.Module):
             positions,
             global_embeddings=global_embeddings,
         )
-        return packed_output, torch.stack(global_embeddings).mean(dim=0)
+        return packed_output, torch.stack(global_embeddings)
 
     def _encode(
         self,
@@ -299,12 +295,12 @@ class BobertEncoder(nn.Module):
         max_seqlen: int,
     ) -> torch.Tensor:
         packed_input = self.embed_sequences(packed_vectors)
-        _, embedding = self.encode_with_embedding(
+        _, embeddings = self.encode_with_layer_embeddings(
             packed_input,
             cu_seqlens,
             max_seqlen,
         )
-        return embedding
+        return embeddings
 
     def embed_osu_bytes(
         self,
@@ -339,8 +335,8 @@ class BobertEncoder(nn.Module):
                 enabled=device.type == "cuda",
             ),
         ):
-            embedding = self.embed_packed(vectors, cu_seqlens, length)
-        return embedding[0].float().cpu().numpy().astype(np.float32)
+            embeddings = self.embed_packed(vectors, cu_seqlens, length)
+        return embeddings[:, 0].float().cpu().numpy().astype(np.float32)
 
 
 class BobertForPretraining(nn.Module):

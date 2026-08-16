@@ -51,7 +51,9 @@ DIFFICULTY_NEIGHBOR_K = 50
 DIFFICULTY_BATCH_SIZE = 256
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
-RETRIEVAL_RECALL_KS = [10, 50, 100]
+RETRIEVAL_RECALL_K = 50
+RETRIEVAL_HARD_NEGATIVE_K = 100
+RETRIEVAL_HUBNESS_K = 50
 
 
 @dataclass
@@ -141,7 +143,13 @@ def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]
         path = target_path(target)
         name = target_name(path)
         run_dir = path.parent if path.parent.parent == RUNS_DIR else None
-        center = target not in no_center and name != "graph"
+        metadata_path = path.with_suffix(".json")
+        metadata = (
+            json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata_path.exists()
+            else {}
+        )
+        center = target not in no_center and name != "graph" and not metadata.get("centered")
         beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=False)
         loaded.append(
             TargetData(
@@ -194,6 +202,13 @@ def mean(values: list[float]) -> float:
     return float(np.mean(values)) if values else float("nan")
 
 
+def bottom20_mean(values: list[float]) -> float:
+    if not values:
+        return float("nan")
+    count = max(1, int(np.ceil(len(values) * 0.2)))
+    return float(np.mean(np.partition(values, count - 1)[:count]))
+
+
 def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
@@ -217,40 +232,72 @@ def evaluate_grouped_retrieval(
                 target_id for target_id in present if target_id != query_id
             )
 
-    ranks_by_query: dict[int, list[float]] = {}
+    r_precisions = []
+    recalls = []
+    local_margins = []
+    neighbor_occurrences = np.zeros(len(candidate_ids), dtype=np.int64)
     for query_id, positive_ids in positives_by_query.items():
         if not positive_ids:
             continue
         query_idx = candidate_indices[query_id]
         similarities = candidates @ candidates[query_idx]
         similarities[query_idx] = -np.inf
-        ranks = []
-        for target_id in positive_ids:
-            target_similarity = similarities[candidate_indices[target_id]]
-            greater = np.count_nonzero(similarities > target_similarity)
-            tied = np.count_nonzero(similarities == target_similarity)
-            rank = float(greater + 1 + (tied - 1) / 2)
-            ranks.append(rank)
-        ranks_by_query[query_id] = ranks
+        positive_indices = np.asarray(
+            [candidate_indices[target_id] for target_id in positive_ids]
+        )
+        positive_count = len(positive_indices)
+        top_count = min(
+            len(candidate_ids) - 1,
+            positive_count
+            + max(RETRIEVAL_HARD_NEGATIVE_K, RETRIEVAL_HUBNESS_K),
+        )
+        top_indices = np.argpartition(similarities, -top_count)[-top_count:]
+        top_indices = top_indices[np.lexsort((top_indices, -similarities[top_indices]))]
+        top_is_positive = np.isin(top_indices, positive_indices)
 
-    positive_ranks = [rank for ranks in ranks_by_query.values() for rank in ranks]
-    query_median_ranks = [float(np.median(ranks)) for ranks in ranks_by_query.values()]
-    return {
-        "median_positive_rank": float(np.median(positive_ranks))
-        if positive_ranks
-        else float("nan"),
-        "p90_positive_rank": float(np.percentile(query_median_ranks, 90))
-        if query_median_ranks
-        else float("nan"),
-        **{
-            f"macro_recall@{top_k}": mean(
-                [
-                    sum(rank <= top_k for rank in ranks) / len(ranks)
-                    for ranks in ranks_by_query.values()
-                ]
+        hits_at_r = top_is_positive[:positive_count]
+        r_precisions.append(float(hits_at_r.mean()))
+        recalls.append(
+            float(top_is_positive[:RETRIEVAL_RECALL_K].sum() / positive_count)
+        )
+
+        hard_negative_indices = top_indices[~top_is_positive][
+            :RETRIEVAL_HARD_NEGATIVE_K
+        ]
+        if len(hard_negative_indices):
+            local_margins.append(
+                float(
+                    np.percentile(similarities[positive_indices], 10)
+                    - np.percentile(similarities[hard_negative_indices], 90)
+                )
             )
-            for top_k in RETRIEVAL_RECALL_KS
-        },
+
+        neighbors = top_indices[: min(RETRIEVAL_HUBNESS_K, len(top_indices))]
+        neighbor_occurrences[neighbors] += 1
+
+    standard_deviation = float(neighbor_occurrences.std())
+    hubness = (
+        float(
+            np.mean(
+                (
+                    (neighbor_occurrences - neighbor_occurrences.mean())
+                    / standard_deviation
+                )
+                ** 3
+            )
+        )
+        if standard_deviation > 0
+        else float("nan")
+    )
+
+    return {
+        "macro_r_precision": mean(r_precisions),
+        f"macro_recall@{RETRIEVAL_RECALL_K}": mean(recalls),
+        "median_local_margin": float(np.median(local_margins))
+        if local_margins
+        else float("nan"),
+        "bottom20_local_margin": bottom20_mean(local_margins),
+        f"knn_{RETRIEVAL_HUBNESS_K}_skewness": hubness,
     }
 
 

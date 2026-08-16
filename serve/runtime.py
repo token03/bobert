@@ -26,7 +26,6 @@ EMBEDDINGS_PATH = Path(
 )
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
-EMBEDDING_CHUNK_SIZE = 16384
 SEARCH_CANDIDATE_FACTORS = (10, 25, 100)
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 SEARCH_COLUMNS = [
@@ -170,8 +169,14 @@ class Runtime:
             or self.static_embeddings.shape[0] != len(self.static_ids)
         ):
             raise RuntimeError("invalid embeddings.parquet shape")
-        self.transform = EmbeddingTransform.fit_transform_inplace(
-            self.static_embeddings, chunk_size=EMBEDDING_CHUNK_SIZE
+        sidecar = json.loads(
+            EMBEDDINGS_PATH.with_suffix(".json").read_text(encoding="utf-8")
+        )
+        self.transform = EmbeddingTransform(
+            np.asarray(sidecar["layer_means"], dtype=np.float32)
+        )
+        self.static_embeddings /= np.maximum(
+            np.linalg.norm(self.static_embeddings, axis=1, keepdims=True), 1e-12
         )
         self.static_embeddings.flags.writeable = False
         self.embedding_dim = self.static_embeddings.shape[1]
@@ -228,8 +233,10 @@ class Runtime:
         if not metadata_complete(cached.metadata):
             self.cache.delete(beatmap_id)
             return None
-        transformed = self._transform(cached.embedding)
-        return self._append(beatmap_id, transformed, cached.metadata), cached.metadata
+        return (
+            self._append(beatmap_id, cached.embedding, cached.metadata),
+            cached.metadata,
+        )
 
     def infer_and_store(
         self, beatmap_id: int, content: bytes, metadata: dict[str, Any]
@@ -238,19 +245,13 @@ class Runtime:
             raw = self.model.embed_osu_bytes(
                 content, self.vector_stats, beatmap_id=beatmap_id
             )
-        raw = np.asarray(raw, dtype=np.float32)
-        if raw.shape != (self.embedding_dim,):
-            raise ValueError(f"invalid model embedding shape: {raw.shape}")
-        norm = float(np.linalg.norm(raw))
-        if not np.isfinite(norm) or norm <= 1e-12:
-            raise ValueError("model returned an invalid embedding")
-        normalized = raw / norm
-        self.cache.upsert(beatmap_id, normalized, metadata)
-        return self._append(beatmap_id, self._transform(normalized), metadata)
+        transformed = self._transform(raw)
+        self.cache.upsert(beatmap_id, transformed, metadata)
+        return self._append(beatmap_id, transformed, metadata)
 
     def _transform(self, vector: np.ndarray) -> np.ndarray:
         vector = np.asarray(vector, dtype=np.float32)
-        if vector.shape != (self.embedding_dim,):
+        if vector.shape != self.transform.means.shape:
             raise ValueError(f"invalid embedding shape: {vector.shape}")
         transformed = self.transform.apply(vector)
         if (

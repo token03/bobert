@@ -13,7 +13,7 @@ from rich.progress import (
 import pandas as pd
 
 from scripts.common.api import ossapi_request, osu_api
-from scripts.common.beatmaps import beatmap_to_dict
+from scripts.common.beatmaps import beatmap_to_dict, fetch_beatmaps_metadata
 from scripts.common.io import atomic_json, atomic_parquet
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
@@ -171,8 +171,7 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
                 batch = todo_ids[i : i + BATCH_SIZE]
 
                 try:
-                    success_batch = ossapi_request(api.beatmaps, batch)
-                    new_data.extend([beatmap_to_dict(b) for b in success_batch])
+                    new_data.extend(fetch_beatmaps_metadata(api, batch))
                 except Exception as e:
                     bar.console.print(f"[red]Batch failed: {e}[/red]")
                     for bid in batch:
