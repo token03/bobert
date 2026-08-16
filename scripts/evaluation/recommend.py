@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -10,8 +11,9 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from scripts.common.api import osu_api
+from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmap_metadata
+from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings, mapper_ids
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 from scripts.common.query import (
     DEFAULT_BEATMAPS_DIR,
@@ -34,6 +36,7 @@ from core.model import EmbeddingTransform
 console = Console()
 MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
+MODE_MAPPER = "mapper"
 DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
 DEFAULT_STRAINS_PATH = PROJECT_ROOT / "data" / "strains.parquet"
 
@@ -55,19 +58,13 @@ class QueryContext:
     mode: str = MODE_DEFAULT
     embedding_transform: EmbeddingTransform | None = None
     cache: dict[int, np.ndarray] = field(default_factory=dict)
+    mapper_counts: dict[int, int] = field(default_factory=dict)
+    mapper_names: dict[int, str] = field(default_factory=dict)
 
 
 def metadata_set_id(row: dict | None) -> int | None:
     value = clean_value((row or {}).get("beatmapset_id"), None)
     return int(value) if value is not None else None
-
-
-def metadata_mapper_ids(row: dict | None) -> set[int]:
-    owners = str(clean_value((row or {}).get("owners"), "")).split()
-    if owners:
-        return {int(owner) for owner in owners}
-    value = clean_value((row or {}).get("user_id"), None)
-    return {int(value)} if value is not None else set()
 
 
 def apply_strain_stars(metadata_lookup: dict[int, dict]) -> None:
@@ -110,6 +107,8 @@ def refresh_missing_metadata(
 
 
 def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = None):
+    if ctx.mode == MODE_MAPPER:
+        return get_mapper_embedding(raw_input, ctx)
     beatmap_id = extract_beatmap_id(raw_input)
     if fixed_label is not None:
         idx = ctx.id_to_index.get(beatmap_id)
@@ -168,7 +167,7 @@ def map_cells(
         stars,
         f"[{style}]{escape(title)}[/{style}]",
         f"[bright_magenta]{escape(creator)}[/bright_magenta]"
-        if query_mapper_ids and metadata_mapper_ids(row) & query_mapper_ids
+        if query_mapper_ids and mapper_ids(row) & query_mapper_ids
         else escape(creator),
         escape(version),
         bpm,
@@ -195,7 +194,7 @@ def print_query_table(beatmap_id: int, ctx: QueryContext, row: dict | None = Non
     table = Table(title="Query", show_header=True, header_style="bold magenta")
     add_map_columns(table)
     row = row or ctx.metadata_lookup.get(beatmap_id)
-    table.add_row(*map_cells(beatmap_id, row, metadata_mapper_ids(row)))
+    table.add_row(*map_cells(beatmap_id, row, mapper_ids(row)))
     console.print()
     console.print(table)
 
@@ -212,6 +211,88 @@ def print_result_table(
     for beatmap_id, value, row in results:
         table.add_row(f"{value:.3f}", *map_cells(beatmap_id, row, query_mapper_ids))
     console.print(table)
+
+
+def load_mapper_names(mapper_ids: list[int], ctx: QueryContext) -> None:
+    missing = [
+        mapper_id
+        for mapper_id in dict.fromkeys(mapper_ids)
+        if mapper_id not in ctx.mapper_names
+    ]
+    if not missing:
+        return
+    api = osu_api()
+    for start in range(0, len(missing), 50):
+        users = ossapi_request(api.users, missing[start : start + 50])
+        ctx.mapper_names.update({int(user.id): user.username for user in users})
+
+
+def get_mapper_embedding(raw_input: str, ctx: QueryContext):
+    text = raw_input.strip()
+    is_beatmap = "osu.ppy.sh" in text and any(
+        part in text for part in ("/beatmaps/", "/beatmapsets/", "/b/")
+    )
+    value = text.rstrip("/").rsplit("/", 1)[-1]
+    if is_beatmap:
+        beatmap_id = extract_beatmap_id(text)
+        row = ctx.metadata_lookup.get(beatmap_id)
+        if row is None:
+            row = fetch_beatmap_metadata(osu_api(), beatmap_id)
+            ctx.metadata_lookup[beatmap_id] = row
+        mapper_id = int(clean_value(row.get("user_id"), None))
+    elif value.isdigit():
+        mapper_id = int(value)
+    else:
+        user = ossapi_request(osu_api().user, value)
+        mapper_id = int(user.id)
+        ctx.mapper_names[mapper_id] = user.username
+    idx = ctx.id_to_index.get(mapper_id)
+    if idx is None:
+        raise ValueError(
+            f"mapper {mapper_id} has fewer than {MIN_MAPPER_MAPS} embedded maps"
+        )
+    load_mapper_names([mapper_id], ctx)
+    return mapper_id, ctx.embeddings[idx]
+
+
+def print_mapper_table(
+    title: str | None,
+    rows: list[tuple[str, int]],
+    ctx: QueryContext,
+    label: str | None = None,
+) -> None:
+    table = Table(title=title, header_style="bold magenta")
+    if label:
+        table.add_column(label, justify="right", style="green")
+    table.add_column("ID", justify="right", style="cyan")
+    table.add_column("Mapper", style="blue")
+    table.add_column("Maps", justify="right", style="magenta")
+    for value, mapper_id in rows:
+        name = ctx.mapper_names.get(mapper_id, str(mapper_id))
+        cells = [
+            f"[link=https://osu.ppy.sh/users/{mapper_id}]{mapper_id}[/link]",
+            escape(name),
+            f"{ctx.mapper_counts[mapper_id]:,}",
+        ]
+        table.add_row(*([value] if label else []), *cells)
+    console.print(table)
+
+
+def mapper_recommend(raw_input: str, ctx: QueryContext) -> None:
+    mapper_id, query_embedding = get_embedding(raw_input, ctx)
+    results = list(islice(iter_neighbors(mapper_id, query_embedding, ctx), ctx.top_k))
+    result_ids = [mapper_id for mapper_id, _similarity, _row in results]
+    load_mapper_names(result_ids, ctx)
+
+    console.print()
+    print_mapper_table("Query Mapper", [("", mapper_id)], ctx)
+    print_mapper_table(
+        "Similar Mappers",
+        [(f"{similarity:.3f}", mapper_id) for mapper_id, similarity, _row in results],
+        ctx,
+        "Sim",
+    )
+    console.print()
 
 
 def iter_neighbors(beatmap_id: int, query_embedding: np.ndarray, ctx: QueryContext):
@@ -264,6 +345,13 @@ def compare(raw_input_a: str, raw_input_b: str, ctx: QueryContext):
         embedding_a.astype(np.float32, copy=False)
         @ embedding_b.astype(np.float32, copy=False)
     )
+    if ctx.mode == MODE_MAPPER:
+        console.print()
+        print_mapper_table(
+            None, [("A", beatmap_id_a), ("B", beatmap_id_b)], ctx, "Side"
+        )
+        console.print(f"[bold]Similarity:[/bold] [green]{similarity:.6f}[/green]\n")
+        return
 
     table = Table(show_header=True, header_style="bold magenta")
     add_map_columns(table, side=True)
@@ -302,13 +390,16 @@ def graph_recommend(raw_input: str, ctx: QueryContext):
             break
 
     print_query_table(beatmap_id, ctx)
-    query_mapper_ids = metadata_mapper_ids(ctx.metadata_lookup.get(beatmap_id))
+    query_mapper_ids = mapper_ids(ctx.metadata_lookup.get(beatmap_id))
     for title, results in (("Ranked", ranked_results), ("Unranked", unranked_results)):
         print_result_table(results, title=title, query_mapper_ids=query_mapper_ids)
     console.print()
 
 
 def recommend(raw_input: str, ctx: QueryContext):
+    if ctx.mode == MODE_MAPPER:
+        mapper_recommend(raw_input, ctx)
+        return
     if ctx.mode == MODE_GRAPH:
         graph_recommend(raw_input, ctx)
         return
@@ -346,7 +437,7 @@ def recommend(raw_input: str, ctx: QueryContext):
 
     print_result_table(
         refresh_missing_metadata(results, ctx),
-        query_mapper_ids=metadata_mapper_ids(query_row),
+        query_mapper_ids=mapper_ids(query_row),
     )
     console.print()
 
@@ -361,8 +452,13 @@ def run_query(parts: list[str], ctx: QueryContext):
 
 
 def run_interactive(ctx: QueryContext):
+    entity = (
+        "mapper username/ID or beatmap URL"
+        if ctx.mode == MODE_MAPPER
+        else "beatmap id/URL"
+    )
     console.print(
-        "[dim]Paste one beatmap id/URL for recommendations, or two for comparison.[/dim]"
+        f"[dim]Enter one {entity} for recommendations, or two for comparison.[/dim]"
     )
     console.print(
         "[dim]Press Ctrl+C to clear, or Ctrl+D, q, quit, or empty input to exit.[/dim]"
@@ -405,6 +501,11 @@ def parse_args():
         action="store_true",
         help="Use fixed graph embeddings from data/graph.parquet",
     )
+    parser.add_argument(
+        "--mapper",
+        action="store_true",
+        help=f"Recommend mapper centroids with at least {MIN_MAPPER_MAPS} maps",
+    )
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
     parser.add_argument("-v", "--version")
@@ -421,6 +522,8 @@ def parse_args():
 def validate_args(args: argparse.Namespace):
     if len(args.beatmaps) > 2:
         raise SystemExit("Error: provide at most two beatmap ids or URLs")
+    if args.graph and args.mapper:
+        raise SystemExit("Error: --graph and --mapper cannot be combined")
 
 
 def load_query_data(args: argparse.Namespace, mode: str):
@@ -456,10 +559,10 @@ def load_query_data(args: argparse.Namespace, mode: str):
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
-    mode = MODE_GRAPH if args.graph else MODE_DEFAULT
+    mode = MODE_GRAPH if args.graph else MODE_MAPPER if args.mapper else MODE_DEFAULT
     beatmap_ids, embeddings, id_to_index = load_query_data(args, mode)
     embedding_transform = None
-    if mode == MODE_DEFAULT and len(embeddings):
+    if mode != MODE_GRAPH and len(embeddings):
         if args.no_center:
             embedding_transform = EmbeddingTransform(
                 np.zeros(embeddings.shape[1], dtype=np.float32)
@@ -469,7 +572,17 @@ def build_context(args: argparse.Namespace) -> QueryContext:
             embeddings = embeddings.astype(np.float32, copy=True)
             embedding_transform = EmbeddingTransform.fit_transform_inplace(embeddings)
     metadata_lookup = metadata_by_id(load_metadata(resolve_path(args.metadata)))
-    apply_strain_stars(metadata_lookup)
+    if mode != MODE_MAPPER:
+        apply_strain_stars(metadata_lookup)
+    mapper_counts = {}
+    if mode == MODE_MAPPER:
+        beatmap_ids, embeddings, id_to_index, mapper_counts = mapper_embeddings(
+            beatmap_ids, embeddings, metadata_lookup
+        )
+        console.print(
+            f"[green]Built[/green] {len(beatmap_ids):,} mapper centroids with at least "
+            f"{MIN_MAPPER_MAPS} maps"
+        )
     return QueryContext(
         beatmap_ids=beatmap_ids,
         embeddings=embeddings,
@@ -485,6 +598,7 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         version=args.version,
         mode=mode,
         embedding_transform=embedding_transform,
+        mapper_counts=mapper_counts,
     )
 
 

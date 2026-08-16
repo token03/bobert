@@ -12,9 +12,11 @@ from scripts.common.paths import (
     RUNS_DIR,
     resolve_path,
 )
+from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings
 
 EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
+MAPPER_OUTPUT_DIR = OUTPUT_DIR / "mappers"
 
 N_EXPORT_NEIGHBORS = 25
 UMAP_NEIGHBORS = 15
@@ -28,6 +30,27 @@ def _sample_df(df: pd.DataFrame, limit: int | None) -> pd.DataFrame:
     if limit is None or limit <= 0 or len(df) <= limit:
         return df.reset_index(drop=True)
     return df.sample(n=limit).reset_index(drop=True)
+
+
+def _mapper_df(mapper_ids: np.ndarray, map_counts: dict[int, int]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "beatmap_id": mapper_ids,
+            "title": [f"Mapper {mapper_id}" for mapper_id in mapper_ids],
+            "artist": "?",
+            "creator": [str(mapper_id) for mapper_id in mapper_ids],
+            "version": [
+                f"{map_counts[int(mapper_id)]:,} maps" for mapper_id in mapper_ids
+            ],
+            "difficulty_rating": 0.0,
+            "status": "mapper",
+            "submitted_date": "",
+            "playcount": 0,
+            "max_combo": 0,
+            "total_length": 0,
+            "bpm": 0,
+        }
+    )
 
 
 def _nearest_neighbors_cpu(matrix: np.ndarray, n_neighbors: int):
@@ -79,18 +102,21 @@ def _umap_cpu(
 
 def process(
     embeddings_path: Path = EMBEDDINGS_PATH,
-    output_dir: Path = OUTPUT_DIR,
+    output_dir: Path | None = None,
     limit: int | None = None,
     min_star: float | None = None,
     max_star: float | None = None,
     use_gpu: bool = True,
     center: bool = False,
+    mapper: bool = False,
     n_export_neighbors: int = N_EXPORT_NEIGHBORS,
     umap_neighbors: int = UMAP_NEIGHBORS,
 ):
     print("Initializing...")
     embeddings_path = _resolve_path(embeddings_path)
-    output_dir = _resolve_path(output_dir)
+    output_dir = _resolve_path(
+        output_dir or (MAPPER_OUTPUT_DIR if mapper else OUTPUT_DIR)
+    )
     if not embeddings_path.exists():
         raise FileNotFoundError(
             f"Embedding parquet not found at {embeddings_path}. Export Bobert embeddings first or pass --embeddings to an existing parquet."
@@ -100,9 +126,10 @@ def process(
         emb_df = pd.read_parquet(embeddings_path)
         pbar.update(1)
 
-        meta_df = pd.read_parquet(
-            BEATMAPS_PATH,
-            columns=[
+        meta_columns = (
+            ["id", "user_id", "owners", "difficulty_rating"]
+            if mapper
+            else [
                 "id",
                 "title",
                 "artist",
@@ -115,8 +142,9 @@ def process(
                 "max_combo",
                 "total_length",
                 "bpm",
-            ],
+            ]
         )
+        meta_df = pd.read_parquet(BEATMAPS_PATH, columns=meta_columns)
         pbar.update(1)
 
     print("Merging metadata...")
@@ -127,11 +155,12 @@ def process(
         df = df[df["difficulty_rating"] <= max_star]
     if len(df) == 0:
         raise ValueError("No beatmaps remain after applying filters.")
-    df = _sample_df(df, limit)
+    if not mapper:
+        df = _sample_df(df, limit)
 
     del emb_df, meta_df
 
-    print(f"Preparing matrix ({len(df)} items)...")
+    print(f"Preparing {'mapper ' if mapper else ''}matrix ({len(df)} items)...")
     matrix_cpu = np.stack(df["embedding"].values).astype(np.float32)
     matrix_cpu /= np.clip(np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None)
     if center:
@@ -141,10 +170,24 @@ def process(
             np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None
         )
 
+    if mapper:
+        metadata = df.set_index("beatmap_id")[["user_id", "owners"]].to_dict("index")
+        mapper_ids, matrix_cpu, _, map_counts = mapper_embeddings(
+            df["beatmap_id"].to_numpy(), matrix_cpu, metadata
+        )
+        df = _mapper_df(mapper_ids, map_counts)
+        if limit is not None and limit > 0 and len(df) > limit:
+            selected = np.random.default_rng().choice(len(df), limit, replace=False)
+            df = df.iloc[selected].reset_index(drop=True)
+            matrix_cpu = matrix_cpu[selected]
+        print(f"Prepared mapper matrix ({len(df)} items)...")
+
     try:
         n_neighbors = max(n_export_neighbors, umap_neighbors)
         if use_gpu:
-            print(f"Calculating {n_export_neighbors} nearest neighbors (PyTorch GPU)...")
+            print(
+                f"Calculating {n_export_neighbors} nearest neighbors (PyTorch GPU)..."
+            )
             kn_dists, kn_indices = _nearest_neighbors_gpu(matrix_cpu, n_neighbors)
         else:
             print(f"Calculating {n_export_neighbors} nearest neighbors (CPU)...")
@@ -176,7 +219,7 @@ def process(
         embedding_2d = _umap_cpu(matrix_cpu, umap_neighbors)
 
     print("Preparing data for export...")
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Saving to {output_dir}/...")
 
@@ -230,18 +273,23 @@ def process(
     meta_df.to_parquet(output_dir / "meta.parquet", index=False)
 
     print("  - status_map.parquet")
+    status_codes = ["1", "2", "3", "4", "0", "-1", "-2"]
+    status_names = [
+        "Ranked",
+        "Approved",
+        "Qualified",
+        "Loved",
+        "Pending",
+        "WIP",
+        "Graveyard",
+    ]
+    if mapper:
+        status_codes.append("mapper")
+        status_names.append("Mapper")
     status_map_df = pd.DataFrame(
         {
-            "status_code": ["1", "2", "3", "4", "0", "-1", "-2"],
-            "status_name": [
-                "Ranked",
-                "Approved",
-                "Qualified",
-                "Loved",
-                "Pending",
-                "WIP",
-                "Graveyard",
-            ],
+            "status_code": status_codes,
+            "status_name": status_names,
         }
     )
     status_map_df.to_parquet(output_dir / "status_map.parquet", index=False)
@@ -259,7 +307,7 @@ def main() -> None:
         help="Embedding parquet with beatmap_id and embedding columns",
     )
     parser.add_argument("-v", "--version")
-    parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--limit", type=int, default=None, help="Optional random sample size"
     )
@@ -275,6 +323,11 @@ def main() -> None:
         action="store_true",
         help="Subtract the normalized embedding mean and renormalize",
     )
+    parser.add_argument(
+        "--mapper",
+        action="store_true",
+        help=f"Aggregate map embeddings by owner ID using at least {MIN_MAPPER_MAPS} maps",
+    )
     parser.add_argument("--neighbors", type=int, default=N_EXPORT_NEIGHBORS)
     parser.add_argument("--umap-neighbors", type=int, default=UMAP_NEIGHBORS)
     args = parser.parse_args()
@@ -287,12 +340,13 @@ def main() -> None:
             if args.version
             else EMBEDDINGS_PATH
         ),
-        output_dir=Path(args.output_dir),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
         limit=args.limit,
         min_star=args.min_star,
         max_star=args.max_star,
         use_gpu=not args.cpu,
         center=args.center,
+        mapper=args.mapper,
         n_export_neighbors=args.neighbors,
         umap_neighbors=args.umap_neighbors,
     )
