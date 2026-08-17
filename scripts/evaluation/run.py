@@ -202,6 +202,10 @@ def mean(values: list[float]) -> float:
     return float(np.mean(values)) if values else float("nan")
 
 
+def weighted_mean(values: list[float], weights: list[float]) -> float:
+    return float(np.average(values, weights=weights)) if values else float("nan")
+
+
 def bottom20_mean(values: list[float]) -> float:
     if not values:
         return float("nan")
@@ -234,6 +238,7 @@ def evaluate_grouped_retrieval(
 
     r_precisions = []
     recalls = []
+    query_weights = []
     local_margins = []
     neighbor_occurrences = np.zeros(len(candidate_ids), dtype=np.int64)
     for query_id, positive_ids in positives_by_query.items():
@@ -246,6 +251,7 @@ def evaluate_grouped_retrieval(
             [candidate_indices[target_id] for target_id in positive_ids]
         )
         positive_count = len(positive_indices)
+        query_weights.append(1 / np.sqrt(positive_count + 1))
         top_count = min(
             len(candidate_ids) - 1,
             positive_count
@@ -291,8 +297,8 @@ def evaluate_grouped_retrieval(
     )
 
     return {
-        "macro_r_precision": mean(r_precisions),
-        f"macro_recall@{RETRIEVAL_RECALL_K}": mean(recalls),
+        "macro_r_precision": weighted_mean(r_precisions, query_weights),
+        f"macro_recall@{RETRIEVAL_RECALL_K}": weighted_mean(recalls, query_weights),
         "median_local_margin": float(np.median(local_margins))
         if local_margins
         else float("nan"),
@@ -406,7 +412,8 @@ def ridge_oof(
         gram = x_train.T @ x_train / train_idx.numel()
         gram.diagonal().add_(PROBE_RIDGE_ALPHA)
         cross = x_train.T @ (y[train_idx] - y_mean) / train_idx.numel()
-        weights = torch.linalg.solve(gram, cross)
+        chol = torch.linalg.cholesky(gram)
+        weights = torch.cholesky_solve(cross, chol)
         pred[test_idx] = (x[test_idx] - x_mean) @ weights + y_mean
     return pred[:, 0] if vector_target else pred
 
@@ -446,7 +453,8 @@ def ridge_multiclass_metrics(
         gram.diagonal().add_(PROBE_RIDGE_ALPHA)
         cross = torch.zeros((x.shape[1], n_classes), device=x.device)
         cross.index_add_(1, train_labels, weighted_x.T)
-        weights = torch.linalg.solve(gram, cross / weight_sum)
+        chol = torch.linalg.cholesky(gram)
+        weights = torch.cholesky_solve(cross / weight_sum, chol)
         bias = torch.full((n_classes,), 1 / n_classes, device=x.device)
         scores = (x[test_idx] - x_mean) @ weights + bias
         target = y[test_idx]
