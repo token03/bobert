@@ -13,7 +13,11 @@ from rich.markup import escape
 from rich.table import Table
 
 from scripts.common.api import ossapi_request, osu_api
-from scripts.common.beatmaps import fetch_beatmap_metadata, upsert_beatmaps_metadata
+from scripts.common.beatmaps import (
+    fetch_beatmap_metadata,
+    fetch_beatmaps_metadata,
+    upsert_beatmaps_metadata,
+)
 from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings, mapper_ids
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 from scripts.common.query import (
@@ -30,7 +34,6 @@ from scripts.common.query import (
     load_embeddings,
     load_metadata,
     metadata_by_id,
-    sharded_osu_path,
 )
 from scripts.model.embed import find_model
 from core.model import EmbeddingTransform
@@ -86,33 +89,36 @@ def apply_strain_stars(metadata_lookup: dict[int, dict]) -> None:
 def refresh_missing_metadata(
     results: list[tuple[int, float, dict | None]], ctx: QueryContext
 ):
-    api = None
-    refreshed = []
+    missing = [
+        (beatmap_id, row)
+        for beatmap_id, _similarity, row in results
+        if beatmap_table_values_missing(row)
+    ]
     fetched = []
-    for beatmap_id, similarity, row in results:
-        if beatmap_table_values_missing(row):
-            try:
-                api = api or osu_api()
-                console.print(f"[dim]Fetching metadata for {beatmap_id}...[/dim]")
-                strain_stars = (row or {}).get("difficulty_rating")
-                row = fetch_beatmap_metadata(
-                    api,
-                    beatmap_id,
-                    metadata_set_id(row),
-                    sharded_osu_path(beatmap_id, ctx.beatmaps_dir),
-                )
+    if missing:
+        beatmap_ids = [beatmap_id for beatmap_id, _row in missing]
+        try:
+            console.print(
+                f"[dim]Fetching metadata for {len(beatmap_ids)} beatmaps...[/dim]"
+            )
+            fetched = fetch_beatmaps_metadata(osu_api(), beatmap_ids)
+            for (beatmap_id, old_row), row in zip(missing, fetched):
+                strain_stars = (old_row or {}).get("difficulty_rating")
                 if strain_stars is not None:
                     row["difficulty_rating"] = strain_stars
                 ctx.metadata_lookup[beatmap_id] = row
-                fetched.append(row)
-            except Exception as exc:
+        except Exception as exc:
+            for beatmap_id, _row in missing:
                 console.print(
                     f"[yellow]Warning:[/yellow] could not refresh {beatmap_id}: "
                     f"{escape(str(exc))}"
                 )
-        refreshed.append((beatmap_id, similarity, row))
+
     upsert_beatmaps_metadata(fetched, ctx.metadata_path)
-    return refreshed
+    return [
+        (beatmap_id, similarity, ctx.metadata_lookup.get(beatmap_id, row))
+        for beatmap_id, similarity, row in results
+    ]
 
 
 def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = None):
