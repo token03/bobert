@@ -26,7 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT pretraining.")
     parser.add_argument("--config", default="config.yaml")
     profile = parser.add_mutually_exclusive_group()
-    profile.add_argument("--ablate", action="store_true")
+    profile.add_argument("--proxy", action="store_true")
+    profile.add_argument("--validate", action="store_true")
     profile.add_argument("--full", action="store_true")
     parser.add_argument("--dataset-path")
     parser.add_argument("--sample-size", type=int)
@@ -62,12 +63,15 @@ def load_config(args: argparse.Namespace, checkpoint: dict | None = None) -> Dic
     )
     OmegaConf.set_struct(config, False)
 
-    if args.ablate:
+    if args.proxy:
         config.training.data.sample_size = 60000
         config.training.trainer.epochs = 6
+    elif args.validate:
+        config.training.data.sample_size = 120000
+        config.training.trainer.epochs = 10
     elif args.full:
         config.training.data.sample_size = None
-        config.training.trainer.epochs = 30
+        config.training.trainer.epochs = 20
 
     if args.dataset_path:
         config.data.dataset_path = args.dataset_path
