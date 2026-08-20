@@ -787,44 +787,6 @@ def run_difficulty_evals(targets: list[TargetData], _args: argparse.Namespace) -
     run_difficulty_probe(targets, data)
 
 
-def run_rff_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    if not RFF_EVAL_PATH.exists():
-        console.print(
-            f"[yellow]Skipping RFF Probe: {RFF_EVAL_PATH} not found.[/yellow]"
-        )
-        return
-    beatmap_ids, embeddings, id_to_index = load_embeddings(
-        RFF_EVAL_PATH, center=False, normalize=False
-    )
-    reference = TargetData(
-        "rff", RFF_EVAL_PATH, None, beatmap_ids, embeddings, id_to_index, False
-    )
-    ids = common_ids([*targets, reference])
-    if len(ids) < MIN_PROBE_MAPS:
-        return
-
-    device = probe_device()
-    folds = fold_indices(beatmapset_groups(ids), device)
-    y = torch.tensor(target_matrix(reference, ids), dtype=torch.float32, device=device)
-    y_mean = y.mean(dim=0)
-    y_std = y.std(dim=0)
-    valid = y_std > 1e-6
-
-    def r2(pred: torch.Tensor) -> float:
-        scale = y_std[valid]
-        residual = torch.sum(((y[:, valid] - pred[:, valid]) / scale) ** 2)
-        total = torch.sum(((y[:, valid] - y_mean[valid]) / scale) ** 2)
-        return float((1.0 - residual / total.clamp_min(1e-12)).item())
-
-    metrics = {}
-    for target in targets:
-        x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
-        pred = ridge_oof(x, y, folds)
-        metrics[target.name] = {"overall_r2": r2(pred)}
-        del x, pred
-    print_eval_result(EvalResult("RFF Probe", metrics))
-
-
 def load_valid_ngrams(path: Path) -> set[str]:
     ngrams = set()
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -1045,7 +1007,6 @@ def main() -> None:
         run_genre_eval,
         run_map_attribute_eval,
         run_difficulty_evals,
-        run_rff_eval,
         run_collection_ngram_eval,
         run_tournament_slot_eval,
     ]
