@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import json
 import time
 from pathlib import Path
 
@@ -8,6 +7,7 @@ import httpx
 import pandas as pd
 import tqdm
 
+from scripts.common.failures import load_failures, save_failures
 from scripts.common.osu import get_api_tiers, get_sharded_path, is_valid_osu_file
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 from scripts.sources.beatmaps.metadata import fetch_missing_beatmaps
@@ -43,29 +43,6 @@ class RateLimiter:
             self.next_request_time = max(
                 self.next_request_time, time.monotonic() + delay
             )
-
-
-def load_failed_downloads() -> dict[str, str]:
-    if not FAILED_DOWNLOADS_PATH.exists():
-        return {}
-    try:
-        with open(FAILED_DOWNLOADS_PATH) as f:
-            return json.load(f).get("failed_ids", {})
-    except Exception:
-        return {}
-
-
-def save_failed_downloads(failed_ids: dict[str, str]) -> None:
-    with open(FAILED_DOWNLOADS_PATH, "w") as f:
-        json.dump(
-            {
-                "failed_ids": dict(sorted(failed_ids.items())),
-                "count": len(failed_ids),
-                "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            f,
-            indent=2,
-        )
 
 
 def load_ids_file(path: str) -> list[str]:
@@ -181,7 +158,9 @@ async def download_jobs(
                 failed_ids[beatmap_id] = reason
                 failures_since_checkpoint += 1
                 if failures_since_checkpoint >= FAILED_DOWNLOADS_CHECKPOINT_INTERVAL:
-                    save_failed_downloads(existing_failed_ids | failed_ids)
+                    save_failures(
+                        FAILED_DOWNLOADS_PATH, existing_failed_ids | failed_ids
+                    )
                     failures_since_checkpoint = 0
             if completed >= len(jobs):
                 done.set()
@@ -298,7 +277,7 @@ def main():
         f"raw: {len(raw_ids):,}, dataset: {len(dataset_ids):,}"
     )
 
-    failed_ids = {} if args.retry_failed else load_failed_downloads()
+    failed_ids = {} if args.retry_failed else load_failures(FAILED_DOWNLOADS_PATH)
     if failed_ids:
         print(
             f"Skipping {len(failed_ids):,} previously failed downloads "
@@ -313,6 +292,8 @@ def main():
     ]
     print(f"Beatmaps to download: {len(jobs):,}")
     if not jobs:
+        if args.retry_failed:
+            save_failures(FAILED_DOWNLOADS_PATH, {})
         print("No beatmaps left to download.")
         return
 
@@ -326,8 +307,9 @@ def main():
     )
     failed_ids |= new_failed_ids
 
+    if failed_ids or args.retry_failed:
+        save_failures(FAILED_DOWNLOADS_PATH, failed_ids)
     if failed_ids:
-        save_failed_downloads(failed_ids)
         print(
             f"{len(failed_ids):,} beatmaps failed all download tiers - "
             f"saved to {FAILED_DOWNLOADS_PATH}"

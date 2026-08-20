@@ -1,20 +1,20 @@
 import argparse
-import json
 import signal
 
+import pandas as pd
 from rich import print
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
-    BarColumn,
     TextColumn,
     TimeRemainingColumn,
 )
-import pandas as pd
 
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import beatmap_to_dict, fetch_beatmaps_metadata
-from scripts.common.io import atomic_json, atomic_parquet
+from scripts.common.failures import load_failures, save_failures
+from scripts.common.io import atomic_parquet
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
 
 COLLECTION_BEATMAPS_PATH = COLLECTIONS_DIR / "edges.parquet"
@@ -41,16 +41,6 @@ def load_existing_beatmaps():
     except Exception as e:
         print(f"[red]Error loading Parquet: {e}. Starting fresh.[/red]")
         return pd.DataFrame(), set()
-
-
-def load_failed_state():
-    if not FAILED_BEATMAPS_PATH.exists():
-        return {"failed_ids": {}}
-    try:
-        with open(FAILED_BEATMAPS_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return {"failed_ids": {}}
 
 
 def fetch_status_beatmaps(api, statuses):
@@ -94,7 +84,22 @@ def fetch_status_beatmaps(api, statuses):
     return beatmaps
 
 
-def fetch_missing_beatmaps(ids=None, statuses=None):
+def upsert_beatmaps(beatmaps_df, records):
+    if not records:
+        return beatmaps_df
+    new_df = pd.DataFrame(records)
+    if beatmaps_df.empty:
+        return new_df
+    new_ids = set(new_df["id"].astype(str))
+    return pd.concat(
+        [beatmaps_df[~beatmaps_df["id"].astype(str).isin(new_ids)], new_df],
+        ignore_index=True,
+    )
+
+
+def fetch_missing_beatmaps(
+    ids=None, statuses=None, *, refresh=False, retry_failed=False
+):
     DATA_DIR.mkdir(exist_ok=True)
 
     if ids is None and not statuses and not COLLECTION_BEATMAPS_PATH.exists():
@@ -117,9 +122,22 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
     all_ids = [int(bid) for bid in source_ids if str(bid).isdigit()]
 
     beatmaps_df, existing_ids = load_existing_beatmaps()
-    failed_state = load_failed_state()
+    failed_ids = load_failures(FAILED_BEATMAPS_PATH)
+    cached_failed_ids = set() if retry_failed else set(failed_ids)
 
-    todo_ids = [bid for bid in all_ids if str(bid) not in existing_ids]
+    todo_ids = [
+        bid
+        for bid in all_ids
+        if (refresh or str(bid) not in existing_ids)
+        and str(bid) not in cached_failed_ids
+    ]
+
+    skipped_failed = sum(str(bid) in cached_failed_ids for bid in all_ids)
+    if skipped_failed:
+        print(
+            f"[yellow]Skipping {skipped_failed} cached metadata failures "
+            "(use --retry-failed to retry).[/yellow]"
+        )
 
     if len(todo_ids) == 0:
         print("[bold green]All beatmaps have been fetched![/bold green]")
@@ -128,11 +146,13 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
     print(f"[cyan]Total left to fetch: {len(todo_ids)}[/cyan]")
 
     if status_beatmaps is not None:
-        beatmaps_df = pd.concat(
-            [beatmaps_df, pd.DataFrame(status_beatmaps[bid] for bid in todo_ids)],
-            ignore_index=True,
+        beatmaps_df = upsert_beatmaps(
+            beatmaps_df, [status_beatmaps[bid] for bid in todo_ids]
         )
+        for bid in todo_ids:
+            failed_ids.pop(str(bid), None)
         atomic_parquet(beatmaps_df, BEATMAPS_PATH)
+        save_failures(FAILED_BEATMAPS_PATH, failed_ids)
         print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
         return beatmaps_df
 
@@ -171,14 +191,15 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
                 batch = todo_ids[i : i + BATCH_SIZE]
 
                 try:
-                    new_data.extend(fetch_beatmaps_metadata(api, batch))
+                    records = fetch_beatmaps_metadata(api, batch)
+                    new_data.extend(records)
+                    for bid in batch:
+                        failed_ids.pop(str(bid), None)
                 except Exception as e:
                     bar.console.print(f"[red]Batch failed: {e}[/red]")
                     for bid in batch:
                         bid_s = str(bid)
-                        failed_state["failed_ids"][bid_s] = (
-                            failed_state["failed_ids"].get(bid_s, 0) + 1
-                        )
+                        failed_ids[bid_s] = int(failed_ids.get(bid_s, 0)) + 1
 
                 bar.update(task, advance=len(batch))
 
@@ -186,12 +207,11 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
                     bar.console.print(
                         f"[green]Saving checkpoint ({len(new_data)} items)...[/green]"
                     )
-                    new_df = pd.DataFrame(new_data)
-                    beatmaps_df = pd.concat([beatmaps_df, new_df], ignore_index=True)
+                    beatmaps_df = upsert_beatmaps(beatmaps_df, new_data)
 
                     atomic_parquet(beatmaps_df, BEATMAPS_PATH)
 
-                    atomic_json(failed_state, FAILED_BEATMAPS_PATH)
+                    save_failures(FAILED_BEATMAPS_PATH, failed_ids)
 
                     new_data = []
 
@@ -201,12 +221,10 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
             print(
                 f"[green]Final Save: Writing {len(new_data)} items to disk...[/green]"
             )
-            beatmaps_df = pd.concat(
-                [beatmaps_df, pd.DataFrame(new_data)], ignore_index=True
-            )
+            beatmaps_df = upsert_beatmaps(beatmaps_df, new_data)
             atomic_parquet(beatmaps_df, BEATMAPS_PATH)
 
-        atomic_json(failed_state, FAILED_BEATMAPS_PATH)
+        save_failures(FAILED_BEATMAPS_PATH, failed_ids)
         print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
 
     return beatmaps_df
@@ -214,6 +232,9 @@ def fetch_missing_beatmaps(ids=None, statuses=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch beatmap metadata from osu!")
+    parser.add_argument(
+        "--retry-failed", action="store_true", help="Retry cached metadata failures"
+    )
     for status in ("wip", "pending", "qualified", "graveyard"):
         parser.add_argument(
             f"--{status}", action="store_true", help=f"fetch {status} beatmaps"
@@ -224,7 +245,7 @@ def main():
         for status in ("wip", "pending", "qualified", "graveyard")
         if getattr(args, status)
     ]
-    fetch_missing_beatmaps(statuses=statuses)
+    fetch_missing_beatmaps(statuses=statuses, retry_failed=args.retry_failed)
 
 
 if __name__ == "__main__":
