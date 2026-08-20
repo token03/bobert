@@ -59,8 +59,6 @@ fetch-collection-vertices = "scripts.sources.collections.vertices:main"
 fetch-collection-edges = "scripts.sources.collections.edges:main"
 fetch-tournaments = "scripts.sources.collections.tournaments:main"
 build-eval-graph = "scripts.evaluation.graph:main"
-build-eval-motifs = "scripts.evaluation.motifs:main"
-build-eval-rff = "scripts.evaluation.rff:main"
 build-eval-ngrams = "scripts.evaluation.ngrams:main"
 
 [build-system]
