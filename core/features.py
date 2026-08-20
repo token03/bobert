@@ -19,51 +19,6 @@ CENTER_X = OSU_STAGE_WIDTH / 2.0
 CENTER_Y = OSU_STAGE_HEIGHT / 2.0
 DEFAULT_PRE_START_MS = 200.0
 
-DURATION_BINS = (
-    1 / 16,
-    1 / 12,
-    1 / 8,
-    1 / 6,
-    1 / 4,
-    1 / 3,
-    3 / 8,
-    1 / 2,
-    5 / 8,
-    2 / 3,
-    3 / 4,
-    5 / 6,
-    7 / 8,
-    1,
-    5 / 4,
-    4 / 3,
-    3 / 2,
-    5 / 3,
-    7 / 4,
-    2,
-    9 / 4,
-    5 / 2,
-    3,
-    7 / 2,
-    15 / 4,
-    4,
-    9 / 2,
-    5,
-    6,
-    8,
-    16,
-    32,
-)
-
-DURATION_OFF_GRID = len(DURATION_BINS)
-DURATION_CARDINALITY = len(DURATION_BINS) + 1
-DURATION_BIN_VALUES = pl.Series(DURATION_BINS)
-DURATION_MIDPOINTS = pl.Series(
-    [(left + right) / 2 for left, right in zip(DURATION_BINS, DURATION_BINS[1:])]
-)
-BEAT_PHASE_DIVISIONS = 24
-BEAT_PHASE_CARDINALITY = BEAT_PHASE_DIVISIONS + 1
-ONSET_DURATION_TOLERANCE_MS = 2.0
-SUSTAIN_DURATION_TOLERANCE_MS = 3.0
 SPAN_COUNT_CARDINALITY = 5
 
 
@@ -79,19 +34,26 @@ class Feature:
 FEATURES = (
     Feature("norm_x", "spatial"),
     Feature("norm_y", "spatial"),
-    Feature("incoming_dx", "spatial", standardize=True),
-    Feature("incoming_dy", "spatial", standardize=True),
+    Feature("log_jump_distance", "spatial", standardize=True),
+    Feature("jump_direction_cos", "spatial"),
+    Feature("jump_direction_sin", "spatial"),
     Feature("log_onset_ioi_ms", "rhythm", standardize=True),
-    Feature("log_beat_length_ms", "rhythm", standardize=True),
+    Feature("onset_rhythm_cos", "rhythm"),
+    Feature("onset_rhythm_sin", "rhythm"),
     Feature(
         "log_span_duration_ms",
         "rhythm",
         standardize=True,
         conditional="slider",
     ),
+    Feature("span_rhythm_cos", "rhythm", conditional="slider"),
+    Feature("span_rhythm_sin", "rhythm", conditional="slider"),
     Feature("log_span_length", "spatial", standardize=True, conditional="slider"),
-    Feature("span_end_dx", "spatial", standardize=True, conditional="slider"),
-    Feature("span_end_dy", "spatial", standardize=True, conditional="slider"),
+    Feature(
+        "log_span_end_distance", "spatial", standardize=True, conditional="slider"
+    ),
+    Feature("span_end_direction_cos", "spatial", conditional="slider"),
+    Feature("span_end_direction_sin", "spatial", conditional="slider"),
     Feature("curve_residual_1_dx", "spatial", standardize=True, conditional="slider"),
     Feature("curve_residual_1_dy", "spatial", standardize=True, conditional="slider"),
     Feature("curve_residual_2_dx", "spatial", standardize=True, conditional="slider"),
@@ -102,28 +64,16 @@ FEATURES = (
         standardize=True,
         conditional="spinner",
     ),
+    Feature("spinner_rhythm_cos", "rhythm", conditional="spinner"),
+    Feature("spinner_rhythm_sin", "rhythm", conditional="spinner"),
     Feature("object_type", "attribute", cardinality=3),
     Feature("is_new_combo", "attribute", cardinality=2),
-    Feature("onset_duration_bin", "rhythm", cardinality=DURATION_CARDINALITY),
-    Feature("beat_phase", "rhythm", cardinality=BEAT_PHASE_CARDINALITY),
     Feature("incoming_motion_valid", "spatial", cardinality=3),
-    Feature(
-        "span_duration_bin",
-        "rhythm",
-        cardinality=DURATION_CARDINALITY,
-        conditional="slider",
-    ),
     Feature(
         "span_count_bin",
         "attribute",
         cardinality=SPAN_COUNT_CARDINALITY,
         conditional="slider",
-    ),
-    Feature(
-        "spinner_duration_bin",
-        "rhythm",
-        cardinality=DURATION_CARDINALITY,
-        conditional="spinner",
     ),
 )
 
@@ -167,38 +117,8 @@ FEATURE_INFO = {
 VectorStats = dict[str, tuple[torch.Tensor, torch.Tensor]]
 
 
-BEAT_PHASE_TOLERANCE_MS = 2.0
-BEAT_PHASE_OFF_GRID = BEAT_PHASE_CARDINALITY - 1
-
-
-def _duration_bins(
-    duration_ms: pl.Series, beat_length_ms: pl.Series, tolerance_ms: float
-) -> pl.Series:
-    nearest = DURATION_MIDPOINTS.search_sorted(
-        duration_ms / beat_length_ms, side="left"
-    )
-    error = (duration_ms - DURATION_BIN_VALUES.gather(nearest) * beat_length_ms).abs()
-    return nearest.cast(pl.Int32).set(
-        error.fill_null(float("inf")).fill_nan(float("inf")) > tolerance_ms,
-        DURATION_OFF_GRID,
-    )
-
-
-def _beat_phase_expr(phase: pl.Expr, beat_length_ms: pl.Expr) -> pl.Expr:
-    scaled = phase * BEAT_PHASE_DIVISIONS
-    nearest = scaled.round()
-    error_ms = (scaled - nearest).abs() * beat_length_ms / BEAT_PHASE_DIVISIONS
-    quantized = nearest.cast(pl.Int32, strict=False)
-    return (
-        pl.when(
-            error_ms.is_finite()
-            & (error_ms <= BEAT_PHASE_TOLERANCE_MS)
-            & quantized.is_not_null()
-        )
-        .then(quantized % BEAT_PHASE_DIVISIONS)
-        .otherwise(BEAT_PHASE_OFF_GRID)
-        .cast(pl.Int32)
-    )
+def _log_ratio_angle(value: pl.Expr) -> pl.Expr:
+    return value.clip(lower_bound=1e-6).log() * (2 * np.pi / np.log(2))
 
 
 def _filter_invalid_maps(
@@ -287,6 +207,14 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
         & ~is_break
     )
     duration_ms = (pl.col("end_time") - pl.col("time")).clip(lower_bound=0)
+    incoming_dx = pl.col("x") - pl.col("_prev_exit_x")
+    incoming_dy = pl.col("y") - pl.col("_prev_exit_y")
+    jump_distance = (incoming_dx.pow(2) + incoming_dy.pow(2)).sqrt()
+    direction_valid = incoming_valid & (jump_distance > 0)
+    span_end_dx = pl.col("span_end_dx")
+    span_end_dy = pl.col("span_end_dy")
+    span_end_distance = (span_end_dx.pow(2) + span_end_dy.pow(2)).sqrt()
+    span_end_direction_valid = is_slider & (span_end_distance > 0)
 
     df = (
         df.with_columns(
@@ -296,17 +224,20 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .then(2)
             .otherwise(incoming_valid.fill_null(False).cast(pl.Int32))
             .alias("incoming_motion_valid"),
-            (60000.0 / pl.col("bpm")).alias("_active_beat_length_ms"),
         )
         .with_columns(
             pl.when(incoming_valid)
-            .then((pl.col("x") - pl.col("_prev_exit_x")) / OSU_STAGE_WIDTH)
+            .then(jump_distance.log1p())
             .otherwise(0.0)
-            .alias("incoming_dx"),
-            pl.when(incoming_valid)
-            .then((pl.col("y") - pl.col("_prev_exit_y")) / OSU_STAGE_HEIGHT)
+            .alias("log_jump_distance"),
+            pl.when(direction_valid)
+            .then(incoming_dx / jump_distance)
             .otherwise(0.0)
-            .alias("incoming_dy"),
+            .alias("jump_direction_cos"),
+            pl.when(direction_valid)
+            .then(incoming_dy / jump_distance)
+            .otherwise(0.0)
+            .alias("jump_direction_sin"),
             (
                 pl.col("time")
                 - pl.col("_prev_time").fill_null(pl.col("time") - DEFAULT_PRE_START_MS)
@@ -314,13 +245,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .clip(lower_bound=0)
             .clip(upper_bound=5000)
             .alias("onset_ioi_ms"),
-            (
-                (pl.col("time") - pl.col("timing_origin"))
-                / pl.col("_active_beat_length_ms")
-            )
-            .fill_nan(0.0)
-            .fill_null(0.0)
-            .alias("_absolute_beats"),
             pl.when(is_slider)
             .then(duration_ms)
             .otherwise(0.0)
@@ -332,10 +256,12 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(
             pl.col("onset_ioi_ms").log1p().alias("log_onset_ioi_ms"),
-            pl.col("_active_beat_length_ms").log1p().alias("log_beat_length_ms"),
-            (pl.col("_absolute_beats") - pl.col("_absolute_beats").floor()).alias(
-                "_beat_fraction"
-            ),
+            _log_ratio_angle(pl.col("onset_ioi_ms") * pl.col("bpm") / 60000.0)
+            .cos()
+            .alias("onset_rhythm_cos"),
+            _log_ratio_angle(pl.col("onset_ioi_ms") * pl.col("bpm") / 60000.0)
+            .sin()
+            .alias("onset_rhythm_sin"),
             pl.when(is_slider)
             .then(pl.col("_span_duration_ms").log1p())
             .otherwise(0.0)
@@ -349,13 +275,49 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .otherwise(0.0)
             .alias("log_spinner_duration_ms"),
             pl.when(is_slider)
-            .then(pl.col("span_end_dx") / OSU_STAGE_WIDTH)
+            .then(
+                _log_ratio_angle(
+                    pl.col("_span_duration_ms") * pl.col("bpm") / 60000.0
+                ).cos()
+            )
             .otherwise(0.0)
-            .alias("span_end_dx"),
+            .alias("span_rhythm_cos"),
             pl.when(is_slider)
-            .then(pl.col("span_end_dy") / OSU_STAGE_HEIGHT)
+            .then(
+                _log_ratio_angle(
+                    pl.col("_span_duration_ms") * pl.col("bpm") / 60000.0
+                ).sin()
+            )
             .otherwise(0.0)
-            .alias("span_end_dy"),
+            .alias("span_rhythm_sin"),
+            pl.when(is_spinner)
+            .then(
+                _log_ratio_angle(
+                    pl.col("_spinner_duration_ms") * pl.col("bpm") / 60000.0
+                ).cos()
+            )
+            .otherwise(0.0)
+            .alias("spinner_rhythm_cos"),
+            pl.when(is_spinner)
+            .then(
+                _log_ratio_angle(
+                    pl.col("_spinner_duration_ms") * pl.col("bpm") / 60000.0
+                ).sin()
+            )
+            .otherwise(0.0)
+            .alias("spinner_rhythm_sin"),
+            pl.when(is_slider)
+            .then(span_end_distance.log1p())
+            .otherwise(0.0)
+            .alias("log_span_end_distance"),
+            pl.when(span_end_direction_valid)
+            .then(span_end_dx / span_end_distance)
+            .otherwise(0.0)
+            .alias("span_end_direction_cos"),
+            pl.when(span_end_direction_valid)
+            .then(span_end_dy / span_end_distance)
+            .otherwise(0.0)
+            .alias("span_end_direction_sin"),
             pl.when(is_slider)
             .then(pl.col("curve_residual_1_dx") / OSU_STAGE_WIDTH)
             .otherwise(0.0)
@@ -374,11 +336,6 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .alias("curve_residual_2_dy"),
         )
         .with_columns(
-            _beat_phase_expr(
-                pl.col("_beat_fraction"), pl.col("_active_beat_length_ms")
-            ).alias("beat_phase"),
-        )
-        .with_columns(
             pl.when(~is_slider)
             .then(0)
             .when(pl.col("_span_count") <= 3)
@@ -390,32 +347,7 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
             .alias("span_count_bin"),
         )
     )
-    df = df.with_columns(
-        _duration_bins(
-            df["onset_ioi_ms"],
-            df["_active_beat_length_ms"],
-            ONSET_DURATION_TOLERANCE_MS,
-        ).alias("onset_duration_bin"),
-        _duration_bins(
-            df["_span_duration_ms"] + df["_spinner_duration_ms"],
-            df["_active_beat_length_ms"],
-            SUSTAIN_DURATION_TOLERANCE_MS,
-        ).alias("_sustain_duration_bin"),
-    )
-    return df.with_columns(
-        pl.when(is_break)
-        .then(DURATION_OFF_GRID)
-        .otherwise(pl.col("onset_duration_bin"))
-        .alias("onset_duration_bin"),
-        pl.when(is_slider)
-        .then(pl.col("_sustain_duration_bin"))
-        .otherwise(DURATION_OFF_GRID)
-        .alias("span_duration_bin"),
-        pl.when(is_spinner)
-        .then(pl.col("_sustain_duration_bin"))
-        .otherwise(DURATION_OFF_GRID)
-        .alias("spinner_duration_bin"),
-    )
+    return df
 
 
 def _finalize_vectors(

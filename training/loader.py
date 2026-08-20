@@ -117,11 +117,21 @@ def prepare_vector(vec, augment, max_seq_len):
         flip_y = aug_type in (2, 3)
         if flip_x:
             for name, index in FEATURE_INFO["continuous"].items():
-                if name == "norm_x" or name.endswith("_dx"):
+                if (
+                    name == "norm_x"
+                    or name == "jump_direction_cos"
+                    or name == "span_end_direction_cos"
+                    or name.endswith("_dx")
+                ):
                     vec[:, index] *= -1
         if flip_y:
             for name, index in FEATURE_INFO["continuous"].items():
-                if name == "norm_y" or name.endswith("_dy"):
+                if (
+                    name == "norm_y"
+                    or name == "jump_direction_sin"
+                    or name == "span_end_direction_sin"
+                    or name.endswith("_dy")
+                ):
                     vec[:, index] *= -1
     return vec
 

@@ -291,11 +291,16 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.categorical = FEATURE_INFO["categorical"]
         common_numeric = (
             ("norm_x", "norm_y"),
-            ("incoming_dx", "incoming_dy"),
-            ("log_onset_ioi_ms", "log_beat_length_ms"),
+            ("log_jump_distance", "jump_direction_cos", "jump_direction_sin"),
+            ("log_onset_ioi_ms", "onset_rhythm_cos", "onset_rhythm_sin"),
         )
         geometry_numeric = (
-            ("span_end_dx", "span_end_dy"),
+            ("log_span_length",),
+            (
+                "log_span_end_distance",
+                "span_end_direction_cos",
+                "span_end_direction_sin",
+            ),
             ("curve_residual_1_dx", "curve_residual_1_dy"),
             ("curve_residual_2_dx", "curve_residual_2_dy"),
         )
@@ -321,17 +326,20 @@ class HitObjectFeatureTokenizer(nn.Module):
             "numeric_mask", torch.tensor(numeric_mask), persistent=False
         )
         self.span_duration_index = self.continuous["log_span_duration_ms"]
-        self.span_length_index = self.continuous["log_span_length"]
+        self.span_rhythm_indices = (
+            self.continuous["span_rhythm_cos"],
+            self.continuous["span_rhythm_sin"],
+        )
         self.spinner_duration_index = self.continuous["log_spinner_duration_ms"]
+        self.spinner_rhythm_indices = (
+            self.continuous["spinner_rhythm_cos"],
+            self.continuous["spinner_rhythm_sin"],
+        )
 
         categorical_names = (
             "is_new_combo",
-            "onset_duration_bin",
-            "beat_phase",
             "incoming_motion_valid",
-            "span_duration_bin",
             "span_count_bin",
-            "spinner_duration_bin",
             "object_type",
         )
         categorical_indices = []
@@ -363,7 +371,7 @@ class HitObjectFeatureTokenizer(nn.Module):
             torch.tensor(category_offsets, dtype=torch.long),
             persistent=False,
         )
-        self.out = nn.Linear(11 * d_feat, d_model, bias=False)
+        self.out = nn.Linear(10 * d_feat, d_model, bias=False)
         self.norm = RMSNorm(d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -374,7 +382,7 @@ class HitObjectFeatureTokenizer(nn.Module):
         object_type = categorical_ids[..., -1]
         is_slider = object_type == OBJECT_TYPE_SLIDER
         is_spinner = object_type == OBJECT_TYPE_SPINNER
-        incoming_valid = categorical_ids[..., 3] == 1
+        incoming_valid = categorical_ids[..., 1] == 1
         slider_scale = is_slider.to(x.dtype)
         spinner_scale = is_spinner.to(x.dtype)
 
@@ -385,8 +393,10 @@ class HitObjectFeatureTokenizer(nn.Module):
             (
                 x[..., self.span_duration_index] * slider_scale
                 + x[..., self.spinner_duration_index] * spinner_scale,
-                x[..., self.span_length_index] * slider_scale,
-                spinner_scale,
+                x[..., self.span_rhythm_indices[0]] * slider_scale
+                + x[..., self.spinner_rhythm_indices[0]] * spinner_scale,
+                x[..., self.span_rhythm_indices[1]] * slider_scale
+                + x[..., self.spinner_rhythm_indices[1]] * spinner_scale,
             ),
             dim=-1,
         )
@@ -413,6 +423,7 @@ class HitObjectFeatureTokenizer(nn.Module):
                 is_slider,
                 is_slider,
                 is_slider,
+                is_slider,
             ),
             dim=-1,
         )
@@ -422,12 +433,8 @@ class HitObjectFeatureTokenizer(nn.Module):
         categorical_active = torch.stack(
             (
                 categorical_ids[..., 0] != 0,
-                torch.ones_like(incoming_valid),
-                torch.ones_like(incoming_valid),
                 ~incoming_valid,
                 is_slider,
-                is_slider,
-                is_spinner,
                 object_type != OBJECT_TYPE_CIRCLE,
             ),
             dim=-1,
@@ -442,13 +449,11 @@ class HitObjectFeatureTokenizer(nn.Module):
             self.categorical_weight,
             padding_idx=0,
         )
-        sustain_token = numeric_tokens[..., 3, :] + categorical_tokens[..., 4:7, :].sum(
-            dim=-2
-        )
+        sustain_token = numeric_tokens[..., 3, :]
         geometry_tokens = torch.stack(
             (
-                numeric_tokens[..., 4, :],
-                numeric_tokens[..., 5:, :].sum(dim=-2),
+                numeric_tokens[..., 4, :] + numeric_tokens[..., 5, :],
+                numeric_tokens[..., 6:, :].sum(dim=-2),
             ),
             dim=-2,
         )
@@ -458,10 +463,6 @@ class HitObjectFeatureTokenizer(nn.Module):
                 sustain_token.unsqueeze(-2),
                 geometry_tokens,
             ),
-            dim=-2,
-        )
-        categorical_tokens = torch.cat(
-            (categorical_tokens[..., :4, :], categorical_tokens[..., 7:, :]),
             dim=-2,
         )
         features = torch.cat(
@@ -480,8 +481,12 @@ class SpanMasker(nn.Module):
             "right_delta_indices",
             torch.tensor(
                 [
-                    continuous["incoming_dx"],
-                    continuous["incoming_dy"],
+                    continuous["log_jump_distance"],
+                    continuous["jump_direction_cos"],
+                    continuous["jump_direction_sin"],
+                    continuous["log_onset_ioi_ms"],
+                    continuous["onset_rhythm_cos"],
+                    continuous["onset_rhythm_sin"],
                     categorical["incoming_motion_valid"]["index"],
                 ],
                 dtype=torch.long,
