@@ -14,7 +14,9 @@ MAX_COORDINATE = 100000
 INT32_MAX = 2**31 - 1
 BEZIER_TOLERANCE = 0.25
 CATMULL_DETAIL = 50
-ACTIVE_SECTIONS = frozenset(("metadata", "difficulty", "timingpoints", "hitobjects"))
+ACTIVE_SECTIONS = frozenset(
+    ("general", "metadata", "difficulty", "timingpoints", "hitobjects")
+)
 CATMULL_T = tuple(
     (t, t * t, t * t * t)
     for t in (step / CATMULL_DETAIL for step in range(CATMULL_DETAIL))
@@ -498,6 +500,15 @@ def parse_osu_file(
                 continue
             if line.startswith("[") and line.endswith("]"):
                 section_name = line[1:-1].lower()
+                continue
+
+            if section_name == "general":
+                if validate_dataset and line.lower().startswith("mode:"):
+                    try:
+                        if int(line.split(":", 1)[1].strip() or 0) != 0:
+                            return None
+                    except ValueError:
+                        pass
                 continue
 
             if section_name == "metadata":
