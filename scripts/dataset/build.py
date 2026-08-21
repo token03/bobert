@@ -1,13 +1,16 @@
-import os
 import argparse
 import json
-import random
-import signal
-import time
-import shutil
 import multiprocessing as mp
+import os
+import random
+import shutil
+import signal
+import threading
+import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional, List, Dict
+from queue import Full
+
 import duckdb
 import polars as pl
 import pyarrow.parquet as pq
@@ -15,13 +18,10 @@ from tqdm import tqdm
 
 from core.osu import (
     RawBeatmap,
-    extract_beatmap_record,
-    extract_hitobject_records,
     parse_osu_file,
 )
 
 MAX_BUFFER_HITOBJECT_ROWS = 100_000
-MIN_OBJECTS_PER_MAP = 1
 MAX_OBJECTS_PER_MAP = 16_384
 MAX_CURVE_POINTS_PER_MAP = 32_768
 PARSE_TIMEOUT_SECONDS = 30
@@ -83,15 +83,6 @@ HITOBJECTS_SCHEMA = {
 }
 
 
-def validate_beatmap(beatmap: Optional[RawBeatmap]) -> bool:
-    return (
-        beatmap is not None
-        and len(beatmap.hit_objects) > 0
-        and MIN_OBJECTS_PER_MAP < len(beatmap.hit_objects)
-        and len(beatmap.hit_objects) <= MAX_OBJECTS_PER_MAP
-    )
-
-
 def log_worker_failure(
     temp_dir: str, pid: int, file_path: str, reason: str, detail: str
 ):
@@ -107,9 +98,10 @@ def log_worker_failure(
 
 def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
     pid = os.getpid()
-    beatmaps_buffer = []
-    hitobjects_buffer = []
+    beatmaps_buffer: list[RawBeatmap] = []
+    buffered_hitobjects = 0
     file_counter = 0
+    pending_progress = 0
 
     def handle_timeout(signum, frame):
         raise ParseTimeoutError()
@@ -127,10 +119,11 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
                 file_path,
                 max_hitobject_lines=MAX_OBJECTS_PER_MAP,
                 max_curve_points=MAX_CURVE_POINTS_PER_MAP,
+                validate_dataset=True,
             )
-            if raw_beatmap and validate_beatmap(raw_beatmap):
-                beatmaps_buffer.append(extract_beatmap_record(raw_beatmap))
-                hitobjects_buffer.extend(extract_hitobject_records(raw_beatmap))
+            if raw_beatmap:
+                beatmaps_buffer.append(raw_beatmap)
+                buffered_hitobjects += len(raw_beatmap.hit_objects)
         except ParseTimeoutError:
             log_worker_failure(
                 temp_dir,
@@ -139,23 +132,26 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
                 "timeout",
                 f"exceeded {PARSE_TIMEOUT_SECONDS}s",
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log_worker_failure(temp_dir, pid, file_path, "error", repr(e))
         finally:
             signal.alarm(0)
 
-        with progress_counter.get_lock():
-            progress_counter.value += 1
+        pending_progress += 1
+        if pending_progress >= 64:
+            with progress_counter.get_lock():
+                progress_counter.value += pending_progress
+            pending_progress = 0
 
-        if len(hitobjects_buffer) >= MAX_BUFFER_HITOBJECT_ROWS:
+        if buffered_hitobjects >= MAX_BUFFER_HITOBJECT_ROWS:
             _write_worker_batch(
                 temp_dir,
                 pid,
                 file_counter,
                 beatmaps_buffer,
-                hitobjects_buffer,
             )
-            beatmaps_buffer, hitobjects_buffer = [], []
+            beatmaps_buffer = []
+            buffered_hitobjects = 0
             file_counter += 1
 
     if beatmaps_buffer:
@@ -164,28 +160,76 @@ def worker(tasks_queue: mp.Queue, temp_dir: str, progress_counter):
             pid,
             file_counter,
             beatmaps_buffer,
-            hitobjects_buffer,
         )
+    if pending_progress:
+        with progress_counter.get_lock():
+            progress_counter.value += pending_progress
 
 
 def _write_worker_batch(
     temp_dir: str,
     pid: int,
     batch_num: int,
-    beatmaps_data: List[Dict],
-    hitobjects_data: List[Dict],
+    beatmaps: list[RawBeatmap],
 ):
-    pl.DataFrame(beatmaps_data, schema=BEATMAPS_SCHEMA).write_parquet(
-        os.path.join(temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet")
+    pl.DataFrame(
+        (beatmap[:9] for beatmap in beatmaps), schema=BEATMAPS_SCHEMA, orient="row"
+    ).write_parquet(
+        os.path.join(temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet"),
+        compression="lz4",
     )
-    pl.DataFrame(hitobjects_data, schema=HITOBJECTS_SCHEMA).write_parquet(
-        os.path.join(temp_dir, "hitobjects", f"worker-{pid}-batch-{batch_num}.parquet")
-    )
+    buckets = defaultdict(list)
+    for beatmap in beatmaps:
+        buckets[beatmap.beatmap_id // 100_000].append(beatmap)
+
+    def rows(bucket_maps):
+        for beatmap in bucket_maps:
+            for obj in beatmap.hit_objects:
+                yield (
+                    beatmap.beatmap_id,
+                    beatmap.category,
+                    obj.object_index,
+                    obj.x,
+                    obj.y,
+                    obj.time,
+                    obj.object_type,
+                    obj.is_new_combo,
+                    obj.hit_sound,
+                    obj.end_time,
+                    obj.pixel_length or 0.0,
+                    obj.bpm,
+                    obj.timing_origin,
+                    obj.end_bpm,
+                    obj.end_timing_origin,
+                    obj.curve_type or "",
+                    obj.num_anchors,
+                    obj.kiai_time,
+                    obj.slides - 1 if obj.slides is not None else 0,
+                    obj.hard_anchor_ratio,
+                    obj.slider_end_x,
+                    obj.slider_end_y,
+                    obj.slider_path_valid,
+                    obj.span_end_dx,
+                    obj.span_end_dy,
+                    obj.curve_residual_1_dx,
+                    obj.curve_residual_1_dy,
+                    obj.curve_residual_2_dx,
+                    obj.curve_residual_2_dy,
+                )
+
+    for bucket, bucket_maps in buckets.items():
+        bucket_dir = Path(temp_dir) / "hitobjects" / f"_bucket={bucket}"
+        bucket_dir.mkdir(exist_ok=True)
+        pl.DataFrame(
+            rows(bucket_maps), schema=HITOBJECTS_SCHEMA, orient="row"
+        ).write_parquet(
+            bucket_dir / f"worker-{pid}-batch-{batch_num}.parquet", compression="lz4"
+        )
 
 
 def _parquet_row_count(path: str | Path) -> int:
     return sum(
-        pq.ParquetFile(file).metadata.num_rows for file in Path(path).glob("*.parquet")
+        pq.ParquetFile(file).metadata.num_rows for file in Path(path).rglob("*.parquet")
     )
 
 
@@ -194,45 +238,28 @@ def _sql_path(path: str | Path) -> str:
 
 
 def consolidate_hitobjects(temp_path: str, output_path: str) -> int:
-    if not list(Path(temp_path).glob("*.parquet")):
+    bucket_dirs = sorted(
+        Path(temp_path).glob("_bucket=*"),
+        key=lambda path: int(path.name.split("=", 1)[1]),
+    )
+    if not bucket_dirs:
         return 0
 
     output = Path(output_path)
     staging_output = output.with_name(f"{output.name}.inprogress")
-    ram_root = Path("/dev/shm") / f"bobert-hitobjects-{os.getpid()}"
-    buckets = ram_root / "buckets"
-    spill = ram_root / "spill"
+    spill = Path(temp_path).parent / f"duckdb-spill-{os.getpid()}"
     if output.exists() or staging_output.exists():
         raise FileExistsError(f"refusing to replace existing output: {output}")
 
-    ram_root.mkdir(parents=True)
     spill.mkdir()
     staging_output.mkdir(parents=True)
     connection = duckdb.connect(":memory:")
     try:
         connection.execute("SET memory_limit = '2GiB'")
-        connection.execute("SET threads = 2")
+        connection.execute(f"SET threads = {min(4, os.cpu_count() or 1)}")
         connection.execute("SET preserve_insertion_order = false")
         connection.execute("PRAGMA disable_progress_bar")
         connection.execute(f"SET temp_directory = '{_sql_path(spill)}'")
-        connection.execute("SET max_temp_directory_size = '6GiB'")
-        connection.execute(
-            f"""
-            COPY (
-                SELECT *, beatmap_id // 100000 AS _bucket
-                FROM read_parquet('{_sql_path(Path(temp_path) / "*.parquet")}')
-            ) TO '{_sql_path(buckets)}' (
-                FORMAT parquet,
-                PARTITION_BY (_bucket),
-                COMPRESSION zstd
-            )
-            """
-        )
-
-        bucket_dirs = sorted(
-            buckets.glob("_bucket=*"),
-            key=lambda path: int(path.name.split("=", 1)[1]),
-        )
         for bucket_dir in tqdm(
             bucket_dirs, desc="Sorting hitobject ranges", unit="range"
         ):
@@ -256,13 +283,12 @@ def consolidate_hitobjects(temp_path: str, output_path: str) -> int:
                 )
                 """
             )
-            shutil.rmtree(bucket_dir)
     except Exception:
         shutil.rmtree(staging_output, ignore_errors=True)
         raise
     finally:
         connection.close()
-        shutil.rmtree(ram_root, ignore_errors=True)
+        shutil.rmtree(spill, ignore_errors=True)
 
     expected_rows = _parquet_row_count(temp_path)
     actual_rows = _parquet_row_count(staging_output)
@@ -284,11 +310,13 @@ def consolidate_table(temp_path: str, output_path: str, table_name: str) -> int:
 
     output = Path(output_path)
     output.mkdir(parents=True, exist_ok=True)
-    frame = (
-        pl.scan_parquet(str(Path(temp_path) / "*.parquet")).sort("beatmap_id").collect()
+    row_count = _parquet_row_count(temp_path)
+    (
+        pl.scan_parquet(str(Path(temp_path) / "*.parquet"))
+        .sort("beatmap_id")
+        .sink_parquet(output / "part-0.parquet", compression="zstd", engine="streaming")
     )
-    frame.write_parquet(output / "part-0.parquet")
-    return frame.height
+    return row_count
 
 
 def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
@@ -316,7 +344,7 @@ def consolidate_dataset(temp_dir: str, output_dir: str) -> int:
     return beatmap_count
 
 
-def terminate_processes(processes: List[mp.Process]):
+def terminate_processes(processes: list[mp.Process]):
     for p in processes:
         if p.is_alive():
             p.terminate()
@@ -332,9 +360,14 @@ def terminate_processes(processes: List[mp.Process]):
 def create_dataset(
     root_dir: str,
     output_dir: str,
-    sample_size: Optional[int] = None,
+    sample_size: int | None = None,
     sample_seed: int = 42,
+    num_workers: int | None = None,
 ) -> str:
+    num_workers = min(8, os.cpu_count() or 1) if num_workers is None else num_workers
+    if num_workers <= 0:
+        raise ValueError("num_workers must be positive")
+
     temp_dir = output_dir + "_temp_processing"
     if os.path.exists(temp_dir):
         shutil.rmtree(temp_dir)
@@ -343,9 +376,7 @@ def create_dataset(
     os.makedirs(os.path.join(temp_dir, "beatmaps"))
     os.makedirs(os.path.join(temp_dir, "hitobjects"))
 
-    num_workers = 4
-
-    print("Finding all .osu files using os.walk...")
+    print("Finding all .osu files...")
     all_files = [
         os.path.join(root, file)
         for root, _, files in os.walk(root_dir)
@@ -353,21 +384,22 @@ def create_dataset(
         if file.endswith(".osu")
     ]
     print(f"Found {len(all_files)} total .osu files.")
-
     if sample_size and len(all_files) > sample_size:
         rng = random.Random(sample_seed)
         files_to_process = rng.sample(all_files, sample_size)
     else:
         files_to_process = all_files
-    print(f"Processing {len(files_to_process)} files.")
+    files_to_process.sort(
+        key=lambda path: (
+            int(Path(path).stem) if Path(path).stem.isdecimal() else 2**63,
+            path,
+        )
+    )
+    total_files = len(files_to_process)
+    print(f"Processing {total_files} files.")
 
     ctx = multiprocessing_context()
-    tasks_q = ctx.Queue()
-    for file_path in files_to_process:
-        tasks_q.put(file_path)
-    for _ in range(num_workers):
-        tasks_q.put(None)
-
+    tasks_q = ctx.Queue(maxsize=num_workers * 8)
     progress_counter = ctx.Value("i", 0)
 
     print(f"Phase 1: Starting {num_workers} worker processes for parallel parsing...")
@@ -379,13 +411,39 @@ def create_dataset(
     for p in processes:
         p.start()
 
+    producer_state = {"count": 0, "error": None}
+    stop_producer = threading.Event()
+
+    def put_task(task):
+        while not stop_producer.is_set():
+            try:
+                tasks_q.put(task, timeout=0.1)
+                return True
+            except Full:
+                pass
+        return False
+
+    def produce():
+        try:
+            for file_path in files_to_process:
+                if not put_task(file_path):
+                    return
+                producer_state["count"] += 1
+        except Exception as error:  # noqa: BLE001
+            producer_state["error"] = error
+        finally:
+            for _ in range(num_workers):
+                if not put_task(None):
+                    break
+
+    producer = threading.Thread(target=produce, daemon=True)
+    producer.start()
+
     try:
-        with tqdm(
-            total=len(files_to_process), desc="Parsing files", unit="files"
-        ) as pbar:
+        with tqdm(total=total_files, desc="Parsing files", unit="files") as pbar:
             last_value = 0
             reported_flush = False
-            while any(p.is_alive() for p in processes):
+            while producer.is_alive() or any(p.is_alive() for p in processes):
                 for p in processes:
                     if p.exitcode is not None and p.exitcode != 0:
                         raise RuntimeError(
@@ -395,7 +453,11 @@ def create_dataset(
                 current = progress_counter.value
                 pbar.update(current - last_value)
                 last_value = current
-                if current >= len(files_to_process) and not reported_flush:
+                if (
+                    not producer.is_alive()
+                    and current >= producer_state["count"]
+                    and not reported_flush
+                ):
                     pbar.write(
                         "All files parsed; waiting for workers to flush parquet batches..."
                     )
@@ -404,7 +466,9 @@ def create_dataset(
 
             current = progress_counter.value
             pbar.update(current - last_value)
-
+        producer.join()
+        if producer_state["error"] is not None:
+            raise producer_state["error"]
         for p in processes:
             p.join()
             if p.exitcode != 0:
@@ -413,14 +477,19 @@ def create_dataset(
                 )
     except KeyboardInterrupt:
         print("Interrupted; terminating worker processes...")
+        stop_producer.set()
         terminate_processes(processes)
+        producer.join(timeout=1)
         raise
     except Exception:
+        stop_producer.set()
         terminate_processes(processes)
+        producer.join(timeout=1)
         raise
 
     elapsed = time.time() - start_time
-    maps_per_sec = len(files_to_process) / elapsed if elapsed > 0 else 0
+    processed_files = producer_state["count"]
+    maps_per_sec = processed_files / elapsed if elapsed > 0 else 0
     print(f"Phase 1 complete in {elapsed:.2f} seconds ({maps_per_sec:.2f} maps/sec).")
 
     consolidate_dataset(temp_dir, output_dir)
@@ -461,6 +530,13 @@ def main():
         default=42,
         help="Random seed used with --sample-size.",
     )
+    parser.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        default=None,
+        help="Parser worker count. Defaults to min(8, CPU count).",
+    )
     args = parser.parse_args()
 
     total_start_time = time.time()
@@ -469,6 +545,7 @@ def main():
         args.output_dir,
         args.sample_size,
         args.sample_seed,
+        args.workers,
     )
     print(f"Total time taken: {time.time() - total_start_time:.2f} seconds.")
     print(f"Output directory: {final_dir}")

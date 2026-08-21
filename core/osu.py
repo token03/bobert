@@ -3,15 +3,22 @@ import io
 import math
 import os
 from collections.abc import Iterable, Iterator
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple
 
 OBJECT_TYPE_CIRCLE = 0
 OBJECT_TYPE_SLIDER = 1
 OBJECT_TYPE_SPINNER = 2
 
 MAX_TIME_MS = 36000000
+MAX_COORDINATE = 100000
+INT32_MAX = 2**31 - 1
 BEZIER_TOLERANCE = 0.25
 CATMULL_DETAIL = 50
+ACTIVE_SECTIONS = frozenset(("metadata", "difficulty", "timingpoints", "hitobjects"))
+CATMULL_T = tuple(
+    (t, t * t, t * t * t)
+    for t in (step / CATMULL_DETAIL for step in range(CATMULL_DETAIL))
+)
 
 Point = tuple[float, float]
 
@@ -40,9 +47,9 @@ class RawHitObject(NamedTuple):
     time: int
     object_type: int
     is_new_combo: int
-    curve_type: Optional[str]
-    slides: Optional[int]
-    pixel_length: Optional[float]
+    curve_type: str | None
+    slides: int | None
+    pixel_length: float | None
     end_time: int
     hit_sound: int
     bpm: float
@@ -73,8 +80,8 @@ class RawBeatmap(NamedTuple):
     slider_multiplier: float
     slider_tick: float
     difficulty_rating: float
-    timing_points: List[RawTimingPoint]
-    hit_objects: List[RawHitObject]
+    timing_points: list[RawTimingPoint]
+    hit_objects: list[RawHitObject]
 
 
 def extract_beatmap_record(beatmap: RawBeatmap) -> dict:
@@ -139,91 +146,91 @@ class TimingSection(NamedTuple):
     kiai: int
 
 
-def _midpoint(a: Point, b: Point) -> Point:
-    return ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
-
-
-def _flatten_bezier(points: list[Point], vertices: list[Point], depth: int = 0) -> None:
-    if len(points) == 1:
+def _flatten_bezier_vertices(points: list[Point], depth: int = 0) -> Iterator[Point]:
+    n = len(points)
+    if n == 1:
         return
-    if len(points) == 2:
-        vertices.append(points[1])
+    if n == 2:
+        yield points[1]
         return
 
-    if len(points) in (3, 4):
+    if n in (3, 4):
         curvature = max(
             math.hypot(
                 points[index - 1][0] - 2 * points[index][0] + points[index + 1][0],
                 points[index - 1][1] - 2 * points[index][1] + points[index + 1][1],
             )
-            for index in range(1, len(points) - 1)
+            for index in range(1, n - 1)
         )
         steps = max(1, math.ceil(math.sqrt(curvature / (8 * BEZIER_TOLERANCE))))
-        if len(points) == 3:
+        if n == 3:
             a, b, c = points
             for step in range(1, steps + 1):
                 t = step / steps
                 s = 1 - t
-                vertices.append(
-                    (
-                        s * s * a[0] + 2 * s * t * b[0] + t * t * c[0],
-                        s * s * a[1] + 2 * s * t * b[1] + t * t * c[1],
-                    )
+                yield (
+                    s * s * a[0] + 2 * s * t * b[0] + t * t * c[0],
+                    s * s * a[1] + 2 * s * t * b[1] + t * t * c[1],
                 )
         else:
             a, b, c, d = points
             for step in range(1, steps + 1):
                 t = step / steps
                 s = 1 - t
-                vertices.append(
-                    (
-                        s**3 * a[0]
-                        + 3 * s * s * t * b[0]
-                        + 3 * s * t * t * c[0]
-                        + t**3 * d[0],
-                        s**3 * a[1]
-                        + 3 * s * s * t * b[1]
-                        + 3 * s * t * t * c[1]
-                        + t**3 * d[1],
-                    )
+                yield (
+                    s**3 * a[0]
+                    + 3 * s * s * t * b[0]
+                    + 3 * s * t * t * c[0]
+                    + t**3 * d[0],
+                    s**3 * a[1]
+                    + 3 * s * s * t * b[1]
+                    + 3 * s * t * t * c[1]
+                    + t**3 * d[1],
                 )
         return
 
     tolerance = BEZIER_TOLERANCE * BEZIER_TOLERANCE * 4
-    flat = all(
-        (points[i - 1][0] - 2 * points[i][0] + points[i + 1][0]) ** 2
-        + (points[i - 1][1] - 2 * points[i][1] + points[i + 1][1]) ** 2
-        <= tolerance
-        for i in range(1, len(points) - 1)
-    )
-    if flat or depth >= 16:
-        vertices.append(points[-1])
+    if (
+        all(
+            (points[i - 1][0] - 2 * points[i][0] + points[i + 1][0]) ** 2
+            + (points[i - 1][1] - 2 * points[i][1] + points[i + 1][1]) ** 2
+            <= tolerance
+            for i in range(1, n - 1)
+        )
+        or depth >= 16
+    ):
+        yield points[-1]
         return
 
     left = [points[0]]
     right = [points[-1]]
     work = points
     while len(work) > 1:
-        work = [_midpoint(work[i], work[i + 1]) for i in range(len(work) - 1)]
+        work = [
+            (
+                (work[i][0] + work[i + 1][0]) * 0.5,
+                (work[i][1] + work[i + 1][1]) * 0.5,
+            )
+            for i in range(len(work) - 1)
+        ]
         left.append(work[0])
         right.append(work[-1])
 
-    _flatten_bezier(left, vertices, depth + 1)
-    _flatten_bezier(list(reversed(right)), vertices, depth + 1)
+    yield from _flatten_bezier_vertices(left, depth + 1)
+    yield from _flatten_bezier_vertices(list(reversed(right)), depth + 1)
 
 
-def _split_bezier_vertices(points: list[Point]) -> list[Point]:
-    vertices = [points[0]]
+def _split_bezier_vertices(points: list[Point]) -> Iterator[Point]:
+    yield points[0]
     segment = [points[0]]
     for point in points[1:]:
         if point == segment[-1]:
             if len(segment) > 1:
-                _flatten_bezier(segment, vertices)
+                yield from _flatten_bezier_vertices(segment)
             segment = [point]
         else:
             segment.append(point)
-    _flatten_bezier(segment, vertices)
-    return vertices
+    yield from _flatten_bezier_vertices(segment)
 
 
 def _perfect_vertices(points: list[Point]) -> Iterator[Point]:
@@ -276,10 +283,7 @@ def _catmull_vertices(points: list[Point]) -> Iterator[Point]:
                 2 * v3[1] - v2[1],
             )
         )
-        for step in range(CATMULL_DETAIL):
-            t = step / CATMULL_DETAIL
-            t2 = t * t
-            t3 = t2 * t
+        for t, t2, t3 in CATMULL_T:
             yield (
                 0.5
                 * (
@@ -403,8 +407,8 @@ def _slider_geometry(
 
 
 def _preprocess_timing_points(
-    timing_points: List[RawTimingPoint],
-) -> List[TimingSection]:
+    timing_points: list[RawTimingPoint],
+) -> list[TimingSection]:
     sections = []
     last_uninherited = None
     for point in timing_points:
@@ -441,20 +445,25 @@ def parse_osu_file(
     max_hitobject_lines: int | None = None,
     max_curve_points: int | None = None,
     *,
+    validate_dataset: bool = False,
     _content: bytes | None = None,
     _beatmap_id: int | None = None,
-) -> Optional[RawBeatmap]:
+) -> RawBeatmap | None:
     if _content is None:
         try:
             filename_beatmap_id = int(os.path.splitext(os.path.basename(file_path))[0])
         except ValueError:
             filename_beatmap_id = None
         category = os.path.basename(os.path.dirname(file_path))
-        source = open(file_path, "r", encoding="utf-8", errors="ignore")
+        source = open(  # noqa: SIM115
+            file_path, "r", encoding="utf-8", errors="ignore"
+        )
     else:
         filename_beatmap_id = _beatmap_id
         category = ""
-        source = io.StringIO(_content.decode("utf-8", errors="ignore"))
+        source = io.TextIOWrapper(
+            io.BytesIO(_content), encoding="utf-8", errors="ignore"
+        )
 
     data = {
         "beatmap_id": filename_beatmap_id,
@@ -470,6 +479,7 @@ def parse_osu_file(
 
     timing_points = []
     timing_sections = None
+    dataset_valid_sections = []
     section_start_times = []
     timing_index = -1
     previous_object_time = -1
@@ -480,14 +490,8 @@ def parse_osu_file(
 
     with source as file:
         for raw_line in file:
-            if section_name not in {
-                "metadata",
-                "difficulty",
-                "timingpoints",
-                "hitobjects",
-            }:
-                if not raw_line.startswith("["):
-                    continue
+            if section_name not in ACTIVE_SECTIONS and not raw_line.startswith("["):
+                continue
 
             line = raw_line.strip()
             if not line or line.startswith("//"):
@@ -561,22 +565,32 @@ def parse_osu_file(
             else:
                 continue
 
-            if is_slider and len(parts) > 5:
-                curve_point_count += parts[5].count("|")
+            curve_data = parts[5].split("|") if is_slider and len(parts) > 5 else None
+            if curve_data is not None:
+                curve_point_count += len(curve_data) - 1
                 if (
                     max_curve_points is not None
                     and curve_point_count > max_curve_points
                 ):
                     return None
 
-            if abs(x) > 100000 or abs(y) > 100000:
+            if abs(x) > MAX_COORDINATE or abs(y) > MAX_COORDINATE:
                 continue
+            if validate_dataset and not -(2**31) <= hit_sound <= INT32_MAX:
+                return None
 
             if timing_sections is None:
                 if not timing_points:
                     return None
                 timing_points.sort(key=lambda point: point.time)
                 timing_sections = _preprocess_timing_points(timing_points)
+                if validate_dataset:
+                    dataset_valid_sections = [
+                        math.isfinite(section.bpm)
+                        and abs(section.bpm) <= 3.4028235e38
+                        and -(2**31) <= section.timing_origin < 2**31
+                        for section in timing_sections
+                    ]
                 section_start_times = [item.start_time for item in timing_sections]
 
             if time >= previous_object_time:
@@ -592,6 +606,12 @@ def parse_osu_file(
             active_section = (
                 timing_sections[timing_index] if timing_index >= 0 else None
             )
+            if (
+                validate_dataset
+                and timing_index >= 0
+                and not dataset_valid_sections[timing_index]
+            ):
+                return None
             bpm = active_section.bpm if active_section is not None else 120.0
             timing_origin = (
                 active_section.timing_origin if active_section is not None else 0
@@ -610,7 +630,7 @@ def parse_osu_file(
 
             if object_type == OBJECT_TYPE_SLIDER:
                 try:
-                    curve_data = parts[5].split("|")
+                    assert curve_data is not None
                     curve_type = curve_data[0]
                     control_points: list[Point] = [(float(x), float(y))]
                     path_valid = bool(curve_type)
@@ -621,6 +641,12 @@ def parse_osu_file(
                             coordinates = raw_point.split(":", 2)
                             point = (int(coordinates[0]), int(coordinates[1]))
                         except (ValueError, IndexError):
+                            path_valid = False
+                            continue
+                        if validate_dataset and (
+                            abs(point[0]) > MAX_COORDINATE
+                            or abs(point[1]) > MAX_COORDINATE
+                        ):
                             path_valid = False
                             continue
                         control_points.append((float(point[0]), float(point[1])))
@@ -636,6 +662,8 @@ def parse_osu_file(
 
                     slides = int(parts[6])
                     pixel_length = float(parts[7])
+                    if validate_dataset and not 1 <= slides <= 2**31:
+                        return None
                     if path_valid:
                         slider_geometry = _slider_geometry(
                             curve_type, control_points, pixel_length
@@ -667,6 +695,8 @@ def parse_osu_file(
             if end_time != time:
                 end_index = bisect.bisect_right(section_start_times, end_time) - 1
                 if end_index >= 0:
+                    if validate_dataset and not dataset_valid_sections[end_index]:
+                        return None
                     end_section = timing_sections[end_index]
                     end_bpm = end_section.bpm
                     end_timing_origin = end_section.timing_origin
@@ -674,6 +704,18 @@ def parse_osu_file(
             hard_anchor_ratio = (
                 num_hard_anchors / num_anchors if num_anchors > 0 else 0.0
             )
+            if validate_dataset and not (
+                -(2**31) <= time < 2**31
+                and -(2**31) <= end_time < 2**31
+                and (
+                    object_type != OBJECT_TYPE_SLIDER
+                    or all(
+                        math.isfinite(value) and abs(value) <= 3.4028235e38
+                        for value in (pixel_length or 0.0, *slider_geometry[1:])
+                    )
+                )
+            ):
+                return None
             hit_objects.append(
                 RawHitObject(
                     object_index=len(hit_objects),
@@ -706,7 +748,23 @@ def parse_osu_file(
                 )
             )
 
-    if data["beatmap_id"] is None or not timing_points or not hit_objects:
+    if (
+        data["beatmap_id"] is None
+        or not timing_points
+        or not hit_objects
+        or (
+            validate_dataset
+            and (
+                not -(2**63) <= data["beatmap_id"] < 2**63
+                or len(hit_objects) < 2
+                or len(hit_objects) > 16_384
+                or not all(
+                    math.isfinite(data[field]) and abs(data[field]) <= 3.4028235e38
+                    for field in DIFFICULTY_KEYS.values()
+                )
+            )
+        )
+    ):
         return None
     return RawBeatmap(**data, timing_points=timing_points, hit_objects=hit_objects)
 
@@ -716,7 +774,7 @@ def parse_osu_bytes(
     beatmap_id: int | None = None,
     max_hitobject_lines: int | None = None,
     max_curve_points: int | None = None,
-) -> Optional[RawBeatmap]:
+) -> RawBeatmap | None:
     return parse_osu_file(
         "",
         max_hitobject_lines=max_hitobject_lines,

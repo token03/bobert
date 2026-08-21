@@ -1,5 +1,6 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Literal, Optional, Sequence, Tuple
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -11,7 +12,6 @@ from .osu import (
     RawBeatmap,
     extract_hitobject_records,
 )
-
 
 OSU_STAGE_WIDTH = 512
 OSU_STAGE_HEIGHT = 384
@@ -49,9 +49,7 @@ FEATURES = (
     Feature("span_rhythm_cos", "rhythm", conditional="slider"),
     Feature("span_rhythm_sin", "rhythm", conditional="slider"),
     Feature("log_span_length", "spatial", standardize=True, conditional="slider"),
-    Feature(
-        "log_span_end_distance", "spatial", standardize=True, conditional="slider"
-    ),
+    Feature("log_span_end_distance", "spatial", standardize=True, conditional="slider"),
     Feature("span_end_direction_cos", "spatial", conditional="slider"),
     Feature("span_end_direction_sin", "spatial", conditional="slider"),
     Feature("curve_residual_1_dx", "spatial", standardize=True, conditional="slider"),
@@ -122,8 +120,8 @@ def _log_ratio_angle(value: pl.Expr) -> pl.Expr:
 
 
 def _filter_invalid_maps(
-    beatmaps_df: pl.DataFrame, hitobjects_df: pl.DataFrame
-) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    beatmaps_df: pl.LazyFrame, hitobjects_df: pl.LazyFrame
+) -> pl.LazyFrame:
     valid_hitobjects = hitobjects_df.filter(
         pl.col("x").is_between(0, OSU_STAGE_WIDTH)
         & pl.col("y").is_between(0, OSU_STAGE_HEIGHT)
@@ -148,13 +146,10 @@ def _filter_invalid_maps(
         .select("beatmap_id")
         .join(beatmaps_df.select("beatmap_id").unique(), on="beatmap_id", how="semi")
     )
-    return (
-        beatmaps_df.join(good_maps, on="beatmap_id", how="semi"),
-        valid_hitobjects.join(good_maps, on="beatmap_id", how="semi"),
-    )
+    return valid_hitobjects.join(good_maps, on="beatmap_id", how="semi")
 
 
-def _prepare_objects(df: pl.DataFrame, max_seq_len: Optional[int]) -> pl.DataFrame:
+def _prepare_objects(df: pl.LazyFrame, max_seq_len: int | None) -> pl.LazyFrame:
     df = df.sort(["beatmap_id", "time", "object_index"])
     if max_seq_len is not None:
         df = df.group_by("beatmap_id", maintain_order=True).head(int(max_seq_len))
@@ -191,7 +186,7 @@ def _prepare_objects(df: pl.DataFrame, max_seq_len: Optional[int]) -> pl.DataFra
     )
 
 
-def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
+def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
     is_slider = pl.col("object_type") == OBJECT_TYPE_SLIDER
     is_spinner = pl.col("object_type") == OBJECT_TYPE_SPINNER
     gap_ms = pl.col("time") - pl.col("_prev_time")
@@ -352,33 +347,35 @@ def _apply_features(df: pl.DataFrame) -> pl.DataFrame:
 
 def _finalize_vectors(
     df: pl.DataFrame, split_indices: np.ndarray
-) -> List[torch.Tensor]:
-    values = np.nan_to_num(
-        df.select(pl.col(name).cast(pl.Float32) for name in FIELD_NAMES).to_numpy(
-            order="c"
-        ),
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-        copy=False,
-    ).astype(np.float16, copy=False)
-    return [
-        torch.from_numpy(np.ascontiguousarray(vector))
-        for vector in np.split(values, split_indices)
-    ]
+) -> list[torch.Tensor]:
+    packed = torch.from_numpy(df.select(FIELD_NAMES).to_numpy(order="c"))
+    lengths = np.diff(np.concatenate(([0], split_indices, [len(packed)])))
+    return list(torch.split(packed, lengths.tolist()))
 
 
 def build_feature_tensors(
     beatmaps_df: pl.DataFrame,
     hitobjects_df: pl.DataFrame,
-    max_seq_len: Optional[int] = None,
+    max_seq_len: int | None = None,
 ):
-    beatmaps_df, hitobjects_df = _filter_invalid_maps(beatmaps_df, hitobjects_df)
-    if beatmaps_df.is_empty() or hitobjects_df.is_empty():
-        return [], np.array([])
+    hitobjects_lf = _filter_invalid_maps(beatmaps_df.lazy(), hitobjects_df.lazy())
+    df = (
+        _apply_features(_prepare_objects(hitobjects_lf, max_seq_len))
+        .select(
+            "beatmap_id",
+            *(
+                pl.when(pl.col(name).cast(pl.Float16).is_finite())
+                .then(pl.col(name).cast(pl.Float16))
+                .otherwise(0.0)
+                .alias(name)
+                for name in FIELD_NAMES
+            ),
+        )
+        .collect(engine="streaming")
+    )
+    if df.is_empty():
+        return [], np.empty(0, dtype=np.int64)
 
-    df = _prepare_objects(hitobjects_df, max_seq_len)
-    df = _apply_features(df)
     ids = df["beatmap_id"].to_numpy()
     split_indices = np.flatnonzero(ids[:-1] != ids[1:]) + 1
     vectors = _finalize_vectors(df, split_indices)
@@ -415,7 +412,8 @@ def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> Vect
     counts = torch.zeros(len(STANDARDIZED_FEATURES), dtype=torch.int64)
     totals = torch.zeros(len(STANDARDIZED_FEATURES))
     totals_sq = torch.zeros(len(STANDARDIZED_FEATURES))
-    for vectors in train_data:
+    for start in range(0, len(train_data), 256):
+        vectors = torch.cat(tuple(train_data[start : start + 256]))
         values = vectors.index_select(1, indices).float()
         counts += len(vectors)
         counts[slider_indices] -= (
@@ -451,7 +449,10 @@ def normalize(
     vectors: torch.Tensor, stats: VectorStats, epsilon: float = 1e-8
 ) -> torch.Tensor:
     normalized = vectors.to(dtype=torch.float32, copy=True)
+    means = torch.zeros(VECTOR_DIM, dtype=normalized.dtype, device=normalized.device)
+    divisors = torch.ones(VECTOR_DIM, dtype=normalized.dtype, device=normalized.device)
     for name, (mean, std) in stats.items():
         index = FEATURE_INDEX[name]
-        normalized[:, index].sub_(mean).div_(std + epsilon)
-    return normalized
+        means[index] = mean
+        divisors[index] = std + epsilon
+    return normalized.sub_(means).div_(divisors)
