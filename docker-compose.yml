@@ -5,13 +5,14 @@ services:
       network: host
     mem_limit: 3.5g
     restart: unless-stopped
+    logging:
+      driver: local
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data:ro
       - ./runs:/app/runs:ro
       - ./cache:/app/cache
-      - ./logs:/app/logs
     environment:
       APP_ENV: production
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-https://bobert-web.pages.dev}
@@ -42,6 +43,8 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
+    logging:
+      driver: local
     # IPV6 CAUSE IM CHEAP AND DONT WANNA PAY FOR IPV4 ON HETZNER
     command: tunnel --no-autoupdate --protocol http2 --edge-ip-version 6 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     depends_on:

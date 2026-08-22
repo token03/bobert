@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import logging
-import logging.handlers
 import os
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 THREAD_COUNT = min(
@@ -66,19 +64,7 @@ TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 API_SHARED_SECRET = os.getenv("API_SHARED_SECRET", "")
 
 
-logging.getLogger("uvicorn.access").disabled = True
-for _name in ("httpx", "httpcore"):
-    logging.getLogger(_name).setLevel(logging.WARNING)
-log = logging.getLogger("bobert.api")
-
-
-def configure_logging() -> None:
-    Path("/app/logs").mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(
-        "/app/logs/access.log", maxBytes=2 * 1024 * 1024, backupCount=2
-    )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+log = logging.getLogger("uvicorn.error")
 
 
 class DateWindow(str, Enum):
@@ -154,15 +140,16 @@ class RequestLoggingMiddleware:
             ):
                 logged = True
                 elapsed = (time.perf_counter() - start) * 1000
-                log.info(
-                    "request_id=%s client_ip=%s method=%s path=%s status=%d elapsed_ms=%.2f",
-                    request_id,
-                    client_ip,
-                    scope["method"],
-                    scope["path"],
-                    status,
-                    elapsed,
-                )
+                if not (scope["path"] == "/health" and status < 400):
+                    log.info(
+                        "request_id=%s client_ip=%s method=%s path=%s status=%d elapsed_ms=%.2f",
+                        request_id,
+                        client_ip,
+                        scope["method"],
+                        scope["path"],
+                        status,
+                        elapsed,
+                    )
 
         try:
             await self.app(scope, receive, send_logged)
@@ -189,7 +176,6 @@ _rate_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _http_client, _osu, _runtime
-    configure_logging()
     _http_client = httpx.AsyncClient(
         timeout=20.0,
         limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
@@ -220,6 +206,7 @@ app.add_middleware(
     allowed_hosts=[
         "localhost",
         "127.0.0.1",
+        "api",
         "bobert.jessiezhong.com",
         "*.trycloudflare.com",
     ],
