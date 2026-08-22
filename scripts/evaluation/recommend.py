@@ -525,7 +525,7 @@ def parse_args():
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
     parser.add_argument("-v", "--version")
     parser.add_argument("--model", help="Exported BoBERT .pt model")
-    parser.add_argument("--top-k", type=int, default=40)
+    parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
     return parser.parse_args()
