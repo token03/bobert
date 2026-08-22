@@ -5,6 +5,8 @@ services:
       network: host
     mem_limit: 3.5g
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data:ro
       - ./runs:/app/runs:ro

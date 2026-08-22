@@ -1,0 +1,16 @@
+[tools]
+python = "3.12"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.dev]
+description = "Run the local API and web development servers"
+depends = ["dev:api", "dev:web"]
+
+[tasks."dev:api"]
+run = "docker compose up --build api"
+
+[tasks."dev:web"]
+dir = "web"
+run = "bun run dev"

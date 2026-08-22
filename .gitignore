@@ -27,4 +27,3 @@ visualizer/*/*.parquet
 .vscode/
 
 .venv
-mise.toml
