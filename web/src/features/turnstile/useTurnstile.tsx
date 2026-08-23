@@ -47,6 +47,7 @@ export function useTurnstile() {
         ref={turnstileRef}
         siteKey={turnstileSiteKey}
         options={{
+          action: 'recommend',
           size: 'invisible',
           execution: 'render',
           refreshExpired: 'auto',

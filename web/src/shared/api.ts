@@ -1,6 +1,6 @@
 import type { DefaultRecommendResponse, RecommendRequest, RecommendResponse } from './types'
 
-const apiUrl = import.meta.env.VITE_API_URL ?? '/api'
+const apiUrl = '/api'
 
 export async function recommendBeatmaps(request: RecommendRequest): Promise<RecommendResponse> {
   const headers: HeadersInit = {

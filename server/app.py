@@ -27,10 +27,8 @@ import torch
 torch.set_num_threads(THREAD_COUNT)
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from server.osu import BeatmapUnavailableError, OsuClient
 from server.runtime import Runtime, metadata_complete, public_summary
@@ -59,7 +57,6 @@ DEFAULT_RECOMMEND_IDS = [
     1787848,
 ]
 RATE_LIMITS = {"global": 1200, "server": 600, "ip": 120}
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 API_SHARED_SECRET = os.getenv("API_SHARED_SECRET", "")
 
@@ -193,24 +190,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="bobert-api", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "X-Turnstile-Token", "X-API-Key", "X-Request-ID"],
-    expose_headers=["X-Request-ID", "X-Process-Time-Ms"],
-)
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=[
-        "localhost",
-        "127.0.0.1",
-        "api",
-        "bobert.jessiezhong.com",
-        "*.trycloudflare.com",
-    ],
-)
 app.add_middleware(RequestLoggingMiddleware)
 
 
@@ -219,14 +198,14 @@ def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/recommend")
+@app.get("/api/recommend")
 def default_recommend() -> dict[str, Any]:
     runtime = get_runtime()
     results = [runtime.summary(beatmap_id) for beatmap_id in DEFAULT_RECOMMEND_IDS]
     return {"count": len(results), "results": results}
 
 
-@app.post("/recommend")
+@app.post("/api/recommend")
 async def recommend(
     payload: RecommendRequest,
     request: Request,
@@ -300,7 +279,7 @@ async def recommend(
     }
 
 
-@app.get("/beatmaps/{beatmap_id}")
+@app.get("/api/beatmaps/{beatmap_id}")
 async def beatmap_detail(beatmap_id: int) -> dict[str, Any]:
     detail = await run_in_threadpool(get_runtime().catalog_detail, beatmap_id)
     if detail is None:
