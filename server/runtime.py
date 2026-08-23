@@ -28,6 +28,7 @@ EMBEDDINGS_PATH = Path(
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 SEARCH_CANDIDATE_FACTORS = (10, 25, 100)
+DEFAULT_COUNTS = (15, 40, 30, 15)
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 STATUS_GROUPS = {
     "ranked": {"1", "2", "3", "ranked", "approved", "qualified"},
@@ -211,9 +212,14 @@ class Runtime:
             int(row["id"]): row
             for row in beatmaps.unique("id", maintain_order=True).iter_rows(named=True)
         }
-        self.default_pool = [
-            public_summary(int(beatmap_id), self.metadata_by_id[int(beatmap_id)])
-            for beatmap_id in defaults["id"]
+        self.default_pools = [
+            [
+                public_summary(int(beatmap_id), self.metadata_by_id[int(beatmap_id)])
+                for beatmap_id in defaults.filter(
+                    pl.col("difficulty_rating").floor() == star
+                )["id"]
+            ]
+            for star in range(5, 9)
         ]
         del beatmaps
         self.dynamic_ids: list[int] = []
@@ -235,7 +241,14 @@ class Runtime:
             )
 
     def default_summaries(self, seed: int | None = None) -> list[dict[str, Any]]:
-        return random.Random(seed).sample(self.default_pool, 100)
+        rng = random.Random(seed)
+        results = [
+            item
+            for pool, count in zip(self.default_pools, DEFAULT_COUNTS)
+            for item in rng.sample(pool, count)
+        ]
+        rng.shuffle(results)
+        return results
 
     def memory_embedding(
         self, beatmap_id: int

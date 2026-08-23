@@ -262,6 +262,38 @@ async def beatmap_detail(beatmap_id: int) -> dict[str, Any]:
     return detail
 
 
+@app.get("/api/beatmaps/{beatmap_id}/summary")
+async def beatmap_summary(
+    beatmap_id: int, request: Request, response: Response
+) -> dict[str, Any]:
+    ip = request_client_ip(request.scope, request.headers.raw)
+    rate_limit("global:summary", RATE_LIMITS["global"])
+    rate_limit(f"ip:{ip}:summary", RATE_LIMITS["ip"])
+
+    runtime = get_runtime()
+    memory = runtime.memory_embedding(beatmap_id)
+    if memory is None:
+        memory = await run_in_threadpool(runtime.cached_embedding, beatmap_id)
+    if memory is not None:
+        metadata = memory[1]
+    else:
+        if await run_in_threadpool(runtime.cache.is_unavailable, beatmap_id):
+            raise HTTPException(
+                status_code=404, detail=f"beatmap {beatmap_id} is unavailable"
+            )
+        try:
+            metadata = await get_osu().metadata(beatmap_id)
+            if not metadata_complete(metadata):
+                raise BeatmapUnavailableError(
+                    f"beatmap {beatmap_id} is unavailable"
+                )
+        except (BeatmapUnavailableError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    response.headers["Cache-Control"] = "public, max-age=300"
+    return public_summary(beatmap_id, metadata)
+
+
 def get_runtime() -> Runtime:
     if _runtime is None:
         raise RuntimeError("runtime is not initialized")

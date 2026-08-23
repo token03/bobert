@@ -747,11 +747,10 @@ button:disabled {
   aspect-ratio: 10 / 3;
   overflow: hidden;
   border-radius: 0;
-  background: var(--surface);
+  background: inherit;
 }
 
-.source-cover img,
-.source-cover .cover-placeholder {
+.source-cover img {
   display: block;
   width: 100%;
   height: 100%;
@@ -870,7 +869,7 @@ button:disabled {
   overflow: hidden;
   border: 0;
   border-radius: 0;
-  background: var(--surface);
+  background: inherit;
   padding: 0;
   text-align: left;
 }
@@ -880,8 +879,8 @@ button:disabled {
 }
 
 .cover-preview:disabled {
-  cursor: not-allowed;
-  opacity: 0.62;
+  cursor: default;
+  opacity: 1;
 }
 
 .cover-preview::after {
@@ -893,8 +892,7 @@ button:disabled {
   transition: opacity 0.18s ease;
 }
 
-.cover-preview img,
-.cover-placeholder {
+.cover-preview img {
   display: block;
   width: 100%;
   height: 100%;
@@ -956,14 +954,6 @@ button:disabled {
 .filled-icon {
   fill: currentColor;
   stroke: currentColor;
-}
-
-.cover-placeholder {
-  display: grid;
-  place-items: center;
-  color: var(--accent-light);
-  font-size: 20px;
-  font-weight: 900;
 }
 
 .map-content {

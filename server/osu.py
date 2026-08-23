@@ -28,6 +28,8 @@ class OsuClient:
         self._token: str | None = None
         self._expires_at = 0.0
         self._token_lock = asyncio.Lock()
+        self._metadata: dict[int, dict[str, Any]] = {}
+        self._metadata_tasks: dict[int, asyncio.Task[dict[str, Any]]] = {}
 
     async def start(self) -> None:
         await self._access_token()
@@ -62,6 +64,24 @@ class OsuClient:
             return self._token
 
     async def metadata(self, beatmap_id: int) -> dict[str, Any]:
+        cached = self._metadata.get(beatmap_id)
+        if cached is not None:
+            return cached
+        task = self._metadata_tasks.get(beatmap_id)
+        if task is None:
+            task = asyncio.create_task(self._fetch_metadata(beatmap_id))
+            self._metadata_tasks[beatmap_id] = task
+        try:
+            metadata = await asyncio.shield(task)
+            self._metadata[beatmap_id] = metadata
+            if len(self._metadata) > 256:
+                self._metadata.pop(next(iter(self._metadata)))
+            return metadata
+        finally:
+            if task.done() and self._metadata_tasks.get(beatmap_id) is task:
+                self._metadata_tasks.pop(beatmap_id, None)
+
+    async def _fetch_metadata(self, beatmap_id: int) -> dict[str, Any]:
         response = await self._metadata_response(beatmap_id)
         if response.status_code == 401:
             response = await self._metadata_response(beatmap_id, force=True)

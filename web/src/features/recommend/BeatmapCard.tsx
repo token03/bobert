@@ -152,7 +152,7 @@ function BeatmapCover({
   if (variant === 'source') {
     return (
       <div className="source-cover" aria-hidden="true">
-        {beatmap.beatmapset_id ? <img src={cardCoverUrl(beatmap.beatmapset_id)} alt="" /> : <span className="cover-placeholder">osu!</span>}
+        {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onError={(event) => { event.currentTarget.hidden = true }} /> : null}
       </div>
     )
   }
@@ -171,7 +171,7 @@ function BeatmapCover({
       aria-label={hasPreview ? (isCoverActive ? 'Pause preview' : 'Play preview') : 'No preview available'}
       title={hasPreview ? (isCoverActive ? 'Pause preview' : 'Play preview') : 'No preview available'}
     >
-      {beatmap.beatmapset_id ? <img src={coverUrl(beatmap.beatmapset_id)} alt="" loading="lazy" decoding="async" /> : <span className="cover-placeholder">osu!</span>}
+      {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={coverUrl(beatmap.beatmapset_id)} alt="" loading="lazy" decoding="async" onError={(event) => { event.currentTarget.hidden = true }} /> : null}
       {hasPreview ? (
         <span className="cover-play-overlay" aria-hidden="true">
           <span className="cover-play-button">{isCoverActive ? <Pause className="filled-icon" /> : <Play className="filled-icon" />}</span>

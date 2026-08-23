@@ -1,4 +1,4 @@
-import type { DefaultRecommendResponse, RecommendRequest, RecommendResponse } from './types'
+import type { BeatmapMetadata, DefaultRecommendResponse, RecommendRequest, RecommendResponse } from './types'
 
 const apiUrl = '/api'
 
@@ -40,4 +40,16 @@ export async function fetchDefaultRecommendations(): Promise<DefaultRecommendRes
   }
 
   return data as DefaultRecommendResponse
+}
+
+export async function fetchBeatmapSummary(beatmapId: number): Promise<BeatmapMetadata> {
+  const result = await fetch(`${apiUrl}/beatmaps/${beatmapId}/summary`)
+  const text = await result.text()
+  const data = text ? JSON.parse(text) : null
+
+  if (!result.ok) {
+    throw new Error(data?.detail ?? `Request failed with ${result.status}`)
+  }
+
+  return data as BeatmapMetadata
 }

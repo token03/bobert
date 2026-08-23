@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
 import { useAudioPreview } from '../audio/useAudioPreview'
 import { useTurnstile } from '../turnstile/useTurnstile'
-import { fetchDefaultRecommendations } from '../../shared/api'
+import { fetchBeatmapSummary, fetchDefaultRecommendations } from '../../shared/api'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata, DefaultRecommendResponse, RecommendResponse } from '../../shared/types'
 import { cardCoverUrl } from '../../shared/urls'
@@ -73,6 +73,14 @@ export function RecommendPage() {
     }
 
     function restoreFromLocation() {
+      if (rangeSearchTimeout.current !== null) {
+        window.clearTimeout(rangeSearchTimeout.current)
+        rangeSearchTimeout.current = null
+      }
+      recommendRequestId.current += 1
+      setIsRunning(false)
+      setSourceSwap(null)
+
       const values = valuesFromRecommendSearch(window.location.search)
 
       if (!values) {
@@ -232,7 +240,7 @@ export function RecommendPage() {
     }
   }
 
-  async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
+  async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<void>, preloadCover = true) {
     const currentSource = response?.query.metadata ?? null
     setSourceSwap({
       beatmap: currentSource,
@@ -242,10 +250,7 @@ export function RecommendPage() {
       requestDone: false,
     })
 
-    const nextValues = { ...form.getValues(), beatmapInput: String(beatmap.beatmap_id) }
-    form.reset(nextValues)
-    scrollToPageTop()
-    const request = runRecommend(nextValues, 'push', false).then(() => {
+    void request.then(() => {
       setSourceSwap((swap) => {
         if (!swap || swap.nextBeatmap.beatmap_id !== beatmap.beatmap_id) {
           return swap
@@ -254,7 +259,7 @@ export function RecommendPage() {
       })
     })
 
-    if (beatmap.beatmapset_id !== null) {
+    if (preloadCover && beatmap.beatmapset_id !== null) {
       await new Promise<void>((resolve) => {
         const image = new Image()
         image.onload = () => resolve()
@@ -270,6 +275,39 @@ export function RecommendPage() {
       return { ...swap, beatmap: swap.beatmap ?? beatmap, phase: swap.beatmap ? 'out' : 'in' }
     })
     await request
+  }
+
+  async function runManualRecommend(values: RecommendFormValues) {
+    const beatmapId = parseBeatmapId(values.beatmapInput)!
+    if (response?.query.metadata.beatmap_id === beatmapId) {
+      await runRecommend(values)
+      return
+    }
+
+    let requestDone = false
+    const request = runRecommend(values).finally(() => {
+      requestDone = true
+    })
+    const requestId = recommendRequestId.current
+    const knownBeatmap = [...(response?.results ?? []), ...(defaultResponse?.results ?? [])].find((beatmap) => beatmap.beatmap_id === beatmapId)
+
+    try {
+      const beatmap = knownBeatmap ?? await fetchBeatmapSummary(beatmapId)
+      if (!requestDone && recommendRequestId.current === requestId) {
+        await swapSourceBeatmap(beatmap, 'left', request, false)
+        return
+      }
+    } catch {
+      return request
+    }
+    await request
+  }
+
+  async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
+    const nextValues = { ...form.getValues(), beatmapInput: String(beatmap.beatmap_id) }
+    form.reset(nextValues)
+    scrollToPageTop()
+    await swapSourceBeatmap(beatmap, direction, runRecommend(nextValues, 'push', false))
   }
 
   function finishSourceSweep() {
@@ -295,7 +333,7 @@ export function RecommendPage() {
       <RecommendForm
         form={form}
         isLoading={isLoading}
-        onSubmit={runRecommend}
+        onSubmit={runManualRecommend}
         onRangeChange={scheduleRangeRecommend}
         onSelectChange={(values) => {
           clearRangeSearchTimeout()
@@ -303,7 +341,7 @@ export function RecommendPage() {
         }}
         onPasteSearch={(values) => {
           clearRangeSearchTimeout()
-          void runRecommend(values)
+          void runManualRecommend(values)
         }}
         onReset={(values) => {
           void resetRecommendations(values)
