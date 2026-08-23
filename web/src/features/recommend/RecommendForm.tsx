@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
+import { CalendarDays, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
 import type { UseFormReturn } from 'react-hook-form'
 import { defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
@@ -10,19 +10,20 @@ type RecommendFormProps = {
   isLoading: boolean
   onSubmit: (values: RecommendFormValues) => Promise<void>
   onRangeChange: (values: RecommendFormValues) => void
-  onStatusChange: (values: RecommendFormValues) => void
+  onSelectChange: (values: RecommendFormValues) => void
   onPasteSearch: (values: RecommendFormValues) => void
   onReset: (values: RecommendFormValues) => void
 }
 
 type RangeFieldName = 'minSr' | 'maxSr' | 'minLength' | 'maxLength' | 'minBpm' | 'maxBpm'
 
-export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onStatusChange, onPasteSearch, onReset }: RecommendFormProps) {
+export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
   const values = form.watch()
   const beatmapError = form.formState.errors.beatmapInput?.message
   const submitDisabled = isLoading || form.formState.isSubmitting
   const beatmapInput = form.register('beatmapInput')
   const status = form.register('status')
+  const dateWindow = form.register('dateWindow')
 
   function resetForm() {
     const nextValues = { ...defaultFilters, beatmapInput: form.getValues('beatmapInput') }
@@ -114,25 +115,45 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onStat
             <RangeFields label="BPM" icon={<Metronome strokeWidth={3} />} min={values.minBpm} max={values.maxBpm} setMin={(value) => updateRange('minBpm', value)} setMax={(value) => updateRange('maxBpm', value)} />
             <RangeFields label="Length" icon={<Clock strokeWidth={3} />} min={values.minLength} max={values.maxLength} setMin={(value) => updateRange('minLength', value)} setMax={(value) => updateRange('maxLength', value)} />
 
-            <label className="field status-field">
+            <label className="field select-field date-field">
+              <span aria-hidden="true">
+                <CalendarDays strokeWidth={3} />
+              </span>
+              <select
+                aria-label="Date window"
+                {...dateWindow}
+                onChange={(event) => {
+                  dateWindow.onChange(event)
+                  onSelectChange({ ...form.getValues(), dateWindow: event.target.value })
+                }}
+              >
+                <option value="">All time</option>
+                <option value="last_week">Last week</option>
+                <option value="last_month">Last month</option>
+                <option value="last_3_months">Last 3 months</option>
+                <option value="last_6_months">Last 6 months</option>
+                <option value="last_year">Last year</option>
+                <option value="last_2_years">Last 2 years</option>
+                <option value="last_5_years">Last 5 years</option>
+              </select>
+            </label>
+
+            <label className="field select-field status-field">
               <span aria-hidden="true">
                 <Tag strokeWidth={3} />
               </span>
               <select
+                aria-label="Status"
                 {...status}
                 onChange={(event) => {
                   status.onChange(event)
-                  onStatusChange({ ...form.getValues(), status: event.target.value })
+                  onSelectChange({ ...form.getValues(), status: event.target.value })
                 }}
               >
                 <option value="">Any</option>
-                <option value="-2">Graveyard</option>
-                <option value="-1">WIP</option>
-                <option value="0">Pending</option>
-                <option value="1">Ranked</option>
-                <option value="2">Approved</option>
-                <option value="3">Qualified</option>
-                <option value="4">Loved</option>
+                <option value="ranked">Ranked</option>
+                <option value="loved">Loved</option>
+                <option value="unranked">Unranked</option>
               </select>
             </label>
 

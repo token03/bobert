@@ -238,7 +238,7 @@ export function RecommendPage() {
         isLoading={isLoading}
         onSubmit={runRecommend}
         onRangeChange={scheduleRangeRecommend}
-        onStatusChange={(values) => {
+        onSelectChange={(values) => {
           clearRangeSearchTimeout()
           runAutoRecommend(values)
         }}
@@ -278,8 +278,6 @@ export function RecommendPage() {
       {audio.audioElement}
 
       <section className="results-panel">
-        {error ? <p className="error-text">{error}</p> : null}
-
         <div className="recommend-layout">
           {response ? <BeatmapCard variant="source" beatmap={response.query.metadata} onCopy={copyBeatmapId} /> : null}
           {recommendForm}
@@ -304,9 +302,9 @@ export function RecommendPage() {
       {audio.activeBeatmap ? (
         <AudioPreviewBar
           beatmap={audio.activeBeatmap}
+          audioRef={audio.audioRef}
           visible={audio.visible}
           isPlaying={audio.isPlaying}
-          currentTime={audio.currentTime}
           duration={audio.duration}
           volume={audio.volume}
           muted={audio.muted}

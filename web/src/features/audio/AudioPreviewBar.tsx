@@ -1,11 +1,13 @@
 import { Pause, Play, Volume2, VolumeX } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import type { CSSProperties, RefObject } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
 
 type AudioPreviewBarProps = {
   beatmap: BeatmapMetadata
+  audioRef: RefObject<HTMLAudioElement | null>
   visible: boolean
   isPlaying: boolean
-  currentTime: number
   duration: number
   volume: number
   muted: boolean
@@ -18,9 +20,9 @@ type AudioPreviewBarProps = {
 
 export function AudioPreviewBar({
   beatmap,
+  audioRef,
   visible,
   isPlaying,
-  currentTime,
   duration,
   volume,
   muted,
@@ -31,8 +33,33 @@ export function AudioPreviewBar({
   onPointerDown,
 }: AudioPreviewBarProps) {
   const safeDuration = Number.isFinite(duration) ? Math.max(0, duration) : 0
-  const safeCurrentTime = Math.min(safeDuration || currentTime, Math.max(0, currentTime))
-  const volumeValue = muted ? 0 : volume
+  const progressRef = useRef<HTMLInputElement>(null)
+  const [localVolume, setLocalVolume] = useState(volume)
+  const volumeValue = muted ? 0 : localVolume
+  const progressStyle = { '--range-progress': '0%' } as CSSProperties
+  const volumeStyle = { '--range-progress': `${volumeValue * 100}%` } as CSSProperties
+
+  useEffect(() => {
+    let frame = 0
+
+    const updateProgress = () => {
+      const audio = audioRef.current
+      const input = progressRef.current
+
+      if (audio && input) {
+        const current = Math.min(safeDuration || audio.currentTime, Math.max(0, audio.currentTime))
+        input.value = String(current)
+        input.style.setProperty('--range-progress', `${safeDuration ? (current / safeDuration) * 100 : 0}%`)
+      }
+
+      if (audio && !audio.paused && !audio.ended) {
+        frame = window.requestAnimationFrame(updateProgress)
+      }
+    }
+
+    updateProgress()
+    return () => window.cancelAnimationFrame(frame)
+  }, [audioRef, isPlaying, safeDuration])
 
   return (
     <aside
@@ -48,13 +75,19 @@ export function AudioPreviewBar({
       <div className="audio-pill-main">
         <input
           className="audio-progress"
+          ref={progressRef}
           type="range"
           min="0"
           max={safeDuration || 0}
           step="0.1"
-          value={safeCurrentTime}
+          defaultValue="0"
+          style={progressStyle}
           disabled={!safeDuration}
-          onChange={(event) => onSeek(event.target.value)}
+          onInput={(event) => {
+            const input = event.currentTarget
+            input.style.setProperty('--range-progress', `${safeDuration ? (Number(input.value) / safeDuration) * 100 : 0}%`)
+            onSeek(input.value)
+          }}
           aria-label="Preview progress"
         />
       </div>
@@ -69,7 +102,11 @@ export function AudioPreviewBar({
           max="1"
           step="0.01"
           value={volumeValue}
-          onChange={(event) => onVolumeChange(event.target.value)}
+          style={volumeStyle}
+          onChange={(event) => {
+            setLocalVolume(Number(event.target.value))
+            onVolumeChange(event.target.value)
+          }}
           aria-label="Preview volume"
         />
       </div>

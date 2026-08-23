@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -28,6 +29,11 @@ BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 SEARCH_CANDIDATE_FACTORS = (10, 25, 100)
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
+STATUS_GROUPS = {
+    "ranked": {"1", "2", "3", "ranked", "approved", "qualified"},
+    "loved": {"4", "loved"},
+    "unranked": {"-2", "-1", "0", "graveyard", "wip", "pending"},
+}
 SEARCH_COLUMNS = [
     "id",
     "beatmapset_id",
@@ -36,6 +42,7 @@ SEARCH_COLUMNS = [
     "title",
     "creator",
     "version",
+    "mode",
     "status",
     "ranked",
     "difficulty_rating",
@@ -50,6 +57,8 @@ SEARCH_COLUMNS = [
     "last_updated",
     "ranked_date",
     "submitted_date",
+    "favourite_count",
+    "play_count",
 ]
 
 
@@ -185,10 +194,27 @@ class Runtime:
         }
 
         beatmaps = pl.read_parquet(BEATMAPS_PATH, columns=SEARCH_COLUMNS)
+        defaults = (
+            beatmaps.filter(pl.col("status").is_in(["1", "4"]), pl.col("mode") == "osu")
+            .sort("difficulty_rating", descending=True)
+            .unique("beatmapset_id", keep="first", maintain_order=True)
+            .join(pl.DataFrame({"id": self.static_ids}), on="id", how="semi")
+            .filter(
+                pl.col("difficulty_rating").is_between(5, 9, closed="left"),
+                pl.col("play_count") > 50000,
+                pl.col("favourite_count")
+                >= pl.min_horizontal(pl.col("play_count") / 250, pl.lit(1000)),
+            )
+            .sort("id")
+        )
         self.metadata_by_id = {
             int(row["id"]): row
             for row in beatmaps.unique("id", maintain_order=True).iter_rows(named=True)
         }
+        self.default_pool = [
+            public_summary(int(beatmap_id), self.metadata_by_id[int(beatmap_id)])
+            for beatmap_id in defaults["id"]
+        ]
         del beatmaps
         self.dynamic_ids: list[int] = []
         self.dynamic_embeddings: list[np.ndarray] = []
@@ -207,6 +233,9 @@ class Runtime:
             raise RuntimeError(
                 f"model dimension {self.model.d_model} does not match embeddings dimension {self.embedding_dim}"
             )
+
+    def default_summaries(self, seed: int | None = None) -> list[dict[str, Any]]:
+        return random.Random(seed).sample(self.default_pool, 100)
 
     def memory_embedding(
         self, beatmap_id: int
@@ -457,7 +486,8 @@ def passes_filters(
             str(metadata.get("status", "")).lower(),
             str(metadata.get("ranked", "")).lower(),
         }
-        if filters.status.lower() not in statuses:
+        accepted = STATUS_GROUPS.get(filters.status.lower(), {filters.status.lower()})
+        if statuses.isdisjoint(accepted):
             return False
     if date_cutoff is not None:
         release_date = parse_metadata_datetime(metadata_release_date(metadata))

@@ -6,14 +6,15 @@ type UseAudioPreviewOptions = {
   onError: (message: string) => void
 }
 
+const initialVolume = 0.25
+
 export function useAudioPreview({ onError }: UseAudioPreviewOptions) {
   const audioRef = useRef<HTMLAudioElement>(null)
   const hideTimerRef = useRef<number | null>(null)
   const [activeBeatmap, setActiveBeatmap] = useState<BeatmapMetadata | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
-  const [volume, setVolume] = useState(0.25)
+  const volumeRef = useRef(initialVolume)
   const [muted, setMuted] = useState(false)
   const [visible, setVisible] = useState(false)
 
@@ -73,11 +74,10 @@ export function useAudioPreview({ onError }: UseAudioPreviewOptions) {
       }
 
       setActiveBeatmap(beatmap)
-      setCurrentTime(0)
       setDuration(0)
       audio.src = previewUrl(beatmapsetId)
       audio.currentTime = 0
-      audio.volume = volume
+      audio.volume = volumeRef.current
       audio.muted = muted
       await audio.play()
     } catch (err) {
@@ -120,7 +120,6 @@ export function useAudioPreview({ onError }: UseAudioPreviewOptions) {
 
     showTemporarily()
     audio.currentTime = nextTime
-    setCurrentTime(nextTime)
   }
 
   function changeVolume(value: string) {
@@ -132,7 +131,7 @@ export function useAudioPreview({ onError }: UseAudioPreviewOptions) {
     }
 
     const clampedVolume = Math.min(1, Math.max(0, nextVolume))
-    setVolume(clampedVolume)
+    volumeRef.current = clampedVolume
     setMuted(false)
 
     if (audio) {
@@ -165,21 +164,8 @@ export function useAudioPreview({ onError }: UseAudioPreviewOptions) {
     setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
   }
 
-  function handleTimeUpdate() {
-    const audio = audioRef.current
-
-    if (!audio) {
-      return
-    }
-
-    setCurrentTime(audio.currentTime)
-  }
-
   function handleEnded() {
-    const audio = audioRef.current
-
     setIsPlaying(false)
-    setCurrentTime(audio?.duration && Number.isFinite(audio.duration) ? audio.duration : 0)
     showTemporarily()
   }
 
@@ -198,15 +184,14 @@ export function useAudioPreview({ onError }: UseAudioPreviewOptions) {
           showTemporarily(true)
         }}
         onLoadedMetadata={handleLoadedMetadata}
-        onTimeUpdate={handleTimeUpdate}
         onEnded={handleEnded}
       />
     ),
     activeBeatmap,
+    audioRef,
     isPlaying,
-    currentTime,
     duration,
-    volume,
+    volume: initialVolume,
     muted,
     visible,
     playPreview,

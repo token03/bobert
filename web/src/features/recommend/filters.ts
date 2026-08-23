@@ -18,6 +18,7 @@ export const defaultFilters = {
   minHp: '0',
   maxHp: '10',
   status: '',
+  dateWindow: '',
   excludeSameSet: true,
 }
 
@@ -42,6 +43,7 @@ export const recommendFormSchema = z.object({
   minHp: z.string(),
   maxHp: z.string(),
   status: z.string(),
+  dateWindow: z.string(),
   excludeSameSet: z.boolean(),
 })
 
@@ -60,6 +62,7 @@ export function buildRecommendRequest(values: RecommendFormValues) {
     min_drain: numericOrNull(values.minHp),
     max_drain: numericOrNull(values.maxHp),
     status: values.status || null,
+    date_window: values.dateWindow || null,
     exclude_same_set: values.excludeSameSet,
   }
   const minBpmValue = numericOrNull(values.minBpm)

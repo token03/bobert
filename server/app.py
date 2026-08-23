@@ -29,7 +29,7 @@ import uvicorn
 
 torch.set_num_threads(THREAD_COUNT)
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -37,28 +37,6 @@ from server.osu import BeatmapUnavailableError, OsuClient
 from server.runtime import Runtime, metadata_complete, public_summary
 
 MAX_RECOMMEND_TOP_K = 1000
-DEFAULT_RECOMMEND_IDS = [
-    1872396,
-    658127,
-    1351114,
-    2535968,
-    2809623,
-    4881796,
-    3592622,
-    724015,
-    1031991,
-    2872154,
-    2736518,
-    3333745,
-    2250670,
-    1380717,
-    2719326,
-    555797,
-    1988753,
-    2096523,
-    1419243,
-    1787848,
-]
 RATE_LIMITS = {"global": 1200, "ip": 120}
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 
@@ -201,9 +179,9 @@ def health() -> dict[str, bool]:
 
 
 @app.get("/api/recommend")
-def default_recommend() -> dict[str, Any]:
-    runtime = get_runtime()
-    results = [runtime.summary(beatmap_id) for beatmap_id in DEFAULT_RECOMMEND_IDS]
+def default_recommend(response: Response, seed: int | None = None) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    results = get_runtime().default_summaries(seed)
     return {"count": len(results), "results": results}
 
 

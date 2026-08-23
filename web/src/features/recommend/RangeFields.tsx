@@ -22,6 +22,7 @@ export function RangeFields({ label, icon, min, max, setMin, setMax }: RangeFiel
       <span className="range-inputs">
         <input
           inputMode="decimal"
+          maxLength={3}
           type="text"
           value={min}
           onChange={(event) => updateNumber(event.target.value, setMin)}
@@ -31,6 +32,7 @@ export function RangeFields({ label, icon, min, max, setMin, setMax }: RangeFiel
         <span aria-hidden="true">|</span>
         <input
           inputMode="decimal"
+          maxLength={3}
           type="text"
           value={max}
           onChange={(event) => updateNumber(event.target.value, setMax)}

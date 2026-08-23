@@ -52,6 +52,12 @@ export function BeatmapCard(props: BeatmapCardProps) {
             </div>
           </div>
 
+          <div className="source-meta">
+            <CreatorLink beatmap={beatmap} />
+            <span className={`status-label ${statusClass(beatmap.status)}`}>{statusLabel(beatmap.status)}</span>
+          </div>
+          <div className="source-meta-separator" aria-hidden="true" />
+
           <BeatmapStats beatmap={beatmap} variant="source" actions={<CardActions beatmap={beatmap} onCopy={onCopy} />} />
         </div>
       </article>
@@ -69,11 +75,21 @@ export function BeatmapCard(props: BeatmapCardProps) {
 
       <div className="beatmap-card-content beatmap-card-content-result map-content">
         <div className="map-main">
-          <BeatmapSummary beatmap={beatmap} />
-          <div className="match-line">
-            {beatmap.score !== undefined ? <span className="match-pill">{formatMatch(beatmap.score)}</span> : null}
-            <span className={`status-label ${statusClass(beatmap.status)}`}>{statusLabel(beatmap.status)}</span>
-            <CreatorLink beatmap={beatmap} />
+          <div className="result-summary">
+            <div className="result-copy">
+              <div className="title-line">
+                <span className="map-title">{displayTitle(beatmap)}</span>
+              </div>
+              <div className="artist-line">by {displayArtist(beatmap)}</div>
+              <div className="version-line">
+                <span>{beatmap.version ?? 'Unknown difficulty'}</span>
+              </div>
+            </div>
+            <div className="result-meta">
+              <CreatorLink beatmap={beatmap} />
+              {beatmap.score !== undefined ? <span className="match-pill">{formatMatch(beatmap.score)} match</span> : null}
+              <span className={`status-label ${statusClass(beatmap.status)}`}>{statusLabel(beatmap.status)}</span>
+            </div>
           </div>
         </div>
 
@@ -143,6 +159,7 @@ function BeatmapSummary({ beatmap }: { beatmap: BeatmapMetadata }) {
 function BeatmapStats({ beatmap, variant = 'result', actions }: { beatmap: BeatmapMetadata; variant?: 'result' | 'source'; actions: ReactNode }) {
   return (
     <div className="stat-strip">
+      {variant === 'result' ? <div className="result-stat-separator" aria-hidden="true" /> : null}
       <div className="stat-row stat-row-main">
         <Stat label={<Star aria-label="Star" strokeWidth={3} />} value={formatNumber(beatmap.stars, 2)} featured />
         <Stat label={<Metronome aria-label="BPM" strokeWidth={3} />} value={formatNumber(beatmap.bpm, 0)} featured />
@@ -200,7 +217,7 @@ function CreatorLink({ beatmap }: { beatmap: BeatmapMetadata }) {
 
   if (beatmap.user_id) {
     return (
-      <span>
+      <span className="creator-credit">
         mapped by{' '}
         <a className="mapper-link" href={userUrl(beatmap.user_id)} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
           {creatorName}
@@ -209,5 +226,5 @@ function CreatorLink({ beatmap }: { beatmap: BeatmapMetadata }) {
     )
   }
 
-  return <span>mapped by {creatorName}</span>
+  return <span className="creator-credit">mapped by {creatorName}</span>
 }

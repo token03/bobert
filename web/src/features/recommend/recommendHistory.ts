@@ -21,6 +21,7 @@ const fields = [
   'minHp',
   'maxHp',
   'status',
+  'dateWindow',
 ] as const satisfies readonly (keyof RecommendFormValues)[]
 
 type CachedRecommendation = {
@@ -61,6 +62,15 @@ export function valuesFromRecommendSearch(search: string): RecommendFormValues |
   for (const field of fields) {
     values[field] = params.get(field) ?? defaultFilters[field]
   }
+  values.status = {
+    '1': 'ranked',
+    '2': 'ranked',
+    '3': 'ranked',
+    '4': 'loved',
+    '-2': 'unranked',
+    '-1': 'unranked',
+    '0': 'unranked',
+  }[values.status] ?? values.status
 
   values.excludeSameSet = params.get('excludeSameSet') === null ? defaultFilters.excludeSameSet : params.get('excludeSameSet') === 'true'
 

@@ -34,7 +34,7 @@ export function formatLength(value: number | null): string {
 }
 
 export function formatMatch(value: number): string {
-  return `${(value * 100).toFixed(2)}%`
+  return `${(value * 100).toFixed(0)}%`
 }
 
 export function resultsLabel(count: number): string {
