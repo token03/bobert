@@ -1028,6 +1028,10 @@ button:disabled {
   transition: opacity 0.14s ease, transform 0.18s ease;
 }
 
+.result-meta-details:has(> .status-label:only-child) {
+  align-content: start;
+}
+
 .result-meta-actions {
   opacity: 0;
   pointer-events: none;
