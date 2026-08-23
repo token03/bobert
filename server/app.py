@@ -59,9 +59,8 @@ DEFAULT_RECOMMEND_IDS = [
     1419243,
     1787848,
 ]
-RATE_LIMITS = {"global": 1200, "server": 600, "ip": 120}
+RATE_LIMITS = {"global": 1200, "ip": 120}
 TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
-API_SHARED_SECRET = os.getenv("API_SHARED_SECRET", "")
 
 
 log = logging.getLogger("uvicorn.error")
@@ -213,16 +212,11 @@ async def recommend(
     payload: RecommendRequest,
     request: Request,
     x_turnstile_token: str | None = Header(default=None, alias="X-Turnstile-Token"),
-    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
     ip = request_client_ip(request.scope, request.headers.raw)
-    trusted_server = bool(API_SHARED_SECRET) and x_api_key == API_SHARED_SECRET
     rate_limit("global:recommend", RATE_LIMITS["global"])
-    if trusted_server:
-        rate_limit("server:recommend", RATE_LIMITS["server"])
-    else:
-        rate_limit(f"ip:{ip}:recommend", RATE_LIMITS["ip"])
-        await verify_turnstile(x_turnstile_token, ip)
+    rate_limit(f"ip:{ip}:recommend", RATE_LIMITS["ip"])
+    await verify_turnstile(x_turnstile_token, ip)
 
     runtime = get_runtime()
     memory = runtime.memory_embedding(payload.beatmap_id)

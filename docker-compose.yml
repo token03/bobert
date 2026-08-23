@@ -14,13 +14,11 @@ services:
       - ./runs:/app/runs:ro
       - ./cache:/app/cache
     environment:
-      APP_ENV: production
       BOBERT_DATA_DIR: /app/data
       BOBERT_RUN_DIR: /app/runs/current
       BOBERT_CACHE_DB: /app/cache/runtime.sqlite
       BOBERT_MODEL_PATH: /app/runs/current/bobert.pt
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY}
-      API_SHARED_SECRET: ${API_SHARED_SECRET}
       OSU_CLIENT_ID: ${OSU_CLIENT_ID}
       OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET}
       OMP_NUM_THREADS: "2"
