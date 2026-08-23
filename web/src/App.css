@@ -9,7 +9,7 @@
   --space-3xl: 14px;
   --space-4xl: 16px;
   --space-5xl: 24px;
-  --space-page: clamp(12px, 3vw, 48px);
+  --space-page: clamp(12px, calc(31.5vw - 396px), 108px);
   --radius-sm: 8px;
   --radius-md: 10px;
   --radius-lg: 14px;
@@ -1405,7 +1405,20 @@ button:disabled {
   }
 }
 
-@media (max-width: 1080px) {
+@media (max-width: 1400px) {
+  :root {
+    --space-page: clamp(12px, calc(10vw - 50px), 108px);
+  }
+
+  .recommend-layout {
+    width: min(100%, 900px);
+    margin-inline: auto;
+  }
+
+  .primary-controls {
+    grid-template-columns: 1fr;
+  }
+
   .result-list {
     grid-template-columns: 1fr;
   }
@@ -1452,10 +1465,6 @@ button:disabled {
 }
 
 @media (max-width: 760px) {
-  .app-shell {
-    padding: 0 var(--space-2xl) var(--space-5xl);
-  }
-
   .audio-pill {
     right: var(--space-xl);
     bottom: var(--space-xl);
