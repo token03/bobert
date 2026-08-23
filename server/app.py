@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import socket
 import threading
 import time
 import uuid
@@ -23,6 +25,7 @@ for _variable in (
 
 import httpx
 import torch
+import uvicorn
 
 torch.set_num_threads(THREAD_COUNT)
 
@@ -352,3 +355,17 @@ async def verify_turnstile(token: str | None, remote_ip: str) -> None:
     )
     if not response.json().get("success"):
         raise HTTPException(status_code=401, detail="Turnstile verification failed")
+
+
+if __name__ == "__main__":
+    sockets = []
+    for family, host in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+        sock = socket.socket(family)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock.bind((host, 8000))
+        sock.setblocking(False)
+        sockets.append(sock)
+    config = uvicorn.Config(app, workers=1, proxy_headers=True, access_log=False)
+    asyncio.run(uvicorn.Server(config).serve(sockets=sockets))
