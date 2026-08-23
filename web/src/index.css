@@ -1,4 +1,4 @@
-@import '@fontsource-variable/geist';
+@import '@fontsource-variable/onest';
 
 :root {
   --accent: #ff66aa;
@@ -22,7 +22,7 @@
   --surface-strong: #28292c;
   --text: #dfe0e2;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --sans: 'Onest Variable', ui-sans-serif, system-ui, sans-serif;
   --shadow: 0 18px 70px rgba(0, 0, 0, 0.34);
 
   color: var(--text);

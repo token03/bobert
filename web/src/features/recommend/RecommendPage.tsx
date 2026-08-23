@@ -5,16 +5,25 @@ import { useTurnstile } from '../turnstile/useTurnstile'
 import { fetchDefaultRecommendations } from '../../shared/api'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata, DefaultRecommendResponse, RecommendResponse } from '../../shared/types'
+import { cardCoverUrl } from '../../shared/urls'
 import { buildRecommendRequest, defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RecommendForm } from './RecommendForm'
 import { readCachedRecommendation, recommendSearchParams, valuesFromRecommendSearch, writeCachedRecommendation } from './recommendHistory'
 import { BeatmapCard } from './BeatmapCard'
+import type { SweepDirection } from './BeatmapCard'
 import { ResultsList } from './ResultsList'
 import { useRecommend } from './useRecommend'
 import { useRecommendForm } from './useRecommendForm'
 
 type HistoryMode = 'push' | 'replace' | 'none'
+type SourceSwap = {
+  beatmap: BeatmapMetadata | null
+  nextBeatmap: BeatmapMetadata
+  direction: SweepDirection
+  phase: 'in' | 'out' | 'preloading' | 'waiting'
+  requestDone: boolean
+}
 
 export function RecommendPage() {
   const [error, setError] = useState('')
@@ -22,6 +31,7 @@ export function RecommendPage() {
   const [defaultResponse, setDefaultResponse] = useState<DefaultRecommendResponse | null>(null)
   const [defaultLoading, setDefaultLoading] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
+  const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
   const turnstile = useTurnstile()
   const recommend = useRecommend()
   const form = useRecommendForm()
@@ -222,10 +232,59 @@ export function RecommendPage() {
     }
   }
 
-  async function searchBeatmap(beatmapId: number) {
-    const nextValues = { ...form.getValues(), beatmapInput: String(beatmapId) }
+  async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
+    const currentSource = response?.query.metadata ?? null
+    setSourceSwap({
+      beatmap: currentSource,
+      nextBeatmap: beatmap,
+      direction,
+      phase: 'preloading',
+      requestDone: false,
+    })
+
+    const nextValues = { ...form.getValues(), beatmapInput: String(beatmap.beatmap_id) }
     form.reset(nextValues)
-    await runRecommend(nextValues)
+    scrollToPageTop()
+    const request = runRecommend(nextValues, 'push', false).then(() => {
+      setSourceSwap((swap) => {
+        if (!swap || swap.nextBeatmap.beatmap_id !== beatmap.beatmap_id) {
+          return swap
+        }
+        return swap.phase === 'waiting' ? null : { ...swap, requestDone: true }
+      })
+    })
+
+    if (beatmap.beatmapset_id !== null) {
+      await new Promise<void>((resolve) => {
+        const image = new Image()
+        image.onload = () => resolve()
+        image.onerror = () => resolve()
+        image.src = cardCoverUrl(beatmap.beatmapset_id!)
+      })
+    }
+
+    setSourceSwap((swap) => {
+      if (!swap || swap.nextBeatmap.beatmap_id !== beatmap.beatmap_id) {
+        return swap
+      }
+      return { ...swap, beatmap: swap.beatmap ?? beatmap, phase: swap.beatmap ? 'out' : 'in' }
+    })
+    await request
+  }
+
+  function finishSourceSweep() {
+    setSourceSwap((swap) => {
+      if (!swap) {
+        return null
+      }
+      if (swap.phase === 'out') {
+        return { ...swap, beatmap: swap.nextBeatmap, phase: 'in' }
+      }
+      if (swap.phase === 'in') {
+        return swap.requestDone ? null : { ...swap, phase: 'waiting' }
+      }
+      return swap
+    })
   }
 
   const resultBeatmaps = response?.results ?? defaultResponse?.results ?? []
@@ -271,6 +330,8 @@ export function RecommendPage() {
       {isLoading ? <div className="results-loading-overlay" aria-hidden="true" /> : null}
     </div>
   )
+  const sourceBeatmap = sourceSwap ? sourceSwap.beatmap : response?.query.metadata
+  const sourceSweepPhase = sourceSwap?.phase === 'in' || sourceSwap?.phase === 'out' ? sourceSwap.phase : undefined
 
   return (
     <main className="app-shell">
@@ -279,7 +340,16 @@ export function RecommendPage() {
 
       <section className="results-panel">
         <div className="recommend-layout">
-          {response ? <BeatmapCard variant="source" beatmap={response.query.metadata} onCopy={copyBeatmapId} /> : null}
+          {sourceBeatmap ? (
+            <BeatmapCard
+              variant="source"
+              beatmap={sourceBeatmap}
+              onCopy={copyBeatmapId}
+              sweepDirection={sourceSweepPhase ? sourceSwap?.direction : undefined}
+              sweepPhase={sourceSweepPhase}
+              onSweepEnd={finishSourceSweep}
+            />
+          ) : null}
           {recommendForm}
           {response ? (
             response.results.length > 0 ? (

@@ -1,11 +1,12 @@
 import { memo } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
 import { BeatmapCard } from './BeatmapCard'
+import type { SweepDirection } from './BeatmapCard'
 
 type ResultsListProps = {
   beatmaps: BeatmapMetadata[]
   onCopy: (beatmapId: number) => Promise<void>
-  onSearch: (beatmapId: number) => Promise<void>
+  onSearch: (beatmap: BeatmapMetadata, direction: SweepDirection) => Promise<void>
   isLoading: boolean
   onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
   activePreviewSetId: number | null

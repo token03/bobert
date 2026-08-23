@@ -1,5 +1,6 @@
-import { Clock, Copy, Download, Metronome, Pause, Play, Search, Star } from 'lucide-react'
-import type { KeyboardEvent, MouseEvent, ReactNode } from 'react'
+import { Check, Clock, Copy, Download, Metronome, Pause, Play, Search, Star } from 'lucide-react'
+import { useState } from 'react'
+import type { FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { displayArtist, displayTitle, formatFixedNumber, formatLength, formatMatch, formatNumber, statusClass, statusLabel } from '../../shared/format'
 import { Stat } from '../../shared/ui/Stat'
 import type { BeatmapMetadata } from '../../shared/types'
@@ -9,13 +10,18 @@ type SourceBeatmapCardProps = {
   variant: 'source'
   beatmap: BeatmapMetadata
   onCopy: (beatmapId: number) => Promise<void>
+  sweepDirection?: SweepDirection
+  sweepPhase?: 'in' | 'out'
+  onSweepEnd?: () => void
 }
+
+export type SweepDirection = 'left' | 'right'
 
 type ResultBeatmapCardProps = {
   variant?: 'result'
   beatmap: BeatmapMetadata
   onCopy: (beatmapId: number) => Promise<void>
-  onSearch: (beatmapId: number) => Promise<void>
+  onSearch: (beatmap: BeatmapMetadata, direction: SweepDirection) => Promise<void>
   isLoading: boolean
   onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
   activePreviewSetId: number | null
@@ -26,6 +32,7 @@ type BeatmapCardProps = SourceBeatmapCardProps | ResultBeatmapCardProps
 
 export function BeatmapCard(props: BeatmapCardProps) {
   const { beatmap, onCopy } = props
+  const [copied, setCopied] = useState(false)
   const variant = props.variant ?? 'result'
   const isSource = variant === 'source'
   const openBeatmap = () => window.open(beatmapUrl(beatmap), '_blank', 'noreferrer')
@@ -39,10 +46,27 @@ export function BeatmapCard(props: BeatmapCardProps) {
       openBeatmap()
     }
   }
+  const handleCardBlur = (event: FocusEvent<HTMLElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      setCopied(false)
+    }
+  }
 
   if (isSource) {
+    const sourceProps = props as SourceBeatmapCardProps
+    const sweepClass = sourceProps.sweepDirection && sourceProps.sweepPhase ? ` source-sweep-${sourceProps.sweepPhase}-${sourceProps.sweepDirection}` : ''
+
     return (
-      <article className="beatmap-card beatmap-card-source source-card clickable-card" role="link" tabIndex={0} onClick={openBeatmap} onKeyDown={handleCardKeyDown}>
+      <article
+        className={`beatmap-card beatmap-card-source source-card clickable-card${sweepClass}`}
+        role="link"
+        tabIndex={0}
+        onClick={openBeatmap}
+        onKeyDown={handleCardKeyDown}
+        onMouseLeave={() => setCopied(false)}
+        onBlur={handleCardBlur}
+        onAnimationEnd={() => sourceProps.onSweepEnd?.()}
+      >
         <BeatmapCover beatmap={beatmap} variant="source" />
 
         <div className="beatmap-card-content beatmap-card-content-source source-content">
@@ -58,7 +82,7 @@ export function BeatmapCard(props: BeatmapCardProps) {
           </div>
           <div className="source-meta-separator" aria-hidden="true" />
 
-          <BeatmapStats beatmap={beatmap} variant="source" actions={<CardActions beatmap={beatmap} onCopy={onCopy} />} />
+          <BeatmapStats beatmap={beatmap} variant="source" actions={<CardActions beatmap={beatmap} onCopy={onCopy} copied={copied} onCopiedChange={setCopied} />} />
         </div>
       </article>
     )
@@ -70,7 +94,15 @@ export function BeatmapCard(props: BeatmapCardProps) {
   const isCoverActive = isActivePreview && resultProps.isPreviewPlaying
 
   return (
-    <article className="beatmap-card beatmap-card-result beatmap-row clickable-card" role="link" tabIndex={0} onClick={openBeatmap} onKeyDown={handleCardKeyDown}>
+    <article
+      className="beatmap-card beatmap-card-result beatmap-row clickable-card"
+      role="link"
+      tabIndex={0}
+      onClick={openBeatmap}
+      onKeyDown={handleCardKeyDown}
+      onMouseLeave={() => setCopied(false)}
+      onBlur={handleCardBlur}
+    >
       <BeatmapCover beatmap={beatmap} variant="result" isCoverActive={isCoverActive} onPlayPreview={resultProps.onPlayPreview} />
 
       <div className="beatmap-card-content beatmap-card-content-result map-content">
@@ -87,13 +119,20 @@ export function BeatmapCard(props: BeatmapCardProps) {
             </div>
             <div className="result-meta">
               <CreatorLink beatmap={beatmap} />
-              {beatmap.score !== undefined ? <span className="match-pill">{formatMatch(beatmap.score)} match</span> : null}
-              <span className={`status-label ${statusClass(beatmap.status)}`}>{statusLabel(beatmap.status)}</span>
+              <div className="result-meta-slot">
+                <div className="result-meta-details">
+                  {beatmap.score !== undefined ? <span className="match-pill">{formatMatch(beatmap.score)} match</span> : null}
+                  <span className={`status-label ${statusClass(beatmap.status)}`}>{statusLabel(beatmap.status)}</span>
+                </div>
+                <div className="result-meta-actions">
+                  <CardActions beatmap={beatmap} onCopy={onCopy} onSearch={resultProps.onSearch} isLoading={resultProps.isLoading} copied={copied} onCopiedChange={setCopied} />
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        <BeatmapStats beatmap={beatmap} actions={<CardActions beatmap={beatmap} onCopy={onCopy} onSearch={resultProps.onSearch} isLoading={resultProps.isLoading} />} />
+        <BeatmapStats beatmap={beatmap} />
       </div>
     </article>
   )
@@ -156,22 +195,22 @@ function BeatmapSummary({ beatmap }: { beatmap: BeatmapMetadata }) {
   )
 }
 
-function BeatmapStats({ beatmap, variant = 'result', actions }: { beatmap: BeatmapMetadata; variant?: 'result' | 'source'; actions: ReactNode }) {
+function BeatmapStats({ beatmap, variant = 'result', actions }: { beatmap: BeatmapMetadata; variant?: 'result' | 'source'; actions?: ReactNode }) {
   return (
     <div className="stat-strip">
       {variant === 'result' ? <div className="result-stat-separator" aria-hidden="true" /> : null}
       <div className="stat-row stat-row-main">
-        <Stat label={<Star aria-label="Star" strokeWidth={3} />} value={formatNumber(beatmap.stars, 2)} featured />
-        <Stat label={<Metronome aria-label="BPM" strokeWidth={3} />} value={formatNumber(beatmap.bpm, 0)} featured />
-        <Stat label={<Clock aria-label="Length" strokeWidth={3} />} value={formatLength(beatmap.total_length)} featured />
+        <Stat label={<Star aria-label="Star" strokeWidth={2.5} />} value={formatFixedNumber(beatmap.stars, 2)} featured />
+        <Stat label={<Clock aria-label="Length" strokeWidth={2.5} />} value={formatLength(beatmap.total_length)} featured />
+        <Stat label={<Metronome aria-label="BPM" strokeWidth={2.5} />} value={formatNumber(beatmap.bpm, 0)} featured />
       </div>
       <div className="stat-side">
         {variant === 'source' ? <div className="source-stat-separator" aria-hidden="true" /> : null}
         <div className="stat-row stat-row-sub">
-          <Stat label="AR" value={formatFixedNumber(beatmap.ar, 1)} />
-          <Stat label="CS" value={formatFixedNumber(beatmap.cs, 1)} />
-          <Stat label="OD" value={formatFixedNumber(beatmap.accuracy, 1)} />
-          <Stat label="HP" value={formatFixedNumber(beatmap.drain, 1)} />
+          <Stat label="AR" value={formatDifficultyStat(beatmap.ar)} />
+          <Stat label="CS" value={formatDifficultyStat(beatmap.cs)} />
+          <Stat label="OD" value={formatDifficultyStat(beatmap.accuracy)} />
+          <Stat label="HP" value={formatDifficultyStat(beatmap.drain)} />
         </div>
         {actions}
       </div>
@@ -179,26 +218,61 @@ function BeatmapStats({ beatmap, variant = 'result', actions }: { beatmap: Beatm
   )
 }
 
+function formatDifficultyStat(value: number | null) {
+  return value === 10 ? '10\u2008' : formatFixedNumber(value, 1)
+}
+
 function CardActions({
   beatmap,
   onCopy,
   onSearch,
   isLoading = false,
+  copied,
+  onCopiedChange,
 }: {
   beatmap: BeatmapMetadata
   onCopy: (beatmapId: number) => Promise<void>
-  onSearch?: (beatmapId: number) => Promise<void>
+  onSearch?: (beatmap: BeatmapMetadata, direction: SweepDirection) => Promise<void>
   isLoading?: boolean
+  copied: boolean
+  onCopiedChange: (copied: boolean) => void
 }) {
   return (
     <div className="row-actions" onClick={(event) => event.stopPropagation()}>
       {onSearch ? (
-        <button type="button" disabled={isLoading} onClick={(event) => handleActionClick(event, () => onSearch(beatmap.beatmap_id))} aria-label="Search similar" title="Search similar">
+        <button
+          type="button"
+          disabled={isLoading}
+          onClick={(event) =>
+            handleActionClick(event, () => {
+              const card = event.currentTarget.closest('.beatmap-card')
+              const list = card?.closest('.result-list')
+              const cardRect = card?.getBoundingClientRect()
+              const listRect = list?.getBoundingClientRect()
+              const direction = cardRect && listRect && cardRect.left >= listRect.left + listRect.width / 2 ? 'right' : 'left'
+              return onSearch(beatmap, direction)
+            })
+          }
+          aria-label="Search similar"
+          title="Search similar"
+        >
           <Search />
         </button>
       ) : null}
-      <button type="button" onClick={(event) => handleActionClick(event, () => onCopy(beatmap.beatmap_id))} aria-label="Copy beatmap ID" title="Copy ID">
-        <Copy />
+      <button
+        type="button"
+        className={copied ? 'copy-action is-copied' : 'copy-action'}
+        onClick={(event) =>
+          handleActionClick(event, () => {
+            onCopiedChange(true)
+            return onCopy(beatmap.beatmap_id)
+          })
+        }
+        aria-label={copied ? 'Beatmap ID copied' : 'Copy beatmap ID'}
+        title={copied ? 'Copied' : 'Copy ID'}
+      >
+        <Copy className="copy-action-icon" />
+        <Check className="copy-check-icon" />
       </button>
       <button type="button" onClick={(event) => handleActionClick(event, () => window.location.assign(`osu://b/${beatmap.beatmap_id}`))} aria-label="Open beatmap in osu!" title="Open in osu!">
         <Download />
