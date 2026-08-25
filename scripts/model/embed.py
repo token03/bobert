@@ -22,7 +22,7 @@ from core.model import BobertEncoder, EmbeddingTransform
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
 RETRIEVAL_DENSITY_K = 100
-RETRIEVAL_LAMBDA = 0.75
+RETRIEVAL_LAMBDA = 1.0
 
 
 class ExportDataset(Dataset):
