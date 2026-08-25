@@ -64,10 +64,10 @@ def load_config(args: argparse.Namespace, checkpoint: dict | None = None) -> Dic
     OmegaConf.set_struct(config, False)
 
     if args.proxy:
-        config.training.data.sample_size = 60000
+        config.training.data.sample_size = 100000
         config.training.trainer.epochs = 6
     elif args.validate:
-        config.training.data.sample_size = 120000
+        config.training.data.sample_size = 160000
         config.training.trainer.epochs = 10
     elif args.full:
         config.training.data.sample_size = None
