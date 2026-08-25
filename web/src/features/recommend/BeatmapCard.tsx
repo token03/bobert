@@ -155,7 +155,7 @@ function BeatmapCover({
   if (variant === 'source') {
     return (
       <div className="source-cover" aria-hidden="true">
-        {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onError={(event) => { event.currentTarget.hidden = true }} /> : null}
+        {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onLoad={(event) => { event.currentTarget.classList.add('is-loaded', 'is-revealing') }} onAnimationEnd={(event) => { event.currentTarget.classList.remove('is-revealing') }} onError={(event) => { event.currentTarget.hidden = true }} /> : null}
       </div>
     )
   }

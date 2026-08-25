@@ -754,6 +754,15 @@ button:disabled {
   display: block;
   width: 100%;
   height: 100%;
+  opacity: 0;
+}
+
+.source-cover img.is-loaded {
+  opacity: 1;
+}
+
+.source-cover img.is-revealing {
+  animation: cover-image-reveal 0.24s ease;
 }
 
 .source-cover img {
@@ -1980,11 +1989,13 @@ svg.filled-icon {
     animation: none;
   }
 
+  .source-cover img,
   .cover-preview img {
     opacity: 1;
     transition: none;
   }
 
+  .source-cover img.is-revealing,
   .cover-preview img.is-revealing {
     animation: none;
   }
