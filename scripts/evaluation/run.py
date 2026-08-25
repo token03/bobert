@@ -64,6 +64,8 @@ class TargetData:
     embeddings: np.ndarray
     id_to_index: dict[int, int]
     centered: bool
+    densities: np.ndarray | None
+    retrieval_lambda: float
 
 
 @dataclass
@@ -110,7 +112,7 @@ def load_eval_groups(path: Path) -> dict[str, list[int]]:
 
 def load_embeddings(
     path: Path, *, center: bool, normalize: bool = True
-) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
+) -> tuple[np.ndarray, np.ndarray, dict[int, int], np.ndarray | None]:
     if not path.exists():
         raise FileNotFoundError(f"Embeddings parquet not found: {path}")
     df = pl.read_parquet(path)
@@ -133,7 +135,12 @@ def load_embeddings(
                 np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
             )
     id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
-    return beatmap_ids, embeddings, id_to_index
+    densities = (
+        df["density"].to_numpy().astype(np.float32, copy=True)
+        if "density" in df.columns
+        else None
+    )
+    return beatmap_ids, embeddings, id_to_index, densities
 
 
 def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]:
@@ -148,11 +155,33 @@ def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]
             if metadata_path.exists()
             else {}
         )
-        center = target not in no_center and name != "graph" and not metadata.get("centered")
-        beatmap_ids, embeddings, id_to_index = load_embeddings(path, center=False)
+        center = (
+            target not in no_center and name != "graph" and not metadata.get("centered")
+        )
+        beatmap_ids, embeddings, id_to_index, densities = load_embeddings(
+            path, center=False
+        )
+        retrieval = metadata.get("retrieval", {})
+        retrieval_lambda = (
+            float(retrieval.get("lambda", 0.0))
+            if retrieval.get("method") == "csls" and densities is not None
+            else 0.0
+        )
+        if name != "graph" and retrieval_lambda == 0.0:
+            console.print(
+                f"[yellow]Warning: {name} has no CSLS density; using raw cosine.[/yellow]"
+            )
         loaded.append(
             TargetData(
-                name, path, run_dir, beatmap_ids, embeddings, id_to_index, center
+                name,
+                path,
+                run_dir,
+                beatmap_ids,
+                embeddings,
+                id_to_index,
+                center,
+                densities,
+                retrieval_lambda,
             )
         )
     shared_ids = common_ids(loaded)
@@ -197,6 +226,12 @@ def target_matrix(target: TargetData, ids: list[int]) -> np.ndarray:
     ]
 
 
+def target_densities(target: TargetData, ids: list[int]) -> np.ndarray | None:
+    if target.densities is None:
+        return None
+    return target.densities[[target.id_to_index[int(beatmap_id)] for beatmap_id in ids]]
+
+
 def mean(values: list[float]) -> float:
     return float(np.mean(values)) if values else float("nan")
 
@@ -224,6 +259,7 @@ def evaluate_grouped_retrieval(
         beatmap_id: idx for idx, beatmap_id in enumerate(candidate_ids)
     }
     candidates = target_matrix(target, candidate_ids)
+    densities = target_densities(target, candidate_ids)
 
     positives_by_query: dict[int, set[int]] = {}
     for ids in groups.values():
@@ -245,6 +281,8 @@ def evaluate_grouped_retrieval(
             continue
         query_idx = candidate_indices[query_id]
         similarities = candidates @ candidates[query_idx]
+        if densities is not None:
+            similarities -= target.retrieval_lambda * 0.5 * densities
         similarities[query_idx] = -np.inf
         positive_indices = np.asarray(
             [candidate_indices[target_id] for target_id in positive_ids]
@@ -253,8 +291,7 @@ def evaluate_grouped_retrieval(
         query_weights.append(1 / np.sqrt(positive_count + 1))
         top_count = min(
             len(candidate_ids) - 1,
-            positive_count
-            + max(RETRIEVAL_HARD_NEGATIVE_K, RETRIEVAL_HUBNESS_K),
+            positive_count + max(RETRIEVAL_HARD_NEGATIVE_K, RETRIEVAL_HUBNESS_K),
         )
         top_indices = np.argpartition(similarities, -top_count)[-top_count:]
         top_indices = top_indices[np.lexsort((top_indices, -similarities[top_indices]))]
@@ -716,12 +753,16 @@ def difficulty_neighbor_metrics(
     embeddings: torch.Tensor,
     stars: torch.Tensor,
     groups: torch.Tensor,
+    densities: torch.Tensor | None,
+    retrieval_lambda: float,
 ) -> dict[str, float]:
     total = 0.0
 
     for start in range(0, len(embeddings), DIFFICULTY_BATCH_SIZE):
         stop = min(start + DIFFICULTY_BATCH_SIZE, len(embeddings))
         scores = embeddings[start:stop] @ embeddings.T
+        if densities is not None:
+            scores -= retrieval_lambda * 0.5 * densities
         scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
         neighbors = scores.topk(DIFFICULTY_NEIGHBOR_K, dim=1).indices
         distance = torch.abs(stars[neighbors] - stars[start:stop, None])
@@ -752,8 +793,14 @@ def run_difficulty_neighbor_eval(
         embeddings = torch.tensor(
             target_matrix(target, data.ids), dtype=torch.float32, device=device
         )
+        target_density = target_densities(target, data.ids)
+        densities = (
+            torch.tensor(target_density, dtype=torch.float32, device=device)
+            if target_density is not None
+            else None
+        )
         metrics[target.name] = difficulty_neighbor_metrics(
-            embeddings, stars, groups
+            embeddings, stars, groups, densities, target.retrieval_lambda
         )
         del embeddings
     print_eval_result(EvalResult("Difficulty Neighbors", metrics))

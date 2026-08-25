@@ -1,15 +1,15 @@
 import argparse
-from datetime import datetime, timezone
 import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from omegaconf import OmegaConf
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
-import polars as pl
 import torch
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -20,6 +20,9 @@ from core.dataset import (
 from core.features import VectorStats, normalize
 from core.model import BobertEncoder, EmbeddingTransform
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
+
+RETRIEVAL_DENSITY_K = 100
+RETRIEVAL_LAMBDA = 0.75
 
 
 class ExportDataset(Dataset):
@@ -163,6 +166,76 @@ def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
     )
 
 
+def index_embeddings(
+    path: Path,
+    device_name: str | None,
+    batch_size: int,
+    quiet: bool = False,
+) -> None:
+    if batch_size <= 0:
+        raise ValueError("density batch size must be positive")
+    if not path.exists():
+        raise FileNotFoundError(f"Embeddings parquet not found: {path}")
+    metadata_path = path.with_suffix(".json")
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Embedding metadata not found: {metadata_path}")
+
+    frame = pl.read_parquet(path)
+    embeddings = frame["embedding"].to_numpy()
+    if embeddings.dtype == object:
+        embeddings = np.stack(embeddings)
+    embeddings = embeddings.astype(np.float32, copy=False)
+    embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
+    if len(embeddings) <= RETRIEVAL_DENSITY_K:
+        raise ValueError(f"At least {RETRIEVAL_DENSITY_K + 1} embeddings are required")
+
+    device = torch.device(
+        device_name or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    corpus = torch.from_numpy(embeddings).to(device=device, dtype=dtype)
+    densities = np.empty(len(embeddings), dtype=np.float32)
+    with torch.inference_mode():
+        for start in tqdm(
+            range(0, len(corpus), batch_size),
+            desc="Indexing retrieval",
+            disable=quiet,
+        ):
+            stop = min(start + batch_size, len(corpus))
+            scores = corpus[start:stop] @ corpus.T
+            scores[
+                torch.arange(stop - start, device=device),
+                torch.arange(start, stop, device=device),
+            ] = -torch.inf
+            densities[start:stop] = (
+                scores.topk(RETRIEVAL_DENSITY_K, dim=1)
+                .values.float()
+                .mean(dim=1)
+                .cpu()
+                .numpy()
+            )
+
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        frame.with_columns(pl.Series("density", densities)).write_parquet(temporary)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["retrieval"] = {
+        "method": "csls",
+        "density_k": RETRIEVAL_DENSITY_K,
+        "lambda": RETRIEVAL_LAMBDA,
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if not quiet:
+        print(f"Indexed {len(embeddings):,} embeddings in {path}")
+
+
 def export_embeddings(
     config_path: Path,
     model_path: Path,
@@ -175,6 +248,7 @@ def export_embeddings(
     flush_size: int,
     seed: int,
     device_name: str | None,
+    density_batch_size: int,
     quiet: bool = False,
 ):
     config = OmegaConf.load(config_path)
@@ -267,8 +341,8 @@ def export_embeddings(
                         vectors, cu_seqlens, int(max_seqlen)
                     )
 
-                stored = embeddings.permute(1, 0, 2).float().cpu().numpy().astype(
-                    np.float16
+                stored = (
+                    embeddings.permute(1, 0, 2).float().cpu().numpy().astype(np.float16)
                 )
                 stop = saved_count + len(stored)
                 layer_embeddings[saved_count:stop] = stored
@@ -321,6 +395,8 @@ def export_embeddings(
         + "\n",
         encoding="utf-8",
     )
+    del layer_embeddings
+    index_embeddings(output_path, device_name, density_batch_size, quiet)
     if not quiet:
         print(f"Saved {saved_count:,} embeddings to {output_path}")
 
@@ -343,8 +419,31 @@ def main():
     parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
+    parser.add_argument("--density-batch-size", type=int, default=1024)
+    parser.add_argument(
+        "--index",
+        action="store_true",
+        help="Add or refresh retrieval density without recomputing embeddings",
+    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
+    if args.index:
+        if args.output:
+            output_path = resolve_path(args.output)
+        elif args.version:
+            output_path = RUNS_DIR / args.version / "embeddings.parquet"
+        elif args.model:
+            output_path = resolve_path(args.model).parent / "embeddings.parquet"
+        else:
+            parser.error("--index requires --version, --model, or --output")
+        index_embeddings(
+            output_path,
+            args.device,
+            args.density_batch_size,
+            args.quiet,
+        )
+        return
+
     model_path = find_model(args.model, args.version)
 
     export_embeddings(
@@ -361,6 +460,7 @@ def main():
         flush_size=args.flush_size,
         seed=args.seed,
         device_name=args.device,
+        density_batch_size=args.density_batch_size,
         quiet=args.quiet,
     )
 

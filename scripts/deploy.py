@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import time
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from dotenv import load_dotenv
-
 
 ARTIFACTS = ("bobert.pt", "embeddings.parquet", "embeddings.json")
 CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet")
@@ -25,7 +25,7 @@ def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
     sidecar = json.loads((run_dir / "embeddings.json").read_text(encoding="utf-8"))
     parquet = pq.ParquetFile(embeddings_path)
     schema = parquet.schema_arrow
-    if schema.names != ["beatmap_id", "embedding"]:
+    if schema.names != ["beatmap_id", "embedding", "density"]:
         raise ValueError(f"invalid embedding schema: {schema}")
     embedding_type = schema.field("embedding").type
     if not pa.types.is_fixed_size_list(embedding_type):
@@ -39,6 +39,26 @@ def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
         )
     if int(sidecar.get("count", -1)) != parquet.metadata.num_rows:
         raise ValueError("embeddings.json count does not match embeddings.parquet")
+    retrieval = sidecar.get("retrieval", {})
+    if (
+        retrieval.get("method") != "csls"
+        or not isinstance(retrieval.get("density_k"), int)
+        or retrieval["density_k"] <= 0
+        or not isinstance(retrieval.get("lambda"), (int, float))
+        or not math.isfinite(retrieval["lambda"])
+        or retrieval["lambda"] < 0
+    ):
+        raise ValueError("invalid retrieval metadata")
+    density_type = schema.field("density").type
+    if not (pa.types.is_float16(density_type) or pa.types.is_float32(density_type)):
+        raise ValueError(f"density column must be floating point: {density_type}")
+    densities = pq.read_table(embeddings_path, columns=["density"])[
+        "density"
+    ].to_numpy()
+    if len(densities) != parquet.metadata.num_rows or not all(
+        math.isfinite(float(value)) for value in densities
+    ):
+        raise ValueError("density column contains invalid values")
     if sidecar.get("pooling") == "layer_centered_mean":
         layer_means = sidecar.get("layer_means")
         global_layers = sorted(artifact["model_args"]["global_attention_layers"])
@@ -47,7 +67,10 @@ def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
             or sidecar.get("layers") != global_layers
             or not isinstance(layer_means, list)
             or len(layer_means) != len(global_layers)
-            or any(not isinstance(mean, list) or len(mean) != dimension for mean in layer_means)
+            or any(
+                not isinstance(mean, list) or len(mean) != dimension
+                for mean in layer_means
+            )
         ):
             raise ValueError("invalid layer-centered embedding metadata")
 

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass, field
 from itertools import islice
-import json
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from core.model import EmbeddingTransform
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import (
     fetch_beatmap_metadata,
@@ -36,7 +37,6 @@ from scripts.common.query import (
     metadata_by_id,
 )
 from scripts.model.embed import find_model
-from core.model import EmbeddingTransform
 
 console = Console()
 MODE_DEFAULT = "default"
@@ -62,6 +62,8 @@ class QueryContext:
     version: str | None
     mode: str = MODE_DEFAULT
     embedding_transform: EmbeddingTransform | None = None
+    densities: np.ndarray | None = None
+    retrieval_lambda: float = 0.0
     cache: dict[int, np.ndarray] = field(default_factory=dict)
     mapper_counts: dict[int, int] = field(default_factory=dict)
     mapper_names: dict[int, str] = field(default_factory=dict)
@@ -312,7 +314,12 @@ def mapper_recommend(raw_input: str, ctx: QueryContext) -> None:
 
 def iter_neighbors(beatmap_id: int, query_embedding: np.ndarray, ctx: QueryContext):
     similarities = ctx.embeddings @ query_embedding.astype(np.float32, copy=False)
-    for idx in np.argsort(-similarities):
+    scores = (
+        similarities - ctx.retrieval_lambda * 0.5 * ctx.densities
+        if ctx.densities is not None
+        else similarities
+    )
+    for idx in np.argsort(-scores):
         candidate_id = int(ctx.beatmap_ids[idx])
         if candidate_id != beatmap_id:
             yield (
@@ -333,10 +340,15 @@ def pair_rank(
         return None
 
     similarities = ctx.embeddings @ query_embedding.astype(np.float32, copy=False)
-    target_similarity = similarities[target_idx]
-    rank = int(np.count_nonzero(similarities > target_similarity)) + 1
+    scores = (
+        similarities - ctx.retrieval_lambda * 0.5 * ctx.densities
+        if ctx.densities is not None
+        else similarities
+    )
+    target_similarity = scores[target_idx]
+    rank = int(np.count_nonzero(scores > target_similarity)) + 1
     query_idx = ctx.id_to_index.get(query_id)
-    if query_idx is not None and similarities[query_idx] > target_similarity:
+    if query_idx is not None and scores[query_idx] > target_similarity:
         rank -= 1
     return rank
 
@@ -549,7 +561,7 @@ def load_query_data(args: argparse.Namespace, mode: str):
             f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
             f"[dim]{escape(str(embeddings_path))}[/dim]"
         )
-        return beatmap_ids, embeddings, id_to_index, embeddings_path
+        return beatmap_ids, embeddings, id_to_index, embeddings_path, None
     if args.embeddings:
         embeddings_path = resolve_path(args.embeddings)
     elif args.version:
@@ -567,13 +579,18 @@ def load_query_data(args: argparse.Namespace, mode: str):
         f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
         f"[dim]{escape(str(embeddings_path))}[/dim]"
     )
-    return beatmap_ids, embeddings, id_to_index, embeddings_path
+    frame = pl.read_parquet(embeddings_path, columns=["density"])
+    densities = frame["density"].to_numpy().astype(np.float32, copy=True)
+    return beatmap_ids, embeddings, id_to_index, embeddings_path, densities
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = MODE_GRAPH if args.graph else MODE_MAPPER if args.mapper else MODE_DEFAULT
-    beatmap_ids, embeddings, id_to_index, embeddings_path = load_query_data(args, mode)
+    beatmap_ids, embeddings, id_to_index, embeddings_path, densities = load_query_data(
+        args, mode
+    )
     embedding_transform = None
+    retrieval_lambda = 0.0
     if mode != MODE_GRAPH and len(embeddings):
         sidecar = json.loads(
             embeddings_path.with_suffix(".json").read_text(encoding="utf-8")
@@ -581,6 +598,10 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         embedding_transform = EmbeddingTransform(
             np.asarray(sidecar["layer_means"], dtype=np.float32)
         )
+        retrieval = sidecar.get("retrieval", {})
+        if retrieval.get("method") != "csls":
+            raise ValueError("Embeddings do not contain a CSLS retrieval index")
+        retrieval_lambda = float(retrieval["lambda"])
         embeddings = embeddings.astype(np.float32, copy=True)
         embeddings /= np.maximum(
             np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
@@ -597,6 +618,8 @@ def build_context(args: argparse.Namespace) -> QueryContext:
             f"[green]Built[/green] {len(beatmap_ids):,} mapper centroids with at least "
             f"{MIN_MAPPER_MAPS} maps"
         )
+        densities = None
+        retrieval_lambda = 0.0
     return QueryContext(
         beatmap_ids=beatmap_ids,
         embeddings=embeddings,
@@ -612,6 +635,8 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         version=args.version,
         mode=mode,
         embedding_transform=embedding_transform,
+        densities=densities,
+        retrieval_lambda=retrieval_lambda,
         mapper_counts=mapper_counts,
     )
 

@@ -164,13 +164,18 @@ class Runtime:
         if missing:
             raise RuntimeError(f"missing required data files: {missing}")
 
-        frame = pl.read_parquet(EMBEDDINGS_PATH, columns=["beatmap_id", "embedding"])
+        frame = pl.read_parquet(
+            EMBEDDINGS_PATH, columns=["beatmap_id", "embedding", "density"]
+        )
         self.static_ids = [int(value) for value in frame["beatmap_id"].to_list()]
         self.static_embeddings = np.array(
             frame["embedding"].to_numpy(),
             dtype=np.float32,
             order="C",
             copy=True,
+        )
+        self.static_densities = (
+            frame["density"].to_numpy().astype(np.float32, copy=True)
         )
         del frame
         if (
@@ -182,6 +187,20 @@ class Runtime:
         sidecar = json.loads(
             EMBEDDINGS_PATH.with_suffix(".json").read_text(encoding="utf-8")
         )
+        retrieval = sidecar.get("retrieval", {})
+        if retrieval.get("method") != "csls":
+            raise RuntimeError("embeddings do not contain a CSLS retrieval index")
+        self.retrieval_density_k = int(retrieval["density_k"])
+        self.retrieval_lambda = float(retrieval["lambda"])
+        if (
+            self.static_densities.shape != (len(self.static_ids),)
+            or not np.isfinite(self.static_densities).all()
+            or self.retrieval_density_k <= 0
+            or self.retrieval_density_k >= len(self.static_ids)
+            or not np.isfinite(self.retrieval_lambda)
+            or self.retrieval_lambda < 0
+        ):
+            raise RuntimeError("invalid CSLS retrieval index")
         self.transform = EmbeddingTransform(
             np.asarray(sidecar["layer_means"], dtype=np.float32)
         )
@@ -224,6 +243,7 @@ class Runtime:
         del beatmaps
         self.dynamic_ids: list[int] = []
         self.dynamic_embeddings: list[np.ndarray] = []
+        self.dynamic_densities: list[float] = []
         self.dynamic_index: dict[int, int] = {}
         self.dynamic_metadata: dict[int, dict[str, Any]] = {}
         self.lock = threading.Lock()
@@ -276,7 +296,12 @@ class Runtime:
             self.cache.delete(beatmap_id)
             return None
         return (
-            self._append(beatmap_id, cached.embedding, cached.metadata),
+            self._append(
+                beatmap_id,
+                cached.embedding,
+                self._density(cached.embedding),
+                cached.metadata,
+            ),
             cached.metadata,
         )
 
@@ -289,7 +314,16 @@ class Runtime:
             )
         transformed = self._transform(raw)
         self.cache.upsert(beatmap_id, transformed, metadata)
-        return self._append(beatmap_id, transformed, metadata)
+        return self._append(
+            beatmap_id, transformed, self._density(transformed), metadata
+        )
+
+    def _density(self, vector: np.ndarray) -> float:
+        scores = self.static_embeddings @ vector
+        neighbors = np.partition(scores, -self.retrieval_density_k)[
+            -self.retrieval_density_k :
+        ]
+        return float(neighbors.mean())
 
     def _transform(self, vector: np.ndarray) -> np.ndarray:
         vector = np.asarray(vector, dtype=np.float32)
@@ -304,7 +338,11 @@ class Runtime:
         return transformed
 
     def _append(
-        self, beatmap_id: int, vector: np.ndarray, metadata: dict[str, Any]
+        self,
+        beatmap_id: int,
+        vector: np.ndarray,
+        density: float,
+        metadata: dict[str, Any],
     ) -> np.ndarray:
         with self.lock:
             index = self.dynamic_index.get(beatmap_id)
@@ -314,6 +352,7 @@ class Runtime:
             self.dynamic_ids.append(beatmap_id)
             vector.flags.writeable = False
             self.dynamic_embeddings.append(vector)
+            self.dynamic_densities.append(density)
             self.dynamic_metadata[beatmap_id] = metadata
             return vector
 
@@ -336,14 +375,20 @@ class Runtime:
         with self.lock:
             dynamic_ids = list(self.dynamic_ids)
             dynamic_vectors = list(self.dynamic_embeddings)
+            dynamic_densities = list(self.dynamic_densities)
             dynamic_metadata = dict(self.dynamic_metadata)
         if dynamic_vectors:
             dynamic_scores = (
                 np.asarray(dynamic_vectors, dtype=np.float32) @ query_embedding
             )
-            scores = np.concatenate((static_scores, dynamic_scores))
+            similarities = np.concatenate((static_scores, dynamic_scores))
+            densities = np.concatenate(
+                (self.static_densities, np.asarray(dynamic_densities, dtype=np.float32))
+            )
         else:
-            scores = static_scores
+            similarities = static_scores
+            densities = self.static_densities
+        scores = similarities - self.retrieval_lambda * 0.5 * densities
         static_count = len(self.static_ids)
         query_set_id = metadata_set_id(query_metadata)
         date_cutoff = date_window_cutoff(filters.date_window)
@@ -378,7 +423,7 @@ class Runtime:
                 if candidate_set_id is not None and candidate_set_id in seen_set_ids:
                     continue
                 result = public_summary(beatmap_id, metadata)
-                result["score"] = float(scores[index])
+                result["score"] = float(similarities[index])
                 results.append(result)
                 if candidate_set_id is not None:
                     seen_set_ids.add(candidate_set_id)
