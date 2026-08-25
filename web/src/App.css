@@ -841,6 +841,18 @@ button:disabled {
   position: relative;
 }
 
+.result-card-reveal {
+  animation: result-card-reveal 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--result-reveal-index) * 35ms);
+}
+
+@keyframes result-card-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
 .results-loading-overlay {
   position: absolute;
   inset: 0;
@@ -896,7 +908,22 @@ button:disabled {
   display: block;
   width: 100%;
   height: 100%;
+  opacity: 0;
   transition: transform 0.22s ease, filter 0.18s ease;
+}
+
+.cover-preview img.is-loaded {
+  opacity: 1;
+}
+
+.cover-preview img.is-revealing {
+  animation: cover-image-reveal 0.24s ease;
+}
+
+@keyframes cover-image-reveal {
+  from {
+    opacity: 0;
+  }
 }
 
 .cover-preview img {
@@ -1946,4 +1973,19 @@ button:disabled {
 svg.filled-icon {
   fill: currentColor;
   stroke: currentColor;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .result-card-reveal {
+    animation: none;
+  }
+
+  .cover-preview img {
+    opacity: 1;
+    transition: none;
+  }
+
+  .cover-preview img.is-revealing {
+    animation: none;
+  }
 }

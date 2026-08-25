@@ -1,6 +1,6 @@
 import { Check, Clock, Copy, Download, Metronome, Pause, Play, Search, Star } from 'lucide-react'
 import { useState } from 'react'
-import type { FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
+import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { displayArtist, displayTitle, formatFixedNumber, formatLength, formatMatch, formatNumber, statusClass, statusLabel } from '../../shared/format'
 import { Stat } from '../../shared/ui/Stat'
 import type { BeatmapMetadata } from '../../shared/types'
@@ -26,6 +26,7 @@ type ResultBeatmapCardProps = {
   onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
   activePreviewSetId: number | null
   isPreviewPlaying: boolean
+  revealIndex?: number
 }
 
 type BeatmapCardProps = SourceBeatmapCardProps | ResultBeatmapCardProps
@@ -92,10 +93,12 @@ export function BeatmapCard(props: BeatmapCardProps) {
   const resultProps = props as ResultBeatmapCardProps
   const isActivePreview = hasPreview && resultProps.activePreviewSetId === beatmap.beatmapset_id
   const isCoverActive = isActivePreview && resultProps.isPreviewPlaying
+  const shouldReveal = resultProps.revealIndex !== undefined
 
   return (
     <article
-      className="beatmap-card beatmap-card-result beatmap-row clickable-card"
+      className={`beatmap-card beatmap-card-result beatmap-row clickable-card${shouldReveal ? ' result-card-reveal' : ''}`}
+      style={shouldReveal ? { '--result-reveal-index': resultProps.revealIndex } as CSSProperties : undefined}
       role="link"
       tabIndex={0}
       onClick={openBeatmap}
@@ -171,7 +174,7 @@ function BeatmapCover({
       aria-label={hasPreview ? (isCoverActive ? 'Pause preview' : 'Play preview') : 'No preview available'}
       title={hasPreview ? (isCoverActive ? 'Pause preview' : 'Play preview') : 'No preview available'}
     >
-      {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={coverUrl(beatmap.beatmapset_id)} alt="" loading="lazy" decoding="async" onError={(event) => { event.currentTarget.hidden = true }} /> : null}
+      {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={coverUrl(beatmap.beatmapset_id)} alt="" loading="lazy" decoding="async" onLoad={(event) => { event.currentTarget.classList.add('is-loaded', 'is-revealing') }} onAnimationEnd={(event) => { event.currentTarget.classList.remove('is-revealing') }} onError={(event) => { event.currentTarget.hidden = true }} /> : null}
       {hasPreview ? (
         <span className="cover-play-overlay" aria-hidden="true">
           <span className="cover-play-button">{isCoverActive ? <Pause className="filled-icon" /> : <Play className="filled-icon" />}</span>

@@ -16,7 +16,7 @@ type ResultsListProps = {
 export const ResultsList = memo(function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPreview, activePreviewSetId, isPreviewPlaying }: ResultsListProps) {
   return (
     <div className="result-list">
-      {beatmaps.map((beatmap) => (
+      {beatmaps.map((beatmap, index) => (
         <BeatmapCard
           key={beatmap.beatmap_id}
           beatmap={beatmap}
@@ -26,6 +26,7 @@ export const ResultsList = memo(function ResultsList({ beatmaps, onCopy, onSearc
           onPlayPreview={onPlayPreview}
           activePreviewSetId={activePreviewSetId}
           isPreviewPlaying={isPreviewPlaying}
+          revealIndex={index < 12 ? index : undefined}
         />
       ))}
     </div>
