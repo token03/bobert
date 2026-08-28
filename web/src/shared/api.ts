@@ -2,7 +2,19 @@ import type { BeatmapMetadata, DefaultRecommendResponse, RecommendRequest, Recom
 
 const apiUrl = '/api'
 
-export async function recommendBeatmaps(request: RecommendRequest): Promise<RecommendResponse> {
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const result = await fetch(`${apiUrl}${path}`, init)
+  const text = await result.text()
+  const data = text ? JSON.parse(text) : null
+
+  if (!result.ok) {
+    throw new Error(data?.detail ?? `Request failed with ${result.status}`)
+  }
+
+  return data as T
+}
+
+export async function recommendBeatmaps(request: RecommendRequest, signal?: AbortSignal): Promise<RecommendResponse> {
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
   }
@@ -11,45 +23,22 @@ export async function recommendBeatmaps(request: RecommendRequest): Promise<Reco
     headers['X-Turnstile-Token'] = request.turnstileToken
   }
 
-  const result = await fetch(`${apiUrl}/recommend`, {
+  return api('/recommend', {
     method: 'POST',
     headers,
+    signal,
     body: JSON.stringify({
       beatmap_id: request.beatmapId,
       top_k: request.topK,
       filters: request.filters,
     }),
   })
-  const text = await result.text()
-  const data = text ? JSON.parse(text) : null
-
-  if (!result.ok) {
-    throw new Error(data?.detail ?? `Request failed with ${result.status}`)
-  }
-
-  return data as RecommendResponse
 }
 
-export async function fetchDefaultRecommendations(): Promise<DefaultRecommendResponse> {
-  const result = await fetch(`${apiUrl}/recommend`)
-  const text = await result.text()
-  const data = text ? JSON.parse(text) : null
-
-  if (!result.ok) {
-    throw new Error(data?.detail ?? `Request failed with ${result.status}`)
-  }
-
-  return data as DefaultRecommendResponse
+export async function fetchDefaultRecommendations(signal?: AbortSignal): Promise<DefaultRecommendResponse> {
+  return api('/recommend', { signal })
 }
 
-export async function fetchBeatmapSummary(beatmapId: number): Promise<BeatmapMetadata> {
-  const result = await fetch(`${apiUrl}/beatmaps/${beatmapId}/summary`)
-  const text = await result.text()
-  const data = text ? JSON.parse(text) : null
-
-  if (!result.ok) {
-    throw new Error(data?.detail ?? `Request failed with ${result.status}`)
-  }
-
-  return data as BeatmapMetadata
+export async function fetchBeatmapSummary(beatmapId: number, signal?: AbortSignal): Promise<BeatmapMetadata> {
+  return api(`/beatmaps/${beatmapId}/summary`, { signal })
 }

@@ -1,8 +1,8 @@
 import './App.css'
-import { RecommendPage } from './features/recommend/RecommendPage'
+import { Outlet } from '@tanstack/react-router'
 
 function App() {
-  return <RecommendPage />
+  return <Outlet />
 }
 
 export default App

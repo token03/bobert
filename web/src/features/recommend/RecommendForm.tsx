@@ -19,14 +19,14 @@ type RangeFieldName = 'minSr' | 'maxSr' | 'minLength' | 'maxLength' | 'minBpm' |
 
 export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
   const values = form.watch()
-  const beatmapError = form.formState.errors.beatmapInput?.message
+  const beatmapError = form.formState.errors.beatmap?.message
   const submitDisabled = isLoading || form.formState.isSubmitting
-  const beatmapInput = form.register('beatmapInput')
+  const beatmap = form.register('beatmap')
   const status = form.register('status')
   const dateWindow = form.register('dateWindow')
 
   function resetForm() {
-    const nextValues = { ...defaultFilters, beatmapInput: form.getValues('beatmapInput') }
+    const nextValues = { ...defaultFilters, beatmap: form.getValues('beatmap') }
     form.reset(nextValues)
     onReset(nextValues)
   }
@@ -41,10 +41,10 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
       return false
     }
 
-    const beatmapInput = normalizeBeatmapInput(value)
-    const nextValues = { ...form.getValues(), beatmapInput }
-    form.clearErrors('beatmapInput')
-    form.setValue('beatmapInput', beatmapInput, { shouldValidate: false })
+    const beatmap = normalizeBeatmapInput(value)
+    const nextValues = { ...form.getValues(), beatmap }
+    form.clearErrors('beatmap')
+    form.setValue('beatmap', beatmap, { shouldValidate: false })
     onPasteSearch(nextValues)
     return true
   }
@@ -85,10 +85,10 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
                   aria-invalid={beatmapError ? 'true' : 'false'}
                   aria-describedby={beatmapError ? 'beatmap-error' : undefined}
                   className={beatmapError ? 'has-field-error' : undefined}
-                  {...beatmapInput}
+                  {...beatmap}
                   onChange={(event) => {
-                    form.clearErrors('beatmapInput')
-                    beatmapInput.onChange(event)
+                    form.clearErrors('beatmap')
+                    beatmap.onChange(event)
                   }}
                   onPaste={(event) => {
                     if (searchPastedBeatmap(event.clipboardData.getData('text'))) {
@@ -96,8 +96,8 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
                     }
                   }}
                   onBlur={(event) => {
-                    beatmapInput.onBlur(event)
-                    form.setValue('beatmapInput', normalizeBeatmapInput(event.target.value), { shouldValidate: false })
+                    beatmap.onBlur(event)
+                    form.setValue('beatmap', normalizeBeatmapInput(event.target.value), { shouldValidate: false })
                   }}
                   placeholder="1872396 or https://osu.ppy.sh/beatmaps/1872396"
                 />

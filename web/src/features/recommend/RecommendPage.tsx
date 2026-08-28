@@ -1,22 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
+import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
 import { useAudioPreview } from '../audio/useAudioPreview'
 import { useTurnstile } from '../turnstile/useTurnstile'
-import { fetchBeatmapSummary, fetchDefaultRecommendations } from '../../shared/api'
+import { fetchBeatmapSummary, fetchDefaultRecommendations, recommendBeatmaps } from '../../shared/api'
 import { copyText } from '../../shared/copy'
-import type { BeatmapMetadata, DefaultRecommendResponse, RecommendResponse } from '../../shared/types'
+import type { BeatmapMetadata } from '../../shared/types'
 import { cardCoverUrl } from '../../shared/urls'
 import { buildRecommendRequest, defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RecommendForm } from './RecommendForm'
-import { readCachedRecommendation, recommendSearchParams, valuesFromRecommendSearch, writeCachedRecommendation } from './recommendHistory'
 import { BeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
 import { ResultsList } from './ResultsList'
-import { useRecommend } from './useRecommend'
 import { useRecommendForm } from './useRecommendForm'
 
-type HistoryMode = 'push' | 'replace' | 'none'
+type HistoryMode = 'push' | 'replace'
 type SourceSwap = {
   beatmap: BeatmapMetadata | null
   nextBeatmap: BeatmapMetadata
@@ -26,123 +26,65 @@ type SourceSwap = {
 }
 
 const loadingCards = Array.from({ length: 50 }, (_, index) => index)
+const recommendationStaleTime = 5 * 60_000
+
+function recommendationOptions(values: RecommendFormValues, getToken: () => Promise<string>, resetToken: () => void) {
+  return queryOptions({
+    queryKey: ['recommendations', values] as const,
+    queryFn: async ({ signal }) => {
+      const turnstileToken = await getToken()
+
+      try {
+        return await recommendBeatmaps({ ...buildRecommendRequest(values), turnstileToken }, signal)
+      } finally {
+        resetToken()
+      }
+    },
+    enabled: parseBeatmapId(values.beatmap) !== null,
+    staleTime: recommendationStaleTime,
+    retry: false,
+    placeholderData: keepPreviousData,
+  })
+}
 
 export function RecommendPage() {
-  const [error, setError] = useState('')
-  const [response, setResponse] = useState<RecommendResponse | null>(() => {
-    const values = valuesFromRecommendSearch(window.location.search)
-    return values ? readCachedRecommendation(values)?.response ?? null : null
-  })
-  const [defaultResponse, setDefaultResponse] = useState<DefaultRecommendResponse | null>(null)
-  const [defaultLoading, setDefaultLoading] = useState(false)
-  const [isRunning, setIsRunning] = useState(false)
+  const search = useSearch({ from: '/recommendations' })
+  const navigate = useNavigate({ from: '/recommendations' })
+  const queryClient = useQueryClient()
+  const [uiError, setUiError] = useState('')
   const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
   const turnstile = useTurnstile()
-  const recommend = useRecommend()
-  const form = useRecommendForm()
-  const audio = useAudioPreview({ onError: setError })
-  const defaultRequestId = useRef(0)
-  const recommendRequestId = useRef(0)
+  const form = useRecommendForm(search)
+  const audio = useAudioPreview({ onError: setUiError })
   const rangeSearchTimeout = useRef<number | null>(null)
-  const isLoading = isRunning || recommend.isPending
+  const beatmapId = parseBeatmapId(search.beatmap)
+  const recommend = useQuery(recommendationOptions(search, turnstile.getToken, turnstile.reset))
+  const defaults = useQuery({
+    queryKey: ['recommendations', 'default'],
+    queryFn: ({ signal }) => fetchDefaultRecommendations(signal),
+    enabled: beatmapId === null,
+    staleTime: recommendationStaleTime,
+  })
+  const response = beatmapId === null ? null : recommend.data ?? null
+  const isLoading = recommend.isFetching || defaults.isFetching
+  const requestError = recommend.error ?? defaults.error
+  const error = uiError || (requestError instanceof Error ? requestError.message : requestError ? 'Request failed' : '')
+
+  useEffect(() => {
+    form.reset(search)
+  }, [form, search])
+
+  useEffect(() => () => {
+    if (rangeSearchTimeout.current !== null) {
+      window.clearTimeout(rangeSearchTimeout.current)
+    }
+  }, [])
 
   function clearRangeSearchTimeout() {
     if (rangeSearchTimeout.current !== null) {
       window.clearTimeout(rangeSearchTimeout.current)
       rangeSearchTimeout.current = null
     }
-  }
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadDefaultRecommendations() {
-      const requestId = defaultRequestId.current + 1
-      defaultRequestId.current = requestId
-      setDefaultLoading(true)
-
-      try {
-        const data = await fetchDefaultRecommendations()
-        if (!cancelled && defaultRequestId.current === requestId) {
-          setDefaultResponse(data)
-        }
-      } catch (err) {
-        if (!cancelled && defaultRequestId.current === requestId) {
-          setError(err instanceof Error ? err.message : 'Request failed')
-        }
-      } finally {
-        if (!cancelled && defaultRequestId.current === requestId) {
-          setDefaultLoading(false)
-        }
-      }
-    }
-
-    function restoreFromLocation() {
-      if (rangeSearchTimeout.current !== null) {
-        window.clearTimeout(rangeSearchTimeout.current)
-        rangeSearchTimeout.current = null
-      }
-      recommendRequestId.current += 1
-      setIsRunning(false)
-      setSourceSwap(null)
-
-      const values = valuesFromRecommendSearch(window.location.search)
-
-      if (!values) {
-        form.reset(defaultFilters)
-        setResponse(null)
-        setError('')
-        void loadDefaultRecommendations()
-        return
-      }
-
-      form.reset(values)
-      defaultRequestId.current += 1
-      setDefaultResponse(null)
-      setDefaultLoading(false)
-
-      const cached = readCachedRecommendation(values)
-      if (cached) {
-        setResponse(cached.response)
-        setError('')
-        return
-      }
-
-      setResponse(null)
-      form.reset(defaultFilters)
-      setError('')
-      window.history.replaceState(null, '', window.location.pathname)
-      void loadDefaultRecommendations()
-    }
-
-    restoreFromLocation()
-    window.addEventListener('popstate', restoreFromLocation)
-
-    return () => {
-      cancelled = true
-      if (rangeSearchTimeout.current !== null) {
-        window.clearTimeout(rangeSearchTimeout.current)
-        rangeSearchTimeout.current = null
-      }
-      window.removeEventListener('popstate', restoreFromLocation)
-    }
-  }, [form])
-
-  function updateRecommendationUrl(values: RecommendFormValues, historyMode: HistoryMode) {
-    if (historyMode === 'none') {
-      return
-    }
-
-    const search = recommendSearchParams(values)
-    const nextUrl = `${window.location.pathname}?${search}`
-    const currentUrl = `${window.location.pathname}${window.location.search}`
-
-    if (historyMode === 'replace' || currentUrl === nextUrl) {
-      window.history.replaceState(null, '', nextUrl)
-      return
-    }
-
-    window.history.pushState(null, '', nextUrl)
   }
 
   function scrollToPageTop() {
@@ -152,45 +94,29 @@ export function RecommendPage() {
   }
 
   async function runRecommend(values: RecommendFormValues, historyMode: HistoryMode = 'push', shouldScroll = true) {
-    const requestId = recommendRequestId.current + 1
-    recommendRequestId.current = requestId
     const normalizedValues = {
       ...values,
-      beatmapInput: normalizeBeatmapInput(values.beatmapInput),
+      beatmap: normalizeBeatmapInput(values.beatmap),
     }
+    const options = recommendationOptions(normalizedValues, turnstile.getToken, turnstile.reset)
 
-    form.setValue('beatmapInput', normalizedValues.beatmapInput, { shouldValidate: false })
-    setIsRunning(true)
-    setError('')
-
-    const request = buildRecommendRequest(normalizedValues)
+    form.setValue('beatmap', normalizedValues.beatmap, { shouldValidate: false })
+    setUiError('')
+    await queryClient.invalidateQueries({ queryKey: options.queryKey, exact: true, refetchType: 'none' })
+    await navigate({ search: normalizedValues, replace: historyMode === 'replace' })
 
     try {
-      const turnstileToken = turnstile.enabled ? await turnstile.getToken() : ''
-      const data = await recommend.mutateAsync({ ...request, turnstileToken })
-      if (recommendRequestId.current !== requestId) {
-        return
-      }
-      setResponse(data)
-      writeCachedRecommendation(normalizedValues, data)
-      updateRecommendationUrl(normalizedValues, historyMode)
+      await queryClient.fetchQuery(options)
       if (shouldScroll) {
         scrollToPageTop()
       }
-    } catch (err) {
-      if (recommendRequestId.current === requestId) {
-        setError(err instanceof Error ? err.message : 'Request failed')
-      }
-    } finally {
-      if (recommendRequestId.current === requestId) {
-        setIsRunning(false)
-        turnstile.reset()
-      }
+    } catch {
+      return
     }
   }
 
   function runAutoRecommend(values: RecommendFormValues) {
-    if (!parseBeatmapId(values.beatmapInput)) {
+    if (!parseBeatmapId(values.beatmap)) {
       return
     }
 
@@ -200,7 +126,7 @@ export function RecommendPage() {
   function scheduleRangeRecommend(values: RecommendFormValues) {
     clearRangeSearchTimeout()
 
-    if (!parseBeatmapId(values.beatmapInput)) {
+    if (!parseBeatmapId(values.beatmap)) {
       return
     }
 
@@ -213,36 +139,14 @@ export function RecommendPage() {
   async function resetRecommendations(values: RecommendFormValues) {
     clearRangeSearchTimeout()
 
-    if (parseBeatmapId(values.beatmapInput)) {
+    if (parseBeatmapId(values.beatmap)) {
       await runRecommend(values, 'replace', false)
       return
     }
 
-    recommendRequestId.current += 1
-    defaultRequestId.current += 1
-    const requestId = defaultRequestId.current
-
-    setIsRunning(false)
-    setResponse(null)
-    setError('')
-    setDefaultResponse(null)
-    setDefaultLoading(true)
-    window.history.replaceState(null, '', window.location.pathname)
-
-    try {
-      const data = await fetchDefaultRecommendations()
-      if (defaultRequestId.current === requestId) {
-        setDefaultResponse(data)
-      }
-    } catch (err) {
-      if (defaultRequestId.current === requestId) {
-        setError(err instanceof Error ? err.message : 'Request failed')
-      }
-    } finally {
-      if (defaultRequestId.current === requestId) {
-        setDefaultLoading(false)
-      }
-    }
+    setUiError('')
+    form.reset(defaultFilters)
+    await navigate({ search: defaultFilters, replace: true })
   }
 
   async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<void>, preloadCover = true) {
@@ -288,8 +192,8 @@ export function RecommendPage() {
   }
 
   async function runManualRecommend(values: RecommendFormValues) {
-    const beatmapId = parseBeatmapId(values.beatmapInput)!
-    if (response?.query.metadata.beatmap_id === beatmapId) {
+    const nextBeatmapId = parseBeatmapId(values.beatmap)!
+    if (response?.query.metadata.beatmap_id === nextBeatmapId) {
       await runRecommend(values)
       return
     }
@@ -298,12 +202,15 @@ export function RecommendPage() {
     const request = runRecommend(values).finally(() => {
       requestDone = true
     })
-    const requestId = recommendRequestId.current
-    const knownBeatmap = [...(response?.results ?? []), ...(defaultResponse?.results ?? [])].find((beatmap) => beatmap.beatmap_id === beatmapId)
+    const knownBeatmap = [...(response?.results ?? []), ...(defaults.data?.results ?? [])].find((beatmap) => beatmap.beatmap_id === nextBeatmapId)
 
     try {
-      const beatmap = knownBeatmap ?? await fetchBeatmapSummary(beatmapId)
-      if (!requestDone && recommendRequestId.current === requestId) {
+      const beatmap = knownBeatmap ?? await queryClient.fetchQuery<BeatmapMetadata>({
+        queryKey: ['beatmap', nextBeatmapId],
+        queryFn: ({ signal }) => fetchBeatmapSummary(nextBeatmapId, signal),
+        staleTime: recommendationStaleTime,
+      })
+      if (!requestDone) {
         await swapSourceBeatmap(beatmap, 'left', request, false)
         return
       }
@@ -314,7 +221,7 @@ export function RecommendPage() {
   }
 
   async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
-    const nextValues = { ...form.getValues(), beatmapInput: String(beatmap.beatmap_id) }
+    const nextValues = { ...form.getValues(), beatmap: String(beatmap.beatmap_id) }
     form.reset(nextValues)
     scrollToPageTop()
     await swapSourceBeatmap(beatmap, direction, runRecommend(nextValues, 'push', false))
@@ -335,9 +242,9 @@ export function RecommendPage() {
     })
   }
 
-  const resultBeatmaps = response?.results ?? defaultResponse?.results ?? []
-  const showDefaultResults = !response && defaultResponse !== null
-  const showLoadingRecommendations = defaultLoading || (!error && !response && !showDefaultResults)
+  const resultBeatmaps = response?.results ?? defaults.data?.results ?? []
+  const showDefaultResults = !response && defaults.data !== undefined
+  const showLoadingRecommendations = isLoading || (!error && !response && !showDefaultResults)
   const recommendForm = (
     <div className="sticky-search-wrap">
       <RecommendForm
@@ -380,7 +287,7 @@ export function RecommendPage() {
   )
   const sourceBeatmap = sourceSwap ? sourceSwap.beatmap : response?.query.metadata
   const sourceSweepPhase = sourceSwap?.phase === 'in' || sourceSwap?.phase === 'out' ? sourceSwap.phase : undefined
-  const showSourcePlaceholder = !sourceBeatmap && isLoading && parseBeatmapId(form.getValues('beatmapInput')) !== null
+  const showSourcePlaceholder = !sourceBeatmap && isLoading && parseBeatmapId(form.getValues('beatmap')) !== null
 
   return (
     <main className="app-shell">

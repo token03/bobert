@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 export const defaultFilters = {
-  beatmapInput: '',
+  beatmap: '',
   topK: '100',
   minSr: '',
   maxSr: '',
@@ -23,7 +23,7 @@ export const defaultFilters = {
 }
 
 export const recommendFormSchema = z.object({
-  beatmapInput: z.string().refine((value) => parseBeatmapId(value) !== null, 'Enter a beatmap ID or a beatmap link ending in an ID.'),
+  beatmap: z.string().refine((value) => parseBeatmapId(value) !== null, 'Enter a beatmap ID or a beatmap link ending in an ID.'),
   topK: z.string().refine((value) => {
     const number = Number(value)
     return Number.isSafeInteger(number) && number > 0
@@ -48,6 +48,47 @@ export const recommendFormSchema = z.object({
 })
 
 export type RecommendFormValues = z.infer<typeof recommendFormSchema>
+
+const searchString = (fallback: string) => z.preprocess(
+  (value) => value === undefined || value === null ? fallback : String(value),
+  z.string(),
+).catch(fallback)
+
+export const recommendSearchSchema = z.object({
+  beatmap: searchString(defaultFilters.beatmap),
+  topK: searchString(defaultFilters.topK),
+  minSr: searchString(defaultFilters.minSr),
+  maxSr: searchString(defaultFilters.maxSr),
+  minBpm: searchString(defaultFilters.minBpm),
+  maxBpm: searchString(defaultFilters.maxBpm),
+  minLength: searchString(defaultFilters.minLength),
+  maxLength: searchString(defaultFilters.maxLength),
+  minAr: searchString(defaultFilters.minAr),
+  maxAr: searchString(defaultFilters.maxAr),
+  minCs: searchString(defaultFilters.minCs),
+  maxCs: searchString(defaultFilters.maxCs),
+  minOd: searchString(defaultFilters.minOd),
+  maxOd: searchString(defaultFilters.maxOd),
+  minHp: searchString(defaultFilters.minHp),
+  maxHp: searchString(defaultFilters.maxHp),
+  status: z.preprocess((value) => {
+    const status = value === undefined || value === null ? defaultFilters.status : String(value)
+    return {
+      '1': 'ranked',
+      '2': 'ranked',
+      '3': 'ranked',
+      '4': 'loved',
+      '-2': 'unranked',
+      '-1': 'unranked',
+      '0': 'unranked',
+    }[status] ?? status
+  }, z.string()).catch(defaultFilters.status),
+  dateWindow: searchString(defaultFilters.dateWindow),
+  excludeSameSet: z.preprocess(
+    (value) => value === undefined || value === null ? defaultFilters.excludeSameSet : value === true || value === 'true',
+    z.boolean(),
+  ).catch(defaultFilters.excludeSameSet),
+})
 
 export function buildRecommendRequest(values: RecommendFormValues) {
   const filters: Record<string, boolean | number | string | null> = {
@@ -84,7 +125,7 @@ export function buildRecommendRequest(values: RecommendFormValues) {
   }
 
   return {
-    beatmapId: parseBeatmapId(values.beatmapInput)!,
+    beatmapId: parseBeatmapId(values.beatmap)!,
     topK: Number(values.topK),
     filters,
   }
