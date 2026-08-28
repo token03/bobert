@@ -25,9 +25,14 @@ type SourceSwap = {
   requestDone: boolean
 }
 
+const loadingCards = Array.from({ length: 50 }, (_, index) => index)
+
 export function RecommendPage() {
   const [error, setError] = useState('')
-  const [response, setResponse] = useState<RecommendResponse | null>(null)
+  const [response, setResponse] = useState<RecommendResponse | null>(() => {
+    const values = valuesFromRecommendSearch(window.location.search)
+    return values ? readCachedRecommendation(values)?.response ?? null : null
+  })
   const [defaultResponse, setDefaultResponse] = useState<DefaultRecommendResponse | null>(null)
   const [defaultLoading, setDefaultLoading] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
@@ -243,10 +248,10 @@ export function RecommendPage() {
   async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<void>, preloadCover = true) {
     const currentSource = response?.query.metadata ?? null
     setSourceSwap({
-      beatmap: currentSource,
+      beatmap: currentSource ?? beatmap,
       nextBeatmap: beatmap,
       direction,
-      phase: 'preloading',
+      phase: currentSource ? 'preloading' : 'in',
       requestDone: false,
     })
 
@@ -258,6 +263,11 @@ export function RecommendPage() {
         return swap.phase === 'waiting' ? null : { ...swap, requestDone: true }
       })
     })
+
+    if (!currentSource) {
+      await request
+      return
+    }
 
     if (preloadCover && beatmap.beatmapset_id !== null) {
       await new Promise<void>((resolve) => {
@@ -370,6 +380,7 @@ export function RecommendPage() {
   )
   const sourceBeatmap = sourceSwap ? sourceSwap.beatmap : response?.query.metadata
   const sourceSweepPhase = sourceSwap?.phase === 'in' || sourceSwap?.phase === 'out' ? sourceSwap.phase : undefined
+  const showSourcePlaceholder = !sourceBeatmap && isLoading && parseBeatmapId(form.getValues('beatmapInput')) !== null
 
   return (
     <main className="app-shell">
@@ -387,7 +398,7 @@ export function RecommendPage() {
               sweepPhase={sourceSweepPhase}
               onSweepEnd={finishSourceSweep}
             />
-          ) : null}
+          ) : showSourcePlaceholder ? <div className="beatmap-card source-card source-card-placeholder" aria-hidden="true" /> : null}
           {recommendForm}
           {response ? (
             response.results.length > 0 ? (
@@ -402,7 +413,25 @@ export function RecommendPage() {
               <p className="empty-results">No results found</p>
             )
           ) : showLoadingRecommendations ? (
-            <p className="empty-results loading-recommendations">Loading recommendations</p>
+            <div className="result-list loading-result-list" role="status" aria-label="Loading recommendations">
+              {loadingCards.map((index) => (
+                <div className="beatmap-card loading-result-card" key={index} aria-hidden="true">
+                  <div className="loading-result-cover" />
+                  <div className="loading-result-content">
+                    <div className="loading-result-copy">
+                      <span className="loading-result-line loading-result-title" />
+                      <span className="loading-result-line loading-result-artist" />
+                      <span className="loading-result-line loading-result-version" />
+                    </div>
+                    <div className="loading-result-stats">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           ) : null}
         </div>
       </section>
