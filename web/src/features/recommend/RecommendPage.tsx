@@ -9,7 +9,7 @@ import { useTurnstile } from '../turnstile/useTurnstile'
 import { fetchBeatmapSummary, fetchDefaultRecommendations, recommendBeatmaps } from '../../shared/api'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata } from '../../shared/types'
-import { cardCoverUrl } from '../../shared/urls'
+import { cardCoverUrl, coverUrl } from '../../shared/urls'
 import { buildRecommendRequest, defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RecommendForm } from './RecommendForm'
@@ -32,6 +32,57 @@ type SourceSwap = {
 
 const loadingCards = Array.from({ length: 50 }, (_, index) => index)
 const staleTime = 5 * 60_000
+const coverBatchCount = 16
+const coverBatchTimeout = 500
+
+const coverCache = new Map<number, Promise<void>>()
+
+function preloadCover(beatmapsetId: number) {
+  let request = coverCache.get(beatmapsetId)
+  if (!request) {
+    const image = new Image()
+    image.src = coverUrl(beatmapsetId)
+    request = image.decode().catch(() => new Promise<void>((resolve) => {
+      image.onload = () => resolve()
+      image.onerror = () => resolve()
+    }))
+    coverCache.set(beatmapsetId, request)
+  }
+  return request
+}
+
+function useCoversReady(beatmaps: BeatmapMetadata[]) {
+  const [batch, setBatch] = useState<{ key: string; ready: boolean }>({ key: '', ready: false })
+  const key = beatmaps
+    .slice(0, coverBatchCount)
+    .flatMap((beatmap) => (beatmap.beatmapset_id === null ? [] : [String(beatmap.beatmapset_id)]))
+    .join('|')
+
+  useEffect(() => {
+    if (key === '') {
+      return
+    }
+
+    let cancelled = false
+    const reveal = () => {
+      if (!cancelled) {
+        setBatch({ key, ready: true })
+      }
+    }
+    const timer = setTimeout(reveal, coverBatchTimeout)
+    Promise.all(key.split('|').map((id) => preloadCover(Number(id)))).then(() => {
+      clearTimeout(timer)
+      reveal()
+    })
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [key])
+
+  return key === '' || (batch.key === key && batch.ready)
+}
 
 function recommendationOptions(values: RecommendFormValues, getToken: () => Promise<string>, resetToken: () => void) {
   return queryOptions({
@@ -237,8 +288,10 @@ export function RecommendPage() {
 
   const defaultResponse = beatmapId === null ? defaults.data : undefined
   const resultBeatmaps = response?.results ?? defaultResponse?.results ?? []
+  const hasResults = resultBeatmaps.length > 0
+  const coversReady = useCoversReady(resultBeatmaps)
   const showDefaultResults = defaultResponse !== undefined
-  const showLoadingRecommendations = isLoading || (!requestError && !response && !showDefaultResults)
+  const showLoadingRecommendations = isLoading || (!requestError && !response && !showDefaultResults) || (hasResults && !coversReady)
   const recommendForm = (
     <div className={styles['sticky-search-wrap']}>
       <RecommendForm
@@ -300,18 +353,10 @@ export function RecommendPage() {
             />
           ) : showSourcePlaceholder ? <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${cardStyles['source-card-placeholder']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true" /> : null}
           {recommendForm}
-          {response ? (
-            response.results.length > 0 ? (
-              resultsList(response.results)
-            ) : (
-              <p className={styles['empty-results']}>No results found</p>
-            )
-          ) : showDefaultResults ? (
-            resultBeatmaps.length > 0 ? (
-              resultsList(resultBeatmaps)
-            ) : (
-              <p className={styles['empty-results']}>No results found</p>
-            )
+          {hasResults && coversReady ? (
+            resultsList(resultBeatmaps)
+          ) : (response !== null || showDefaultResults) && !hasResults ? (
+            <p className={styles['empty-results']}>No results found</p>
           ) : showLoadingRecommendations ? (
             <div className={`${listStyles['result-list']} ${styles['loading-result-list']}`} role="status" aria-label="Loading recommendations">
               {loadingCards.map((index) => (

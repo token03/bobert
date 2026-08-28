@@ -61,6 +61,13 @@
 }
 .loading-result-list {
   pointer-events: none;
+  animation: loading-list-in 220ms ease-out;
+}
+
+@keyframes loading-list-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .source-card-placeholder {
@@ -244,7 +251,8 @@
   .loading-result-line,
   .loading-result-stats span,
   .source-card-placeholder,
-  .results-loading-overlay {
+  .results-loading-overlay,
+  .loading-result-list {
     animation: none;
   }
 }

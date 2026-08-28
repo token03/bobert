@@ -152,14 +152,14 @@
 }
 
 .beatmap-card[data-reveal='true'] {
-  animation: result-card-reveal 0.28s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: result-card-reveal 0.35s ease-out backwards;
   animation-delay: calc(var(--result-reveal-index) * 35ms);
 }
 
 @keyframes result-card-reveal {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(8px);
   }
 }
 
