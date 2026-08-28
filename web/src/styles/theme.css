@@ -1,0 +1,96 @@
+:root {
+  --accent: #ff66aa;
+  --accent-strong: #f04f98;
+  --accent-light: #ff8fc3;
+  --accent-muted: rgba(255, 102, 170, 0.48);
+  --accent-soft: rgba(255, 102, 170, 0.16);
+  --bg: #0f1011;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 102, 170, 0.22);
+  --danger: #ff6f9f;
+  --danger-border: rgba(255, 74, 134, 0.46);
+  --danger-border-strong: rgba(255, 74, 134, 0.58);
+  --danger-muted: rgba(255, 74, 134, 0.22);
+  --danger-ring: rgba(255, 74, 134, 0.12);
+  --danger-text: rgba(255, 74, 134, 0.82);
+  --heading: #eeeeef;
+  --input: #161719;
+  --muted: #999b9f;
+  --muted-soft: #6c6e72;
+  --panel: #141517;
+  --panel-solid: #0e0f10;
+  --row: #18191b;
+  --row-hover: #1f2022;
+  --surface: #212225;
+  --surface-strong: #28292c;
+  --text: #dfe0e2;
+  --text-artist: #a5a6a9;
+  --text-detail: #87898d;
+  --text-control-hover: #cfd0d2;
+  --text-mapper: #bebfc2;
+  --text-mapper-hover: #d3d4d6;
+  --text-status: #94969a;
+  --text-status-ranked: #9f967c;
+  --text-status-loved: #9886b9;
+  --text-stat: #bcbec1;
+  --text-stat-label: #85878b;
+  --text-action: #c4bec8;
+  --text-on-accent: #f5eef3;
+  --text-bright: #fff;
+  --match: rgba(220, 148, 173, 0.88);
+  --preview-icon: rgba(211, 143, 166, 0.88);
+  --overlay-preview: rgba(0, 0, 0, 0.46);
+  --overlay-loading: rgba(43, 44, 47, 0.38);
+  --skeleton: rgba(255, 255, 255, 0.095);
+  --skeleton-soft: rgba(255, 255, 255, 0.065);
+  --skeleton-sweep: rgba(255, 255, 255, 0.075);
+  --separator: rgba(255, 255, 255, 0.1);
+  --separator-soft: rgba(255, 255, 255, 0.08);
+  --control-hover: #2d2e31;
+  --control-hover-border: rgba(255, 255, 255, 0.16);
+  --tooltip: rgba(13, 13, 18, 0.94);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --sans: 'Onest Variable', ui-sans-serif, system-ui, sans-serif;
+  --shadow: 0 18px 70px rgba(0, 0, 0, 0.34);
+  --shadow-audio: 0 10px 32px rgba(0, 0, 0, 0.32);
+  --shadow-action: 0 6px 18px rgba(0, 0, 0, 0.24);
+  --shadow-preview: 0 6px 16px rgba(0, 0, 0, 0.55);
+  --space-2xs: 1px;
+  --space-xs: 2px;
+  --space-sm: 5px;
+  --space-md: 6px;
+  --space-lg: 8px;
+  --space-xl: 10px;
+  --space-2xl: 12px;
+  --space-3xl: 14px;
+  --space-4xl: 16px;
+  --space-5xl: 24px;
+  --space-page: clamp(12px, calc(31.5vw - 396px), 108px);
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+  --control-height: 40px;
+  --button-size: 42px;
+  --action-size: 28px;
+  --card-overlap: var(--space-lg);
+  --cover-size: 104px;
+  --cover-size-tablet: 86px;
+  --cover-size-mobile: 92px;
+  --icon-sm: 16px;
+  --icon-md: 18px;
+
+  color: var(--text);
+  background: var(--bg);
+  font: 16px/1.5 var(--sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (max-width: 1400px) {
+  :root {
+    --space-page: clamp(12px, calc(10vw - 50px), 108px);
+  }
+}

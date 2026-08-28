@@ -2,6 +2,7 @@ import { memo } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
 import { BeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
+import styles from './ResultsList.module.css'
 
 type ResultsListProps = {
   beatmaps: BeatmapMetadata[]
@@ -15,7 +16,7 @@ type ResultsListProps = {
 
 export const ResultsList = memo(function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPreview, activePreviewSetId, isPreviewPlaying }: ResultsListProps) {
   return (
-    <div className="result-list">
+    <div className={styles['result-list']} data-results-list>
       {beatmaps.map((beatmap, index) => (
         <BeatmapCard
           key={beatmap.beatmap_id}

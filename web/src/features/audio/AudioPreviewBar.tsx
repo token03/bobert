@@ -2,6 +2,7 @@ import { Pause, Play, Volume2, VolumeX } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
+import styles from './AudioPreviewBar.module.css'
 
 type AudioPreviewBarProps = {
   beatmap: BeatmapMetadata
@@ -63,18 +64,18 @@ export function AudioPreviewBar({
 
   return (
     <aside
-      className={visible ? 'audio-pill is-visible' : 'audio-pill is-hidden'}
+      className={styles['audio-pill']}
+      data-visible={visible}
       aria-label={`Audio preview player for ${beatmap.title}`}
       onPointerDown={onPointerDown}
       onFocus={onPointerDown}
     >
-      <button type="button" className="audio-control-button" onClick={onTogglePlay} aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>
-        {isPlaying ? <Pause className="filled-icon" /> : <Play className="filled-icon" />}
+      <button type="button" className={styles['audio-control-button']} onClick={onTogglePlay} aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>
+        {isPlaying ? <Pause className={styles['filled-icon']} /> : <Play className={styles['filled-icon']} />}
       </button>
 
-      <div className="audio-pill-main">
+      <div className={styles['audio-pill-main']}>
         <input
-          className="audio-progress"
           ref={progressRef}
           type="range"
           min="0"
@@ -92,8 +93,8 @@ export function AudioPreviewBar({
         />
       </div>
 
-      <div className="audio-volume">
-        <button type="button" className="audio-control-button" onClick={onToggleMuted} aria-label={muted ? 'Unmute preview' : 'Mute preview'}>
+      <div className={styles['audio-volume']}>
+        <button type="button" className={styles['audio-control-button']} onClick={onToggleMuted} aria-label={muted ? 'Unmute preview' : 'Mute preview'}>
           {muted || volume === 0 ? <VolumeX /> : <Volume2 />}
         </button>
         <input

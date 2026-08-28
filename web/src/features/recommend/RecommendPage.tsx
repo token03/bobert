@@ -15,6 +15,9 @@ import { BeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
 import { ResultsList } from './ResultsList'
 import { useRecommendForm } from './useRecommendForm'
+import cardStyles from './BeatmapCard.module.css'
+import listStyles from './ResultsList.module.css'
+import styles from './RecommendPage.module.css'
 
 type HistoryMode = 'push' | 'replace'
 type SourceSwap = {
@@ -246,7 +249,7 @@ export function RecommendPage() {
   const showDefaultResults = !response && defaults.data !== undefined
   const showLoadingRecommendations = isLoading || (!error && !response && !showDefaultResults)
   const recommendForm = (
-    <div className="sticky-search-wrap">
+    <div className={styles['sticky-search-wrap']}>
       <RecommendForm
         form={form}
         isLoading={isLoading}
@@ -272,7 +275,7 @@ export function RecommendPage() {
   }
 
   const resultsList = (beatmaps: BeatmapMetadata[]) => (
-    <div className="result-list-wrap" aria-busy={isLoading}>
+    <div className={styles['result-list-wrap']} aria-busy={isLoading}>
       <ResultsList
         beatmaps={beatmaps}
         onCopy={copyBeatmapId}
@@ -282,7 +285,7 @@ export function RecommendPage() {
         activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
         isPreviewPlaying={audio.isPlaying}
       />
-      {isLoading ? <div className="results-loading-overlay" aria-hidden="true" /> : null}
+      {isLoading ? <div className={styles['results-loading-overlay']} aria-hidden="true" /> : null}
     </div>
   )
   const sourceBeatmap = sourceSwap ? sourceSwap.beatmap : response?.query.metadata
@@ -290,12 +293,12 @@ export function RecommendPage() {
   const showSourcePlaceholder = !sourceBeatmap && isLoading && parseBeatmapId(form.getValues('beatmap')) !== null
 
   return (
-    <main className="app-shell">
+    <main className={styles['app-shell']}>
       {turnstile.widget}
       {audio.audioElement}
 
-      <section className="results-panel">
-        <div className="recommend-layout">
+      <section className={styles['results-panel']}>
+        <div className={styles['recommend-layout']}>
           {sourceBeatmap ? (
             <BeatmapCard
               variant="source"
@@ -305,32 +308,32 @@ export function RecommendPage() {
               sweepPhase={sourceSweepPhase}
               onSweepEnd={finishSourceSweep}
             />
-          ) : showSourcePlaceholder ? <div className="beatmap-card source-card source-card-placeholder" aria-hidden="true" /> : null}
+          ) : showSourcePlaceholder ? <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${cardStyles['source-card-placeholder']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true" /> : null}
           {recommendForm}
           {response ? (
             response.results.length > 0 ? (
               resultsList(response.results)
             ) : (
-              <p className="empty-results">No results found</p>
+              <p className={styles['empty-results']}>No results found</p>
             )
           ) : showDefaultResults ? (
             resultBeatmaps.length > 0 ? (
               resultsList(resultBeatmaps)
             ) : (
-              <p className="empty-results">No results found</p>
+              <p className={styles['empty-results']}>No results found</p>
             )
           ) : showLoadingRecommendations ? (
-            <div className="result-list loading-result-list" role="status" aria-label="Loading recommendations">
+            <div className={`${listStyles['result-list']} ${styles['loading-result-list']}`} role="status" aria-label="Loading recommendations">
               {loadingCards.map((index) => (
-                <div className="beatmap-card loading-result-card" key={index} aria-hidden="true">
-                  <div className="loading-result-cover" />
-                  <div className="loading-result-content">
-                    <div className="loading-result-copy">
-                      <span className="loading-result-line loading-result-title" />
-                      <span className="loading-result-line loading-result-artist" />
-                      <span className="loading-result-line loading-result-version" />
+                <div className={`${cardStyles['beatmap-card']} ${styles['loading-result-card']}`} key={index} aria-hidden="true">
+                  <div className={styles['loading-result-cover']} />
+                  <div className={styles['loading-result-content']}>
+                    <div className={styles['loading-result-copy']}>
+                      <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
+                      <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
+                      <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
                     </div>
-                    <div className="loading-result-stats">
+                    <div className={styles['loading-result-stats']}>
                       <span />
                       <span />
                       <span />
@@ -360,7 +363,7 @@ export function RecommendPage() {
         />
       ) : null}
 
-      <footer className="site-footer">
+      <footer className={styles['site-footer']}>
         <span>
           made by <a href="https://osu.ppy.sh/users/4881051" target="_blank" rel="noreferrer">tkn</a>
         </span>

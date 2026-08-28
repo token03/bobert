@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import styles from './RecommendForm.module.css'
 
 type RangeFieldsProps = {
   label: string
@@ -17,9 +18,9 @@ export function RangeFields({ label, icon, min, max, setMin, setMax }: RangeFiel
   }
 
   return (
-    <div className="range-field">
+    <div className={styles['range-field']}>
       <span aria-hidden="true">{icon}</span>
-      <span className="range-inputs">
+      <span className={styles['range-inputs']}>
         <input
           inputMode="decimal"
           maxLength={3}

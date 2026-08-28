@@ -58,8 +58,3 @@ export function statusLabel(value: string | null): string {
 
   return statuses[value] ?? value
 }
-
-export function statusClass(value: string | null): string {
-  const label = statusLabel(value)
-  return `status-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
-}

@@ -1,0 +1,13 @@
+.result-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--space-xl);
+  row-gap: calc(var(--space-xl) * 1.25);
+}
+
+@media (max-width: 1400px) {
+  .result-list {
+    grid-template-columns: 1fr;
+    row-gap: var(--space-xl);
+  }
+}

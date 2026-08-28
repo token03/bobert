@@ -4,6 +4,7 @@ import type { UseFormReturn } from 'react-hook-form'
 import { defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RangeFields } from './RangeFields'
+import styles from './RecommendForm.module.css'
 
 type RecommendFormProps = {
   form: UseFormReturn<RecommendFormValues>
@@ -74,17 +75,17 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
 
   return (
     <>
-      <form className="control-panel" onSubmit={form.handleSubmit(onSubmit)}>
-        <div className="primary-controls">
-          <label className="field beatmap-field search-field">
-            <span className="sr-only">Search</span>
-            <span className="input-with-status">
-              <span className="search-pill">
+      <form className={styles['control-panel']} onSubmit={form.handleSubmit(onSubmit)}>
+        <div className={styles['primary-controls']}>
+          <label className={`${styles.field} ${styles['beatmap-field']} ${styles['search-field']}`}>
+            <span className={styles['sr-only']}>Search</span>
+            <span className={styles['input-with-status']}>
+              <span className={styles['search-pill']}>
                 <input
                   required
                   aria-invalid={beatmapError ? 'true' : 'false'}
                   aria-describedby={beatmapError ? 'beatmap-error' : undefined}
-                  className={beatmapError ? 'has-field-error' : undefined}
+                  data-error={Boolean(beatmapError)}
                   {...beatmap}
                   onChange={(event) => {
                     form.clearErrors('beatmap')
@@ -101,21 +102,21 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
                   }}
                   placeholder="1872396 or https://osu.ppy.sh/beatmaps/1872396"
                 />
-                <button className="primary-button search-button" type="submit" disabled={submitDisabled} aria-label="Recommend">
-                  {submitDisabled ? <Loader className="spinner-icon" /> : <Search />}
-                  <span className="sr-only">Recommend</span>
+                <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
+                  {submitDisabled ? <Loader className={styles['spinner-icon']} /> : <Search />}
+                  <span className={styles['sr-only']}>Recommend</span>
                 </button>
               </span>
               {beatmapError ? <FieldErrorIcon id="beatmap-error" label="Invalid beatmap ID" /> : null}
             </span>
           </label>
 
-          <div className="filter-controls">
+          <div className={styles['filter-controls']}>
             <RangeFields label="Star" icon={<Star strokeWidth={3} />} min={values.minSr} max={values.maxSr} setMin={(value) => updateRange('minSr', value)} setMax={(value) => updateRange('maxSr', value)} />
             <RangeFields label="BPM" icon={<Metronome strokeWidth={3} />} min={values.minBpm} max={values.maxBpm} setMin={(value) => updateRange('minBpm', value)} setMax={(value) => updateRange('maxBpm', value)} />
             <RangeFields label="Length" icon={<Clock strokeWidth={3} />} min={values.minLength} max={values.maxLength} setMin={(value) => updateRange('minLength', value)} setMax={(value) => updateRange('maxLength', value)} />
 
-            <label className="field select-field date-field">
+            <label className={`${styles.field} ${styles['select-field']}`}>
               <span aria-hidden="true">
                 <CalendarDays strokeWidth={3} />
               </span>
@@ -138,7 +139,7 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
               </select>
             </label>
 
-            <label className="field select-field status-field">
+            <label className={`${styles.field} ${styles['select-field']}`}>
               <span aria-hidden="true">
                 <Tag strokeWidth={3} />
               </span>
@@ -157,9 +158,9 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
               </select>
             </label>
 
-            <button className="ghost-button" type="button" onClick={resetForm}>
+            <button className={styles['ghost-button']} type="button" onClick={resetForm}>
               <RotateCcw />
-              <span className="sr-only">Reset</span>
+              <span className={styles['sr-only']}>Reset</span>
             </button>
           </div>
         </div>
@@ -171,9 +172,9 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
 
 function FieldErrorIcon({ id, label }: { id: string; label: string }) {
   return (
-    <span className="field-error-icon" tabIndex={0} aria-label={label}>
+    <span className={styles['field-error-icon']} tabIndex={0} aria-label={label}>
       <XCircle />
-      <span id={id} className="field-tooltip" role="tooltip">
+      <span id={id} className={styles['field-tooltip']} role="tooltip">
         {label}
       </span>
     </span>
