@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useDebouncer } from '@tanstack/react-pacer'
 import { useNavigate, useSearch } from '@tanstack/react-router'
@@ -314,7 +315,7 @@ export function RecommendPage() {
           ) : showLoadingRecommendations ? (
             <div className={`${listStyles['result-list']} ${styles['loading-result-list']}`} role="status" aria-label="Loading recommendations">
               {loadingCards.map((index) => (
-                <div className={`${cardStyles['beatmap-card']} ${styles['loading-result-card']}`} key={index} aria-hidden="true">
+                <div className={`${cardStyles['beatmap-card']} ${styles['loading-result-card']}`} key={index} style={{ '--i': index } as CSSProperties} aria-hidden="true">
                   <div className={styles['loading-result-cover']} />
                   <div className={styles['loading-result-content']}>
                     <div className={styles['loading-result-copy']}>

@@ -40,10 +40,9 @@
   --match: rgba(220, 148, 173, 0.88);
   --preview-icon: rgba(211, 143, 166, 0.88);
   --overlay-preview: rgba(0, 0, 0, 0.46);
-  --overlay-loading: rgba(43, 44, 47, 0.38);
+  --overlay-loading: rgba(11, 12, 13, 0.55);
   --skeleton: rgba(255, 255, 255, 0.095);
   --skeleton-soft: rgba(255, 255, 255, 0.065);
-  --skeleton-sweep: rgba(255, 255, 255, 0.075);
   --separator: rgba(255, 255, 255, 0.1);
   --separator-soft: rgba(255, 255, 255, 0.08);
   --control-hover: #2d2e31;

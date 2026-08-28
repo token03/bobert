@@ -63,6 +63,10 @@
   pointer-events: none;
 }
 
+.source-card-placeholder {
+  animation: loading-pulse 1.6s ease-in-out infinite alternate;
+}
+
 .loading-result-card {
   grid-template-columns: calc(var(--cover-size) + var(--card-overlap)) minmax(0, 1fr);
   min-height: 106px;
@@ -70,29 +74,10 @@
   contain-intrinsic-block-size: auto 106px;
 }
 
-.source-card-placeholder::after,
-.loading-result-card::after,
-.result-list-wrap[aria-busy='true'] [data-beatmap-card]::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  background: linear-gradient(105deg, transparent 38%, var(--skeleton-sweep) 50%, transparent 62%);
-  pointer-events: none;
-  animation: loading-result-sweep 1.8s ease-in-out infinite;
-  transform: translateX(-100%);
-}
-
-@keyframes loading-result-sweep {
-  60%,
-  100% {
-    transform: translateX(100%);
-  }
-}
-
 .loading-result-cover {
   min-height: var(--cover-size);
   background: var(--surface-strong);
+  animation: loading-pulse 1.6s ease-in-out calc(var(--i, 0) * -220ms) infinite alternate;
 }
 
 .loading-result-content {
@@ -119,6 +104,7 @@
   display: block;
   border-radius: var(--radius-pill);
   background: var(--skeleton);
+  animation: loading-pulse 1.6s ease-in-out calc(var(--i, 0) * -220ms) infinite alternate;
 }
 
 .loading-result-line {
@@ -163,6 +149,27 @@
   border-radius: var(--radius-lg);
   background: var(--overlay-loading);
   pointer-events: auto;
+  animation:
+    loading-overlay-in 260ms ease-out,
+    loading-overlay-pulse 2.4s ease-in-out 260ms infinite alternate;
+}
+
+@keyframes loading-overlay-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes loading-overlay-pulse {
+  to {
+    opacity: 0.78;
+  }
+}
+
+@keyframes loading-pulse {
+  to {
+    opacity: 0.35;
+  }
 }
 
 @media (max-width: 1400px) {
@@ -233,12 +240,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .source-card-placeholder::after,
-  .loading-result-card::after {
-    animation: none;
-  }
-
-  .result-list-wrap[aria-busy='true'] [data-beatmap-card]::before {
+  .loading-result-cover,
+  .loading-result-line,
+  .loading-result-stats span,
+  .source-card-placeholder,
+  .results-loading-overlay {
     animation: none;
   }
 }
