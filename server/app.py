@@ -9,7 +9,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 THREAD_COUNT = min(
     2, os.cpu_count() or 1, max(1, int(os.getenv("TORCH_NUM_THREADS", "2")))
@@ -79,6 +79,50 @@ class RecommendRequest(BaseModel):
     beatmap_id: int = Field(gt=0)
     top_k: int = Field(default=20, ge=1, le=MAX_RECOMMEND_TOP_K)
     filters: RecommendFilters = Field(default_factory=RecommendFilters)
+
+
+class BeatmapSummary(BaseModel):
+    beatmap_id: int
+    beatmapset_id: int | None
+    artist: str | None
+    title: str | None
+    creator: str | None
+    user_id: int | None
+    version: str | None
+    status: str | int | None
+    stars: float | None
+    ar: float | None
+    cs: float | None
+    accuracy: float | None
+    drain: float | None
+    bpm: float | None
+    total_length: float | None
+    last_updated: str | None
+    ranked_date: str | None
+    submitted_date: str | None
+    release_date: str | None
+    url: str
+
+
+class ScoredBeatmapSummary(BeatmapSummary):
+    score: float
+
+
+class DefaultRecommendResponse(BaseModel):
+    count: int
+    results: list[BeatmapSummary]
+
+
+class RecommendQuery(BaseModel):
+    beatmap_id: int
+    cache: Literal["hit", "miss"]
+    metadata: BeatmapSummary
+
+
+class RecommendResponse(BaseModel):
+    query: RecommendQuery
+    count: int
+    results: list[ScoredBeatmapSummary]
 
 
 class RequestLoggingMiddleware:
@@ -169,7 +213,15 @@ async def lifespan(_: FastAPI):
         _runtime = None
 
 
-app = FastAPI(title="bobert-api", lifespan=lifespan)
+app = FastAPI(
+    title="bobert-api",
+    version="0.1.0",
+    lifespan=lifespan,
+    openapi_url="/api/openapi.json",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
+)
 app.add_middleware(RequestLoggingMiddleware)
 
 
@@ -178,14 +230,14 @@ def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/api/recommend")
+@app.get("/api/recommend", response_model=DefaultRecommendResponse)
 def default_recommend(response: Response, seed: int | None = None) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     results = get_runtime().default_summaries(seed)
     return {"count": len(results), "results": results}
 
 
-@app.post("/api/recommend")
+@app.post("/api/recommend", response_model=RecommendResponse)
 async def recommend(
     payload: RecommendRequest,
     request: Request,
@@ -262,7 +314,7 @@ async def beatmap_detail(beatmap_id: int) -> dict[str, Any]:
     return detail
 
 
-@app.get("/api/beatmaps/{beatmap_id}/summary")
+@app.get("/api/beatmaps/{beatmap_id}/summary", response_model=BeatmapSummary)
 async def beatmap_summary(
     beatmap_id: int, request: Request, response: Response
 ) -> dict[str, Any]:

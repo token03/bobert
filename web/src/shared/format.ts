@@ -41,7 +41,7 @@ export function resultsLabel(count: number): string {
   return `${count} RESULTS`
 }
 
-export function statusLabel(value: string | null): string {
+export function statusLabel(value: string | number | null): string {
   const statuses: Record<string, string> = {
     '-2': 'graveyard',
     '-1': 'wip',
@@ -56,5 +56,6 @@ export function statusLabel(value: string | null): string {
     return 'unknown status'
   }
 
-  return statuses[value] ?? value
+  const status = String(value)
+  return statuses[status] ?? status
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { RecommendFilters, RecommendRequest } from '../../shared/types'
 
 export const defaultFilters = {
   beatmap: '',
@@ -18,9 +19,14 @@ export const defaultFilters = {
   minHp: '0',
   maxHp: '10',
   status: '',
-  dateWindow: '',
+  dateWindow: '' as const,
   excludeSameSet: true,
 }
+
+const dateWindowSchema = z.union([
+  z.literal(''),
+  z.enum(['last_week', 'last_month', 'last_3_months', 'last_6_months', 'last_year', 'last_2_years', 'last_5_years', 'all_time']),
+])
 
 export const recommendFormSchema = z.object({
   beatmap: z.string().refine((value) => parseBeatmapId(value) !== null, 'Enter a beatmap ID or a beatmap link ending in an ID.'),
@@ -43,7 +49,7 @@ export const recommendFormSchema = z.object({
   minHp: z.string(),
   maxHp: z.string(),
   status: z.string(),
-  dateWindow: z.string(),
+  dateWindow: dateWindowSchema,
   excludeSameSet: z.boolean(),
 })
 
@@ -83,7 +89,10 @@ export const recommendSearchSchema = z.object({
       '0': 'unranked',
     }[status] ?? status
   }, z.string()).catch(defaultFilters.status),
-  dateWindow: searchString(defaultFilters.dateWindow),
+  dateWindow: z.preprocess(
+    (value) => value === undefined || value === null ? defaultFilters.dateWindow : String(value),
+    dateWindowSchema,
+  ).catch(defaultFilters.dateWindow),
   excludeSameSet: z.preprocess(
     (value) => value === undefined || value === null ? defaultFilters.excludeSameSet : value === true || value === 'true',
     z.boolean(),
@@ -91,7 +100,7 @@ export const recommendSearchSchema = z.object({
 })
 
 export function buildRecommendRequest(values: RecommendFormValues) {
-  const filters: Record<string, boolean | number | string | null> = {
+  const filters: RecommendFilters = {
     min_sr: numericOrNull(values.minSr),
     max_sr: numericOrNull(values.maxSr),
     min_ar: numericOrNull(values.minAr),
@@ -125,10 +134,10 @@ export function buildRecommendRequest(values: RecommendFormValues) {
   }
 
   return {
-    beatmapId: parseBeatmapId(values.beatmap)!,
-    topK: Number(values.topK),
+    beatmap_id: parseBeatmapId(values.beatmap)!,
+    top_k: Number(values.topK),
     filters,
-  }
+  } satisfies RecommendRequest
 }
 
 export function normalizeBeatmapInput(value: string): string {

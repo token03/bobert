@@ -1,15 +1,16 @@
-import { useEffect } from 'react'
+import { useEffect, useEffectEvent } from 'react'
+import { Tooltip } from '@base-ui/react/tooltip'
+import { useStore } from '@tanstack/react-form'
 import { CalendarDays, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
-import type { UseFormReturn } from 'react-hook-form'
 import { defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RangeFields } from './RangeFields'
+import type { useRecommendForm } from './useRecommendForm'
 import styles from './RecommendForm.module.css'
 
 type RecommendFormProps = {
-  form: UseFormReturn<RecommendFormValues>
+  form: ReturnType<typeof useRecommendForm>
   isLoading: boolean
-  onSubmit: (values: RecommendFormValues) => Promise<void>
   onRangeChange: (values: RecommendFormValues) => void
   onSelectChange: (values: RecommendFormValues) => void
   onPasteSearch: (values: RecommendFormValues) => void
@@ -18,23 +19,22 @@ type RecommendFormProps = {
 
 type RangeFieldName = 'minSr' | 'maxSr' | 'minLength' | 'maxLength' | 'minBpm' | 'maxBpm'
 
-export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
-  const values = form.watch()
-  const beatmapError = form.formState.errors.beatmap?.message
-  const submitDisabled = isLoading || form.formState.isSubmitting
-  const beatmap = form.register('beatmap')
-  const status = form.register('status')
-  const dateWindow = form.register('dateWindow')
+export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
+  const { values, isSubmitting } = useStore(form.store, (state) => ({
+    values: state.values,
+    isSubmitting: state.isSubmitting,
+  }))
+  const submitDisabled = isLoading || isSubmitting
 
   function resetForm() {
-    const nextValues = { ...defaultFilters, beatmap: form.getValues('beatmap') }
+    const nextValues = { ...defaultFilters, beatmap: form.getFieldValue('beatmap') }
     form.reset(nextValues)
     onReset(nextValues)
   }
 
   function updateRange(field: RangeFieldName, value: string) {
-    form.setValue(field, value)
-    onRangeChange({ ...form.getValues(), [field]: value })
+    form.setFieldValue(field, value)
+    onRangeChange({ ...form.state.values, [field]: value })
   }
 
   function searchPastedBeatmap(value: string) {
@@ -43,12 +43,13 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
     }
 
     const beatmap = normalizeBeatmapInput(value)
-    const nextValues = { ...form.getValues(), beatmap }
-    form.clearErrors('beatmap')
-    form.setValue('beatmap', beatmap, { shouldValidate: false })
+    const nextValues = { ...form.state.values, beatmap }
+    form.setFieldValue('beatmap', beatmap, { dontValidate: true })
     onPasteSearch(nextValues)
     return true
   }
+
+  const handleWindowPaste = useEffectEvent((value: string) => searchPastedBeatmap(value))
 
   useEffect(() => {
     function pasteSearch(event: ClipboardEvent) {
@@ -64,119 +65,139 @@ export function RecommendForm({ form, isLoading, onSubmit, onRangeChange, onSele
         return
       }
 
-      if (searchPastedBeatmap(event.clipboardData?.getData('text') ?? '')) {
+      if (handleWindowPaste(event.clipboardData?.getData('text') ?? '')) {
         event.preventDefault()
       }
     }
 
     window.addEventListener('paste', pasteSearch)
     return () => window.removeEventListener('paste', pasteSearch)
-  })
+  }, [])
 
   return (
-    <>
-      <form className={styles['control-panel']} onSubmit={form.handleSubmit(onSubmit)}>
-        <div className={styles['primary-controls']}>
-          <label className={`${styles.field} ${styles['beatmap-field']} ${styles['search-field']}`}>
-            <span className={styles['sr-only']}>Search</span>
-            <span className={styles['input-with-status']}>
-              <span className={styles['search-pill']}>
-                <input
-                  required
-                  aria-invalid={beatmapError ? 'true' : 'false'}
-                  aria-describedby={beatmapError ? 'beatmap-error' : undefined}
-                  data-error={Boolean(beatmapError)}
-                  {...beatmap}
-                  onChange={(event) => {
-                    form.clearErrors('beatmap')
-                    beatmap.onChange(event)
-                  }}
-                  onPaste={(event) => {
-                    if (searchPastedBeatmap(event.clipboardData.getData('text'))) {
-                      event.preventDefault()
-                    }
-                  }}
-                  onBlur={(event) => {
-                    beatmap.onBlur(event)
-                    form.setValue('beatmap', normalizeBeatmapInput(event.target.value), { shouldValidate: false })
-                  }}
-                  placeholder="1872396 or https://osu.ppy.sh/beatmaps/1872396"
-                />
-                <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
-                  {submitDisabled ? <Loader className={styles['spinner-icon']} /> : <Search />}
-                  <span className={styles['sr-only']}>Recommend</span>
-                </button>
-              </span>
-              {beatmapError ? <FieldErrorIcon id="beatmap-error" label="Invalid beatmap ID" /> : null}
-            </span>
-          </label>
+    <form
+      className={styles['control-panel']}
+      onSubmit={(event) => {
+        event.preventDefault()
+        void form.handleSubmit()
+      }}
+    >
+      <div className={styles['primary-controls']}>
+        <div className={`${styles.field} ${styles['beatmap-field']} ${styles['search-field']}`}>
+          <label className={styles['sr-only']} htmlFor="beatmap">Search</label>
+          <form.Field name="beatmap">
+            {(field) => {
+              const beatmapError = field.state.meta.errors[0]?.message
 
-          <div className={styles['filter-controls']}>
-            <RangeFields label="Star" icon={<Star strokeWidth={3} />} min={values.minSr} max={values.maxSr} setMin={(value) => updateRange('minSr', value)} setMax={(value) => updateRange('maxSr', value)} />
-            <RangeFields label="BPM" icon={<Metronome strokeWidth={3} />} min={values.minBpm} max={values.maxBpm} setMin={(value) => updateRange('minBpm', value)} setMax={(value) => updateRange('maxBpm', value)} />
-            <RangeFields label="Length" icon={<Clock strokeWidth={3} />} min={values.minLength} max={values.maxLength} setMin={(value) => updateRange('minLength', value)} setMax={(value) => updateRange('maxLength', value)} />
-
-            <label className={`${styles.field} ${styles['select-field']}`}>
-              <span aria-hidden="true">
-                <CalendarDays strokeWidth={3} />
-              </span>
-              <select
-                aria-label="Date window"
-                {...dateWindow}
-                onChange={(event) => {
-                  dateWindow.onChange(event)
-                  onSelectChange({ ...form.getValues(), dateWindow: event.target.value })
-                }}
-              >
-                <option value="">All time</option>
-                <option value="last_week">Last week</option>
-                <option value="last_month">Last month</option>
-                <option value="last_3_months">Last 3 months</option>
-                <option value="last_6_months">Last 6 months</option>
-                <option value="last_year">Last year</option>
-                <option value="last_2_years">Last 2 years</option>
-                <option value="last_5_years">Last 5 years</option>
-              </select>
-            </label>
-
-            <label className={`${styles.field} ${styles['select-field']}`}>
-              <span aria-hidden="true">
-                <Tag strokeWidth={3} />
-              </span>
-              <select
-                aria-label="Status"
-                {...status}
-                onChange={(event) => {
-                  status.onChange(event)
-                  onSelectChange({ ...form.getValues(), status: event.target.value })
-                }}
-              >
-                <option value="">Any</option>
-                <option value="ranked">Ranked</option>
-                <option value="loved">Loved</option>
-                <option value="unranked">Unranked</option>
-              </select>
-            </label>
-
-            <button className={styles['ghost-button']} type="button" onClick={resetForm}>
-              <RotateCcw />
-              <span className={styles['sr-only']}>Reset</span>
-            </button>
-          </div>
+              return (
+                <span className={styles['input-with-status']}>
+                  <span className={styles['search-pill']}>
+                    <input
+                      required
+                      id="beatmap"
+                      name={field.name}
+                      value={field.state.value}
+                      aria-invalid={beatmapError ? 'true' : 'false'}
+                      aria-describedby={beatmapError ? 'beatmap-error' : undefined}
+                      data-error={Boolean(beatmapError)}
+                      onChange={(event) => field.handleChange(event.target.value)}
+                      onPaste={(event) => {
+                        if (searchPastedBeatmap(event.clipboardData.getData('text'))) {
+                          event.preventDefault()
+                        }
+                      }}
+                      onBlur={(event) => {
+                        field.handleBlur()
+                        form.setFieldValue('beatmap', normalizeBeatmapInput(event.target.value), { dontValidate: true })
+                      }}
+                      placeholder="1872396 or https://osu.ppy.sh/beatmaps/1872396"
+                    />
+                    <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
+                      {submitDisabled ? <Loader className={styles['spinner-icon']} /> : <Search />}
+                      <span className={styles['sr-only']}>Recommend</span>
+                    </button>
+                  </span>
+                  {beatmapError ? (
+                    <>
+                      <span id="beatmap-error" className={styles['sr-only']}>{beatmapError}</span>
+                      <FieldErrorIcon label={beatmapError} />
+                    </>
+                  ) : null}
+                </span>
+              )
+            }}
+          </form.Field>
         </div>
 
-      </form>
-    </>
+        <div className={styles['filter-controls']}>
+          <RangeFields label="Star" icon={<Star strokeWidth={3} />} min={values.minSr} max={values.maxSr} setMin={(value) => updateRange('minSr', value)} setMax={(value) => updateRange('maxSr', value)} />
+          <RangeFields label="BPM" icon={<Metronome strokeWidth={3} />} min={values.minBpm} max={values.maxBpm} setMin={(value) => updateRange('minBpm', value)} setMax={(value) => updateRange('maxBpm', value)} />
+          <RangeFields label="Length" icon={<Clock strokeWidth={3} />} min={values.minLength} max={values.maxLength} setMin={(value) => updateRange('minLength', value)} setMax={(value) => updateRange('maxLength', value)} />
+
+          <label className={`${styles.field} ${styles['select-field']}`}>
+            <span aria-hidden="true">
+              <CalendarDays strokeWidth={3} />
+            </span>
+            <select
+              aria-label="Date window"
+              value={values.dateWindow}
+              onChange={(event) => {
+                const dateWindow = event.target.value as RecommendFormValues['dateWindow']
+                form.setFieldValue('dateWindow', dateWindow)
+                onSelectChange({ ...form.state.values, dateWindow })
+              }}
+            >
+              <option value="">All time</option>
+              <option value="last_week">Last week</option>
+              <option value="last_month">Last month</option>
+              <option value="last_3_months">Last 3 months</option>
+              <option value="last_6_months">Last 6 months</option>
+              <option value="last_year">Last year</option>
+              <option value="last_2_years">Last 2 years</option>
+              <option value="last_5_years">Last 5 years</option>
+            </select>
+          </label>
+
+          <label className={`${styles.field} ${styles['select-field']}`}>
+            <span aria-hidden="true">
+              <Tag strokeWidth={3} />
+            </span>
+            <select
+              aria-label="Status"
+              value={values.status}
+              onChange={(event) => {
+                form.setFieldValue('status', event.target.value)
+                onSelectChange({ ...form.state.values, status: event.target.value })
+              }}
+            >
+              <option value="">Any</option>
+              <option value="ranked">Ranked</option>
+              <option value="loved">Loved</option>
+              <option value="unranked">Unranked</option>
+            </select>
+          </label>
+
+          <button className={styles['ghost-button']} type="button" onClick={resetForm}>
+            <RotateCcw />
+            <span className={styles['sr-only']}>Reset</span>
+          </button>
+        </div>
+      </div>
+    </form>
   )
 }
 
-function FieldErrorIcon({ id, label }: { id: string; label: string }) {
+function FieldErrorIcon({ label }: { label: string }) {
   return (
-    <span className={styles['field-error-icon']} tabIndex={0} aria-label={label}>
-      <XCircle />
-      <span id={id} className={styles['field-tooltip']} role="tooltip">
-        {label}
-      </span>
-    </span>
+    <Tooltip.Root>
+      <Tooltip.Trigger className={styles['field-error-icon']} type="button" delay={0} aria-label={label}>
+        <XCircle />
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Positioner className={styles['field-tooltip-positioner']} side="top" align="end" sideOffset={8}>
+          <Tooltip.Popup className={styles['field-tooltip']}>{label}</Tooltip.Popup>
+        </Tooltip.Positioner>
+      </Tooltip.Portal>
+    </Tooltip.Root>
   )
 }

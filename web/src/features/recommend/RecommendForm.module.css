@@ -303,6 +303,9 @@
   width: var(--icon-md);
   height: var(--icon-md);
   color: var(--danger-text);
+  border: 0;
+  background: transparent;
+  padding: 0;
   outline: none;
   transform: translateY(-50%);
 }
@@ -318,12 +321,13 @@
   stroke: currentColor;
 }
 
+.field-tooltip-positioner {
+  z-index: 30;
+}
+
 .field-tooltip {
-  position: absolute;
-  right: calc(var(--space-2xs) * -1);
-  bottom: calc(100% + var(--space-lg));
   width: max-content;
-  max-width: 160px;
+  max-width: min(280px, calc(100vw - var(--space-4xl)));
   border: 1px solid var(--danger-muted);
   border-radius: var(--radius-pill);
   background: var(--tooltip);
@@ -331,19 +335,15 @@
   font-size: 11px;
   font-weight: 750;
   letter-spacing: 0;
-  opacity: 0;
   padding: var(--space-md) var(--space-xl);
-  pointer-events: none;
   text-transform: none;
-  transform: translateY(3px);
   transition: opacity 0.12s ease, transform 0.12s ease;
-  white-space: nowrap;
 }
 
-.field-error-icon:hover .field-tooltip,
-.field-error-icon:focus .field-tooltip {
-  opacity: 1;
-  transform: translateY(0);
+.field-tooltip[data-starting-style],
+.field-tooltip[data-ending-style] {
+  opacity: 0;
+  transform: translateY(3px);
 }
 
 .primary-button,

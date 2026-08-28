@@ -1,4 +1,3 @@
-import { memo } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
 import { BeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
@@ -14,7 +13,7 @@ type ResultsListProps = {
   isPreviewPlaying: boolean
 }
 
-export const ResultsList = memo(function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPreview, activePreviewSetId, isPreviewPlaying }: ResultsListProps) {
+export function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPreview, activePreviewSetId, isPreviewPlaying }: ResultsListProps) {
   return (
     <div className={styles['result-list']} data-results-list>
       {beatmaps.map((beatmap, index) => (
@@ -31,14 +30,5 @@ export const ResultsList = memo(function ResultsList({ beatmaps, onCopy, onSearc
         />
       ))}
     </div>
-  )
-}, areResultsEqual)
-
-function areResultsEqual(previous: ResultsListProps, next: ResultsListProps) {
-  return (
-    previous.beatmaps === next.beatmaps &&
-    previous.isLoading === next.isLoading &&
-    previous.activePreviewSetId === next.activePreviewSetId &&
-    previous.isPreviewPlaying === next.isPreviewPlaying
   )
 }

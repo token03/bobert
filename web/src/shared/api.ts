@@ -1,44 +1,40 @@
-import type { BeatmapMetadata, DefaultRecommendResponse, RecommendRequest, RecommendResponse } from './types'
+import createClient from 'openapi-fetch'
+import type { components, paths } from './schema'
+import type { RecommendRequest } from './types'
 
-const apiUrl = '/api'
+const client = createClient<paths>()
+type Schemas = components['schemas']
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const result = await fetch(`${apiUrl}${path}`, init)
-  const text = await result.text()
-  const data = text ? JSON.parse(text) : null
-
-  if (!result.ok) {
-    throw new Error(data?.detail ?? `Request failed with ${result.status}`)
-  }
-
-  return data as T
-}
-
-export async function recommendBeatmaps(request: RecommendRequest, signal?: AbortSignal): Promise<RecommendResponse> {
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-  }
-
-  if (request.turnstileToken) {
-    headers['X-Turnstile-Token'] = request.turnstileToken
-  }
-
-  return api('/recommend', {
-    method: 'POST',
-    headers,
+export async function recommendBeatmaps(body: RecommendRequest, turnstileToken?: string, signal?: AbortSignal): Promise<Schemas['RecommendResponse']> {
+  const { data, response } = await client.POST('/api/recommend', {
+    body,
+    headers: turnstileToken ? { 'X-Turnstile-Token': turnstileToken } : undefined,
     signal,
-    body: JSON.stringify({
-      beatmap_id: request.beatmapId,
-      top_k: request.topK,
-      filters: request.filters,
-    }),
   })
+  if (!data) {
+    throw new Error(`Request failed with ${response.status}`)
+  }
+
+  return data
 }
 
-export async function fetchDefaultRecommendations(signal?: AbortSignal): Promise<DefaultRecommendResponse> {
-  return api('/recommend', { signal })
+export async function fetchDefaultRecommendations(signal?: AbortSignal): Promise<Schemas['DefaultRecommendResponse']> {
+  const { data, response } = await client.GET('/api/recommend', { signal })
+  if (!data) {
+    throw new Error(`Request failed with ${response.status}`)
+  }
+
+  return data
 }
 
-export async function fetchBeatmapSummary(beatmapId: number, signal?: AbortSignal): Promise<BeatmapMetadata> {
-  return api(`/beatmaps/${beatmapId}/summary`, { signal })
+export async function fetchBeatmapSummary(beatmapId: number, signal?: AbortSignal): Promise<Schemas['BeatmapSummary']> {
+  const { data, response } = await client.GET('/api/beatmaps/{beatmap_id}/summary', {
+    params: { path: { beatmap_id: beatmapId } },
+    signal,
+  })
+  if (!data) {
+    throw new Error(`Request failed with ${response.status}`)
+  }
+
+  return data
 }

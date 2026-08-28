@@ -129,7 +129,7 @@ export function BeatmapCard(props: BeatmapCardProps) {
               <CreatorLink beatmap={beatmap} />
               <div className={styles['result-meta-slot']}>
                 <div className={styles['result-meta-details']}>
-                  {beatmap.score !== undefined ? <span className={styles['match-pill']}>{formatMatch(beatmap.score)} match</span> : null}
+                  {'score' in beatmap ? <span className={styles['match-pill']}>{formatMatch(beatmap.score)} match</span> : null}
                   <span className={styles['status-label']} data-status={statusLabel(beatmap.status)}>{statusLabel(beatmap.status)}</span>
                 </div>
                 <div className={styles['result-meta-actions']}>
