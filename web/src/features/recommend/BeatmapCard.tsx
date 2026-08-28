@@ -11,6 +11,9 @@ type SourceBeatmapCardProps = {
   variant: 'source'
   beatmap: BeatmapMetadata
   onCopy: (beatmapId: number) => Promise<void>
+  onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
+  activePreviewSetId: number | null
+  isPreviewPlaying: boolean
   sweepDirection?: SweepDirection
   sweepPhase?: 'in' | 'out'
   onSweepEnd?: () => void
@@ -56,6 +59,7 @@ export function BeatmapCard(props: BeatmapCardProps) {
 
   if (isSource) {
     const sourceProps = props as SourceBeatmapCardProps
+    const isCoverActive = sourceProps.isPreviewPlaying && sourceProps.activePreviewSetId === beatmap.beatmapset_id
     return (
       <article
         className={`${styles['beatmap-card']} ${styles['source-card']} ${styles['clickable-card']}`}
@@ -71,7 +75,7 @@ export function BeatmapCard(props: BeatmapCardProps) {
         onBlur={handleCardBlur}
         onAnimationEnd={() => sourceProps.onSweepEnd?.()}
       >
-        <BeatmapCover beatmap={beatmap} variant="source" />
+        <BeatmapCover beatmap={beatmap} variant="source" isCoverActive={isCoverActive} onPlayPreview={sourceProps.onPlayPreview} />
 
         <div className={`${styles['beatmap-card-content']} ${styles['source-content']}`}>
           <div className={styles['source-main']}>
@@ -158,10 +162,27 @@ function BeatmapCover({
   onPlayPreview?: (beatmap: BeatmapMetadata) => Promise<void>
 }) {
   if (variant === 'source') {
+    if (beatmap.beatmapset_id === null) {
+      return <div className={styles['source-cover']} aria-hidden="true" />
+    }
+
     return (
-      <div className={styles['source-cover']} aria-hidden="true">
-        {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onLoad={(event) => { event.currentTarget.dataset.loaded = 'true'; event.currentTarget.dataset.revealing = 'true' }} onAnimationEnd={(event) => { delete event.currentTarget.dataset.revealing }} onError={(event) => { event.currentTarget.hidden = true }} /> : null}
-      </div>
+      <button
+        className={`${styles['source-cover']} ${styles['cover-preview']}`}
+        data-audio-active={isCoverActive || undefined}
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation()
+          onPlayPreview?.(beatmap)
+        }}
+        aria-label={isCoverActive ? 'Pause preview' : 'Play preview'}
+        title={isCoverActive ? 'Pause preview' : 'Play preview'}
+      >
+        <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onLoad={(event) => { event.currentTarget.dataset.loaded = 'true'; event.currentTarget.dataset.revealing = 'true' }} onAnimationEnd={(event) => { delete event.currentTarget.dataset.revealing }} onError={(event) => { event.currentTarget.hidden = true }} />
+        <span className={styles['cover-play-overlay']} aria-hidden="true">
+          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause className={styles['filled-icon']} /> : <Play className={styles['filled-icon']} />}</span>
+        </span>
+      </button>
     )
   }
 

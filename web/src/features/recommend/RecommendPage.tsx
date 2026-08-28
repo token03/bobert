@@ -30,7 +30,7 @@ type SourceSwap = {
   requestDone: boolean
 }
 
-const loadingCards = Array.from({ length: 50 }, (_, index) => index)
+const loadingCards = Array.from({ length: 100 }, (_, index) => index)
 const staleTime = 5 * 60_000
 const coverBatchCount = 16
 const coverBatchTimeout = 500
@@ -347,6 +347,9 @@ export function RecommendPage() {
               variant="source"
               beatmap={sourceBeatmap}
               onCopy={copyBeatmapId}
+              onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
+              activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
+              isPreviewPlaying={audio.isPlaying}
               sweepDirection={sourceSweepPhase ? sourceSwap?.direction : undefined}
               sweepPhase={sourceSweepPhase}
               onSweepEnd={finishSourceSweep}
