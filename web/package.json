@@ -2,11 +2,12 @@
   "name": "bobert-web",
   "private": true,
   "version": "0.0.0",
+  "packageManager": "bun@1.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "generate:api": "openapi-typescript http://127.0.0.1:8008/api/openapi.json --output src/shared/schema.d.ts",
+    "generate:api": "bunx openapi-typescript@7.13.0 http://127.0.0.1:8008/api/openapi.json --output src/shared/schema.d.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -37,7 +38,6 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
-    "openapi-typescript": "^7.13.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
     "vite": "^8.0.12"
