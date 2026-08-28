@@ -67,6 +67,7 @@ SEARCH_COLUMNS = [
 class CachedEmbedding:
     beatmap_id: int
     embedding: np.ndarray
+    density: float | None
     metadata: dict[str, Any]
 
 
@@ -77,8 +78,14 @@ class SQLiteCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS embeddings (beatmap_id INTEGER PRIMARY KEY, embedding BLOB NOT NULL, metadata_json TEXT NOT NULL, created_at INTEGER NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS embeddings (beatmap_id INTEGER PRIMARY KEY, embedding BLOB NOT NULL, density REAL, metadata_json TEXT NOT NULL, created_at INTEGER NOT NULL)"
             )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(embeddings)").fetchall()
+            }
+            if "density" not in columns:
+                conn.execute("ALTER TABLE embeddings ADD COLUMN density REAL")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS unavailable_beatmaps (beatmap_id INTEGER PRIMARY KEY, reason TEXT NOT NULL, created_at INTEGER NOT NULL)"
             )
@@ -105,7 +112,7 @@ class SQLiteCache:
     def get(self, beatmap_id: int) -> CachedEmbedding | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT embedding, metadata_json FROM embeddings WHERE beatmap_id = ?",
+                "SELECT embedding, density, metadata_json FROM embeddings WHERE beatmap_id = ?",
                 (int(beatmap_id),),
             ).fetchone()
         if row is None:
@@ -113,23 +120,38 @@ class SQLiteCache:
         vector = np.frombuffer(row[0], dtype=np.float32).copy()
         if vector.shape != (self.embedding_dim,):
             return None
-        return CachedEmbedding(int(beatmap_id), vector, json.loads(row[1] or "{}"))
+        density = float(row[1]) if row[1] is not None else None
+        return CachedEmbedding(
+            int(beatmap_id), vector, density, json.loads(row[2] or "{}")
+        )
 
     def upsert(
-        self, beatmap_id: int, embedding: np.ndarray, metadata: dict[str, Any]
+        self,
+        beatmap_id: int,
+        embedding: np.ndarray,
+        density: float,
+        metadata: dict[str, Any],
     ) -> None:
         vector = np.asarray(embedding, dtype=np.float32)
         if vector.shape != (self.embedding_dim,):
             raise ValueError(f"invalid embedding shape: {vector.shape}")
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO embeddings (beatmap_id, embedding, metadata_json, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO embeddings (beatmap_id, embedding, density, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
                     int(beatmap_id),
                     vector.tobytes(),
+                    float(density),
                     json.dumps(metadata, separators=(",", ":")),
                     int(time.time()),
                 ),
+            )
+
+    def set_density(self, beatmap_id: int, density: float) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE embeddings SET density = ? WHERE beatmap_id = ?",
+                (float(density), int(beatmap_id)),
             )
 
     def delete(self, beatmap_id: int) -> None:
@@ -227,16 +249,22 @@ class Runtime:
             )
             .sort("id")
         )
-        self.metadata_by_id = {
-            int(row["id"]): row
-            for row in beatmaps.unique("id", maintain_order=True).iter_rows(named=True)
-        }
+        static_order = pl.DataFrame(
+            {"id": self.static_ids, "_static_index": range(len(self.static_ids))}
+        )
+        self.static_metadata = (
+            static_order.join(
+                beatmaps.unique("id", maintain_order=True), on="id", how="left"
+            )
+            .sort("_static_index")
+            .drop("_static_index")
+        )
         self.default_pools = [
             [
-                public_summary(int(beatmap_id), self.metadata_by_id[int(beatmap_id)])
-                for beatmap_id in defaults.filter(
+                public_summary(int(row["id"]), row)
+                for row in defaults.filter(
                     pl.col("difficulty_rating").floor() == star
-                )["id"]
+                ).iter_rows(named=True)
             ]
             for star in range(5, 9)
         ]
@@ -275,8 +303,8 @@ class Runtime:
     ) -> tuple[np.ndarray, dict[str, Any]] | None:
         static_index = self.static_index.get(beatmap_id)
         if static_index is not None:
-            return self.static_embeddings[static_index], self.metadata_by_id.get(
-                beatmap_id, {}
+            return self.static_embeddings[static_index], self.static_metadata.row(
+                static_index, named=True
             )
         with self.lock:
             dynamic_index = self.dynamic_index.get(beatmap_id)
@@ -295,11 +323,15 @@ class Runtime:
         if not metadata_complete(cached.metadata):
             self.cache.delete(beatmap_id)
             return None
+        density = cached.density
+        if density is None:
+            density = self._density(cached.embedding)
+            self.cache.set_density(beatmap_id, density)
         return (
             self._append(
                 beatmap_id,
                 cached.embedding,
-                self._density(cached.embedding),
+                density,
                 cached.metadata,
             ),
             cached.metadata,
@@ -313,10 +345,9 @@ class Runtime:
                 content, self.vector_stats, beatmap_id=beatmap_id
             )
         transformed = self._transform(raw)
-        self.cache.upsert(beatmap_id, transformed, metadata)
-        return self._append(
-            beatmap_id, transformed, self._density(transformed), metadata
-        )
+        density = self._density(transformed)
+        self.cache.upsert(beatmap_id, transformed, density, metadata)
+        return self._append(beatmap_id, transformed, density, metadata)
 
     def _density(self, vector: np.ndarray) -> float:
         scores = self.static_embeddings @ vector
@@ -357,8 +388,10 @@ class Runtime:
             return vector
 
     def summary(self, beatmap_id: int) -> dict[str, Any]:
-        metadata = self.metadata_by_id.get(beatmap_id)
-        if metadata is None:
+        static_index = self.static_index.get(beatmap_id)
+        if static_index is not None:
+            metadata = self.static_metadata.row(static_index, named=True)
+        else:
             with self.lock:
                 metadata = self.dynamic_metadata.get(beatmap_id, {})
         return public_summary(beatmap_id, metadata)
@@ -408,8 +441,10 @@ class Runtime:
                 )
                 if beatmap_id == query_beatmap_id:
                     continue
-                metadata = self.metadata_by_id.get(
-                    beatmap_id, dynamic_metadata.get(beatmap_id, {})
+                metadata = (
+                    self.static_metadata.row(index, named=True)
+                    if index < static_count
+                    else dynamic_metadata.get(beatmap_id, {})
                 )
                 candidate_set_id = metadata_set_id(metadata)
                 if not passes_filters(metadata, filters, date_cutoff):
