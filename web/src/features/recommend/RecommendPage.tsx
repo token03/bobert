@@ -5,7 +5,6 @@ import { useDebouncer } from '@tanstack/react-pacer'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
 import { useAudioPreview } from '../audio/useAudioPreview'
-import { useTurnstile } from '../turnstile/useTurnstile'
 import { fetchBeatmapSummary, fetchDefaultRecommendations, recommendBeatmaps } from '../../shared/api'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata } from '../../shared/types'
@@ -84,18 +83,10 @@ function useCoversReady(beatmaps: BeatmapMetadata[]) {
   return key === '' || (batch.key === key && batch.ready)
 }
 
-function recommendationOptions(values: RecommendFormValues, getToken: () => Promise<string>, resetToken: () => void) {
+function recommendationOptions(values: RecommendFormValues) {
   return queryOptions({
     queryKey: ['recommendations', values] as const,
-    queryFn: async ({ signal }) => {
-      const token = await getToken()
-
-      try {
-        return await recommendBeatmaps(buildRecommendRequest(values), token, signal)
-      } finally {
-        resetToken()
-      }
-    },
+    queryFn: ({ signal }) => recommendBeatmaps(buildRecommendRequest(values), signal),
     enabled: parseBeatmapId(values.beatmap) !== null,
     staleTime,
     retry: false,
@@ -108,11 +99,10 @@ export function RecommendPage() {
   const navigate = useNavigate({ from: '/recommendations' })
   const queryClient = useQueryClient()
   const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
-  const turnstile = useTurnstile()
   const form = useRecommendForm(search, runManualRecommend)
   const audio = useAudioPreview({ onError: console.error })
   const beatmapId = parseBeatmapId(search.beatmap)
-  const recommend = useQuery(recommendationOptions(search, turnstile.getToken, turnstile.reset))
+  const recommend = useQuery(recommendationOptions(search))
   const defaults = useQuery({
     queryKey: ['recommendations', 'default'],
     queryFn: ({ signal }) => fetchDefaultRecommendations(signal),
@@ -144,7 +134,7 @@ export function RecommendPage() {
       ...values,
       beatmap: normalizeBeatmapInput(values.beatmap),
     }
-    const options = recommendationOptions(normalizedValues, turnstile.getToken, turnstile.reset)
+    const options = recommendationOptions(normalizedValues)
 
     form.setFieldValue('beatmap', normalizedValues.beatmap, { dontValidate: true })
     await queryClient.invalidateQueries({ queryKey: options.queryKey, exact: true, refetchType: 'none' })
@@ -337,7 +327,6 @@ export function RecommendPage() {
 
   return (
     <main className={styles['app-shell']}>
-      {turnstile.widget}
       {audio.audioElement}
 
       <section className={styles['results-panel']}>

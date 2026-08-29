@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import socket
-import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -29,7 +28,7 @@ import uvicorn
 
 torch.set_num_threads(THREAD_COUNT)
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -37,8 +36,6 @@ from server.osu import BeatmapUnavailableError, OsuClient
 from server.runtime import Runtime, metadata_complete, public_summary
 
 MAX_RECOMMEND_TOP_K = 1000
-RATE_LIMITS = {"global": 1200, "ip": 120}
-TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY", "")
 
 
 log = logging.getLogger("uvicorn.error")
@@ -190,8 +187,6 @@ class RequestLoggingMiddleware:
 _runtime: Runtime | None = None
 _osu: OsuClient | None = None
 _http_client: httpx.AsyncClient | None = None
-_rate_buckets: dict[str, tuple[int, int]] = {}
-_rate_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -238,16 +233,7 @@ def default_recommend(response: Response, seed: int | None = None) -> dict[str, 
 
 
 @app.post("/api/recommend", response_model=RecommendResponse)
-async def recommend(
-    payload: RecommendRequest,
-    request: Request,
-    x_turnstile_token: str | None = Header(default=None, alias="X-Turnstile-Token"),
-) -> dict[str, Any]:
-    ip = request_client_ip(request.scope, request.headers.raw)
-    rate_limit("global:recommend", RATE_LIMITS["global"])
-    rate_limit(f"ip:{ip}:recommend", RATE_LIMITS["ip"])
-    await verify_turnstile(x_turnstile_token, ip)
-
+async def recommend(payload: RecommendRequest) -> dict[str, Any]:
     runtime = get_runtime()
     memory = runtime.memory_embedding(payload.beatmap_id)
     cache_status = "hit"
@@ -316,12 +302,8 @@ async def beatmap_detail(beatmap_id: int) -> dict[str, Any]:
 
 @app.get("/api/beatmaps/{beatmap_id}/summary", response_model=BeatmapSummary)
 async def beatmap_summary(
-    beatmap_id: int, request: Request, response: Response
+    beatmap_id: int, response: Response
 ) -> dict[str, Any]:
-    ip = request_client_ip(request.scope, request.headers.raw)
-    rate_limit("global:summary", RATE_LIMITS["global"])
-    rate_limit(f"ip:{ip}:summary", RATE_LIMITS["ip"])
-
     runtime = get_runtime()
     memory = runtime.memory_embedding(beatmap_id)
     if memory is None:
@@ -358,12 +340,6 @@ def get_osu() -> OsuClient:
     return _osu
 
 
-def get_http_client() -> httpx.AsyncClient:
-    if _http_client is None:
-        raise RuntimeError("HTTP client is not initialized")
-    return _http_client
-
-
 def request_client_ip(scope: dict[str, Any], raw_headers: Any) -> str:
     headers = (
         raw_headers
@@ -376,43 +352,6 @@ def request_client_ip(scope: dict[str, Any], raw_headers: Any) -> str:
             return value.decode(errors="replace").split(",", 1)[0].strip()
     client = scope.get("client")
     return client[0] if client else "unknown"
-
-
-def rate_limit(key: str, limit: int) -> None:
-    bucket = int(time.time()) // 3600
-    with _rate_lock:
-        current_bucket, count = _rate_buckets.get(key, (bucket, 0))
-        count = count + 1 if current_bucket == bucket else 1
-        _rate_buckets[key] = bucket, count
-        if len(_rate_buckets) > 10000:
-            stale = [
-                name
-                for name, (item_bucket, _) in _rate_buckets.items()
-                if item_bucket != bucket
-            ]
-            for name in stale[:1000]:
-                _rate_buckets.pop(name, None)
-    if count > limit:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
-
-async def verify_turnstile(token: str | None, remote_ip: str) -> None:
-    if not TURNSTILE_SECRET_KEY:
-        return
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing Turnstile token")
-    response = await get_http_client().post(
-        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-        data={
-            "secret": TURNSTILE_SECRET_KEY,
-            "response": token,
-            "remoteip": remote_ip,
-        },
-    )
-    if not response.json().get("success"):
-        raise HTTPException(status_code=401, detail="Turnstile verification failed")
-
-
 if __name__ == "__main__":
     sockets = []
     for family, host in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):

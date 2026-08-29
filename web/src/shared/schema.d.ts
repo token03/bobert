@@ -329,9 +329,7 @@ export interface operations {
     recommend_api_recommend_post: {
         parameters: {
             query?: never;
-            header?: {
-                "X-Turnstile-Token"?: string | null;
-            };
+            header?: never;
             path?: never;
             cookie?: never;
         };

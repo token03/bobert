@@ -201,6 +201,11 @@ class Runtime:
             or self.retrieval_lambda < 0
         ):
             raise RuntimeError("invalid CSLS retrieval index")
+        self.static_penalty = np.asarray(
+            -0.5 * self.retrieval_lambda * self.static_densities, dtype=np.float32
+        )
+        self.static_penalty.flags.writeable = False
+        del self.static_densities
         self.transform = EmbeddingTransform(
             np.asarray(sidecar["layer_means"], dtype=np.float32)
         )
@@ -331,8 +336,8 @@ class Runtime:
         top_k: int,
         filters: Any,
     ) -> list[dict[str, Any]]:
-        similarities = self.static_embeddings @ query_embedding
-        scores = similarities - self.retrieval_lambda * 0.5 * self.static_densities
+        scores = self.static_embeddings @ query_embedding
+        scores += self.static_penalty
         query_set_id = metadata_set_id(query_metadata)
         date_cutoff = date_window_cutoff(filters.date_window)
         seen_set_ids: set[int] = set()
@@ -360,7 +365,7 @@ class Runtime:
                 if candidate_set_id is not None and candidate_set_id in seen_set_ids:
                     continue
                 result = public_summary(beatmap_id, metadata)
-                result["score"] = float(similarities[index])
+                result["score"] = float(scores[index] - self.static_penalty[index])
                 results.append(result)
                 if candidate_set_id is not None:
                     seen_set_ids.add(candidate_set_id)
@@ -405,11 +410,12 @@ def candidate_index_batches(scores: np.ndarray, top_k: int):
             continue
         previous = candidate_count
         if candidate_count == count:
-            yield np.argsort(-scores)
+            yield np.argsort(scores)[::-1]
             return
-        indices = np.argpartition(-scores, candidate_count - 1)[:candidate_count]
-        yield indices[np.argsort(-scores[indices])]
-    yield np.argsort(-scores)
+        split = count - candidate_count
+        indices = np.argpartition(scores, split)[split:]
+        yield indices[np.argsort(scores[indices])[::-1]]
+    yield np.argsort(scores)[::-1]
 
 
 def public_summary(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]:

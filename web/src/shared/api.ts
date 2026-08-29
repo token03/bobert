@@ -5,10 +5,9 @@ import type { RecommendRequest } from './types'
 const client = createClient<paths>()
 type Schemas = components['schemas']
 
-export async function recommendBeatmaps(body: RecommendRequest, turnstileToken?: string, signal?: AbortSignal): Promise<Schemas['RecommendResponse']> {
+export async function recommendBeatmaps(body: RecommendRequest, signal?: AbortSignal): Promise<Schemas['RecommendResponse']> {
   const { data, response } = await client.POST('/api/recommend', {
     body,
-    headers: turnstileToken ? { 'X-Turnstile-Token': turnstileToken } : undefined,
     signal,
   })
   if (!data) {
