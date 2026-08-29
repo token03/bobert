@@ -159,15 +159,12 @@
 @keyframes result-card-reveal {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
 }
 
 .beatmap-row {
   grid-template-columns: calc(var(--cover-size) + var(--card-overlap)) minmax(0, 1fr);
   min-height: var(--cover-size-mobile);
-  content-visibility: auto;
-  contain-intrinsic-block-size: auto 106px;
 }
 
 .beatmap-row:hover {
@@ -882,7 +879,6 @@
 @media (max-width: 760px) {
   .beatmap-row {
     grid-template-columns: calc(var(--cover-size-tablet) + var(--card-overlap)) minmax(0, 1fr);
-    contain-intrinsic-block-size: auto 183px;
   }
   .source-card {
     grid-template-columns: clamp(calc(160px + var(--card-overlap)), calc(32vw + var(--card-overlap)), calc(240px + var(--card-overlap))) minmax(0, 1fr);
@@ -1008,9 +1004,6 @@
     grid-template-columns: 1fr;
   }
 
-  .beatmap-row {
-    contain-intrinsic-block-size: auto 190px;
-  }
   .source-card .source-content {
     grid-template-columns: minmax(0, 1fr) max-content;
     align-items: center;
