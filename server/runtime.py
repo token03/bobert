@@ -27,7 +27,8 @@ EMBEDDINGS_PATH = Path(
 )
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
-SEARCH_CANDIDATE_FACTORS = (10, 25, 100)
+FILTERED_SCORE_THRESHOLD = 0.1
+FILTERED_SCORE_BATCH_SIZE = 8192
 DEFAULT_COUNTS = (15, 40, 30, 15)
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 STATUS_GROUPS = {
@@ -242,6 +243,102 @@ class Runtime:
             .sort("_static_index")
             .drop("_static_index")
         )
+        self.static_id_values = np.asarray(self.static_ids, dtype=np.int64)
+        self.static_set_ids = (
+            self.static_metadata["beatmapset_id"]
+            .fill_null(-1)
+            .to_numpy()
+            .astype(np.int64, copy=False)
+        )
+        missing_set_ids = self.static_set_ids == -1
+        self.static_set_groups = np.empty(len(self.static_ids), dtype=np.int32)
+        if missing_set_ids.all():
+            first_missing_group = 0
+        else:
+            _, self.static_set_groups[~missing_set_ids] = np.unique(
+                self.static_set_ids[~missing_set_ids], return_inverse=True
+            )
+            first_missing_group = (
+                int(self.static_set_groups[~missing_set_ids].max()) + 1
+            )
+        if missing_set_ids.any():
+            self.static_set_groups[missing_set_ids] = np.arange(
+                first_missing_group,
+                first_missing_group + int(missing_set_ids.sum()),
+                dtype=np.int32,
+            )
+        self.static_set_group_count = int(self.static_set_groups.max()) + 1
+        self.static_set_order = np.argsort(
+            self.static_set_groups, kind="stable"
+        ).astype(np.int32)
+        ordered_set_groups = self.static_set_groups[self.static_set_order]
+        self.static_set_starts = np.flatnonzero(
+            np.r_[True, ordered_set_groups[1:] != ordered_set_groups[:-1]]
+        ).astype(np.int32)
+        self.filter_values = {
+            column: self.static_metadata[column]
+            .cast(pl.Float64, strict=False)
+            .fill_null(float("nan"))
+            .to_numpy()
+            for column in (
+                "difficulty_rating",
+                "ar",
+                "cs",
+                "accuracy",
+                "drain",
+                "bpm",
+                "total_length",
+            )
+        }
+        status_values = (
+            self.static_metadata["status"]
+            .cast(pl.String, strict=False)
+            .fill_null("none")
+            .str.to_lowercase()
+            .to_numpy()
+        )
+        ranked_values = (
+            self.static_metadata["ranked"]
+            .cast(pl.String, strict=False)
+            .fill_null("none")
+            .str.to_lowercase()
+            .to_numpy()
+        )
+        self.static_status_values = (status_values, ranked_values)
+        self.static_status_groups = {
+            group: np.isin(status_values, list(accepted))
+            | np.isin(ranked_values, list(accepted))
+            for group, accepted in STATUS_GROUPS.items()
+        }
+        ranked_status = (
+            pl.col("status")
+            .cast(pl.String, strict=False)
+            .fill_null("")
+            .str.to_lowercase()
+            .is_in(RANKED_STATUS_VALUES)
+            | pl.col("ranked")
+            .cast(pl.String, strict=False)
+            .fill_null("")
+            .str.to_lowercase()
+            .is_in(RANKED_STATUS_VALUES)
+        )
+        release_date = (
+            pl.when(ranked_status & pl.col("ranked_date").is_not_null())
+            .then(pl.col("ranked_date"))
+            .otherwise(pl.col("submitted_date"))
+        )
+        self.static_release_dates = (
+            self.static_metadata.select(
+                release_date
+                .cast(pl.String, strict=False)
+                .str.to_datetime(strict=False, time_zone="UTC")
+                .dt.epoch("us")
+                .fill_null(np.iinfo(np.int64).min)
+                .alias("release_date")
+            )["release_date"]
+            .to_numpy()
+            .astype(np.int64, copy=False)
+        )
         self.default_pools = [
             [
                 public_summary(int(row["id"]), row)
@@ -336,41 +433,113 @@ class Runtime:
         top_k: int,
         filters: Any,
     ) -> list[dict[str, Any]]:
-        scores = self.static_embeddings @ query_embedding
-        scores += self.static_penalty
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
         query_set_id = metadata_set_id(query_metadata)
         date_cutoff = date_window_cutoff(filters.date_window)
-        seen_set_ids: set[int] = set()
-        results: list[dict[str, Any]] = []
-        evaluated: set[int] = set()
-        for indices in candidate_index_batches(scores, top_k):
-            for raw_index in indices:
-                index = int(raw_index)
-                if index in evaluated:
-                    continue
-                evaluated.add(index)
-                beatmap_id = self.static_ids[index]
-                if beatmap_id == query_beatmap_id:
-                    continue
-                metadata = self.static_metadata.row(index, named=True)
-                candidate_set_id = metadata_set_id(metadata)
-                if not passes_filters(metadata, filters, date_cutoff):
-                    continue
-                if (
-                    filters.exclude_same_set
-                    and query_set_id is not None
-                    and candidate_set_id == query_set_id
-                ):
-                    continue
-                if candidate_set_id is not None and candidate_set_id in seen_set_ids:
-                    continue
-                result = public_summary(beatmap_id, metadata)
-                result["score"] = float(scores[index] - self.static_penalty[index])
-                results.append(result)
-                if candidate_set_id is not None:
-                    seen_set_ids.add(candidate_set_id)
-                if len(results) == top_k:
-                    return results
+        eligible = self.static_id_values != query_beatmap_id
+        if filters.exclude_same_set and query_set_id is not None:
+            eligible &= self.static_set_ids != query_set_id
+        for column, minimum, maximum in (
+            ("difficulty_rating", filters.min_sr, filters.max_sr),
+            ("ar", filters.min_ar, filters.max_ar),
+            ("cs", filters.min_cs, filters.max_cs),
+            ("accuracy", filters.min_accuracy, filters.max_accuracy),
+            ("drain", filters.min_drain, filters.max_drain),
+            ("bpm", filters.min_bpm, filters.max_bpm),
+            ("total_length", filters.min_length, filters.max_length),
+        ):
+            values = self.filter_values[column]
+            if minimum is not None:
+                eligible &= values >= minimum
+            if maximum is not None:
+                eligible &= values <= maximum
+        if filters.status:
+            status = filters.status.lower()
+            status_mask = self.static_status_groups.get(status)
+            if status_mask is None:
+                accepted = list(STATUS_GROUPS.get(status, {status}))
+                status_mask = np.isin(self.static_status_values[0], accepted) | np.isin(
+                    self.static_status_values[1], accepted
+                )
+            eligible &= status_mask
+        if date_cutoff is not None:
+            eligible &= self.static_release_dates >= int(
+                date_cutoff.timestamp() * 1_000_000
+            )
+
+        eligible_indices = np.flatnonzero(eligible)
+        if not len(eligible_indices):
+            return []
+        score_filtered = (
+            len(eligible_indices) <= len(self.static_ids) * FILTERED_SCORE_THRESHOLD
+        )
+        if score_filtered:
+            scores = np.empty(len(eligible_indices), dtype=np.float32)
+            for start in range(0, len(eligible_indices), FILTERED_SCORE_BATCH_SIZE):
+                stop = min(start + FILTERED_SCORE_BATCH_SIZE, len(eligible_indices))
+                batch_indices = eligible_indices[start:stop]
+                scores[start:stop] = (
+                    self.static_embeddings[batch_indices] @ query_embedding
+                )
+            scores += self.static_penalty[eligible_indices]
+            groups = self.static_set_groups[eligible_indices]
+            best_scores = np.full(
+                self.static_set_group_count, -np.inf, dtype=np.float32
+            )
+            np.maximum.at(best_scores, groups, scores)
+            winning = scores == best_scores[groups]
+            best_positions = np.full(
+                self.static_set_group_count, -1, dtype=np.int32
+            )
+            np.maximum.at(best_positions, groups[winning], np.flatnonzero(winning))
+            available_groups = np.flatnonzero(best_positions >= 0)
+        else:
+            ranking_scores = self.static_embeddings @ query_embedding
+            ranking_scores += self.static_penalty
+            ranking_scores[~eligible] = -np.inf
+            best_scores = np.maximum.reduceat(
+                ranking_scores[self.static_set_order], self.static_set_starts
+            )
+            available_groups = np.flatnonzero(np.isfinite(best_scores))
+        result_count = min(top_k, len(available_groups))
+        if result_count < len(available_groups):
+            selected = np.argpartition(
+                best_scores[available_groups], -result_count
+            )[-result_count:]
+            selected_groups = available_groups[selected]
+        else:
+            selected_groups = available_groups
+        selected_groups = selected_groups[
+            np.argsort(best_scores[selected_groups])[::-1]
+        ]
+        if score_filtered:
+            selected_positions = best_positions[selected_groups]
+            selected_indices = eligible_indices[selected_positions]
+            selected_scores = scores[selected_positions]
+        else:
+            selected_indices = []
+            for group in selected_groups:
+                start = self.static_set_starts[group]
+                stop = (
+                    self.static_set_starts[group + 1]
+                    if group + 1 < self.static_set_group_count
+                    else len(self.static_set_order)
+                )
+                group_indices = self.static_set_order[start:stop]
+                group_scores = ranking_scores[group_indices]
+                tied = np.flatnonzero(group_scores == best_scores[group])
+                selected_indices.append(group_indices[tied[-1]])
+            selected_scores = ranking_scores[selected_indices]
+
+        results = []
+        for index, score in zip(selected_indices, selected_scores):
+            beatmap_id = self.static_ids[index]
+            result = public_summary(
+                beatmap_id, self.static_metadata.row(index, named=True)
+            )
+            result["score"] = float(score - self.static_penalty[index])
+            results.append(result)
         return results
 
     def catalog_detail(self, beatmap_id: int) -> dict[str, Any] | None:
@@ -399,23 +568,6 @@ class Runtime:
             )
         beatmapset = set_rows.row(0, named=True) if set_rows.height else None
         return {"beatmap": json_value(beatmap), "beatmapset": json_value(beatmapset)}
-
-
-def candidate_index_batches(scores: np.ndarray, top_k: int):
-    count = len(scores)
-    previous = 0
-    for factor in SEARCH_CANDIDATE_FACTORS:
-        candidate_count = min(count, max(top_k * factor, top_k))
-        if candidate_count <= previous:
-            continue
-        previous = candidate_count
-        if candidate_count == count:
-            yield np.argsort(scores)[::-1]
-            return
-        split = count - candidate_count
-        indices = np.argpartition(scores, split)[split:]
-        yield indices[np.argsort(scores[indices])[::-1]]
-    yield np.argsort(scores)[::-1]
 
 
 def public_summary(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -457,55 +609,6 @@ def metadata_complete(metadata: dict[str, Any] | None) -> bool:
     return all(json_value(value) is not None for value in required) and (
         json_value(metadata.get("status")) is not None
         or json_value(metadata.get("ranked")) is not None
-    )
-
-
-def passes_filters(
-    metadata: dict[str, Any], filters: Any, date_cutoff: datetime | None
-) -> bool:
-    stars = metadata.get("difficulty_rating", metadata.get("stars"))
-    if not passes_range(stars, filters.min_sr, filters.max_sr):
-        return False
-    for key, minimum, maximum in (
-        ("ar", filters.min_ar, filters.max_ar),
-        ("cs", filters.min_cs, filters.max_cs),
-        ("accuracy", filters.min_accuracy, filters.max_accuracy),
-        ("drain", filters.min_drain, filters.max_drain),
-        ("bpm", filters.min_bpm, filters.max_bpm),
-    ):
-        if not passes_range(metadata.get(key), minimum, maximum):
-            return False
-    if not passes_range(
-        metadata.get("total_length", metadata.get("hit_length")),
-        filters.min_length,
-        filters.max_length,
-    ):
-        return False
-    if filters.status:
-        statuses = {
-            str(metadata.get("status", "")).lower(),
-            str(metadata.get("ranked", "")).lower(),
-        }
-        accepted = STATUS_GROUPS.get(filters.status.lower(), {filters.status.lower()})
-        if statuses.isdisjoint(accepted):
-            return False
-    if date_cutoff is not None:
-        release_date = parse_metadata_datetime(metadata_release_date(metadata))
-        if release_date is None or release_date < date_cutoff:
-            return False
-    return True
-
-
-def passes_range(value: Any, minimum: float | None, maximum: float | None) -> bool:
-    if minimum is None and maximum is None:
-        return True
-    if value is None:
-        return False
-    number = float(value)
-    return (
-        not isnan(number)
-        and (minimum is None or number >= minimum)
-        and (maximum is None or number <= maximum)
     )
 
 
@@ -555,21 +658,6 @@ def date_window_cutoff(window: Any) -> datetime | None:
         else 31
     )
     return now.replace(year=year, month=month, day=min(now.day, days))
-
-
-def parse_metadata_datetime(value: Any) -> datetime | None:
-    value = json_value(value)
-    if value is None:
-        return None
-    try:
-        parsed = (
-            value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
-        )
-    except ValueError:
-        return None
-    return (
-        parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-    )
 
 
 def json_value(value: Any) -> Any:
