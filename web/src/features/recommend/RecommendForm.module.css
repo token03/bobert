@@ -507,7 +507,8 @@
     grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(150px, 1.2fr) minmax(120px, 1fr) var(--control-height);
   }
 
-  .beatmap-field {
+  .beatmap-field,
+  .filter-controls {
     grid-column: 1 / -1;
   }
 }
