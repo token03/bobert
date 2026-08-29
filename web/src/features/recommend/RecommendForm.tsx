@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Select } from '@base-ui/react/select'
 import { Tooltip } from '@base-ui/react/tooltip'
@@ -6,7 +6,8 @@ import { useStore } from '@tanstack/react-form'
 import { CalendarDays, Check, ChevronDown, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
 import { defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
-import { RangeFields } from './RangeFields'
+import { RangeFilter } from './RangeFilter'
+import type { RangeFilterConfig } from './RangeFilter'
 import type { useRecommendForm } from './useRecommendForm'
 import styles from './RecommendForm.module.css'
 
@@ -19,7 +20,114 @@ type RecommendFormProps = {
   onReset: (values: RecommendFormValues) => void
 }
 
-type RangeFieldName = 'minSr' | 'maxSr' | 'minLength' | 'maxLength' | 'minBpm' | 'maxBpm'
+type RangeFieldName = 'minSr' | 'maxSr' | 'minAr' | 'maxAr' | 'minCs' | 'maxCs' | 'minLength' | 'maxLength' | 'minBpm' | 'maxBpm'
+
+const decimalAria = (unit: string) => (value: number, overflow: 'lower' | 'higher' | null) => `${value.toFixed(1)} ${unit}${overflow ? ` or ${overflow}` : ''}`
+const integerAria = (unit: string) => (value: number, overflow: 'lower' | 'higher' | null) => `${value} ${unit}${overflow ? ` or ${overflow}` : ''}`
+
+function formatDuration(value: number) {
+  const hours = Math.floor(value / 3600)
+  const minutes = Math.floor(value % 3600 / 60)
+  const seconds = String(value % 60).padStart(2, '0')
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}` : `${minutes}:${seconds}`
+}
+
+function formatDurationAria(value: number, overflow: 'lower' | 'higher' | null) {
+  const minutes = Math.floor(value / 60)
+  const seconds = value % 60
+  const parts = [minutes ? `${minutes} minute${minutes === 1 ? '' : 's'}` : '', seconds ? `${seconds} second${seconds === 1 ? '' : 's'}` : ''].filter(Boolean)
+  return `${parts.join(' ') || '0 seconds'}${overflow ? ` or ${overflow === 'higher' ? 'longer' : 'shorter'}` : ''}`
+}
+
+const lengthSliderMax = 200
+const lengthMax = 20 * 60
+const lengthScale = Math.log1p(lengthMax / 60)
+
+function durationToSlider(value: number) {
+  return lengthSliderMax * Math.log1p(value / 60) / lengthScale
+}
+
+function sliderToDuration(value: number) {
+  return Math.round(60 * Math.expm1(value / lengthSliderMax * lengthScale))
+}
+
+const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName; maxField: RangeFieldName }> = [
+  {
+    key: 'stars',
+    label: 'Star rating',
+    icon: <Star strokeWidth={3} />,
+    minField: 'minSr',
+    maxField: 'maxSr',
+    min: 0,
+    max: 12,
+    step: 0.1,
+    largeStep: 0.5,
+    overflowMax: true,
+    formatValue: (value) => value.toFixed(1),
+    formatAriaValue: decimalAria('stars'),
+  },
+  {
+    key: 'ar',
+    label: 'Approach rate',
+    triggerLabel: 'AR',
+    minField: 'minAr',
+    maxField: 'maxAr',
+    min: 0,
+    max: 10,
+    step: 0.1,
+    largeStep: 0.5,
+    formatValue: (value) => value.toFixed(1),
+    formatAriaValue: decimalAria('approach rate'),
+  },
+  {
+    key: 'cs',
+    label: 'Circle size',
+    triggerLabel: 'CS',
+    minField: 'minCs',
+    maxField: 'maxCs',
+    min: 0,
+    max: 10,
+    step: 0.1,
+    largeStep: 0.5,
+    formatValue: (value) => value.toFixed(1),
+    formatAriaValue: decimalAria('circle size'),
+  },
+  {
+    key: 'bpm',
+    label: 'BPM',
+    icon: <Metronome strokeWidth={3} />,
+    minField: 'minBpm',
+    maxField: 'maxBpm',
+    min: 100,
+    max: 300,
+    step: 5,
+    largeStep: 25,
+    overflowMin: true,
+    overflowMax: true,
+    formatValue: String,
+    formatAriaValue: integerAria('beats per minute'),
+  },
+  {
+    key: 'length',
+    label: 'Length',
+    icon: <Clock strokeWidth={3} />,
+    minField: 'minLength',
+    maxField: 'maxLength',
+    min: 0,
+    max: lengthMax,
+    step: 5,
+    largeStep: 30,
+    sliderMin: 0,
+    sliderMax: lengthSliderMax,
+    sliderStep: 1,
+    sliderLargeStep: 6,
+    overflowMax: true,
+    formatValue: formatDuration,
+    formatAriaValue: formatDurationAria,
+    toSliderValue: durationToSlider,
+    fromSliderValue: sliderToDuration,
+  },
+]
 
 const dateWindowOptions = [
   { value: null, label: 'All time' },
@@ -40,6 +148,7 @@ const statusOptions = [
 ] as const
 
 export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
+  const [resetAnimation, setResetAnimation] = useState(0)
   const { values, isSubmitting } = useStore(form.store, (state) => ({
     values: state.values,
     isSubmitting: state.isSubmitting,
@@ -47,14 +156,16 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
   const submitDisabled = isLoading || isSubmitting
 
   function resetForm() {
+    setResetAnimation((animation) => animation + 1)
     const nextValues = { ...defaultFilters, beatmap: form.getFieldValue('beatmap') }
     form.reset(nextValues)
     onReset(nextValues)
   }
 
-  function updateRange(field: RangeFieldName, value: string) {
-    form.setFieldValue(field, value)
-    onRangeChange({ ...form.state.values, [field]: value })
+  function updateRange(minField: RangeFieldName, maxField: RangeFieldName, min: string, max: string) {
+    form.setFieldValue(minField, min)
+    form.setFieldValue(maxField, max)
+    onRangeChange({ ...form.state.values, [minField]: min, [maxField]: max })
   }
 
   function searchPastedBeatmap(value: string) {
@@ -149,12 +260,21 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           </form.Field>
         </div>
 
+        <div className={styles['search-separator']} aria-hidden="true" />
+
         <div className={styles['filter-controls']}>
-          <RangeFields label="Star" icon={<Star strokeWidth={3} />} min={values.minSr} max={values.maxSr} setMin={(value) => updateRange('minSr', value)} setMax={(value) => updateRange('maxSr', value)} />
-          <RangeFields label="BPM" icon={<Metronome strokeWidth={3} />} min={values.minBpm} max={values.maxBpm} setMin={(value) => updateRange('minBpm', value)} setMax={(value) => updateRange('maxBpm', value)} />
-          <RangeFields label="Length" icon={<Clock strokeWidth={3} />} min={values.minLength} max={values.maxLength} setMin={(value) => updateRange('minLength', value)} setMax={(value) => updateRange('maxLength', value)} />
+          {rangeFilters.map(({ minField, maxField, ...config }) => (
+            <RangeFilter
+              key={config.key}
+              config={config}
+              minValue={values[minField] as string}
+              maxValue={values[maxField] as string}
+              onValueCommit={(min, max) => updateRange(minField, maxField, min, max)}
+            />
+          ))}
 
           <FilterSelect
+            filterKey="date"
             label="Date window"
             icon={<CalendarDays strokeWidth={3} />}
             value={values.dateWindow === 'all_time' ? '' : values.dateWindow}
@@ -167,6 +287,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           />
 
           <FilterSelect
+            filterKey="status"
             label="Status"
             icon={<Tag strokeWidth={3} />}
             value={values.status}
@@ -177,8 +298,8 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
             }}
           />
 
-          <button className={styles['ghost-button']} type="button" onClick={resetForm}>
-            <RotateCcw />
+          <button className={styles['ghost-button']} data-filter="reset" type="button" onClick={resetForm}>
+            <RotateCcw key={resetAnimation} data-reset-animate={resetAnimation > 0 || undefined} />
             <span className={styles['sr-only']}>Reset</span>
           </button>
         </div>
@@ -188,6 +309,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
 }
 
 type FilterSelectProps = {
+  filterKey: string
   label: string
   icon: ReactNode
   value: string
@@ -195,15 +317,19 @@ type FilterSelectProps = {
   onValueChange: (value: string) => void
 }
 
-function FilterSelect({ label, icon, value, options, onValueChange }: FilterSelectProps) {
+function FilterSelect({ filterKey, label, icon, value, options, onValueChange }: FilterSelectProps) {
   return (
     <Select.Root
       items={options}
       value={value || null}
-      highlightItemOnHover={false}
       onValueChange={(nextValue) => onValueChange(nextValue ?? '')}
     >
-      <Select.Trigger className={`${styles.field} ${styles['select-field']}`} aria-label={label}>
+      <Select.Trigger
+        className={`${styles.field} ${styles['select-field']}`}
+        data-active={value || undefined}
+        data-filter={filterKey}
+        aria-label={label}
+      >
         <span aria-hidden="true">{icon}</span>
         <Select.Value className={styles['select-value']} />
         <Select.Icon className={styles['select-icon']}>

@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useDebouncer } from '@tanstack/react-pacer'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
 import { useAudioPreview } from '../audio/useAudioPreview'
@@ -158,20 +157,7 @@ export function RecommendPage() {
     void runRecommend(values, 'replace', false)
   }
 
-  const rangeSearch = useDebouncer(runAutoRecommend, { wait: 500 })
-
-  function scheduleRangeRecommend(values: RecommendFormValues) {
-    if (!parseBeatmapId(values.beatmap)) {
-      rangeSearch.cancel()
-      return
-    }
-
-    rangeSearch.maybeExecute(values)
-  }
-
   async function resetRecommendations(values: RecommendFormValues) {
-    rangeSearch.cancel()
-
     if (parseBeatmapId(values.beatmap)) {
       await runRecommend(values, 'replace', false)
       return
@@ -224,7 +210,6 @@ export function RecommendPage() {
   }
 
   async function runManualRecommend(values: RecommendFormValues) {
-    rangeSearch.cancel()
     const nextBeatmapId = parseBeatmapId(values.beatmap)!
     if (response?.query.metadata.beatmap_id === nextBeatmapId) {
       await runRecommend(values)
@@ -254,7 +239,6 @@ export function RecommendPage() {
   }
 
   async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
-    rangeSearch.cancel()
     const nextValues = { ...form.state.values, beatmap: String(beatmap.beatmap_id) }
     form.reset(nextValues)
     scrollToPageTop()
@@ -287,13 +271,9 @@ export function RecommendPage() {
       <RecommendForm
         form={form}
         isLoading={isLoading}
-        onRangeChange={scheduleRangeRecommend}
-        onSelectChange={(values) => {
-          rangeSearch.cancel()
-          runAutoRecommend(values)
-        }}
+        onRangeChange={runAutoRecommend}
+        onSelectChange={runAutoRecommend}
         onPasteSearch={(values) => {
-          rangeSearch.cancel()
           void runManualRecommend(values)
         }}
         onReset={(values) => {
