@@ -366,7 +366,7 @@
   padding-right: 30px;
 }
 
-.range-filter-trigger:hover,
+.range-filter-wrap:hover .range-filter-trigger,
 .range-filter-trigger[data-popup-open] {
   border-color: var(--control-hover-border);
   background: var(--surface);
@@ -397,7 +397,7 @@
 
 .range-trigger-clear:hover,
 .range-trigger-clear:focus-visible {
-  background: var(--surface);
+  background: transparent;
   color: var(--text);
   outline: none;
 }
@@ -426,6 +426,11 @@
 }
 
 .range-filter-trigger[data-active] .range-trigger-value {
+  color: var(--text);
+}
+
+.range-filter-trigger[data-active] .range-trigger-mark,
+.select-field[data-active] > span:first-child {
   color: var(--text);
 }
 
