@@ -1,7 +1,9 @@
 import { useEffect, useEffectEvent } from 'react'
+import type { ReactNode } from 'react'
+import { Select } from '@base-ui/react/select'
 import { Tooltip } from '@base-ui/react/tooltip'
 import { useStore } from '@tanstack/react-form'
-import { CalendarDays, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
+import { CalendarDays, Check, ChevronDown, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
 import { defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RangeFields } from './RangeFields'
@@ -18,6 +20,24 @@ type RecommendFormProps = {
 }
 
 type RangeFieldName = 'minSr' | 'maxSr' | 'minLength' | 'maxLength' | 'minBpm' | 'maxBpm'
+
+const dateWindowOptions = [
+  { value: null, label: 'All time' },
+  { value: 'last_week', label: 'Last week' },
+  { value: 'last_month', label: 'Last month' },
+  { value: 'last_3_months', label: 'Last 3 months' },
+  { value: 'last_6_months', label: 'Last 6 months' },
+  { value: 'last_year', label: 'Last year' },
+  { value: 'last_2_years', label: 'Last 2 years' },
+  { value: 'last_5_years', label: 'Last 5 years' },
+] as const
+
+const statusOptions = [
+  { value: null, label: 'Any' },
+  { value: 'ranked', label: 'Ranked' },
+  { value: 'loved', label: 'Loved' },
+  { value: 'unranked', label: 'Unranked' },
+] as const
 
 export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
   const { values, isSubmitting } = useStore(form.store, (state) => ({
@@ -134,48 +154,28 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           <RangeFields label="BPM" icon={<Metronome strokeWidth={3} />} min={values.minBpm} max={values.maxBpm} setMin={(value) => updateRange('minBpm', value)} setMax={(value) => updateRange('maxBpm', value)} />
           <RangeFields label="Length" icon={<Clock strokeWidth={3} />} min={values.minLength} max={values.maxLength} setMin={(value) => updateRange('minLength', value)} setMax={(value) => updateRange('maxLength', value)} />
 
-          <label className={`${styles.field} ${styles['select-field']}`}>
-            <span aria-hidden="true">
-              <CalendarDays strokeWidth={3} />
-            </span>
-            <select
-              aria-label="Date window"
-              value={values.dateWindow}
-              onChange={(event) => {
-                const dateWindow = event.target.value as RecommendFormValues['dateWindow']
-                form.setFieldValue('dateWindow', dateWindow)
-                onSelectChange({ ...form.state.values, dateWindow })
-              }}
-            >
-              <option value="">All time</option>
-              <option value="last_week">Last week</option>
-              <option value="last_month">Last month</option>
-              <option value="last_3_months">Last 3 months</option>
-              <option value="last_6_months">Last 6 months</option>
-              <option value="last_year">Last year</option>
-              <option value="last_2_years">Last 2 years</option>
-              <option value="last_5_years">Last 5 years</option>
-            </select>
-          </label>
+          <FilterSelect
+            label="Date window"
+            icon={<CalendarDays strokeWidth={3} />}
+            value={values.dateWindow === 'all_time' ? '' : values.dateWindow}
+            options={dateWindowOptions}
+            onValueChange={(value) => {
+              const dateWindow = value as RecommendFormValues['dateWindow']
+              form.setFieldValue('dateWindow', dateWindow)
+              onSelectChange({ ...form.state.values, dateWindow })
+            }}
+          />
 
-          <label className={`${styles.field} ${styles['select-field']}`}>
-            <span aria-hidden="true">
-              <Tag strokeWidth={3} />
-            </span>
-            <select
-              aria-label="Status"
-              value={values.status}
-              onChange={(event) => {
-                form.setFieldValue('status', event.target.value)
-                onSelectChange({ ...form.state.values, status: event.target.value })
-              }}
-            >
-              <option value="">Any</option>
-              <option value="ranked">Ranked</option>
-              <option value="loved">Loved</option>
-              <option value="unranked">Unranked</option>
-            </select>
-          </label>
+          <FilterSelect
+            label="Status"
+            icon={<Tag strokeWidth={3} />}
+            value={values.status}
+            options={statusOptions}
+            onValueChange={(status) => {
+              form.setFieldValue('status', status)
+              onSelectChange({ ...form.state.values, status })
+            }}
+          />
 
           <button className={styles['ghost-button']} type="button" onClick={resetForm}>
             <RotateCcw />
@@ -184,6 +184,58 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
         </div>
       </div>
     </form>
+  )
+}
+
+type FilterSelectProps = {
+  label: string
+  icon: ReactNode
+  value: string
+  options: ReadonlyArray<{ value: string | null; label: string }>
+  onValueChange: (value: string) => void
+}
+
+function FilterSelect({ label, icon, value, options, onValueChange }: FilterSelectProps) {
+  return (
+    <Select.Root
+      items={options}
+      value={value || null}
+      highlightItemOnHover={false}
+      onValueChange={(nextValue) => onValueChange(nextValue ?? '')}
+    >
+      <Select.Trigger className={`${styles.field} ${styles['select-field']}`} aria-label={label}>
+        <span aria-hidden="true">{icon}</span>
+        <Select.Value className={styles['select-value']} />
+        <Select.Icon className={styles['select-icon']}>
+          <ChevronDown />
+        </Select.Icon>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Positioner
+          className={styles['select-positioner']}
+          sideOffset={3}
+          align="start"
+          alignItemWithTrigger={false}
+        >
+          <Select.Popup className={styles['select-popup']}>
+            <Select.List className={styles['select-list']}>
+              {options.map((option) => (
+                <Select.Item
+                  className={styles['select-item']}
+                  key={option.value ?? 'empty'}
+                  value={option.value}
+                >
+                  <Select.ItemText>{option.label}</Select.ItemText>
+                  <Select.ItemIndicator className={styles['select-item-indicator']}>
+                    <Check />
+                  </Select.ItemIndicator>
+                </Select.Item>
+              ))}
+            </Select.List>
+          </Select.Popup>
+        </Select.Positioner>
+      </Select.Portal>
+    </Select.Root>
   )
 }
 
