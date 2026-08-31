@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from omegaconf import OmegaConf
 import torch
+from omegaconf import OmegaConf
 
 from core.model import BobertForPretraining
 from scripts.common.paths import RUNS_DIR, find_latest_checkpoint, resolve_path
@@ -13,6 +13,7 @@ from scripts.common.paths import RUNS_DIR, find_latest_checkpoint, resolve_path
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export a BoBERT inference model.")
     parser.add_argument("--checkpoint")
+    parser.add_argument("--config")
     parser.add_argument("-v", "--version")
     parser.add_argument("--output")
     return parser.parse_args()
@@ -40,15 +41,16 @@ def resolve_checkpoint(path: str | None, version: str | None) -> Path:
 def main() -> int:
     args = parse_args()
     checkpoint_path = resolve_checkpoint(args.checkpoint, args.version)
+    config_path = resolve_path(
+        args.config or checkpoint_path.parent.parent / "config.yaml"
+    )
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
     output_path = resolve_path(
         args.output or checkpoint_path.parent.parent / "bobert.pt"
     )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    config = OmegaConf.create(checkpoint["config"])
-    OmegaConf.set_struct(config, False)
-    config.runtime.compile_model = False
-    config.runtime.activation_checkpointing = False
-    OmegaConf.set_struct(config, True)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    config = OmegaConf.load(config_path)
 
     model = BobertForPretraining.from_config(config, torch.device("cpu"))
     state = {

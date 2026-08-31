@@ -4,21 +4,21 @@ import argparse
 from pathlib import Path
 from typing import cast
 
+import pytorch_lightning as pl
 import torch
 from omegaconf import DictConfig, OmegaConf
-import pytorch_lightning as pl
 
 from core.model import BobertForPretraining
+from scripts.common.paths import (
+    RUNS_DIR,
+    find_latest_checkpoint,
+    run_name_from_checkpoint,
+)
 from training.loader import BobertDataModule
 from training.pretrain import BobertModule, compile_encoder
 from training.setup import (
     create_trainer,
     setup_device,
-)
-from scripts.common.paths import (
-    RUNS_DIR,
-    find_latest_checkpoint,
-    run_name_from_checkpoint,
 )
 
 
@@ -54,15 +54,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config(args: argparse.Namespace, checkpoint: dict | None = None) -> DictConfig:
-    config = cast(
-        DictConfig,
-        OmegaConf.create(checkpoint["config"])
-        if checkpoint is not None
-        else OmegaConf.load(args.config),
-    )
-    OmegaConf.set_struct(config, False)
-
+def load_config(args: argparse.Namespace) -> DictConfig:
+    config = cast(DictConfig, OmegaConf.load(args.config))
     if args.proxy:
         config.training.data.sample_size = 100000
         config.training.trainer.epochs = 6
@@ -105,24 +98,23 @@ def resolve_resume_checkpoint(args: argparse.Namespace) -> Path | None:
             raise FileNotFoundError(f"No checkpoint found in {RUNS_DIR}")
         return checkpoint
     if args.resume_ckpt:
-        return Path(args.resume_ckpt)
-    if args.version:
-        checkpoint = RUNS_DIR / args.version / "checkpoints" / "last.ckpt"
-        if checkpoint.exists():
-            return checkpoint
+        checkpoint = Path(args.resume_ckpt)
+        if not checkpoint.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+        return checkpoint
     return None
 
 
 def main() -> int:
     args = parse_args()
     resume_checkpoint = resolve_resume_checkpoint(args)
-    checkpoint = (
-        torch.load(resume_checkpoint, map_location="cpu", weights_only=False)
-        if resume_checkpoint is not None
-        else None
-    )
-    config = load_config(args, checkpoint)
-    del checkpoint
+    if (
+        args.version
+        and resume_checkpoint is None
+        and (RUNS_DIR / args.version).exists()
+    ):
+        raise FileExistsError(f"Run already exists: {RUNS_DIR / args.version}")
+    config = load_config(args)
     pl.seed_everything(config.data.dataset_seed, workers=True)
 
     print(f"PyTorch version: {torch.__version__}")
@@ -164,7 +156,6 @@ def main() -> int:
         module,
         datamodule=datamodule,
         ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
-        weights_only=False if resume_checkpoint is not None else None,
     )
 
     if datamodule.vector_stats is None:

@@ -109,13 +109,13 @@ name = "bobert"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dion" },
     { name = "duckdb" },
     { name = "fastapi" },
     { name = "flash-attn" },
     { name = "httpx" },
     { name = "liger-kernel" },
     { name = "matplotlib" },
-    { name = "muon-optimizer" },
     { name = "numba" },
     { name = "numpy" },
     { name = "omegaconf" },
@@ -144,13 +144,13 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dion", git = "https://github.com/microsoft/dion.git?rev=e64832041d8e01989abf609c9550f6307efbff2a" },
     { name = "duckdb", specifier = ">=1.5.4" },
     { name = "fastapi", specifier = ">=0.116.0" },
     { name = "flash-attn", url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "liger-kernel", specifier = ">=0.8.0" },
     { name = "matplotlib", specifier = ">=3.10.6" },
-    { name = "muon-optimizer", git = "https://github.com/KellerJordan/Muon" },
     { name = "numba", specifier = ">=0.61.2" },
     { name = "numpy", specifier = ">=2.2,<2.3" },
     { name = "omegaconf", specifier = ">=2.3.0" },
@@ -288,6 +288,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a9/95/a3dbbb5028f35eafb79008e7522a75244477d2838f38cbb722248dabc2a8/cycler-0.12.1.tar.gz", hash = "sha256:88bb128f02ba341da8ef447245a9e138fae777f6a23943da4540077d3601eb1c", size = 7615, upload-time = "2023-10-07T05:32:18.335Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl", hash = "sha256:85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30", size = 8321, upload-time = "2023-10-07T05:32:16.783Z" },
+]
+
+[[package]]
+name = "dion"
+version = "0.1.0"
+source = { git = "https://github.com/microsoft/dion.git?rev=e64832041d8e01989abf609c9550f6307efbff2a#e64832041d8e01989abf609c9550f6307efbff2a" }
+dependencies = [
+    { name = "numpy" },
+    { name = "torch" },
 ]
 
 [[package]]
@@ -603,11 +612,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2b/17/ebb9644da78c4ab36403739e0e6e0e30ebb135b9caf3440825001a0bddcb/multidict-6.7.1-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:fc5907494fccf3e7d3f94f95c91d6336b092b5fc83811720fae5e2765890dfba", size = 251377, upload-time = "2026-01-26T02:44:12.042Z" },
     { url = "https://files.pythonhosted.org/packages/81/08/7036c080d7117f28a4af526d794aab6a84463126db031b007717c1a6676e/multidict-6.7.1-py3-none-any.whl", hash = "sha256:55d97cc6dae627efa6a6e548885712d4864b81110ac76fa4e534c03819fa4a56", size = 12319, upload-time = "2026-01-26T02:46:44.004Z" },
 ]
-
-[[package]]
-name = "muon-optimizer"
-version = "0.1.0"
-source = { git = "https://github.com/KellerJordan/Muon#6399c658d3c4a3356ba823fa6664b10e23871068" }
 
 [[package]]
 name = "narwhals"

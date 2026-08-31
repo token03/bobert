@@ -1,11 +1,11 @@
 from contextlib import nullcontext
-from typing import Any, Dict
+from typing import Any
 
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
+from torch import nn
 from torchmetrics import MeanAbsoluteError
 from torchmetrics.classification import MulticlassF1Score
 
@@ -38,7 +38,7 @@ def compile_encoder(model: nn.Module, config: DictConfig) -> None:
     )
 
 
-def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor, metrics=None):
+def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor, metrics=None):
     zero = sum(output["continuous"].sum() * 0.0 for output in predictions.values())
     losses = {name: zero for name in ("spatial", "rhythm", "attribute")}
     if targets.shape[0] == 0:
@@ -51,25 +51,27 @@ def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor, metrics=None):
         "spinner": object_type == OBJECT_TYPE_SPINNER,
     }
     for group, mask in masks.items():
-        if not torch.any(mask):
-            continue
-
+        update_metrics = metrics is not None and bool(torch.any(mask))
         output = predictions[group]
         continuous_names = [
             name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
         ]
         if continuous_names:
             indices = [FEATURE_INFO["continuous"][name] for name in continuous_names]
-            continuous_loss = F.smooth_l1_loss(
-                output["continuous"][mask],
-                targets[mask][:, indices],
-                beta=0.5,
-                reduction="none",
-            ).sum(dim=0)
+            continuous_loss = (
+                F.smooth_l1_loss(
+                    output["continuous"],
+                    targets[:, indices],
+                    beta=0.5,
+                    reduction="none",
+                )
+                .mul(mask[:, None])
+                .sum(dim=0)
+            )
             for index, name in enumerate(continuous_names):
                 loss_group = FEATURES_BY_NAME[name].family
                 losses[loss_group] = losses[loss_group] + continuous_loss[index]
-                if metrics is not None:
+                if update_metrics:
                     metrics["mae"][name].update(
                         output["continuous"][mask, index], targets[mask, indices[index]]
                     )
@@ -77,13 +79,17 @@ def mlm_loss(predictions: Dict[str, Any], targets: torch.Tensor, metrics=None):
         for name, logits in output["categorical"].items():
             info = FEATURE_INFO["categorical"][name]
             loss_group = FEATURES_BY_NAME[name].family
-            categorical_loss = F.cross_entropy(
-                logits[mask],
-                targets[mask, info["index"]].long(),
-                reduction="sum",
+            categorical_loss = (
+                F.cross_entropy(
+                    logits,
+                    targets[:, info["index"]].long(),
+                    reduction="none",
+                )
+                .mul(mask)
+                .sum()
             )
             losses[loss_group] = losses[loss_group] + categorical_loss
-            if metrics is not None:
+            if update_metrics:
                 metrics["f1"][name].update(
                     logits[mask], targets[mask, info["index"]].long()
                 )
@@ -121,20 +127,9 @@ class BobertModule(pl.LightningModule):
                 ),
             }
         )
-        self.save_hyperparameters("quiet")
 
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]):
-        checkpoint["config"] = OmegaConf.to_container(self.config, resolve=True)
-        if self.datamodule.vector_stats is not None:
-            checkpoint["vector_stats"] = self.datamodule.vector_stats
-        if self.datamodule.strain_stats is not None:
-            checkpoint["strain_stats"] = self.datamodule.strain_stats
-
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]):
-        if self.datamodule.vector_stats is not None:
-            self.datamodule.vector_stats = checkpoint["vector_stats"]
-        if self.datamodule.strain_stats is not None:
-            self.datamodule.strain_stats = checkpoint["strain_stats"]
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        checkpoint["vector_stats"] = self.datamodule.vector_stats
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config)
@@ -164,7 +159,7 @@ class BobertModule(pl.LightningModule):
             batch["max_seqlen"],
         )
 
-    def _shared_step(self, batch: Dict[str, Any], metrics=None):
+    def _shared_step(self, batch: dict[str, Any], metrics=None):
         predictions, targets, _ = self(batch)
         losses = mlm_loss(predictions["mlm"], targets["mlm"], metrics)
         losses["mlm"] = losses["total"]
@@ -175,10 +170,7 @@ class BobertModule(pl.LightningModule):
         losses["strain_aim"] = strain_by_target["aim"]
         losses["strain_speed"] = strain_by_target["speed"]
         losses["strain_aim_children"] = torch.stack(
-            [
-                strain_by_target[name]
-                for name in ("slider", "snap", "flow", "agility")
-            ]
+            [strain_by_target[name] for name in ("slider", "snap", "flow", "agility")]
         ).mean()
         losses["strain_speed_children"] = torch.stack(
             [strain_by_target[name] for name in ("tap", "rhythm")]
@@ -228,7 +220,7 @@ class BobertModule(pl.LightningModule):
                 f"using {target_dtype}."
             )
 
-    def _create_preallocation_batch(self, max_seq_len: int) -> Dict[str, Any]:
+    def _create_preallocation_batch(self, max_seq_len: int) -> dict[str, Any]:
         batch_size = preallocation_batch_size(
             self.datamodule.train_dataset,
             self.config.training.trainer.batch_size,
@@ -291,13 +283,13 @@ class BobertModule(pl.LightningModule):
             "batch_size": batch_size,
         }
 
-    def training_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
         losses, target_count = self._shared_step(batch)
         optimizer = self.trainer.optimizers[0]
         self.log_dict(
             {
                 "muon_lr": optimizer.param_groups[0]["lr"],
-                "adam_lr": optimizer.param_groups[1]["lr"],
+                "adamw_lr": optimizer.param_groups[-1]["lr"],
             },
             batch_size=target_count,
         )
@@ -310,7 +302,7 @@ class BobertModule(pl.LightningModule):
             )
         return losses["total"]
 
-    def validation_step(self, batch: Dict[str, Any], batch_idx: int) -> torch.Tensor:
+    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
         losses, target_count = self._shared_step(batch, self.val_metrics)
         self.log(
             "val_loss",
@@ -329,9 +321,7 @@ class BobertModule(pl.LightningModule):
                 "val_strain_aim_loss": losses["strain_aim"],
                 "val_strain_speed_loss": losses["strain_speed"],
                 "val_strain_aim_children_loss": losses["strain_aim_children"],
-                "val_strain_speed_children_loss": losses[
-                    "strain_speed_children"
-                ],
+                "val_strain_speed_children_loss": losses["strain_speed_children"],
                 **{
                     f"val_strain_{name}_loss": loss
                     for name, loss in zip(

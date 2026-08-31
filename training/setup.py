@@ -1,13 +1,12 @@
 from pathlib import Path
-from typing import List, Optional
 
-from muon import SingleDeviceMuonWithAuxAdam
-from omegaconf import DictConfig
 import pytorch_lightning as pl
+import torch
+from dion import NorMuon
+from omegaconf import DictConfig
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
-import torch
-import torch.nn as nn
+from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
@@ -18,35 +17,57 @@ def setup_device() -> str:
 
 def create_optimizer(model: nn.Module, config: DictConfig) -> Optimizer:
     optimizer_config = config.training.optimizer
-    muon_params = []
-    if hasattr(model, "bert"):
-        muon_params = [
-            parameter
-            for parameter in model.bert.layers.parameters()
-            if parameter.requires_grad and parameter.ndim >= 2
-        ]
+    muon_params = [
+        parameter
+        for parameter in model.bert.layers.parameters()
+        if parameter.requires_grad and parameter.ndim >= 2
+    ]
     muon_param_ids = {id(parameter) for parameter in muon_params}
-    adam_params = [
+    adamw_params = [
         parameter
         for parameter in model.parameters()
         if parameter.requires_grad and id(parameter) not in muon_param_ids
     ]
-    return SingleDeviceMuonWithAuxAdam(
+    contracting_params = [
+        parameter
+        for parameter in muon_params
+        if parameter.shape[0] < parameter.shape[1]
+    ]
+    spectral_params = [
+        parameter
+        for parameter in muon_params
+        if parameter.shape[0] >= parameter.shape[1]
+    ]
+    return NorMuon(
         [
-            dict(
-                params=muon_params,
-                use_muon=True,
-                lr=float(optimizer_config.muon_lr),
-                weight_decay=float(optimizer_config.muon_wd),
-            ),
-            dict(
-                params=adam_params,
-                use_muon=False,
-                lr=float(optimizer_config.adam_lr),
-                betas=tuple(optimizer_config.adam_betas),
-                weight_decay=float(optimizer_config.adam_wd),
-            ),
-        ]
+            {
+                "params": spectral_params,
+                "algorithm": "normuon",
+                "adjust_lr": "spectral_norm",
+                "lr": float(optimizer_config.muon_lr),
+                "weight_decay": float(optimizer_config.muon_wd),
+            },
+            {
+                "params": contracting_params,
+                "algorithm": "normuon",
+                "adjust_lr": None,
+                "lr": float(optimizer_config.muon_lr),
+                "weight_decay": float(optimizer_config.muon_wd),
+            },
+            {
+                "params": adamw_params,
+                "algorithm": "adamw",
+                "lr": float(optimizer_config.adamw_lr),
+                "weight_decay": float(optimizer_config.adamw_wd),
+            },
+        ],
+        mu=0.95,
+        muon_beta2=0.95,
+        betas=tuple(optimizer_config.adamw_betas),
+        epsilon=1e-10,
+        nesterov=True,
+        use_polar_express=True,
+        use_triton=muon_params[0].device.type == "cuda",
     )
 
 
@@ -60,7 +81,7 @@ def create_scheduler(
         raise ValueError("Warmup steps must be less than all training steps.")
     decay_steps = total_steps - warmup_steps
     min_lr_ratio = float(scheduler_config.min_lr_ratio)
-    adam_min_lr = float(optimizer_config.adam_lr) * min_lr_ratio
+    adamw_min_lr = float(optimizer_config.adamw_lr) * min_lr_ratio
     muon_min_lr = float(optimizer_config.muon_lr) * min_lr_ratio
     print(
         f"Scheduler: linear warmup-decay with {warmup_steps} warmup, "
@@ -68,7 +89,7 @@ def create_scheduler(
     )
     print(
         f"Min LR ratio: {min_lr_ratio:.4f} "
-        f"(Adam {adam_min_lr:.2e}, Muon {muon_min_lr:.2e})"
+        f"(AdamW {adamw_min_lr:.2e}, Muon {muon_min_lr:.2e})"
     )
 
     def lr_lambda(current_step: int) -> float:
@@ -87,7 +108,7 @@ def create_trainer(
     config: DictConfig,
     runs_dir: str | Path,
     run_name: str | None = None,
-    extra_callbacks: Optional[List[pl.Callback]] = None,
+    extra_callbacks: list[pl.Callback] | None = None,
     quiet: bool = False,
 ) -> pl.Trainer:
     trainer_config = config.training.trainer

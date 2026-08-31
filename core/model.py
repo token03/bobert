@@ -123,9 +123,7 @@ class BobertEncoder(nn.Module):
             dim_feedforward=model_config.dim_feedforward,
             dropout=model_config.dropout,
             local_attention_window=model_config.local_attention_window,
-            local_attention_block_size=getattr(
-                model_config, "local_attention_block_size", 256
-            ),
+            local_attention_block_size=model_config.local_attention_block_size,
             global_attention_layers=model_config.global_attention_layers,
             max_seq_len=data_config.max_seq_len,
             activation_checkpointing=runtime_config.activation_checkpointing,
@@ -186,7 +184,7 @@ class BobertEncoder(nn.Module):
     ) -> torch.Tensor:
         positions = torch.arange(max_seqlen, device=packed_embeddings.device)
         torch._dynamo.mark_dynamic(packed_embeddings, 0)
-        torch._dynamo.mark_dynamic(cu_seqlens, 0)
+        torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
         torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
         return self._encode(packed_embeddings, cu_seqlens, positions)
 
@@ -211,7 +209,7 @@ class BobertEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         positions = torch.arange(max_seqlen, device=packed_embeddings.device)
         torch._dynamo.mark_dynamic(packed_embeddings, 0)
-        torch._dynamo.mark_dynamic(cu_seqlens, 0)
+        torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
         torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
         global_embeddings: list[torch.Tensor] = []
         packed_output = self._encode(

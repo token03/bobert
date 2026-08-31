@@ -6,13 +6,13 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
+    "dion",
     "duckdb>=1.5.4",
     "flash-attn==2.8.3",
     "fastapi>=0.116.0",
     "httpx>=0.28.1",
     "liger-kernel>=0.8.0",
     "matplotlib>=3.10.6",
-    "muon-optimizer",
     "numba>=0.61.2",
     "numpy>=2.2,<2.3",
     "omegaconf>=2.3.0",
@@ -88,6 +88,6 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
-muon-optimizer = { git = "https://github.com/KellerJordan/Muon" }
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 parsecore = { git = "https://github.com/token03/parsecore.git" }
+dion = { git = "https://github.com/microsoft/dion.git", rev = "e64832041d8e01989abf609c9550f6307efbff2a" }
