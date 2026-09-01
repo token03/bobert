@@ -27,6 +27,7 @@ STRAINS_SCHEMA = {
     "beatmap_id": pl.Int64,
     "seq_len": pl.Int64,
     "stars": pl.Float64,
+    "actual_stars": pl.Float64,
     **{column: pl.Float64 for column in STRUCTURAL_FACTOR_COLUMNS},
     "objects_pruned": pl.Boolean,
 }
@@ -43,6 +44,10 @@ def _calculator(max_objects: int) -> StructuralCalculator:
     )
 
 
+def _star_calculator(max_objects: int) -> StructuralCalculator:
+    return StructuralCalculator(max_objects=max_objects).mods(0)
+
+
 def _calculate_batch_worker(
     beatmap_ids: list[int],
     requested_seq_len: int,
@@ -52,6 +57,7 @@ def _calculate_batch_worker(
         min(requested_seq_len, MAX_OBJECTS) if requested_seq_len else MAX_OBJECTS
     )
     calculator = _calculator(max_objects)
+    star_calculator = _star_calculator(max_objects)
     rows = []
     failed = 0
 
@@ -68,6 +74,7 @@ def _calculate_batch_worker(
                     "beatmap_id": beatmap_id,
                     "seq_len": factors.object_count,
                     "stars": factors.stars,
+                    "actual_stars": star_calculator.calculate_stars_bytes(data),
                     "aim": factors.aim,
                     "speed": factors.speed,
                     "slider": min(max(factors.slider, 0.0), 1.0),
@@ -77,6 +84,34 @@ def _calculate_batch_worker(
                     "tap": factors.tap,
                     "rhythm": factors.rhythm,
                     "objects_pruned": factors.objects_pruned,
+                }
+            )
+        except Exception:
+            failed += 1
+
+    return rows, failed
+
+
+def _calculate_stars_batch_worker(
+    entries: list[tuple[int, int]],
+    raw_beatmap_path: str,
+) -> tuple[list[dict], int]:
+    calculators = {}
+    rows = []
+    failed = 0
+
+    for beatmap_id, seq_len in entries:
+        path = get_sharded_path(beatmap_id, raw_beatmap_path)
+        try:
+            data = Path(path).read_bytes()
+            calculator = calculators.get(seq_len)
+            if calculator is None:
+                calculator = calculators[seq_len] = _star_calculator(seq_len)
+            rows.append(
+                {
+                    "beatmap_id": beatmap_id,
+                    "seq_len": seq_len,
+                    "actual_stars": calculator.calculate_stars_bytes(data),
                 }
             )
         except Exception:
@@ -98,6 +133,11 @@ def load_existing_strains(path: str) -> pl.DataFrame:
     if not os.path.exists(path):
         return empty_strains_df()
     strains = pl.read_parquet(path)
+    old_columns = set(STRAINS_SCHEMA) - {"actual_stars"}
+    if set(strains.columns) == old_columns:
+        strains = strains.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("actual_stars")
+        )
     if set(strains.columns) != set(STRAINS_SCHEMA):
         print("Existing strains file has an incompatible schema; rebuilding it")
         return empty_strains_df()
@@ -184,6 +224,51 @@ def calculate_missing_strains(
     return rows, cached_count, failed
 
 
+def calculate_missing_stars(
+    strains: pl.DataFrame,
+    raw_beatmap_path: str,
+    batch_size: int,
+    workers: int = 6,
+) -> tuple[list[dict], int]:
+    tasks = list(
+        strains.filter(pl.col("actual_stars").is_null())
+        .select("beatmap_id", "seq_len")
+        .iter_rows()
+    )
+    if not tasks:
+        return [], 0
+
+    batches = list(chunked(tasks, batch_size))
+    worker = importlib.import_module(
+        "scripts.dataset.strains"
+    )._calculate_stars_batch_worker
+    rows = []
+    failed = 0
+    print(f"Scheduling {len(tasks)} missing star ratings across {workers} workers")
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=workers)
+    try:
+        futures = {
+            executor.submit(worker, batch, raw_beatmap_path): batch for batch in batches
+        }
+        with tqdm(total=len(tasks), desc="Calculating star ratings") as progress:
+            for future in concurrent.futures.as_completed(futures):
+                batch_rows, batch_failed = future.result()
+                rows.extend(batch_rows)
+                failed += batch_failed
+                progress.update(len(futures[future]))
+    except KeyboardInterrupt:
+        print("\nInterrupted; stopping workers.")
+        processes = list(executor._processes.values())
+        for process in processes:
+            process.terminate()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise SystemExit(130) from None
+    else:
+        executor.shutdown()
+
+    return rows, failed
+
+
 def save_strains(strains: pl.DataFrame, path: str) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -200,7 +285,6 @@ def main() -> None:
         "-l",
         "--length",
         type=int,
-        required=True,
         help="Sequence length to calculate (0 uses the 4096-object maximum)",
     )
     parser.add_argument("-d", "--dataset", type=str, default=None)
@@ -209,41 +293,87 @@ def main() -> None:
     parser.add_argument("--raw-beatmaps", default="./data/beatmaps")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=6)
+    parser.add_argument(
+        "--stars-only",
+        action="store_true",
+        help="Only backfill missing actual star ratings",
+    )
     args = parser.parse_args()
 
-    if args.length < 0:
+    if args.length is None and not args.stars_only:
+        parser.error("--length is required unless --stars-only is used")
+    if args.length is not None and args.length < 0:
         raise ValueError("--length must be non-negative; use 0 for the maximum")
     if args.batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
 
-    dataset_path = args.dataset or load_config(args.config)["data"]["dataset_path"]
-    dataset_path = str(resolve_path(dataset_path))
     output_path = str(resolve_path(args.output))
     raw_beatmap_path = str(resolve_path(args.raw_beatmaps))
 
-    print("Loading beatmap IDs from dataset...")
-    beatmap_lengths = get_beatmap_lengths(dataset_path)
     existing = load_existing_strains(output_path)
-    rows, cached, failed = calculate_missing_strains(
-        beatmap_lengths,
-        args.length,
-        existing,
+    if args.stars_only:
+        combined = existing
+        rows = []
+        cached = len(existing)
+        failed = 0
+    else:
+        dataset_path = args.dataset or load_config(args.config)["data"]["dataset_path"]
+        dataset_path = str(resolve_path(dataset_path))
+        print("Loading beatmap IDs from dataset...")
+        beatmap_lengths = get_beatmap_lengths(dataset_path)
+        rows, cached, failed = calculate_missing_strains(
+            beatmap_lengths,
+            args.length,
+            existing,
+            raw_beatmap_path,
+            args.batch_size,
+            args.workers,
+        )
+        new = (
+            pl.DataFrame(rows, schema=STRAINS_SCHEMA)
+            if rows
+            else empty_strains_df()
+        )
+        combined = pl.concat([existing, new]).unique(
+            ["beatmap_id", "seq_len"], keep="last"
+        )
+    star_rows, star_failed = calculate_missing_stars(
+        combined,
         raw_beatmap_path,
         args.batch_size,
         args.workers,
     )
-
-    new = pl.DataFrame(rows, schema=STRAINS_SCHEMA) if rows else empty_strains_df()
-    combined = pl.concat([existing, new]).unique(
-        ["beatmap_id", "seq_len"], keep="last"
-    )
+    if star_rows:
+        stars = pl.DataFrame(
+            star_rows,
+            schema={
+                "beatmap_id": pl.Int64,
+                "seq_len": pl.Int64,
+                "actual_stars": pl.Float64,
+            },
+        )
+        combined = (
+            combined.join(
+                stars,
+                on=["beatmap_id", "seq_len"],
+                how="left",
+                suffix="_new",
+            )
+            .with_columns(
+                pl.coalesce("actual_stars_new", "actual_stars").alias("actual_stars")
+            )
+            .drop("actual_stars_new")
+            .select(*STRAINS_SCHEMA)
+        )
     save_strains(combined, output_path)
 
     print(f"Already cached: {cached}")
     print(f"Newly calculated: {len(rows)}")
     print(f"Failed: {failed}")
+    print(f"Star ratings backfilled: {len(star_rows)}")
+    print(f"Star ratings failed: {star_failed}")
     print(f"Total strains: {len(combined)}")
 
 
