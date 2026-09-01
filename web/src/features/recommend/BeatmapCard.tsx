@@ -73,7 +73,11 @@ export function BeatmapCard(props: BeatmapCardProps) {
         onKeyDown={handleCardKeyDown}
         onMouseLeave={() => setCopied(false)}
         onBlur={handleCardBlur}
-        onAnimationEnd={() => sourceProps.onSweepEnd?.()}
+        onAnimationEnd={(event) => {
+          if (event.target === event.currentTarget && sourceProps.sweepPhase) {
+            sourceProps.onSweepEnd?.()
+          }
+        }}
       >
         <BeatmapCover beatmap={beatmap} variant="source" isCoverActive={isCoverActive} onPlayPreview={sourceProps.onPlayPreview} />
 
@@ -178,7 +182,7 @@ function BeatmapCover({
         aria-label={isCoverActive ? 'Pause preview' : 'Play preview'}
         title={isCoverActive ? 'Pause preview' : 'Play preview'}
       >
-        <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onLoad={(event) => { event.currentTarget.dataset.loaded = 'true'; event.currentTarget.dataset.revealing = 'true' }} onAnimationEnd={(event) => { delete event.currentTarget.dataset.revealing }} onError={(event) => { event.currentTarget.hidden = true }} />
+        <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onError={(event) => { event.currentTarget.hidden = true }} />
         <span className={styles['cover-play-overlay']} aria-hidden="true">
           <span className={styles['cover-play-button']}>{isCoverActive ? <Pause className={styles['filled-icon']} /> : <Play className={styles['filled-icon']} />}</span>
         </span>

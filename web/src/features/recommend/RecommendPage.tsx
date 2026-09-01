@@ -99,7 +99,7 @@ export function RecommendPage() {
   const navigate = useNavigate({ from: '/recommendations' })
   const queryClient = useQueryClient()
   const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
-  const [sourceView, setSourceView] = useState<{ beatmapId: number | null; direction: SweepDirection }>({ beatmapId: null, direction: 'left' })
+  const [sourceView, setSourceView] = useState<{ beatmapId: number | null; direction: SweepDirection; animate: boolean }>({ beatmapId: null, direction: 'left', animate: false })
   const form = useRecommendForm(search, runManualRecommend)
   const audio = useAudioPreview({ onError: console.error })
   const beatmapIds = parseBeatmapIds(search.beatmap)
@@ -182,6 +182,7 @@ export function RecommendPage() {
 
   async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<void>, preloadCover = true) {
     const currentSource = selectedSource
+    setSourceView((view) => ({ ...view, beatmapId: null, animate: false }))
     setSourceSwap({
       beatmap: currentSource ?? beatmap,
       nextBeatmap: beatmap,
@@ -349,7 +350,8 @@ export function RecommendPage() {
               beatmaps={sourceBeatmaps}
               beatmap={sourceBeatmap}
               direction={sourceView.direction}
-              onSelect={(beatmapId, direction) => setSourceView({ beatmapId, direction })}
+              animate={sourceView.animate}
+              onSelect={(beatmapId, direction) => setSourceView({ beatmapId, direction, animate: true })}
               onCopy={copyBeatmapId}
               onPlayPreview={(beatmap) => audio.playPreview(beatmap)}
               activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
@@ -415,6 +417,7 @@ type SourceBeatmapPagerProps = {
   beatmaps: BeatmapMetadata[]
   beatmap: BeatmapMetadata
   direction: SweepDirection
+  animate: boolean
   onSelect: (beatmapId: number, direction: SweepDirection) => void
   onCopy: (beatmapId: number) => Promise<void>
   onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
@@ -422,7 +425,7 @@ type SourceBeatmapPagerProps = {
   isPreviewPlaying: boolean
 }
 
-function SourceBeatmapPager({ beatmaps, beatmap, direction, onSelect, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: SourceBeatmapPagerProps) {
+function SourceBeatmapPager({ beatmaps, beatmap, direction, animate, onSelect, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: SourceBeatmapPagerProps) {
   const card = (
     <BeatmapCard
       key={beatmap.beatmap_id}
@@ -433,7 +436,7 @@ function SourceBeatmapPager({ beatmaps, beatmap, direction, onSelect, onCopy, on
       activePreviewSetId={activePreviewSetId}
       isPreviewPlaying={isPreviewPlaying}
       sweepDirection={direction}
-      sweepPhase={beatmaps.length > 1 ? 'in' : undefined}
+      sweepPhase={animate && beatmaps.length > 1 ? 'in' : undefined}
     />
   )
 
