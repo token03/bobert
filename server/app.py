@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from server.osu import BeatmapUnavailableError, OsuClient
-from server.runtime import Runtime, metadata_complete, public_summary
+from server.runtime import Runtime, metadata_complete
 
 MAX_RECOMMEND_TOP_K = 1000
 
@@ -285,7 +285,7 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
         "query": {
             "beatmap_id": payload.beatmap_id,
             "cache": cache_status,
-            "metadata": public_summary(payload.beatmap_id, metadata),
+            "metadata": runtime.public_summary(payload.beatmap_id, metadata),
         },
         "count": len(results),
         "results": results,
@@ -325,7 +325,7 @@ async def beatmap_summary(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     response.headers["Cache-Control"] = "public, max-age=300"
-    return public_summary(beatmap_id, metadata)
+    return runtime.public_summary(beatmap_id, metadata)
 
 
 def get_runtime() -> Runtime:

@@ -862,7 +862,7 @@ wheels = [
 [[package]]
 name = "parsecore"
 version = "1.0.1"
-source = { git = "https://github.com/token03/parsecore.git#bf504600b17a643d859cab2ca5c60ede7acfd1d6" }
+source = { git = "https://github.com/token03/parsecore.git#3856624e1a13c477fca786f0a8b857f71f813d59" }
 dependencies = [
     { name = "requests" },
 ]

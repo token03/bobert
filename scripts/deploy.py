@@ -16,7 +16,7 @@ import torch
 from dotenv import load_dotenv
 
 ARTIFACTS = ("bobert.pt", "embeddings.parquet", "embeddings.json")
-CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet")
+CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet", "strains.parquet")
 
 
 def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
@@ -78,6 +78,7 @@ def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
         catalogs = {
             root / "data" / "beatmaps.parquet": {"id", "beatmapset_id"},
             root / "data" / "beatmapsets.parquet": {"beatmap_id", "beatmapset_id"},
+            root / "data" / "strains.parquet": {"beatmap_id", "actual_stars"},
         }
         for path, columns in catalogs.items():
             missing = columns - set(pq.read_schema(path).names)
@@ -91,7 +92,7 @@ def main() -> int:
     parser.add_argument(
         "--metadata",
         action="store_true",
-        help="Also upload data/beatmaps.parquet and data/beatmapsets.parquet.",
+        help="Also upload beatmaps, beatmapsets, and strains catalogs.",
     )
     args = parser.parse_args()
 
@@ -161,7 +162,7 @@ def main() -> int:
         subprocess.run(
             [
                 *ssh,
-                f"mv -f {remote_metadata}/beatmaps.parquet {remote_metadata}/beatmapsets.parquet {remote_root}/data/ && rmdir {remote_metadata}",
+                f"mv -f {' '.join(f'{remote_metadata}/{name}' for name in CATALOGS)} {remote_root}/data/ && rmdir {remote_metadata}",
             ],
             check=True,
         )

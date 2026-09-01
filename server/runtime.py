@@ -27,6 +27,7 @@ EMBEDDINGS_PATH = Path(
 )
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
+STRAINS_PATH = DATA_DIR / "strains.parquet"
 FILTERED_SCORE_THRESHOLD = 0.1
 FILTERED_SCORE_BATCH_SIZE = 8192
 DEFAULT_COUNTS = (15, 40, 30, 15)
@@ -159,7 +160,13 @@ class Runtime:
     def __init__(self) -> None:
         missing = [
             str(path)
-            for path in (BEATMAPS_PATH, BEATMAPSETS_PATH, EMBEDDINGS_PATH, MODEL_PATH)
+            for path in (
+                BEATMAPS_PATH,
+                BEATMAPSETS_PATH,
+                STRAINS_PATH,
+                EMBEDDINGS_PATH,
+                MODEL_PATH,
+            )
             if not path.exists()
         ]
         if missing:
@@ -219,7 +226,35 @@ class Runtime:
             beatmap_id: index for index, beatmap_id in enumerate(self.static_ids)
         }
 
-        beatmaps = pl.read_parquet(BEATMAPS_PATH, columns=SEARCH_COLUMNS)
+        strains = (
+            pl.read_parquet(
+                STRAINS_PATH,
+                columns=["beatmap_id", "seq_len", "actual_stars"],
+            )
+            .filter(pl.col("actual_stars").is_not_null())
+            .sort("seq_len", descending=True)
+            .unique("beatmap_id", keep="first")
+            .sort("beatmap_id")
+        )
+        self.strain_ids = strains["beatmap_id"].to_numpy()
+        self.strain_stars = strains["actual_stars"].to_numpy()
+        beatmaps = (
+            pl.read_parquet(BEATMAPS_PATH, columns=SEARCH_COLUMNS)
+            .join(
+                strains.select(
+                    pl.col("beatmap_id").alias("id"),
+                    pl.col("actual_stars"),
+                ),
+                on="id",
+                how="left",
+            )
+            .with_columns(
+                pl.coalesce("actual_stars", "difficulty_rating").alias(
+                    "difficulty_rating"
+                )
+            )
+            .drop("actual_stars")
+        )
         defaults = (
             beatmaps.filter(pl.col("status").is_in(["1", "4"]), pl.col("mode") == "osu")
             .sort("difficulty_rating", descending=True)
@@ -341,7 +376,7 @@ class Runtime:
         )
         self.default_pools = [
             [
-                public_summary(int(row["id"]), row)
+                self.public_summary(int(row["id"]), row)
                 for row in defaults.filter(
                     pl.col("difficulty_rating").floor() == star
                 ).iter_rows(named=True)
@@ -423,7 +458,22 @@ class Runtime:
         else:
             cached = self.cache.get(beatmap_id)
             metadata = cached.metadata if cached is not None else {}
-        return public_summary(beatmap_id, metadata)
+        return self.public_summary(beatmap_id, metadata)
+
+    def star_rating(self, beatmap_id: int) -> float | None:
+        index = int(np.searchsorted(self.strain_ids, beatmap_id))
+        if index >= len(self.strain_ids) or self.strain_ids[index] != beatmap_id:
+            return None
+        return float(self.strain_stars[index])
+
+    def public_summary(
+        self, beatmap_id: int, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        summary = public_summary(beatmap_id, metadata)
+        stars = self.star_rating(beatmap_id)
+        if stars is not None:
+            summary["stars"] = stars
+        return summary
 
     def search(
         self,
@@ -535,7 +585,7 @@ class Runtime:
         results = []
         for index, score in zip(selected_indices, selected_scores):
             beatmap_id = self.static_ids[index]
-            result = public_summary(
+            result = self.public_summary(
                 beatmap_id, self.static_metadata.row(index, named=True)
             )
             result["score"] = float(score - self.static_penalty[index])
@@ -555,6 +605,9 @@ class Runtime:
             if cached is None:
                 return None
             beatmap = {"id": beatmap_id, **cached.metadata}
+        stars = self.star_rating(beatmap_id)
+        if stars is not None:
+            beatmap["difficulty_rating"] = stars
         beatmapset_id = metadata_set_id(beatmap)
         beatmapsets = pl.scan_parquet(BEATMAPSETS_PATH)
         set_rows = (

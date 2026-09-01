@@ -44,8 +44,8 @@ def _calculator(max_objects: int) -> StructuralCalculator:
     )
 
 
-def _star_calculator(max_objects: int) -> StructuralCalculator:
-    return StructuralCalculator(max_objects=max_objects).mods(0)
+def _star_calculator() -> StructuralCalculator:
+    return StructuralCalculator().mods(0)
 
 
 def _calculate_batch_worker(
@@ -57,7 +57,7 @@ def _calculate_batch_worker(
         min(requested_seq_len, MAX_OBJECTS) if requested_seq_len else MAX_OBJECTS
     )
     calculator = _calculator(max_objects)
-    star_calculator = _star_calculator(max_objects)
+    star_calculator = _star_calculator()
     rows = []
     failed = 0
 
@@ -96,7 +96,7 @@ def _calculate_stars_batch_worker(
     entries: list[tuple[int, int]],
     raw_beatmap_path: str,
 ) -> tuple[list[dict], int]:
-    calculators = {}
+    calculator = _star_calculator()
     rows = []
     failed = 0
 
@@ -104,9 +104,6 @@ def _calculate_stars_batch_worker(
         path = get_sharded_path(beatmap_id, raw_beatmap_path)
         try:
             data = Path(path).read_bytes()
-            calculator = calculators.get(seq_len)
-            if calculator is None:
-                calculator = calculators[seq_len] = _star_calculator(seq_len)
             rows.append(
                 {
                     "beatmap_id": beatmap_id,
