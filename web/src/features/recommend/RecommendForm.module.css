@@ -165,7 +165,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  font-size: var(--font-size-body);
+  font-size: var(--font-size-control);
   line-height: 1;
   padding: 0;
 }
@@ -198,7 +198,7 @@
   border-radius: var(--radius-pill);
   background: var(--row-hover);
   color: var(--text);
-  font-size: var(--font-size-body);
+  font-size: var(--font-size-control);
   font-weight: var(--font-weight-regular);
   letter-spacing: 0.01em;
   line-height: 1;
