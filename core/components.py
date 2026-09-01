@@ -314,7 +314,10 @@ class HitObjectFeatureTokenizer(nn.Module):
         self.numeric_weight = nn.Parameter(torch.zeros(len(numeric_sizes), 3, d_feat))
         self.numeric_bias = nn.Parameter(torch.empty(len(numeric_sizes), d_feat))
         for group, size in enumerate(numeric_sizes):
-            nn.init.kaiming_uniform_(self.numeric_weight[group, :size].T, a=5**0.5)
+            nn.init.xavier_uniform_(
+                self.numeric_weight[group, :size].T,
+                gain=nn.init.calculate_gain("tanh"),
+            )
             bound = 1 / size**0.5
             nn.init.uniform_(self.numeric_bias[group], -bound, bound)
         self.register_buffer(
@@ -411,7 +414,7 @@ class HitObjectFeatureTokenizer(nn.Module):
         numeric_hidden = torch.einsum(
             "...gi,gif->...gf", numeric_inputs, self.numeric_weight
         )
-        numeric_tokens = F.gelu(numeric_hidden + self.numeric_bias) - F.gelu(
+        numeric_tokens = torch.tanh(numeric_hidden + self.numeric_bias) - torch.tanh(
             self.numeric_bias
         )
         numeric_active = torch.stack(
