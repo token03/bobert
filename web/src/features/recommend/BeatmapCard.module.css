@@ -13,7 +13,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-weight: 800;
+  font-weight: var(--font-weight-bold);
   text-decoration: none;
 }
 
@@ -415,8 +415,8 @@
   overflow: hidden;
   min-width: 0;
   color: var(--heading);
-  font-size: 17px;
-  font-weight: 700;
+  font-size: var(--font-size-title);
+  font-weight: var(--font-weight-semibold);
   letter-spacing: -0.01em;
   line-height: 1.2;
   text-decoration: none;
@@ -428,8 +428,8 @@
   overflow: hidden;
   margin-top: var(--space-2xs);
   color: var(--text-artist);
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--font-size-control);
+  font-weight: var(--font-weight-semibold);
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -439,8 +439,8 @@
   overflow: hidden;
   margin-top: var(--space-2xs);
   color: var(--text-detail);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: var(--font-size-detail);
+  font-weight: var(--font-weight-medium);
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -456,14 +456,14 @@
 .match-pill {
   justify-self: end;
   color: var(--match);
-  font-weight: 650;
+  font-weight: var(--font-weight-semibold);
   white-space: nowrap;
 }
 
 .creator-credit {
   color: var(--text-detail);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-medium);
   line-height: 1.35;
   text-align: right;
   text-decoration: none;
@@ -473,7 +473,7 @@
 .result-summary .mapper-link,
 .source-meta .mapper-link {
   color: var(--text-mapper);
-  font-weight: 650;
+  font-weight: var(--font-weight-semibold);
   text-decoration: none;
 }
 
@@ -485,8 +485,8 @@
 
 .status-label {
   color: var(--text-status);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-medium);
   line-height: 1.35;
   text-transform: capitalize;
   white-space: nowrap;
@@ -585,7 +585,7 @@
 
 .stat-row-sub .stat-item strong {
   color: var(--text-stat);
-  font-weight: 550;
+  font-weight: var(--font-weight-regular);
   justify-self: end;
   font-variant-numeric: tabular-nums;
 }
@@ -602,14 +602,14 @@
 .stat-item span {
   color: var(--muted);
   font-size: 10px;
-  font-weight: 750;
+  font-weight: var(--font-weight-bold);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .stat-row-sub .stat-item span {
   color: var(--text-stat-label);
-  font-weight: 650;
+  font-weight: var(--font-weight-semibold);
   letter-spacing: 0.06em;
 }
 
@@ -623,7 +623,8 @@
 
 .stat-item strong {
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--font-size-control);
+  font-weight: var(--font-weight-regular);
   line-height: 1;
 }
 
@@ -633,8 +634,8 @@
 
 .stat-item[data-featured='true'] strong {
   color: var(--text);
-  font-size: 16px;
-  font-weight: 600;
+  font-size: var(--font-size-stat);
+  font-weight: var(--font-weight-regular);
   letter-spacing: -0.01em;
 }
 
@@ -660,7 +661,7 @@
   border-radius: var(--radius-sm);
   cursor: pointer;
   font: inherit;
-  font-weight: 800;
+  font-weight: var(--font-weight-bold);
   text-decoration: none;
 }
 
@@ -782,8 +783,8 @@
 
 .source-card .stat-row-sub .stat-item strong {
   color: var(--text-stat);
-  font-size: 15px;
-  font-weight: 550;
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-regular);
   letter-spacing: -0.01em;
   justify-self: center;
 }
@@ -864,8 +865,8 @@
 
   .source-card .stat-row-sub .stat-item strong {
     color: var(--text-stat);
-    font-size: 13px;
-    font-weight: 550;
+    font-size: var(--font-size-control);
+    font-weight: var(--font-weight-regular);
     letter-spacing: 0;
     justify-self: end;
   }
@@ -934,8 +935,8 @@
 
   .source-card .stat-row-sub .stat-item strong {
     color: var(--text-stat);
-    font-size: 13px;
-    font-weight: 550;
+    font-size: var(--font-size-control);
+    font-weight: var(--font-weight-regular);
     letter-spacing: 0;
     justify-self: end;
   }

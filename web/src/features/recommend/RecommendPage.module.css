@@ -11,8 +11,8 @@
   place-items: center;
   margin-top: var(--space-5xl);
   color: var(--muted-soft);
-  font-size: 12px;
-  font-weight: 750;
+  font-size: var(--font-size-detail);
+  font-weight: var(--font-weight-bold);
   letter-spacing: 0.04em;
 }
 
@@ -47,7 +47,7 @@
   place-items: center;
   color: var(--muted);
   font-size: clamp(18px, 2vw, 26px);
-  font-weight: 800;
+  font-weight: var(--font-weight-bold);
   text-align: center;
 }
 

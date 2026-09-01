@@ -21,7 +21,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-weight: 800;
+  font-weight: var(--font-weight-bold);
   text-decoration: none;
 }
 

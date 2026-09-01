@@ -48,8 +48,17 @@
   --control-hover: #2d2e31;
   --control-hover-border: rgba(255, 255, 255, 0.16);
   --tooltip: rgba(13, 13, 18, 0.94);
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --sans: 'Onest Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-size-caption: 11px;
+  --font-size-detail: 12px;
+  --font-size-control: 13px;
+  --font-size-body: 14px;
+  --font-size-stat: 15px;
+  --font-size-title: 16px;
+  --font-weight-regular: 550;
+  --font-weight-medium: 600;
+  --font-weight-semibold: 650;
+  --font-weight-bold: 700;
   --shadow: 0 18px 70px rgba(0, 0, 0, 0.34);
   --shadow-audio: 0 10px 32px rgba(0, 0, 0, 0.32);
   --shadow-action: 0 6px 18px rgba(0, 0, 0, 0.24);
@@ -81,7 +90,7 @@
 
   color: var(--text);
   background: var(--bg);
-  font: 16px/1.5 var(--sans);
+  font: var(--font-size-title)/1.5 var(--sans);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;

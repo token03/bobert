@@ -43,7 +43,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  font-weight: 800;
+  font-weight: var(--font-weight-bold);
   text-decoration: none;
 }
 
@@ -98,8 +98,8 @@
 
 .field > span:not(.input-with-status, .select-value, [aria-hidden='true']) {
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 800;
+  font-size: var(--font-size-detail);
+  font-weight: var(--font-weight-bold);
   letter-spacing: 0.08em;
   line-height: 1;
   text-transform: uppercase;
@@ -165,7 +165,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  font-size: 14px;
+  font-size: var(--font-size-body);
   line-height: 1;
   padding: 0;
 }
@@ -198,10 +198,9 @@
   border-radius: var(--radius-pill);
   background: var(--row-hover);
   color: var(--text);
-  font-family: var(--mono);
-  font-size: 14px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-regular);
+  letter-spacing: 0.01em;
   line-height: 1;
   padding: 0 var(--space-xs) 0 var(--space-lg);
 }
@@ -261,8 +260,8 @@
   box-sizing: border-box;
   padding: 0 7px;
   color: var(--text);
-  font-size: 13px;
-  font-weight: 550;
+  font-size: var(--font-size-control);
+  font-weight: var(--font-weight-regular);
   letter-spacing: 0;
   line-height: 1;
   margin: 0;
@@ -284,8 +283,8 @@
   overflow: hidden;
   min-width: 0;
   color: var(--muted);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--font-size-control);
+  font-weight: var(--font-weight-medium);
   letter-spacing: 0;
   line-height: 1.25;
   text-transform: none;
@@ -356,8 +355,8 @@
   border-radius: calc(var(--radius-sm) - var(--space-xs));
   color: var(--text);
   cursor: default;
-  font-size: 13px;
-  font-weight: 550;
+  font-size: var(--font-size-control);
+  font-weight: var(--font-weight-regular);
   line-height: 1.25;
   outline: none;
   padding: 0 var(--space-lg) 0 calc(var(--space-xl) + var(--icon-md));
@@ -390,8 +389,8 @@
 .search-pill input,
 .control-panel .range-filter-trigger {
   color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-medium);
   letter-spacing: 0.01em;
   line-height: 1;
 }
@@ -468,8 +467,8 @@
 
 .range-trigger-mark {
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 850;
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-bold);
   letter-spacing: 0.04em;
 }
 
@@ -477,8 +476,8 @@
   overflow: hidden;
   min-width: 0;
   color: var(--muted);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--font-size-control);
+  font-weight: var(--font-weight-medium);
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -583,7 +582,7 @@
   justify-content: space-between;
   color: var(--muted-soft);
   font-size: 10px;
-  font-weight: 650;
+  font-weight: var(--font-weight-semibold);
   line-height: 1;
   font-variant-numeric: tabular-nums;
   margin-top: -2px;
@@ -649,8 +648,8 @@
   border-radius: var(--radius-pill);
   background: var(--tooltip);
   color: var(--text);
-  font-size: 11px;
-  font-weight: 750;
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-bold);
   letter-spacing: 0;
   padding: var(--space-md) var(--space-xl);
   text-transform: none;
