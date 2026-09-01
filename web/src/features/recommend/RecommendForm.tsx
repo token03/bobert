@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { Popover } from '@base-ui/react/popover'
 import { Select } from '@base-ui/react/select'
-import { Tooltip } from '@base-ui/react/tooltip'
 import { useStore } from '@tanstack/react-form'
 import { CalendarDays, Check, ChevronDown, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, X, XCircle } from 'lucide-react'
 import { defaultFilters, maxBeatmaps, parseBeatmapIds } from './filters'
@@ -231,7 +231,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
   }
 
   function updateBeatmapDraft(value: string) {
-    setBeatmapDraft(value)
+    setBeatmapDraft(value.replace(/\D/g, ''))
     if (beatmapInputError) {
       setBeatmapInputError(null)
     }
@@ -315,6 +315,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
                       name={field.name}
                       value={beatmapDraft}
                       inputMode="numeric"
+                      pattern="[0-9]*"
                       autoComplete="off"
                       aria-invalid={beatmapError ? 'true' : 'false'}
                       aria-describedby={beatmapError ? 'beatmap-error' : undefined}
@@ -332,18 +333,23 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
                         }
                         if (event.key === 'Enter' && beatmapDraft.trim() && !commitBeatmapDraft()) {
                           event.preventDefault()
+                          return
+                        }
+                        if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !/\d/.test(event.key)) {
+                          event.preventDefault()
                         }
                       }}
                       onPaste={(event) => {
-                        if (searchPastedBeatmaps(event.clipboardData.getData('text'), true)) {
-                          event.preventDefault()
+                        event.preventDefault()
+                        if (!searchPastedBeatmaps(event.clipboardData.getData('text'), true)) {
+                          setBeatmapInputError('Enter a beatmap ID or paste a beatmap link.')
                         }
                       }}
                       onBlur={() => {
                         field.handleBlur()
                         commitBeatmapDraft()
                       }}
-                      placeholder={beatmapIds.length ? '' : 'Beatmap ID or link, e.g. 2201460'}
+                      placeholder={beatmapIds.length ? '' : 'Beatmap ID, or paste a link'}
                     />
                     <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
                       {submitDisabled ? <Loader className={styles['spinner-icon']} /> : <Search />}
@@ -353,7 +359,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
                   {beatmapError ? (
                     <>
                       <span id="beatmap-error" className={styles['sr-only']}>{beatmapError}</span>
-                      <FieldErrorIcon label={beatmapError} />
+                      <FieldErrorPopover label={beatmapError} />
                     </>
                   ) : null}
                 </span>
@@ -472,17 +478,19 @@ function FilterSelect({ filterKey, label, defaultLabel, icon, value, options, on
   )
 }
 
-function FieldErrorIcon({ label }: { label: string }) {
+function FieldErrorPopover({ label }: { label: string }) {
   return (
-    <Tooltip.Root>
-      <Tooltip.Trigger className={styles['field-error-icon']} type="button" delay={0} aria-label={label}>
+    <Popover.Root defaultOpen defaultTriggerId="beatmap-error-trigger">
+      <Popover.Trigger id="beatmap-error-trigger" className={styles['field-error-icon']} type="button" openOnHover delay={0} aria-label={label}>
         <XCircle />
-      </Tooltip.Trigger>
-      <Tooltip.Portal>
-        <Tooltip.Positioner className={styles['field-tooltip-positioner']} side="top" align="end" sideOffset={8}>
-          <Tooltip.Popup className={styles['field-tooltip']}>{label}</Tooltip.Popup>
-        </Tooltip.Positioner>
-      </Tooltip.Portal>
-    </Tooltip.Root>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Positioner className={styles['field-error-positioner']} side="top" align="end" sideOffset={8}>
+          <Popover.Popup className={styles['field-error-popover']} initialFocus={false} role="alert">
+            <Popover.Description>{label}</Popover.Description>
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }

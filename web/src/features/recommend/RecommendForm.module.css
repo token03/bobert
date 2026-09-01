@@ -657,15 +657,15 @@
   stroke: currentColor;
 }
 
-.field-tooltip-positioner {
+.field-error-positioner {
   z-index: 30;
 }
 
-.field-tooltip {
+.field-error-popover {
   width: max-content;
   max-width: min(280px, calc(100vw - var(--space-4xl)));
   border: 1px solid var(--danger-muted);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--tooltip);
   color: var(--text);
   font-size: var(--font-size-caption);
@@ -676,8 +676,12 @@
   transition: opacity 0.12s ease, transform 0.12s ease;
 }
 
-.field-tooltip[data-starting-style],
-.field-tooltip[data-ending-style] {
+.field-error-popover p {
+  margin: 0;
+}
+
+.field-error-popover[data-starting-style],
+.field-error-popover[data-ending-style] {
   opacity: 0;
   transform: translateY(3px);
 }

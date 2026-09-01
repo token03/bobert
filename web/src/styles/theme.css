@@ -7,12 +7,12 @@
   --bg: #0f1011;
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 102, 170, 0.22);
-  --danger: #ff6f9f;
-  --danger-border: rgba(255, 74, 134, 0.46);
-  --danger-border-strong: rgba(255, 74, 134, 0.58);
-  --danger-muted: rgba(255, 74, 134, 0.22);
-  --danger-ring: rgba(255, 74, 134, 0.12);
-  --danger-text: rgba(255, 74, 134, 0.82);
+  --danger: #d96f6f;
+  --danger-border: rgba(217, 111, 111, 0.46);
+  --danger-border-strong: rgba(217, 111, 111, 0.62);
+  --danger-muted: rgba(217, 111, 111, 0.22);
+  --danger-ring: rgba(217, 111, 111, 0.12);
+  --danger-text: rgba(226, 124, 124, 0.9);
   --heading: #eeeeef;
   --input: #161719;
   --muted: #999b9f;
