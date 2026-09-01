@@ -8,7 +8,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 THREAD_COUNT = min(
     2, os.cpu_count() or 1, max(1, int(os.getenv("TORCH_NUM_THREADS", "2")))
@@ -23,6 +23,7 @@ for _variable in (
     os.environ[_variable] = str(THREAD_COUNT)
 
 import httpx
+import numpy as np
 import torch
 import uvicorn
 
@@ -33,9 +34,10 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from server.osu import BeatmapUnavailableError, OsuClient
-from server.runtime import Runtime, metadata_complete
+from server.runtime import Runtime, mean_embedding, metadata_complete
 
 MAX_RECOMMEND_TOP_K = 1000
+MAX_RECOMMEND_SOURCES = 10
 
 
 log = logging.getLogger("uvicorn.error")
@@ -73,7 +75,9 @@ class RecommendFilters(BaseModel):
 
 
 class RecommendRequest(BaseModel):
-    beatmap_id: int = Field(gt=0)
+    beatmap_ids: list[Annotated[int, Field(gt=0)]] = Field(
+        min_length=1, max_length=MAX_RECOMMEND_SOURCES
+    )
     top_k: int = Field(default=20, ge=1, le=MAX_RECOMMEND_TOP_K)
     filters: RecommendFilters = Field(default_factory=RecommendFilters)
 
@@ -110,14 +114,14 @@ class DefaultRecommendResponse(BaseModel):
     results: list[BeatmapSummary]
 
 
-class RecommendQuery(BaseModel):
+class RecommendSource(BaseModel):
     beatmap_id: int
     cache: Literal["hit", "miss"]
     metadata: BeatmapSummary
 
 
 class RecommendResponse(BaseModel):
-    query: RecommendQuery
+    sources: list[RecommendSource]
     count: int
     results: list[ScoredBeatmapSummary]
 
@@ -235,58 +239,72 @@ def default_recommend(response: Response, seed: int | None = None) -> dict[str, 
 @app.post("/api/recommend", response_model=RecommendResponse)
 async def recommend(payload: RecommendRequest) -> dict[str, Any]:
     runtime = get_runtime()
-    memory = runtime.memory_embedding(payload.beatmap_id)
-    cache_status = "hit"
-    if memory is None:
-        memory = await run_in_threadpool(runtime.cached_embedding, payload.beatmap_id)
-    if memory is None:
-        if await run_in_threadpool(runtime.cache.is_unavailable, payload.beatmap_id):
-            raise HTTPException(
-                status_code=404, detail=f"beatmap {payload.beatmap_id} is unavailable"
-            )
-        try:
-            metadata = await get_osu().metadata(payload.beatmap_id)
-            if not metadata_complete(metadata):
-                raise BeatmapUnavailableError(
-                    f"beatmap {payload.beatmap_id} is unavailable"
+    beatmap_ids = list(dict.fromkeys(payload.beatmap_ids))
+
+    async def load_source(
+        beatmap_id: int,
+    ) -> tuple[int, np.ndarray, dict[str, Any], Literal["hit", "miss"]]:
+        memory = runtime.memory_embedding(beatmap_id)
+        cache_status: Literal["hit", "miss"] = "hit"
+        if memory is None:
+            memory = await run_in_threadpool(runtime.cached_embedding, beatmap_id)
+        if memory is None:
+            if await run_in_threadpool(runtime.cache.is_unavailable, beatmap_id):
+                raise HTTPException(
+                    status_code=404, detail=f"beatmap {beatmap_id} is unavailable"
                 )
-            content = await get_osu().download(payload.beatmap_id)
-            embedding = await run_in_threadpool(
-                runtime.infer_and_store,
-                payload.beatmap_id,
-                content,
-                metadata,
-            )
-        except BeatmapUnavailableError as exc:
-            await run_in_threadpool(
-                runtime.cache.mark_unavailable, payload.beatmap_id, str(exc)
-            )
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ValueError as exc:
-            await run_in_threadpool(
-                runtime.cache.mark_unavailable, payload.beatmap_id, str(exc)
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"beatmap {payload.beatmap_id} is unavailable",
-            ) from exc
-        memory = embedding, metadata
-        cache_status = "miss"
-    embedding, metadata = memory
+            try:
+                metadata = await get_osu().metadata(beatmap_id)
+                if not metadata_complete(metadata):
+                    raise BeatmapUnavailableError(
+                        f"beatmap {beatmap_id} is unavailable"
+                    )
+                content = await get_osu().download(beatmap_id)
+                embedding = await run_in_threadpool(
+                    runtime.infer_and_store,
+                    beatmap_id,
+                    content,
+                    metadata,
+                )
+            except BeatmapUnavailableError as exc:
+                await run_in_threadpool(
+                    runtime.cache.mark_unavailable, beatmap_id, str(exc)
+                )
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                await run_in_threadpool(
+                    runtime.cache.mark_unavailable, beatmap_id, str(exc)
+                )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"beatmap {beatmap_id} is unavailable",
+                ) from exc
+            memory = embedding, metadata
+            cache_status = "miss"
+        embedding, metadata = memory
+        return beatmap_id, embedding, metadata, cache_status
+
+    sources = await asyncio.gather(
+        *(load_source(beatmap_id) for beatmap_id in beatmap_ids)
+    )
+    embedding = mean_embedding([source[1] for source in sources])
     results = await run_in_threadpool(
         runtime.search,
-        payload.beatmap_id,
+        beatmap_ids,
         embedding,
-        metadata,
+        [source[2] for source in sources],
         payload.top_k,
         payload.filters,
     )
     return {
-        "query": {
-            "beatmap_id": payload.beatmap_id,
-            "cache": cache_status,
-            "metadata": runtime.public_summary(payload.beatmap_id, metadata),
-        },
+        "sources": [
+            {
+                "beatmap_id": beatmap_id,
+                "cache": cache_status,
+                "metadata": runtime.public_summary(beatmap_id, metadata),
+            }
+            for beatmap_id, _, metadata, cache_status in sources
+        ],
         "count": len(results),
         "results": results,
     }

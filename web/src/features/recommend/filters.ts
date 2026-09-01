@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import type { RecommendFilters, RecommendRequest } from '../../shared/types'
 
+export const maxBeatmaps = 10
+
 export const defaultFilters = {
   beatmap: '',
   topK: '100',
@@ -29,7 +31,9 @@ const dateWindowSchema = z.union([
 ])
 
 export const recommendFormSchema = z.object({
-  beatmap: z.string().refine((value) => parseBeatmapId(value) !== null, 'Enter a beatmap ID or a beatmap link ending in an ID.'),
+  beatmap: z.string()
+    .refine((value) => parseBeatmapIds(value) !== null, 'Enter at least one beatmap ID or beatmap link.')
+    .refine((value) => (parseBeatmapIds(value)?.length ?? 0) <= maxBeatmaps, `Use up to ${maxBeatmaps} beatmaps.`),
   topK: z.string().refine((value) => {
     const number = Number(value)
     return Number.isSafeInteger(number) && number > 0
@@ -134,14 +138,27 @@ export function buildRecommendRequest(values: RecommendFormValues) {
   }
 
   return {
-    beatmap_id: parseBeatmapId(values.beatmap)!,
+    beatmap_ids: parseBeatmapIds(values.beatmap)!,
     top_k: Number(values.topK),
     filters,
   } satisfies RecommendRequest
 }
 
 export function normalizeBeatmapInput(value: string): string {
-  return String(parseBeatmapId(value) ?? value.trim())
+  return parseBeatmapIds(value)?.join(',') ?? value.trim()
+}
+
+export function parseBeatmapIds(value: string): number[] | null {
+  const parts = value.trim().split(/[\s,;]+/).filter(Boolean)
+  if (!parts.length) {
+    return null
+  }
+
+  const ids = parts.map(parseBeatmapId)
+  if (ids.some((id) => id === null)) {
+    return null
+  }
+  return [...new Set(ids as number[])]
 }
 
 export function parseBeatmapId(value: string): number | null {

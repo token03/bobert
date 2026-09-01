@@ -72,6 +72,17 @@ class CachedEmbedding:
     metadata: dict[str, Any]
 
 
+def mean_embedding(embeddings: list[np.ndarray]) -> np.ndarray:
+    vectors = np.asarray(embeddings, dtype=np.float32)
+    if vectors.ndim != 2 or not len(vectors):
+        raise ValueError("embeddings must be a non-empty matrix")
+    combined = vectors.mean(axis=0)
+    norm = float(np.linalg.norm(combined))
+    if not np.isfinite(combined).all() or not np.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("combined embedding is invalid")
+    return np.asarray(combined / norm, dtype=np.float32)
+
+
 class SQLiteCache:
     def __init__(self, path: Path, embedding_dim: int, run_id: str):
         self.path = path
@@ -477,19 +488,23 @@ class Runtime:
 
     def search(
         self,
-        query_beatmap_id: int,
+        source_ids: list[int],
         query_embedding: np.ndarray,
-        query_metadata: dict[str, Any],
+        source_metadata: list[dict[str, Any]],
         top_k: int,
         filters: Any,
     ) -> list[dict[str, Any]]:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
-        query_set_id = metadata_set_id(query_metadata)
+        source_set_ids = [
+            beatmapset_id
+            for metadata in source_metadata
+            if (beatmapset_id := metadata_set_id(metadata)) is not None
+        ]
         date_cutoff = date_window_cutoff(filters.date_window)
-        eligible = self.static_id_values != query_beatmap_id
-        if filters.exclude_same_set and query_set_id is not None:
-            eligible &= self.static_set_ids != query_set_id
+        eligible = ~np.isin(self.static_id_values, source_ids)
+        if filters.exclude_same_set and source_set_ids:
+            eligible &= ~np.isin(self.static_set_ids, source_set_ids)
         for column, minimum, maximum in (
             ("difficulty_rating", filters.min_sr, filters.max_sr),
             ("ar", filters.min_ar, filters.max_ar),

@@ -176,21 +176,10 @@ export interface components {
              */
             exclude_same_set: boolean;
         };
-        /** RecommendQuery */
-        RecommendQuery: {
-            /** Beatmap Id */
-            beatmap_id: number;
-            /**
-             * Cache
-             * @enum {string}
-             */
-            cache: "hit" | "miss";
-            metadata: components["schemas"]["BeatmapSummary"];
-        };
         /** RecommendRequest */
         RecommendRequest: {
-            /** Beatmap Id */
-            beatmap_id: number;
+            /** Beatmap Ids */
+            beatmap_ids: number[];
             /**
              * Top K
              * @default 20
@@ -200,11 +189,23 @@ export interface components {
         };
         /** RecommendResponse */
         RecommendResponse: {
-            query: components["schemas"]["RecommendQuery"];
+            /** Sources */
+            sources: components["schemas"]["RecommendSource"][];
             /** Count */
             count: number;
             /** Results */
             results: components["schemas"]["ScoredBeatmapSummary"][];
+        };
+        /** RecommendSource */
+        RecommendSource: {
+            /** Beatmap Id */
+            beatmap_id: number;
+            /**
+             * Cache
+             * @enum {string}
+             */
+            cache: "hit" | "miss";
+            metadata: components["schemas"]["BeatmapSummary"];
         };
         /** ScoredBeatmapSummary */
         ScoredBeatmapSummary: {

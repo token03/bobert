@@ -1030,6 +1030,10 @@ svg.filled-icon {
   stroke: currentColor;
 }
 @media (prefers-reduced-motion: reduce) {
+  .source-card[data-sweep-phase] {
+    animation: none;
+  }
+
   .beatmap-card[data-reveal='true'] {
     animation: none;
   }

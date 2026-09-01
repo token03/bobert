@@ -59,6 +59,70 @@
 .recommend-layout > [data-card-variant='source'] {
   margin-top: var(--space-xl);
 }
+
+.source-pager {
+  position: relative;
+  min-width: 0;
+  margin-top: var(--space-xl);
+  padding-bottom: var(--space-xl);
+}
+
+.source-panel {
+  min-width: 0;
+  outline: none;
+}
+
+.source-tabs {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: none;
+  padding: 1px var(--space-xs);
+  transform: translateX(-50%);
+}
+
+.source-tab {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 18px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+  padding: 0;
+}
+
+.source-tab::after {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--muted-soft);
+  content: '';
+  transition: width 140ms ease, background-color 140ms ease;
+}
+
+.source-tab[data-active]::after {
+  width: 12px;
+  background: var(--text);
+}
+
+.source-tab:hover::after,
+.source-tab:focus-visible::after {
+  background: var(--muted);
+}
+
+.source-tab:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
 .loading-result-list {
   pointer-events: none;
   animation: loading-list-in 220ms ease-out;
@@ -247,6 +311,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .source-tab::after {
+    transition: none;
+  }
+
   .loading-result-cover,
   .loading-result-line,
   .loading-result-stats span,

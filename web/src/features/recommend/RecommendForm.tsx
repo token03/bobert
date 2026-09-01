@@ -1,10 +1,10 @@
-import { useEffect, useEffectEvent, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Select } from '@base-ui/react/select'
 import { Tooltip } from '@base-ui/react/tooltip'
 import { useStore } from '@tanstack/react-form'
-import { CalendarDays, Check, ChevronDown, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, XCircle } from 'lucide-react'
-import { defaultFilters, normalizeBeatmapInput, parseBeatmapId } from './filters'
+import { CalendarDays, Check, ChevronDown, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, X, XCircle } from 'lucide-react'
+import { defaultFilters, maxBeatmaps, parseBeatmapIds } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RangeFilter } from './RangeFilter'
 import type { RangeFilterConfig } from './RangeFilter'
@@ -16,6 +16,7 @@ type RecommendFormProps = {
   isLoading: boolean
   onRangeChange: (values: RecommendFormValues) => void
   onSelectChange: (values: RecommendFormValues) => void
+  onBeatmapsChange: (values: RecommendFormValues) => void
   onPasteSearch: (values: RecommendFormValues) => void
   onReset: (values: RecommendFormValues) => void
 }
@@ -147,16 +148,94 @@ const statusOptions = [
   { value: 'unranked', label: 'Unranked' },
 ] as const
 
-export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, onPasteSearch, onReset }: RecommendFormProps) {
+export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, onBeatmapsChange, onPasteSearch, onReset }: RecommendFormProps) {
   const [resetAnimation, setResetAnimation] = useState(0)
+  const [beatmapDraft, setBeatmapDraft] = useState('')
+  const [beatmapInputError, setBeatmapInputError] = useState<string | null>(null)
+  const beatmapTokensRef = useRef<HTMLSpanElement>(null)
   const { values, isSubmitting } = useStore(form.store, (state) => ({
     values: state.values,
     isSubmitting: state.isSubmitting,
   }))
   const submitDisabled = isLoading || isSubmitting
 
+  function addBeatmaps(value: string, append: boolean) {
+    const pasted = parseBeatmapIds(value)
+    if (!pasted) {
+      return null
+    }
+    const current = append ? parseBeatmapIds(form.getFieldValue('beatmap')) ?? [] : []
+    const ids = [...new Set([...current, ...pasted])]
+    if (ids.length > maxBeatmaps) {
+      setBeatmapInputError(`Use up to ${maxBeatmaps} beatmaps.`)
+      return false
+    }
+    const beatmap = ids.join(',')
+    const nextValues = { ...form.state.values, beatmap }
+    form.setFieldValue('beatmap', beatmap, { dontValidate: true })
+    setBeatmapDraft('')
+    setBeatmapInputError(null)
+    window.requestAnimationFrame(() => {
+      const tokens = beatmapTokensRef.current
+      if (tokens) {
+        tokens.scrollLeft = tokens.scrollWidth
+      }
+    })
+    return nextValues
+  }
+
+  function searchPastedBeatmaps(value: string, append: boolean) {
+    const nextValues = addBeatmaps(value, append)
+    if (nextValues) {
+      onPasteSearch(nextValues)
+    }
+    return nextValues !== null
+  }
+
+  function commitBeatmapDraft() {
+    if (!beatmapDraft.trim()) {
+      return true
+    }
+    const result = addBeatmaps(beatmapDraft, true)
+    if (result === null) {
+      setBeatmapInputError('Enter a beatmap ID or beatmap link.')
+      return false
+    }
+    return result !== false
+  }
+
+  function removeBeatmap(beatmapId: number) {
+    const ids = (parseBeatmapIds(form.getFieldValue('beatmap')) ?? []).filter((id) => id !== beatmapId)
+    const beatmap = ids.join(',')
+    const nextValues = { ...form.state.values, beatmap }
+    form.setFieldValue('beatmap', beatmap, { dontValidate: true })
+    setBeatmapInputError(null)
+    onBeatmapsChange(nextValues)
+  }
+
+  function removeLastBeatmap() {
+    const ids = parseBeatmapIds(form.getFieldValue('beatmap')) ?? []
+    if (!ids.length) {
+      return
+    }
+    const beatmap = ids.slice(0, -1).join(',')
+    const nextValues = { ...form.state.values, beatmap }
+    form.setFieldValue('beatmap', beatmap, { dontValidate: true })
+    setBeatmapInputError(null)
+    onBeatmapsChange(nextValues)
+  }
+
+  function updateBeatmapDraft(value: string) {
+    setBeatmapDraft(value)
+    if (beatmapInputError) {
+      setBeatmapInputError(null)
+    }
+  }
+
   function resetForm() {
     setResetAnimation((animation) => animation + 1)
+    setBeatmapDraft('')
+    setBeatmapInputError(null)
     const nextValues = { ...defaultFilters, beatmap: form.getFieldValue('beatmap') }
     form.reset(nextValues)
     onReset(nextValues)
@@ -168,19 +247,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
     onRangeChange({ ...form.state.values, [minField]: min, [maxField]: max })
   }
 
-  function searchPastedBeatmap(value: string) {
-    if (!parseBeatmapId(value)) {
-      return false
-    }
-
-    const beatmap = normalizeBeatmapInput(value)
-    const nextValues = { ...form.state.values, beatmap }
-    form.setFieldValue('beatmap', beatmap, { dontValidate: true })
-    onPasteSearch(nextValues)
-    return true
-  }
-
-  const handleWindowPaste = useEffectEvent((value: string) => searchPastedBeatmap(value))
+  const handleWindowPaste = useEffectEvent((value: string) => searchPastedBeatmaps(value, false))
 
   useEffect(() => {
     function pasteSearch(event: ClipboardEvent) {
@@ -210,7 +277,9 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
       className={styles['control-panel']}
       onSubmit={(event) => {
         event.preventDefault()
-        void form.handleSubmit()
+        if (commitBeatmapDraft()) {
+          void form.handleSubmit()
+        }
       }}
     >
       <div className={styles['primary-controls']}>
@@ -218,30 +287,58 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           <label className={styles['sr-only']} htmlFor="beatmap">Search</label>
           <form.Field name="beatmap">
             {(field) => {
-              const beatmapError = field.state.meta.errors[0]?.message
+              const beatmapError = beatmapInputError ?? field.state.meta.errors[0]?.message
+              const beatmapIds = parseBeatmapIds(field.state.value) ?? []
 
               return (
                 <span className={styles['input-with-status']}>
-                  <span className={styles['search-pill']}>
+                  <span className={styles['search-pill']} data-error={Boolean(beatmapError)}>
+                    {beatmapIds.length ? (
+                      <span ref={beatmapTokensRef} className={styles['beatmap-tokens']} role="list" aria-label="Source beatmaps">
+                        {beatmapIds.map((beatmapId) => (
+                          <span className={styles['beatmap-token']} role="listitem" key={beatmapId}>
+                            <span>{beatmapId}</span>
+                            <button type="button" onClick={() => removeBeatmap(beatmapId)} aria-label={`Remove beatmap ${beatmapId}`}>
+                              <X />
+                            </button>
+                          </span>
+                        ))}
+                      </span>
+                    ) : null}
                     <input
-                      required
                       id="beatmap"
                       name={field.name}
-                      value={field.state.value}
+                      value={beatmapDraft}
+                      inputMode="numeric"
+                      autoComplete="off"
                       aria-invalid={beatmapError ? 'true' : 'false'}
                       aria-describedby={beatmapError ? 'beatmap-error' : undefined}
                       data-error={Boolean(beatmapError)}
-                      onChange={(event) => field.handleChange(event.target.value)}
-                      onPaste={(event) => {
-                        if (searchPastedBeatmap(event.clipboardData.getData('text'))) {
+                      onChange={(event) => updateBeatmapDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Backspace' && !beatmapDraft) {
+                          removeLastBeatmap()
+                          return
+                        }
+                        if ((event.key === ' ' || event.key === ',') && beatmapDraft.trim()) {
+                          event.preventDefault()
+                          commitBeatmapDraft()
+                          return
+                        }
+                        if (event.key === 'Enter' && beatmapDraft.trim() && !commitBeatmapDraft()) {
                           event.preventDefault()
                         }
                       }}
-                      onBlur={(event) => {
-                        field.handleBlur()
-                        form.setFieldValue('beatmap', normalizeBeatmapInput(event.target.value), { dontValidate: true })
+                      onPaste={(event) => {
+                        if (searchPastedBeatmaps(event.clipboardData.getData('text'), true)) {
+                          event.preventDefault()
+                        }
                       }}
-                      placeholder="1872396 or https://osu.ppy.sh/beatmaps/1872396"
+                      onBlur={() => {
+                        field.handleBlur()
+                        commitBeatmapDraft()
+                      }}
+                      placeholder={beatmapIds.length ? '' : 'Beatmap ID or link, e.g. 2201460'}
                     />
                     <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
                       {submitDisabled ? <Loader className={styles['spinner-icon']} /> : <Search />}
