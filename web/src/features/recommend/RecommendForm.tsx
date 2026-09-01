@@ -56,6 +56,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
   {
     key: 'stars',
     label: 'Star rating',
+    defaultLabel: 'Stars',
     icon: <Star strokeWidth={3} />,
     minField: 'minSr',
     maxField: 'maxSr',
@@ -71,6 +72,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
     key: 'ar',
     label: 'Approach rate',
     triggerLabel: 'AR',
+    defaultLabel: '—',
     minField: 'minAr',
     maxField: 'maxAr',
     min: 0,
@@ -84,6 +86,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
     key: 'cs',
     label: 'Circle size',
     triggerLabel: 'CS',
+    defaultLabel: '—',
     minField: 'minCs',
     maxField: 'maxCs',
     min: 0,
@@ -96,6 +99,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
   {
     key: 'bpm',
     label: 'BPM',
+    defaultLabel: 'BPM',
     icon: <Metronome strokeWidth={3} />,
     minField: 'minBpm',
     maxField: 'maxBpm',
@@ -111,6 +115,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
   {
     key: 'length',
     label: 'Length',
+    defaultLabel: 'Length',
     icon: <Clock strokeWidth={3} />,
     minField: 'minLength',
     maxField: 'maxLength',
@@ -373,6 +378,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           <FilterSelect
             filterKey="date"
             label="Date window"
+            defaultLabel="Date"
             icon={<CalendarDays strokeWidth={3} />}
             value={values.dateWindow === 'all_time' ? '' : values.dateWindow}
             options={dateWindowOptions}
@@ -386,6 +392,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           <FilterSelect
             filterKey="status"
             label="Status"
+            defaultLabel="Status"
             icon={<Tag strokeWidth={3} />}
             value={values.status}
             options={statusOptions}
@@ -408,13 +415,14 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
 type FilterSelectProps = {
   filterKey: string
   label: string
+  defaultLabel: string
   icon: ReactNode
   value: string
   options: ReadonlyArray<{ value: string | null; label: string }>
   onValueChange: (value: string) => void
 }
 
-function FilterSelect({ filterKey, label, icon, value, options, onValueChange }: FilterSelectProps) {
+function FilterSelect({ filterKey, label, defaultLabel, icon, value, options, onValueChange }: FilterSelectProps) {
   return (
     <Select.Root
       items={options}
@@ -428,7 +436,9 @@ function FilterSelect({ filterKey, label, icon, value, options, onValueChange }:
         aria-label={label}
       >
         <span aria-hidden="true">{icon}</span>
-        <Select.Value className={styles['select-value']} />
+        <Select.Value className={styles['select-value']}>
+          {value ? options.find((option) => option.value === value)?.label : defaultLabel}
+        </Select.Value>
         <Select.Icon className={styles['select-icon']}>
           <ChevronDown />
         </Select.Icon>

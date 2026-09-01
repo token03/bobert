@@ -544,8 +544,18 @@
   width: 100%;
   height: 3px;
   border-radius: var(--radius-pill);
-  background: var(--border);
+  background: transparent;
   user-select: none;
+}
+
+.range-slider-track::before {
+  content: '';
+  position: absolute;
+  top: calc(50% - 1.5px);
+  left: 12px;
+  right: 12px;
+  border-radius: var(--radius-pill);
+  background: var(--border);
 }
 
 .range-slider-indicator {
@@ -586,6 +596,16 @@
   line-height: 1;
   font-variant-numeric: tabular-nums;
   margin-top: -2px;
+}
+
+.range-endpoints span:first-child {
+  margin-left: 12px;
+  translate: -50% 0;
+}
+
+.range-endpoints span:last-child {
+  margin-right: 12px;
+  translate: 50% 0;
 }
 
 .control-panel input[data-error='true'] {

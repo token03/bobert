@@ -9,6 +9,7 @@ export type RangeFilterConfig = {
   key: string
   label: string
   triggerLabel?: string
+  defaultLabel?: string
   icon?: ReactNode
   min: number
   max: number
@@ -54,10 +55,10 @@ function isFullRange(value: readonly number[], config: RangeFilterConfig) {
   return value[0] === config.min && value[1] === config.max
 }
 
-function formatRange(value: readonly number[], config: RangeFilterConfig) {
+function formatRange(value: readonly number[], config: RangeFilterConfig, emptyLabel = 'Any') {
   const [min, max] = value
   if (isFullRange(value, config)) {
-    return 'Any'
+    return emptyLabel
   }
   if (min === max) {
     return config.formatValue(min)
@@ -122,7 +123,7 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
           <span className={styles['range-trigger-mark']} aria-hidden="true">
             {config.icon ?? config.triggerLabel}
           </span>
-          <span className={styles['range-trigger-value']}>{formatRange(displayedValue, config)}</span>
+          <span className={styles['range-trigger-value']}>{formatRange(displayedValue, config, config.defaultLabel)}</span>
           {!active ? <ChevronDown className={styles['range-trigger-chevron']} aria-hidden="true" /> : null}
         </Popover.Trigger>
         {active ? (
