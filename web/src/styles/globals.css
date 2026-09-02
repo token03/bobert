@@ -21,6 +21,13 @@ select {
   font: inherit;
 }
 
+svg {
+  stroke: currentColor;
+  stroke-width: 6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
 h1,
 h2,
 p {

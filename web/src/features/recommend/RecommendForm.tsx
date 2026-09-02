@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import { Select } from '@base-ui/react/select'
 import { useStore } from '@tanstack/react-form'
-import { CalendarDays, Check, ChevronDown, Clock, Loader, Metronome, RotateCcw, Search, Star, Tag, X, XCircle } from 'lucide-react'
+import { ArrowCounterClockwise, CalendarDots, CaretDown, Check, Clock, MagnifyingGlass, Metronome, Spinner, Star, Tag, X, XCircle } from '@phosphor-icons/react'
 import { defaultFilters, maxBeatmaps, parseBeatmapIds } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RangeFilter } from './RangeFilter'
@@ -57,7 +57,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
     key: 'stars',
     label: 'Star rating',
     defaultLabel: 'Stars',
-    icon: <Star strokeWidth={3} />,
+    icon: <Star />,
     minField: 'minSr',
     maxField: 'maxSr',
     min: 0,
@@ -100,7 +100,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
     key: 'bpm',
     label: 'BPM',
     defaultLabel: 'BPM',
-    icon: <Metronome strokeWidth={3} />,
+    icon: <Metronome />,
     minField: 'minBpm',
     maxField: 'maxBpm',
     min: 100,
@@ -116,7 +116,7 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
     key: 'length',
     label: 'Length',
     defaultLabel: 'Length',
-    icon: <Clock strokeWidth={3} />,
+    icon: <Clock />,
     minField: 'minLength',
     maxField: 'maxLength',
     min: 0,
@@ -352,7 +352,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
                       placeholder={beatmapIds.length ? '' : 'Beatmap ID, or paste a link'}
                     />
                     <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
-                      {submitDisabled ? <Loader className={styles['spinner-icon']} /> : <Search />}
+                      {submitDisabled ? <Spinner className={styles['spinner-icon']} /> : <MagnifyingGlass />}
                       <span className={styles['sr-only']}>Recommend</span>
                     </button>
                   </span>
@@ -385,7 +385,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
             filterKey="date"
             label="Date window"
             defaultLabel="Date"
-            icon={<CalendarDays strokeWidth={3} />}
+            icon={<CalendarDots />}
             value={values.dateWindow === 'all_time' ? '' : values.dateWindow}
             options={dateWindowOptions}
             onValueChange={(value) => {
@@ -399,7 +399,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
             filterKey="status"
             label="Status"
             defaultLabel="Status"
-            icon={<Tag strokeWidth={3} />}
+            icon={<Tag />}
             value={values.status}
             options={statusOptions}
             onValueChange={(status) => {
@@ -409,7 +409,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
           />
 
           <button className={styles['ghost-button']} data-filter="reset" type="button" onClick={resetForm}>
-            <RotateCcw key={resetAnimation} data-reset-animate={resetAnimation > 0 || undefined} />
+            <ArrowCounterClockwise key={resetAnimation} data-reset-animate={resetAnimation > 0 || undefined} />
             <span className={styles['sr-only']}>Reset</span>
           </button>
         </div>
@@ -446,7 +446,7 @@ function FilterSelect({ filterKey, label, defaultLabel, icon, value, options, on
           {value ? options.find((option) => option.value === value)?.label : defaultLabel}
         </Select.Value>
         <Select.Icon className={styles['select-icon']}>
-          <ChevronDown />
+          <CaretDown />
         </Select.Icon>
       </Select.Trigger>
       <Select.Portal>

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import { Slider } from '@base-ui/react/slider'
-import { ChevronDown, X } from 'lucide-react'
+import { CaretDown, X } from '@phosphor-icons/react'
 import styles from './RecommendForm.module.css'
 
 export type RangeFilterConfig = {
@@ -124,7 +124,7 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
             {config.icon ?? config.triggerLabel}
           </span>
           <span className={styles['range-trigger-value']}>{formatRange(displayedValue, config, config.defaultLabel)}</span>
-          {!active ? <ChevronDown className={styles['range-trigger-chevron']} aria-hidden="true" /> : null}
+          {!active ? <CaretDown className={styles['range-trigger-chevron']} aria-hidden="true" /> : null}
         </Popover.Trigger>
         {active ? (
           <button className={styles['range-trigger-clear']} type="button" onClick={clear} aria-label={`Clear ${config.label} filter`}>

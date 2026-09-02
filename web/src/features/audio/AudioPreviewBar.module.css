@@ -71,10 +71,7 @@
 .audio-control-button svg {
   width: 13px;
   height: 13px;
-  fill: none;
-  stroke: currentColor;
 }
-
 .audio-pill-main {
   display: grid;
   flex: 2 1 0;
@@ -155,10 +152,6 @@
   width: 100%;
 }
 
-svg.filled-icon {
-  fill: currentColor;
-  stroke: currentColor;
-}
 @media (max-width: 760px) {
   .audio-pill {
     right: var(--space-xl);

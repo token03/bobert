@@ -1,4 +1,4 @@
-import { Pause, Play, Volume2, VolumeX } from 'lucide-react'
+import { Pause, Play, SpeakerHigh, SpeakerX } from '@phosphor-icons/react'
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
@@ -71,7 +71,7 @@ export function AudioPreviewBar({
       onFocus={onPointerDown}
     >
       <button type="button" className={styles['audio-control-button']} onClick={onTogglePlay} aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>
-        {isPlaying ? <Pause className={styles['filled-icon']} /> : <Play className={styles['filled-icon']} />}
+        {isPlaying ? <Pause /> : <Play />}
       </button>
 
       <div className={styles['audio-pill-main']}>
@@ -95,7 +95,7 @@ export function AudioPreviewBar({
 
       <div className={styles['audio-volume']}>
         <button type="button" className={styles['audio-control-button']} onClick={onToggleMuted} aria-label={muted ? 'Unmute preview' : 'Mute preview'}>
-          {muted || volume === 0 ? <VolumeX /> : <Volume2 />}
+          {muted || volume === 0 ? <SpeakerX /> : <SpeakerHigh />}
         </button>
         <input
           type="range"

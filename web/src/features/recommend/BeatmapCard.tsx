@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Download, Metronome, Pause, Play, Search, Star } from 'lucide-react'
+import { Check, Clock, Copy, DownloadSimple, Metronome, Pause, Play, MagnifyingGlass, Star } from '@phosphor-icons/react'
 import { useState } from 'react'
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { displayArtist, displayTitle, formatFixedNumber, formatLength, formatMatch, formatNumber, statusLabel } from '../../shared/format'
@@ -184,7 +184,7 @@ function BeatmapCover({
       >
         <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onError={(event) => { event.currentTarget.hidden = true }} />
         <span className={styles['cover-play-overlay']} aria-hidden="true">
-          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause className={styles['filled-icon']} /> : <Play className={styles['filled-icon']} />}</span>
+          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause /> : <Play />}</span>
         </span>
       </button>
     )
@@ -208,7 +208,7 @@ function BeatmapCover({
       {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={coverUrl(beatmap.beatmapset_id)} alt="" loading="lazy" decoding="async" onLoad={(event) => { event.currentTarget.dataset.loaded = 'true'; event.currentTarget.dataset.revealing = 'true' }} onAnimationEnd={(event) => { delete event.currentTarget.dataset.revealing }} onError={(event) => { event.currentTarget.hidden = true }} /> : null}
       {hasPreview ? (
         <span className={styles['cover-play-overlay']} aria-hidden="true">
-          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause className={styles['filled-icon']} /> : <Play className={styles['filled-icon']} />}</span>
+          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause /> : <Play />}</span>
         </span>
       ) : null}
     </button>
@@ -234,9 +234,9 @@ function BeatmapStats({ beatmap, variant = 'result', actions }: { beatmap: Beatm
     <div className={styles['stat-strip']}>
       {variant === 'result' ? <div className={styles['result-stat-separator']} aria-hidden="true" /> : null}
       <div className={`${styles['stat-row']} ${styles['stat-row-main']}`}>
-        <Stat className={styles['stat-item']} label={<Star aria-label="Star" strokeWidth={2.5} />} value={formatFixedNumber(beatmap.stars, 2)} featured />
-        <Stat className={styles['stat-item']} label={<Clock aria-label="Length" strokeWidth={2.5} />} value={formatLength(beatmap.total_length)} featured />
-        <Stat className={styles['stat-item']} label={<Metronome aria-label="BPM" strokeWidth={2.5} />} value={formatNumber(beatmap.bpm, 0)} featured />
+        <Stat className={styles['stat-item']} label={<Star aria-label="Star" />} value={formatFixedNumber(beatmap.stars, 2)} featured />
+        <Stat className={styles['stat-item']} label={<Clock aria-label="Length" />} value={formatLength(beatmap.total_length)} featured />
+        <Stat className={styles['stat-item']} label={<Metronome aria-label="BPM" />} value={formatNumber(beatmap.bpm, 0)} featured />
       </div>
       <div className={styles['stat-side']}>
         {variant === 'source' ? <div className={styles['source-stat-separator']} aria-hidden="true" /> : null}
@@ -290,7 +290,7 @@ function CardActions({
           aria-label="Search similar"
           title="Search similar"
         >
-          <Search />
+          <MagnifyingGlass />
         </button>
       ) : null}
       <button
@@ -310,7 +310,7 @@ function CardActions({
         <Check className={styles['copy-check-icon']} />
       </button>
       <button type="button" onClick={(event) => handleActionClick(event, () => window.location.assign(`osu://b/${beatmap.beatmap_id}`))} aria-label="Open beatmap in osu!" title="Open in osu!">
-        <Download />
+        <DownloadSimple />
       </button>
     </div>
   )

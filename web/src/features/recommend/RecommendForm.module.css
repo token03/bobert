@@ -118,8 +118,6 @@
 .select-field > span:first-child svg {
   width: var(--icon-sm);
   height: var(--icon-sm);
-  fill: none;
-  stroke: currentColor;
 }
 
 .input-with-status {
@@ -311,8 +309,6 @@
 .select-icon svg {
   width: 12px;
   height: 12px;
-  fill: none;
-  stroke: currentColor;
 }
 
 .select-positioner {
@@ -382,8 +378,6 @@
 .select-item-indicator svg {
   width: 13px;
   height: 13px;
-  fill: none;
-  stroke: currentColor;
 }
 
 .search-pill input,
@@ -645,8 +639,6 @@
 .field-error-icon svg {
   width: var(--icon-md);
   height: var(--icon-md);
-  fill: none;
-  stroke: currentColor;
 }
 
 .field-error-positioner {
@@ -691,8 +683,6 @@
 .ghost-button svg {
   width: 18px;
   height: 18px;
-  fill: none;
-  stroke: currentColor;
 }
 
 .primary-button {
@@ -732,7 +722,7 @@
 }
 
 .ghost-button svg[data-reset-animate] {
-  animation: reset-spin 520ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: reset-spin 600ms cubic-bezier(0.22, 1, 0.36, 1);
   transform-origin: center;
 }
 
@@ -747,12 +737,12 @@
 }
 
 @keyframes reset-spin {
-  20% {
-    rotate: -24deg;
+  from {
+    rotate: 0deg;
   }
 
   to {
-    rotate: 360deg;
+    rotate: -360deg;
   }
 }
 @media (max-width: 1500px) {
