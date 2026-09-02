@@ -69,8 +69,9 @@
 }
 
 .audio-control-button svg {
-  width: 13px;
-  height: 13px;
+  width: 11px;
+  height: 11px;
+  opacity: 0.85;
 }
 .audio-pill-main {
   display: grid;

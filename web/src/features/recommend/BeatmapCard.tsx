@@ -184,7 +184,7 @@ function BeatmapCover({
       >
         <img key={beatmap.beatmapset_id} src={cardCoverUrl(beatmap.beatmapset_id)} alt="" onError={(event) => { event.currentTarget.hidden = true }} />
         <span className={styles['cover-play-overlay']} aria-hidden="true">
-          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause /> : <Play />}</span>
+          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause weight="fill" /> : <Play weight="fill" />}</span>
         </span>
       </button>
     )
@@ -208,7 +208,7 @@ function BeatmapCover({
       {beatmap.beatmapset_id ? <img key={beatmap.beatmapset_id} src={coverUrl(beatmap.beatmapset_id)} alt="" loading="lazy" decoding="async" onLoad={(event) => { event.currentTarget.dataset.loaded = 'true'; event.currentTarget.dataset.revealing = 'true' }} onAnimationEnd={(event) => { delete event.currentTarget.dataset.revealing }} onError={(event) => { event.currentTarget.hidden = true }} /> : null}
       {hasPreview ? (
         <span className={styles['cover-play-overlay']} aria-hidden="true">
-          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause /> : <Play />}</span>
+          <span className={styles['cover-play-button']}>{isCoverActive ? <Pause weight="fill" /> : <Play weight="fill" />}</span>
         </span>
       ) : null}
     </button>
