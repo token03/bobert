@@ -101,8 +101,8 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
     commit([sliderMin, sliderMax])
   }
 
-  const edgeMin = `${config.formatValue(config.min)}${config.overflowMin ? '−' : ''}`
-  const edgeMax = `${config.formatValue(config.max)}${config.overflowMax ? '+' : ''}`
+  const currentMin = `${config.formatValue(actualValue[0])}${config.overflowMin && actualValue[0] === config.min ? '−' : ''}`
+  const currentMax = `${config.formatValue(actualValue[1])}${config.overflowMax && actualValue[1] === config.max ? '+' : ''}`
 
   return (
     <Popover.Root
@@ -138,7 +138,7 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
           className={styles['range-popover-positioner']}
           positionMethod="fixed"
           sideOffset={3}
-          align="start"
+          align="center"
           collisionAvoidance={{ side: 'none', align: 'shift' }}
         >
           <Popover.Popup className={styles['range-popover']}>
@@ -146,13 +146,14 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
 
             <Slider.Root
               className={styles['range-slider']}
+              data-active={active || undefined}
               value={value}
               min={sliderMin}
               max={sliderMax}
               step={config.sliderStep ?? config.step}
               largeStep={config.sliderLargeStep ?? config.largeStep}
               thumbCollisionBehavior="none"
-              thumbAlignment="edge"
+              thumbAlignment="center"
               onValueChange={setValue}
               onValueCommitted={commit}
             >
@@ -167,7 +168,9 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
                       const actual = fromSliderValue(thumbValue, config)
                       return config.formatAriaValue(actual, config.overflowMin === true && actual === config.min ? 'lower' : null)
                     }}
-                  />
+                  >
+                    <span className={styles['range-thumb-value']} aria-hidden="true">{currentMin}</span>
+                  </Slider.Thumb>
                   <Slider.Thumb
                     className={styles['range-slider-thumb']}
                     index={1}
@@ -176,15 +179,12 @@ export function RangeFilter({ config, minValue, maxValue, onValueCommit }: Range
                       const actual = fromSliderValue(thumbValue, config)
                       return config.formatAriaValue(actual, config.overflowMax === true && actual === config.max ? 'higher' : null)
                     }}
-                  />
+                  >
+                    <span className={styles['range-thumb-value']} aria-hidden="true">{currentMax}</span>
+                  </Slider.Thumb>
                 </Slider.Track>
               </Slider.Control>
             </Slider.Root>
-
-            <div className={styles['range-endpoints']} aria-hidden="true">
-              <span>{edgeMin}</span>
-              <span>{edgeMax}</span>
-            </div>
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>
