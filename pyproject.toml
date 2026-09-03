@@ -42,6 +42,7 @@ dependencies = [
 [project.scripts]
 deploy = "scripts.deploy:main"
 pretrain = "scripts.model.pretrain:main"
+adapt = "scripts.model.adapt:main"
 embed = "scripts.model.embed:main"
 evaluate = "scripts.evaluation.run:main"
 recommend = "scripts.evaluation.recommend:main"

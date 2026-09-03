@@ -1,11 +1,14 @@
-from pathlib import Path
+from collections.abc import Sequence
 from dataclasses import dataclass
-from omegaconf import DictConfig
+from pathlib import Path
+from typing import Any, Self
+
 import numpy as np
 import torch
-import torch.nn as nn
-from typing import Any, Dict, Sequence, Type, TypeVar
+import torch.nn.functional as F
+from omegaconf import DictConfig
 from rotary_embedding_torch import RotaryEmbedding
+from torch import nn
 
 from . import STRAIN_COLUMNS
 from .components import (
@@ -18,9 +21,6 @@ from .components import (
 )
 from .features import VectorStats, build_beatmap_tensor, normalize
 from .osu import parse_osu_bytes
-
-
-T = TypeVar("T", bound="BobertEncoder")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,23 @@ class EmbeddingTransform:
         return pooled[0] if single else pooled
 
 
+class EmbeddingAdapter(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        nn.init.eye_(self.proj.weight)
+
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        return F.normalize(self.proj(embeddings), dim=-1)
+
+    @torch.inference_mode()
+    def transform(self, embeddings: np.ndarray) -> np.ndarray:
+        values = torch.as_tensor(
+            embeddings, device=self.proj.weight.device, dtype=self.proj.weight.dtype
+        )
+        return self(values).float().cpu().numpy()
+
+
 class BobertEncoder(nn.Module):
     def __init__(
         self,
@@ -62,6 +79,7 @@ class BobertEncoder(nn.Module):
         activation_checkpointing: bool,
         feature_token_dim: int,
         use_flash: bool,
+        adapter: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.d_model = d_model
@@ -80,6 +98,7 @@ class BobertEncoder(nn.Module):
             "dropout": dropout,
             "max_seq_len": max_seq_len,
             "feature_token_dim": feature_token_dim,
+            "adapter": adapter,
         }
 
         self.feature_tokenizer = HitObjectFeatureTokenizer(
@@ -104,6 +123,7 @@ class BobertEncoder(nn.Module):
             ]
         )
         self.final_norm = RMSNorm(d_model)
+        self.adapter = EmbeddingAdapter(d_model)
 
         self.rotary_emb = RotaryEmbedding(
             dim=d_model // n_heads, cache_max_seq_len=max_seq_len
@@ -111,7 +131,7 @@ class BobertEncoder(nn.Module):
         self.rotary_emb(torch.arange(max_seq_len), seq_len=max_seq_len)
 
     @classmethod
-    def from_config(cls: Type[T], config: DictConfig, *, use_flash: bool) -> T:
+    def from_config(cls, config: DictConfig, *, use_flash: bool) -> Self:
         model_config = config.model
         data_config = config.data
         runtime_config = config.runtime
@@ -133,8 +153,8 @@ class BobertEncoder(nn.Module):
 
     @classmethod
     def from_pretrained(
-        cls: Type[T], path: str | Path, device: torch.device
-    ) -> tuple[T, VectorStats]:
+        cls, path: str | Path, device: torch.device
+    ) -> tuple[Self, VectorStats]:
         artifact = torch.load(path, map_location="cpu", weights_only=True)
         model = cls(
             **artifact["model_args"],
@@ -162,7 +182,7 @@ class BobertEncoder(nn.Module):
             path,
         )
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
 
@@ -300,6 +320,14 @@ class BobertEncoder(nn.Module):
         )
         return embeddings
 
+    def adapt(self, embeddings: np.ndarray) -> np.ndarray:
+        return self.adapter.transform(embeddings)
+
+    def transform(
+        self, embeddings: np.ndarray, transform: EmbeddingTransform
+    ) -> np.ndarray:
+        return self.adapt(transform.apply(embeddings))
+
     def embed_osu_bytes(
         self,
         content: bytes,
@@ -363,7 +391,7 @@ class BobertForPretraining(nn.Module):
             StrainHead(bert.d_model, len(STRAIN_COLUMNS)),
         ).to(device)
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         return self.bert.get_summary()
 
     def forward_packed(

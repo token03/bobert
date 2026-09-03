@@ -454,7 +454,7 @@ class Runtime:
         vector = np.asarray(vector, dtype=np.float32)
         if vector.shape != self.transform.means.shape:
             raise ValueError(f"invalid embedding shape: {vector.shape}")
-        transformed = self.transform.apply(vector)
+        transformed = self.model.transform(vector, self.transform)
         if (
             transformed.shape != (self.embedding_dim,)
             or not np.isfinite(transformed).all()

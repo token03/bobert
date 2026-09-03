@@ -1,7 +1,8 @@
 import argparse
 import json
 import math
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,9 @@ from core.features import VectorStats, normalize
 from core.model import BobertEncoder, EmbeddingTransform
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
-RETRIEVAL_DENSITY_K = 100
-RETRIEVAL_LAMBDA = 1.0
+RETRIEVAL_DENSITY_K = 500
+RETRIEVAL_LAMBDA = 0.6
+RETRIEVAL_DENSITY_POWER = 3.0
 
 
 class ExportDataset(Dataset):
@@ -146,7 +148,7 @@ def bucket_batch_sampler(
     if not lengths:
         return None
 
-    mean_len = int(round(sum(lengths) / len(lengths)))
+    mean_len = round(sum(lengths) / len(lengths))
     return LengthBucketBatchSampler(
         lengths,
         batch_size,
@@ -164,6 +166,33 @@ def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
         [pa.array(beatmap_ids, type=pa.int64()), embedding_column],
         names=["beatmap_id", "embedding"],
     )
+
+
+def write_embedding_file(
+    path: Path,
+    ids: np.ndarray,
+    embeddings: np.ndarray,
+    batch_size: int,
+    transform: Callable[[np.ndarray], np.ndarray],
+    quiet: bool = False,
+) -> None:
+    writer = None
+    try:
+        for start in tqdm(
+            range(0, len(embeddings), batch_size),
+            desc="Exporting",
+            disable=quiet,
+        ):
+            stop = min(start + batch_size, len(embeddings))
+            table = embedding_table(
+                ids[start:stop].tolist(), transform(embeddings[start:stop])
+            )
+            if writer is None:
+                writer = pq.ParquetWriter(path, table.schema)
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def index_embeddings(
@@ -187,7 +216,7 @@ def index_embeddings(
     embeddings = embeddings.astype(np.float32, copy=False)
     embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
     if len(embeddings) <= RETRIEVAL_DENSITY_K:
-        raise ValueError(f"At least {RETRIEVAL_DENSITY_K + 1} embeddings are required")
+        raise ValueError(f"density k must be between 1 and {len(embeddings) - 1}")
 
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -215,6 +244,12 @@ def index_embeddings(
                 .numpy()
             )
 
+    deviation = densities.std()
+    transformed = densities**RETRIEVAL_DENSITY_POWER
+    densities = (
+        transformed - transformed.mean()
+    ) / transformed.std() * deviation + densities.mean()
+
     temporary = path.with_name(f".{path.name}.tmp")
     try:
         frame.with_columns(pl.Series("density", densities)).write_parquet(temporary)
@@ -227,6 +262,7 @@ def index_embeddings(
         "method": "csls",
         "density_k": RETRIEVAL_DENSITY_K,
         "lambda": RETRIEVAL_LAMBDA,
+        "density_power": RETRIEVAL_DENSITY_POWER,
     }
     metadata_path.write_text(
         json.dumps(metadata, indent=2) + "\n",
@@ -358,27 +394,21 @@ def export_embeddings(
         raise RuntimeError("No beatmaps loaded for export")
 
     transform = EmbeddingTransform((layer_total / saved_count).astype(np.float32))
-    writer = None
-    try:
-        for start in range(0, saved_count, flush_size):
-            stop = min(start + flush_size, saved_count)
-            table = embedding_table(
-                embedded_ids[start:stop].tolist(),
-                transform.apply(layer_embeddings[start:stop]),
-            )
-            if writer is None:
-                writer = pq.ParquetWriter(output_path, table.schema)
-            writer.write_table(table)
-    finally:
-        if writer is not None:
-            writer.close()
+    write_embedding_file(
+        output_path,
+        embedded_ids[:saved_count],
+        layer_embeddings[:saved_count],
+        flush_size,
+        lambda values: model.transform(values, transform),
+        quiet,
+    )
 
     metadata_path = output_path.with_suffix(".json")
     metadata_path.write_text(
         json.dumps(
             {
                 "version": 2,
-                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "generated_at": datetime.now(UTC).isoformat(),
                 "model": str(model_path),
                 "dataset": str(dataset_dir),
                 "min_sr": min_sr,
@@ -389,6 +419,7 @@ def export_embeddings(
                 "centered": True,
                 "layers": sorted(model.global_attention_layers),
                 "layer_means": transform.means.tolist(),
+                "adapter": model.model_args.get("adapter"),
             },
             indent=2,
         )
@@ -396,7 +427,12 @@ def export_embeddings(
         encoding="utf-8",
     )
     del layer_embeddings
-    index_embeddings(output_path, device_name, density_batch_size, quiet)
+    index_embeddings(
+        output_path,
+        device_name,
+        density_batch_size,
+        quiet,
+    )
     if not quiet:
         print(f"Saved {saved_count:,} embeddings to {output_path}")
 
@@ -420,30 +456,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
     parser.add_argument("--density-batch-size", type=int, default=1024)
-    parser.add_argument(
-        "--index",
-        action="store_true",
-        help="Add or refresh retrieval density without recomputing embeddings",
-    )
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-    if args.index:
-        if args.output:
-            output_path = resolve_path(args.output)
-        elif args.version:
-            output_path = RUNS_DIR / args.version / "embeddings.parquet"
-        elif args.model:
-            output_path = resolve_path(args.model).parent / "embeddings.parquet"
-        else:
-            parser.error("--index requires --version, --model, or --output")
-        index_embeddings(
-            output_path,
-            args.device,
-            args.density_batch_size,
-            args.quiet,
-        )
-        return
-
     model_path = find_model(args.model, args.version)
 
     export_embeddings(

@@ -5,7 +5,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import cache
 from pathlib import Path
 
@@ -50,7 +50,7 @@ DIFFICULTY_NEIGHBOR_K = 50
 DIFFICULTY_BATCH_SIZE = 256
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
-RETRIEVAL_RECALL_K = 50
+RETRIEVAL_RECALL_KS = (10, 20, 50)
 RETRIEVAL_HARD_NEGATIVE_K = 100
 RETRIEVAL_HUBNESS_K = 50
 
@@ -272,7 +272,7 @@ def evaluate_grouped_retrieval(
             )
 
     r_precisions = []
-    recalls = []
+    recalls = {cutoff: [] for cutoff in RETRIEVAL_RECALL_KS}
     query_weights = []
     local_margins = []
     neighbor_occurrences = np.zeros(len(candidate_ids), dtype=np.int64)
@@ -299,9 +299,10 @@ def evaluate_grouped_retrieval(
 
         hits_at_r = top_is_positive[:positive_count]
         r_precisions.append(float(hits_at_r.mean()))
-        recalls.append(
-            float(top_is_positive[:RETRIEVAL_RECALL_K].sum() / positive_count)
-        )
+        for cutoff in RETRIEVAL_RECALL_KS:
+            recalls[cutoff].append(
+                float(top_is_positive[:cutoff].sum() / positive_count)
+            )
 
         hard_negative_indices = top_indices[~top_is_positive][
             :RETRIEVAL_HARD_NEGATIVE_K
@@ -333,8 +334,13 @@ def evaluate_grouped_retrieval(
     )
 
     return {
+        "evaluation_id_coverage": len(covered) / len(eval_ids),
+        "evaluation_queries": float(len(positives_by_query)),
         "macro_r_precision": weighted_mean(r_precisions, query_weights),
-        f"macro_recall@{RETRIEVAL_RECALL_K}": weighted_mean(recalls, query_weights),
+        **{
+            f"macro_recall@{cutoff}": weighted_mean(values, query_weights)
+            for cutoff, values in recalls.items()
+        },
         "median_local_margin": float(np.median(local_margins))
         if local_margins
         else float("nan"),
@@ -977,8 +983,8 @@ def json_value(value):
     return value
 
 
-def save_eval_results(targets: list[TargetData]) -> None:
-    generated_at = datetime.now(timezone.utc).isoformat()
+def save_eval_results(targets: list[TargetData], filename: str = "eval.json") -> None:
+    generated_at = datetime.now(UTC).isoformat()
     for target in targets:
         if target.run_dir is None:
             continue
@@ -1000,11 +1006,16 @@ def save_eval_results(targets: list[TargetData]) -> None:
                 "targets": [item.name for item in targets],
                 "embeddings": str(target.path),
                 "centered": target.centered,
+                "retrieval": (
+                    {"method": "csls", "lambda": target.retrieval_lambda}
+                    if target.retrieval_lambda
+                    else {"method": "cosine"}
+                ),
                 "embedding_metadata": embedding_metadata,
                 "evaluations": evaluations,
             }
         )
-        output = target.run_dir / "eval.json"
+        output = target.run_dir / filename
         output.write_text(
             json.dumps(payload, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
@@ -1020,6 +1031,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "targets", nargs="+", help="Run versions or embedding paths, e.g. v7_ab graph"
     )
     parser.add_argument("--eval", default=str(DATA_DIR / "eval.csv"))
+    parser.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        help="Only run grouped retrieval",
+    )
     parser.add_argument(
         "--no-center",
         action="store_true",
@@ -1046,19 +1062,20 @@ def main() -> None:
     args = parse_args()
     EVAL_RESULTS.clear()
     targets = load_targets(args.targets, no_center=args.no_center)
-    evals = [
-        run_grouped_retrieval,
-        run_mapper_eval,
-        run_artist_eval,
-        run_genre_eval,
-        run_map_attribute_eval,
-        run_difficulty_evals,
-        run_collection_ngram_eval,
-        run_tournament_slot_eval,
-    ]
+    evals = [run_grouped_retrieval]
+    if not args.retrieval_only:
+        evals += [
+            run_mapper_eval,
+            run_artist_eval,
+            run_genre_eval,
+            run_map_attribute_eval,
+            run_difficulty_evals,
+            run_collection_ngram_eval,
+            run_tournament_slot_eval,
+        ]
     for run_eval in evals:
         run_eval(targets, args)
-    save_eval_results(targets)
+    save_eval_results(targets, "retrieval.json" if args.retrieval_only else "eval.json")
 
 
 if __name__ == "__main__":

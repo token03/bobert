@@ -152,7 +152,7 @@ def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = N
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
         embedding = ctx.embedder.embed_osu(osu_path)
         if ctx.embedding_transform is not None:
-            embedding = ctx.embedding_transform.apply(embedding)
+            embedding = ctx.embedder.model.transform(embedding, ctx.embedding_transform)
 
     ctx.cache[beatmap_id] = embedding
     return beatmap_id, embedding
