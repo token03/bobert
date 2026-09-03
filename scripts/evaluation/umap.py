@@ -15,11 +15,20 @@ from scripts.common.paths import (
 from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings
 
 EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
+STRAINS_PATH = DATA_DIR / "strains.parquet"
 OUTPUT_DIR = PROJECT_ROOT / "viz_data"
 MAPPER_OUTPUT_DIR = OUTPUT_DIR / "mappers"
 
 N_EXPORT_NEIGHBORS = 25
 UMAP_NEIGHBORS = 15
+UMAP_MIN_DIST = 0.0
+UMAP_METRIC = "cosine"
+UMAP_INIT = "random"
+UMAP_N_EPOCHS = 100
+UMAP_NEGATIVE_SAMPLE_RATE = 5
+UMAP_RANDOM_STATE = None
+STAR_VMIN = 0.0
+STAR_VMAX = 10.0
 
 
 def _resolve_path(path: str | Path) -> Path:
@@ -80,7 +89,13 @@ def _nearest_neighbors_gpu(matrix: np.ndarray, n_neighbors: int):
 
 def _umap_cpu(
     matrix: np.ndarray,
-    n_neighbors: int,
+    n_neighbors: int = UMAP_NEIGHBORS,
+    min_dist: float = UMAP_MIN_DIST,
+    metric: str = UMAP_METRIC,
+    init: str = UMAP_INIT,
+    n_epochs: int = UMAP_N_EPOCHS,
+    negative_sample_rate: int = UMAP_NEGATIVE_SAMPLE_RATE,
+    random_state: int | None = UMAP_RANDOM_STATE,
     precomputed_knn: tuple[np.ndarray, np.ndarray, None] | None = None,
 ):
     from umap import UMAP
@@ -88,16 +103,62 @@ def _umap_cpu(
     reducer = UMAP(
         n_components=2,
         n_neighbors=n_neighbors,
-        min_dist=0.0,
-        metric="cosine",
-        random_state=None,
-        init="random",
-        n_epochs=100,
-        negative_sample_rate=2,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=random_state,
+        init=init,
+        n_epochs=n_epochs,
+        negative_sample_rate=negative_sample_rate,
         low_memory=False,
         precomputed_knn=precomputed_knn,
     )
     return reducer.fit_transform(matrix)
+
+
+def _save_star_preview(
+    embedding_2d: np.ndarray,
+    beatmap_ids: np.ndarray,
+    preview_path: Path,
+    strains_path: Path = STRAINS_PATH,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    strains_path = _resolve_path(strains_path)
+    stars = pd.read_parquet(strains_path, columns=["beatmap_id", "stars"])
+    lookup = dict(zip(stars["beatmap_id"].to_numpy(), stars["stars"].to_numpy()))
+    values = np.array(
+        [float(lookup.get(int(beatmap_id), 0.0)) for beatmap_id in beatmap_ids],
+        dtype=np.float64,
+    )
+    clipped = np.clip(values, STAR_VMIN, STAR_VMAX)
+    order = np.argsort(clipped)
+    plt.figure(figsize=(10, 8))
+    sc = plt.scatter(
+        embedding_2d[order, 0],
+        embedding_2d[order, 1],
+        c=clipped[order],
+        cmap="turbo",
+        s=2,
+        alpha=0.6,
+        vmin=STAR_VMIN,
+        vmax=STAR_VMAX,
+        linewidths=0,
+        rasterized=True,
+    )
+    plt.colorbar(
+        sc, label=f"stars ({Path(strains_path).name}, {STAR_VMIN:g}-{STAR_VMAX:g})"
+    )
+    plt.xticks([])
+    plt.yticks([])
+    plt.tight_layout()
+    preview_path = _resolve_path(preview_path)
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(preview_path, dpi=150)
+    plt.close()
+    print(f"Preview saved to {preview_path}")
 
 
 def process(
@@ -111,6 +172,14 @@ def process(
     mapper: bool = False,
     n_export_neighbors: int = N_EXPORT_NEIGHBORS,
     umap_neighbors: int = UMAP_NEIGHBORS,
+    umap_min_dist: float = UMAP_MIN_DIST,
+    umap_metric: str = UMAP_METRIC,
+    umap_init: str = UMAP_INIT,
+    umap_epochs: int = UMAP_N_EPOCHS,
+    umap_neg_rate: int = UMAP_NEGATIVE_SAMPLE_RATE,
+    umap_seed: int | None = UMAP_RANDOM_STATE,
+    preview: Path | None = None,
+    skip_save: bool = False,
 ):
     print("Initializing...")
     embeddings_path = _resolve_path(embeddings_path)
@@ -199,6 +268,12 @@ def process(
         embedding_2d = _umap_cpu(
             matrix_cpu,
             umap_neighbors,
+            min_dist=umap_min_dist,
+            metric=umap_metric,
+            init=umap_init,
+            n_epochs=umap_epochs,
+            negative_sample_rate=umap_neg_rate,
+            random_state=umap_seed,
             precomputed_knn=(
                 kn_indices[:, :umap_neighbors],
                 kn_dists[:, :umap_neighbors],
@@ -216,7 +291,24 @@ def process(
         cpu_dists = cpu_dists[:, 1:]
 
         print("Running UMAP (CPU)...")
-        embedding_2d = _umap_cpu(matrix_cpu, umap_neighbors)
+        embedding_2d = _umap_cpu(
+            matrix_cpu,
+            umap_neighbors,
+            min_dist=umap_min_dist,
+            metric=umap_metric,
+            init=umap_init,
+            n_epochs=umap_epochs,
+            negative_sample_rate=umap_neg_rate,
+            random_state=umap_seed,
+        )
+
+    if preview is not None and not mapper:
+        _save_star_preview(embedding_2d, df["beatmap_id"].to_numpy(), preview)
+
+    if skip_save:
+        print("Skipping viz_data export (--skip-save).")
+        print("Done.")
+        return
 
     print("Preparing data for export...")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,6 +422,22 @@ def main() -> None:
     )
     parser.add_argument("--neighbors", type=int, default=N_EXPORT_NEIGHBORS)
     parser.add_argument("--umap-neighbors", type=int, default=UMAP_NEIGHBORS)
+    parser.add_argument("--umap-min-dist", type=float, default=UMAP_MIN_DIST)
+    parser.add_argument("--umap-metric", default=UMAP_METRIC)
+    parser.add_argument("--umap-init", default=UMAP_INIT)
+    parser.add_argument("--umap-epochs", type=int, default=UMAP_N_EPOCHS)
+    parser.add_argument("--umap-neg-rate", type=int, default=UMAP_NEGATIVE_SAMPLE_RATE)
+    parser.add_argument("--umap-seed", type=int, default=UMAP_RANDOM_STATE)
+    parser.add_argument(
+        "--preview",
+        default=None,
+        help="Optional PNG path for a star-gradient preview from strains.parquet",
+    )
+    parser.add_argument(
+        "--skip-save",
+        action="store_true",
+        help="Skip viz_data parquet export and only write the preview image",
+    )
     args = parser.parse_args()
 
     process(
@@ -349,6 +457,14 @@ def main() -> None:
         mapper=args.mapper,
         n_export_neighbors=args.neighbors,
         umap_neighbors=args.umap_neighbors,
+        umap_min_dist=args.umap_min_dist,
+        umap_metric=args.umap_metric,
+        umap_init=args.umap_init,
+        umap_epochs=args.umap_epochs,
+        umap_neg_rate=args.umap_neg_rate,
+        umap_seed=args.umap_seed,
+        preview=Path(args.preview) if args.preview else None,
+        skip_save=args.skip_save,
     )
 
 
