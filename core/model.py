@@ -196,6 +196,12 @@ class BobertEncoder(nn.Module):
     def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
         return self.feature_tokenizer(x)
 
+    def compile_encoder(self, mode: str = "default") -> None:
+        self.embed_sequences = torch.compile(
+            self.embed_sequences, mode=mode, dynamic=False
+        )
+        self._encode = torch.compile(self._encode, mode=mode, dynamic=False)
+
     def encode(
         self,
         packed_embeddings: torch.Tensor,
@@ -257,12 +263,16 @@ class BobertEncoder(nn.Module):
             rotary_freqs = (all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin())
         else:
             total_tokens = packed_embeddings.shape[0]
-            token_idx = torch.arange(total_tokens, device=packed_embeddings.device)
-            batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
-            pos = token_idx - cu_seqlens[batch_ids]
-            rotary_freqs = all_freqs[pos].view(
-                total_tokens, 1, self.d_model // self.n_heads
-            )
+            if cu_seqlens.numel() == 2:
+                freqs = all_freqs[:total_tokens].unsqueeze(1)
+            else:
+                token_idx = torch.arange(total_tokens, device=packed_embeddings.device)
+                batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
+                pos = token_idx - cu_seqlens[batch_ids]
+                freqs = all_freqs[pos].view(
+                    total_tokens, 1, self.d_model // self.n_heads
+                )
+            rotary_freqs = (freqs.cos(), freqs.sin())
 
         for i, layer in enumerate(self.layers):
             packed_output = layer(
@@ -300,9 +310,11 @@ class BobertEncoder(nn.Module):
         packed_output: torch.Tensor,
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
+        if packed_output.device.type == "cpu" and cu_seqlens.numel() == 2:
+            return packed_output.mean(dim=0, keepdim=True, dtype=torch.float32)
         lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         pooled = torch.segment_reduce(
-            packed_output.float(), reduce="mean", lengths=lengths
+            packed_output.float(), reduce="mean", lengths=lengths, unsafe=True
         )
         return pooled.masked_fill(lengths[:, None] == 0, 0.0)
 
@@ -312,6 +324,7 @@ class BobertEncoder(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
     ) -> torch.Tensor:
+        torch._dynamo.mark_dynamic(packed_vectors, 0)
         packed_input = self.embed_sequences(packed_vectors)
         _, embeddings = self.encode_with_layer_embeddings(
             packed_input,

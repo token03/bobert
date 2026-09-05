@@ -1,10 +1,11 @@
 # components.py
+from functools import lru_cache
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from rotary_embedding_torch import apply_rotary_emb
+from rotary_embedding_torch.rotary_embedding_torch import rotate_half
 from torch.utils.checkpoint import checkpoint
 
 from .features import FEATURE_INFO
@@ -78,15 +79,15 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_freqs: torch.Tensor | Tuple[torch.Tensor, torch.Tensor],
+        rotary_freqs: Tuple[torch.Tensor, torch.Tensor],
     ):
         total_tokens, _ = x.shape
 
         qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
         q, k, v = qkv.unbind(dim=1)
+        cos, sin = rotary_freqs
 
         if self.use_flash:
-            cos, sin = rotary_freqs
             q = self.flash_rope(
                 q,
                 cos,
@@ -123,8 +124,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 window_size=window_size,
             )
         else:
-            q = apply_rotary_emb(rotary_freqs, q, seq_dim=0)
-            k = apply_rotary_emb(rotary_freqs, k, seq_dim=0)
+            q = (q * cos + rotate_half(q) * sin).to(q.dtype)
+            k = (k * cos + rotate_half(k) * sin).to(k.dtype)
             out = self._forward_torch(q, k, v, cu_seqlens)
         return self.wo(out.view(total_tokens, self.d_model))
 
@@ -134,17 +135,19 @@ class MultiHeadAttentionWithRoPE(nn.Module):
     def _from_sdpa_4d(self, x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return x.squeeze(0).transpose(0, 1).contiguous().to(dtype)
 
+    @staticmethod
+    @lru_cache(maxsize=32)
+    @torch.inference_mode(False)
     def _local_block_mask(
-        self,
-        q_start: int,
-        q_end: int,
-        kv_start: int,
-        kv_end: int,
+        q_len: int,
+        kv_len: int,
+        q_offset: int,
+        window: int,
         device: torch.device,
     ) -> torch.Tensor:
-        q_idx = torch.arange(q_start, q_end, device=device)
-        kv_idx = torch.arange(kv_start, kv_end, device=device)
-        mask = (q_idx[:, None] - kv_idx[None, :]).abs() <= self.local_window_size
+        q_idx = torch.arange(q_len, device=device) + q_offset
+        kv_idx = torch.arange(kv_len, device=device)
+        mask = (q_idx[:, None] - kv_idx[None, :]).abs() <= window
         return mask.unsqueeze(0).unsqueeze(0)
 
     def _forward_local_chunked_one(
@@ -163,10 +166,10 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             kv_start = max(0, q_start - window)
             kv_end = min(seq_len, q_end + window)
             mask = self._local_block_mask(
-                q_start,
-                q_end,
-                kv_start,
-                kv_end,
+                q_end - q_start,
+                kv_end - kv_start,
+                q_start - kv_start,
+                window,
                 q4.device,
             )
             out = F.scaled_dot_product_attention(
@@ -261,7 +264,7 @@ class EncoderLayer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        rotary_freqs: Optional[torch.Tensor | Tuple[torch.Tensor, torch.Tensor]] = None,
+        rotary_freqs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         cu_seqlens: torch.Tensor = None,
         max_seqlen: int = None,
     ) -> torch.Tensor:

@@ -25,17 +25,7 @@ def compile_encoder(model: nn.Module, config: DictConfig) -> None:
     if not config.runtime.compile_model:
         return
     print("Compiling BERT pre-training tokenizer and encoder with torch.compile...")
-    compile_mode = config.runtime.compile_mode
-    model.bert.embed_sequences = torch.compile(
-        model.bert.embed_sequences,
-        mode=compile_mode,
-        dynamic=False,
-    )
-    model.bert._encode = torch.compile(
-        model.bert._encode,
-        mode=compile_mode,
-        dynamic=False,
-    )
+    model.bert.compile_encoder(mode=config.runtime.compile_mode)
 
 
 def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor, metrics=None):

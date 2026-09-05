@@ -237,7 +237,7 @@ def index_embeddings(
                 torch.arange(start, stop, device=device),
             ] = -torch.inf
             densities[start:stop] = (
-                scores.topk(RETRIEVAL_DENSITY_K, dim=1)
+                scores.topk(RETRIEVAL_DENSITY_K, dim=1, sorted=False)
                 .values.float()
                 .mean(dim=1)
                 .cpu()
@@ -309,6 +309,11 @@ def export_embeddings(
             torch.arange(max_seq_len, device=device),
             seq_len=max_seq_len,
         )
+
+    if device.type == "cuda" and config.runtime.compile_model:
+        if not quiet:
+            print("Compiling embedding tokenizer and encoder with torch.compile...")
+        model.compile_encoder(mode=config.runtime.compile_mode)
 
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     output_path.parent.mkdir(parents=True, exist_ok=True)
