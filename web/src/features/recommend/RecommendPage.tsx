@@ -383,15 +383,34 @@ export function RecommendPage() {
                   <div className={`${cardStyles['beatmap-card']} ${styles['loading-result-card']}`} key={index} style={{ '--i': index } as CSSProperties} aria-hidden="true">
                     <div className={styles['loading-result-cover']} />
                     <div className={styles['loading-result-content']}>
-                      <div className={styles['loading-result-copy']}>
-                        <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
-                        <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
-                        <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
+                      <div className={styles['loading-result-main']}>
+                        <div className={styles['loading-result-summary']}>
+                          <div className={styles['loading-result-copy']}>
+                            <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
+                            <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
+                            <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
+                          </div>
+                          <div className={styles['loading-result-meta']}>
+                            <span className={`${styles['loading-result-line']} ${styles['loading-result-creator']}`} />
+                            <span className={`${styles['loading-result-line']} ${styles['loading-result-status']}`} />
+                          </div>
+                        </div>
                       </div>
                       <div className={styles['loading-result-stats']}>
-                        <span />
-                        <span />
-                        <span />
+                        <div className={styles['loading-result-separator']} aria-hidden="true" />
+                        <div className={styles['loading-result-main-col']}>
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                        <div className={styles['loading-result-side']}>
+                          <div className={styles['loading-result-sub-col']}>
+                            <span />
+                            <span />
+                            <span />
+                            <span />
+                          </div>
+                        </div>
                       </div>
                     </div>
                   </div>
