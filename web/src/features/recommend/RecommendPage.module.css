@@ -213,27 +213,14 @@
   position: relative;
 }
 
-.results-loading-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  border-radius: var(--radius-lg);
-  background: var(--overlay-loading);
-  pointer-events: auto;
-  animation:
-    loading-overlay-in 260ms ease-out,
-    loading-overlay-pulse 2.4s ease-in-out 260ms infinite alternate;
+.results-exiting {
+  pointer-events: none;
+  animation: results-out 140ms ease-out forwards;
 }
 
-@keyframes loading-overlay-in {
-  from {
-    opacity: 0;
-  }
-}
-
-@keyframes loading-overlay-pulse {
+@keyframes results-out {
   to {
-    opacity: 0.78;
+    opacity: 0;
   }
 }
 
@@ -311,6 +298,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .results-exiting {
+    animation-duration: 1ms;
+  }
+
   .source-tab::after {
     transition: none;
   }
@@ -319,7 +310,6 @@
   .loading-result-line,
   .loading-result-stats span,
   .source-card-placeholder,
-  .results-loading-overlay,
   .loading-result-list {
     animation: none;
   }

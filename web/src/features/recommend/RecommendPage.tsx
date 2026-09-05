@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Tabs } from '@base-ui/react/tabs'
 import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -98,6 +98,9 @@ export function RecommendPage() {
   const search = useSearch({ from: '/recommendations' })
   const navigate = useNavigate({ from: '/recommendations' })
   const queryClient = useQueryClient()
+  const resultsRef = useRef<HTMLDivElement>(null)
+  const [outgoingResults, setOutgoingResults] = useState<BeatmapMetadata[] | null>(null)
+  const [resultsHeight, setResultsHeight] = useState(0)
   const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
   const [sourceView, setSourceView] = useState<{ beatmapId: number | null; direction: SweepDirection; animate: boolean }>({ beatmapId: null, direction: 'left', animate: false })
   const form = useRecommendForm(search, runManualRecommend)
@@ -133,6 +136,11 @@ export function RecommendPage() {
   }
 
   async function runRecommend(values: RecommendFormValues, historyMode: HistoryMode = 'push', shouldScroll = true) {
+    if (hasResults && coversReady && !isLoading) {
+      setResultsHeight(resultsRef.current?.getBoundingClientRect().height ?? 0)
+      setOutgoingResults(resultBeatmaps)
+    }
+
     const normalizedValues = {
       ...values,
       beatmap: normalizeBeatmapInput(values.beatmap),
@@ -310,18 +318,15 @@ export function RecommendPage() {
   }
 
   const resultsList = (beatmaps: BeatmapMetadata[]) => (
-    <div className={styles['result-list-wrap']} aria-busy={isLoading}>
-      <ResultsList
-        beatmaps={beatmaps}
-        onCopy={copyBeatmapId}
-        onSearch={searchBeatmap}
-        isLoading={isLoading}
-        onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
-        activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
-        isPreviewPlaying={audio.isPlaying}
-      />
-      {isLoading ? <div className={styles['results-loading-overlay']} aria-hidden="true" /> : null}
-    </div>
+    <ResultsList
+      beatmaps={beatmaps}
+      onCopy={copyBeatmapId}
+      onSearch={searchBeatmap}
+      isLoading={isLoading}
+      onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
+      activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
+      isPreviewPlaying={audio.isPlaying}
+    />
   )
   const sourceBeatmap = sourceSwap ? sourceSwap.beatmap : selectedSource
   const sourceSweepPhase = sourceSwap?.phase === 'in' || sourceSwap?.phase === 'out' ? sourceSwap.phase : undefined
@@ -359,31 +364,48 @@ export function RecommendPage() {
             />
           ) : showSourcePlaceholder ? <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${cardStyles['source-card-placeholder']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true" /> : null}
           {recommendForm}
-          {hasResults && coversReady ? (
-            resultsList(resultBeatmaps)
-          ) : (response !== null || showDefaultResults) && !hasResults ? (
-            <p className={styles['empty-results']}>No results found</p>
-          ) : showLoadingRecommendations ? (
-            <div className={`${listStyles['result-list']} ${styles['loading-result-list']}`} role="status" aria-label="Loading recommendations">
-              {loadingCards.map((index) => (
-                <div className={`${cardStyles['beatmap-card']} ${styles['loading-result-card']}`} key={index} style={{ '--i': index } as CSSProperties} aria-hidden="true">
-                  <div className={styles['loading-result-cover']} />
-                  <div className={styles['loading-result-content']}>
-                    <div className={styles['loading-result-copy']}>
-                      <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
-                      <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
-                      <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
-                    </div>
-                    <div className={styles['loading-result-stats']}>
-                      <span />
-                      <span />
-                      <span />
+          <div
+            ref={resultsRef}
+            className={`${styles['result-list-wrap']}${outgoingResults ? ` ${styles['results-exiting']}` : ''}`}
+            aria-busy={showLoadingRecommendations || outgoingResults !== null}
+            inert={outgoingResults !== null}
+            style={outgoingResults || showLoadingRecommendations ? { minHeight: resultsHeight } : undefined}
+            onAnimationEnd={(event) => {
+              if (event.target === event.currentTarget && outgoingResults) {
+                setOutgoingResults(null)
+              }
+            }}
+          >
+            {outgoingResults ? (
+              resultsList(outgoingResults)
+            ) : showLoadingRecommendations ? (
+              <div className={`${listStyles['result-list']} ${styles['loading-result-list']}`} role="status" aria-label="Loading recommendations">
+                {loadingCards.map((index) => (
+                  <div className={`${cardStyles['beatmap-card']} ${styles['loading-result-card']}`} key={index} style={{ '--i': index } as CSSProperties} aria-hidden="true">
+                    <div className={styles['loading-result-cover']} />
+                    <div className={styles['loading-result-content']}>
+                      <div className={styles['loading-result-copy']}>
+                        <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
+                        <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
+                        <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
+                      </div>
+                      <div className={styles['loading-result-stats']}>
+                        <span />
+                        <span />
+                        <span />
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
+                ))}
+              </div>
+            ) : hasResults ? (
+              resultsList(resultBeatmaps)
+            ) : requestError ? (
+              <p className={styles['empty-results']} role="alert">Could not load recommendations. Please try again.</p>
+            ) : (response !== null || showDefaultResults) ? (
+              <p className={styles['empty-results']}>No results found</p>
+            ) : null}
+          </div>
         </div>
       </section>
 
