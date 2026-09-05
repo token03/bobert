@@ -181,11 +181,10 @@ export function RecommendPage() {
 
   async function updateBeatmaps(values: RecommendFormValues) {
     setSourceSwap(null)
-    if (parseBeatmapIds(values.beatmap)) {
-      await runRecommend(values, 'push', false)
+    if (!parseBeatmapIds(values.beatmap)) {
       return
     }
-    await navigate({ search: values })
+    await runRecommend(values, 'push', false)
   }
 
   async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<void>, preloadCover = true) {

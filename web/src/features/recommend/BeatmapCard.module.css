@@ -155,7 +155,8 @@
 
 .beatmap-row {
   grid-template-columns: calc(var(--cover-size) + var(--card-overlap)) minmax(0, 1fr);
-  min-height: var(--cover-size-mobile);
+  height: var(--result-card-height);
+  min-height: 0;
 }
 
 .beatmap-row:hover {

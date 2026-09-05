@@ -140,9 +140,9 @@
 
 .loading-result-card {
   grid-template-columns: calc(var(--cover-size) + var(--card-overlap)) minmax(0, 1fr);
-  min-height: 106px;
+  height: var(--result-card-height);
+  min-height: 0;
   content-visibility: auto;
-  contain-intrinsic-block-size: auto 106px;
 }
 
 .loading-result-cover {
@@ -245,8 +245,6 @@
 
   .loading-result-card {
     grid-template-columns: calc(var(--cover-size-tablet) + var(--card-overlap)) minmax(0, 1fr);
-    min-height: 183px;
-    contain-intrinsic-block-size: auto 183px;
   }
 
   .loading-result-content {
@@ -273,12 +271,6 @@
   .source-card-placeholder {
     min-height: 204px;
   }
-  .loading-result-card {
-    grid-template-columns: 1fr;
-    min-height: 190px;
-    contain-intrinsic-block-size: auto 190px;
-  }
-
   .loading-result-cover {
     height: calc(var(--cover-size-mobile) + var(--card-overlap));
     min-height: 0;
