@@ -21,13 +21,14 @@ export const defaultFilters = {
   minHp: '0',
   maxHp: '10',
   status: '',
-  dateWindow: '' as const,
+  minDate: '',
+  maxDate: '',
   excludeSameSet: true,
 }
 
-const dateWindowSchema = z.union([
+const monthSchema = z.union([
   z.literal(''),
-  z.enum(['last_week', 'last_month', 'last_3_months', 'last_6_months', 'last_year', 'last_2_years', 'last_5_years', 'all_time']),
+  z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
 ])
 
 export const recommendFormSchema = z.object({
@@ -53,7 +54,8 @@ export const recommendFormSchema = z.object({
   minHp: z.string(),
   maxHp: z.string(),
   status: z.string(),
-  dateWindow: dateWindowSchema,
+  minDate: monthSchema,
+  maxDate: monthSchema,
   excludeSameSet: z.boolean(),
 })
 
@@ -93,10 +95,14 @@ export const recommendSearchSchema = z.object({
       '0': 'unranked',
     }[status] ?? status
   }, z.string()).catch(defaultFilters.status),
-  dateWindow: z.preprocess(
-    (value) => value === undefined || value === null ? defaultFilters.dateWindow : String(value),
-    dateWindowSchema,
-  ).catch(defaultFilters.dateWindow),
+  minDate: z.preprocess(
+    (value) => value === undefined || value === null ? defaultFilters.minDate : String(value),
+    monthSchema,
+  ).catch(defaultFilters.minDate),
+  maxDate: z.preprocess(
+    (value) => value === undefined || value === null ? defaultFilters.maxDate : String(value),
+    monthSchema,
+  ).catch(defaultFilters.maxDate),
   excludeSameSet: z.preprocess(
     (value) => value === undefined || value === null ? defaultFilters.excludeSameSet : value === true || value === 'true',
     z.boolean(),
@@ -116,7 +122,8 @@ export function buildRecommendRequest(values: RecommendFormValues) {
     min_drain: numericOrNull(values.minHp),
     max_drain: numericOrNull(values.maxHp),
     status: values.status || null,
-    date_window: values.dateWindow || null,
+    min_date: values.minDate || null,
+    max_date: values.maxDate || null,
     exclude_same_set: values.excludeSameSet,
   }
   const minBpmValue = numericOrNull(values.minBpm)

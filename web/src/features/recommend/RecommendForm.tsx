@@ -3,9 +3,10 @@ import type { ReactNode } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import { Select } from '@base-ui/react/select'
 import { useStore } from '@tanstack/react-form'
-import { ArrowCounterClockwise, CalendarDots, CaretDown, Check, Clock, MagnifyingGlass, Metronome, Spinner, Star, Tag, X, XCircle } from '@phosphor-icons/react'
+import { ArrowCounterClockwise, CaretDown, Check, Clock, MagnifyingGlass, Metronome, Spinner, Star, Tag, X, XCircle } from '@phosphor-icons/react'
 import { defaultFilters, maxBeatmaps, parseBeatmapIds } from './filters'
 import type { RecommendFormValues } from './filters'
+import { DateRangeFilter } from './DateRangeFilter'
 import { RangeFilter } from './RangeFilter'
 import type { RangeFilterConfig } from './RangeFilter'
 import type { useRecommendForm } from './useRecommendForm'
@@ -134,17 +135,6 @@ const rangeFilters: ReadonlyArray<RangeFilterConfig & { minField: RangeFieldName
     fromSliderValue: sliderToDuration,
   },
 ]
-
-const dateWindowOptions = [
-  { value: null, label: 'All time' },
-  { value: 'last_week', label: 'Last week' },
-  { value: 'last_month', label: 'Last month' },
-  { value: 'last_3_months', label: 'Last 3 months' },
-  { value: 'last_6_months', label: 'Last 6 months' },
-  { value: 'last_year', label: 'Last year' },
-  { value: 'last_2_years', label: 'Last 2 years' },
-  { value: 'last_5_years', label: 'Last 5 years' },
-] as const
 
 const statusOptions = [
   { value: null, label: 'Any' },
@@ -381,17 +371,13 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
             />
           ))}
 
-          <FilterSelect
-            filterKey="date"
-            label="Date window"
-            defaultLabel="Date"
-            icon={<CalendarDots />}
-            value={values.dateWindow === 'all_time' ? '' : values.dateWindow}
-            options={dateWindowOptions}
-            onValueChange={(value) => {
-              const dateWindow = value as RecommendFormValues['dateWindow']
-              form.setFieldValue('dateWindow', dateWindow)
-              onSelectChange({ ...form.state.values, dateWindow })
+          <DateRangeFilter
+            minValue={values.minDate}
+            maxValue={values.maxDate}
+            onValueCommit={(minDate, maxDate) => {
+              form.setFieldValue('minDate', minDate)
+              form.setFieldValue('maxDate', maxDate)
+              onSelectChange({ ...form.state.values, minDate, maxDate })
             }}
           />
 

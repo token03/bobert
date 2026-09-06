@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from math import isnan
 from pathlib import Path
 from typing import Any
@@ -501,7 +501,8 @@ class Runtime:
             for metadata in source_metadata
             if (beatmapset_id := metadata_set_id(metadata)) is not None
         ]
-        date_cutoff = date_window_cutoff(filters.date_window)
+        min_month = month_start_us(filters.min_date)
+        max_month = month_end_exclusive_us(filters.max_date)
         eligible = ~np.isin(self.static_id_values, source_ids)
         if filters.exclude_same_set and source_set_ids:
             eligible &= ~np.isin(self.static_set_ids, source_set_ids)
@@ -528,10 +529,10 @@ class Runtime:
                     self.static_status_values[1], accepted
                 )
             eligible &= status_mask
-        if date_cutoff is not None:
-            eligible &= self.static_release_dates >= int(
-                date_cutoff.timestamp() * 1_000_000
-            )
+        if min_month is not None:
+            eligible &= self.static_release_dates >= min_month
+        if max_month is not None:
+            eligible &= self.static_release_dates < max_month
 
         eligible_indices = np.flatnonzero(eligible)
         if not len(eligible_indices):
@@ -699,33 +700,20 @@ def metadata_release_date(metadata: dict[str, Any]) -> Any:
     return json_value(metadata.get("submitted_date"))
 
 
-def date_window_cutoff(window: Any) -> datetime | None:
-    if window is None or str(window.value) == "all_time":
+def month_start_us(value: str | None) -> int | None:
+    if not value:
         return None
-    now = datetime.now(UTC)
-    months = {
-        "last_month": -1,
-        "last_3_months": -3,
-        "last_6_months": -6,
-        "last_year": -12,
-        "last_2_years": -24,
-        "last_5_years": -60,
-    }
-    if window.value == "last_week":
-        return now - timedelta(days=7)
-    month_index = now.month - 1 + months[window.value]
-    year = now.year + month_index // 12
-    month = month_index % 12 + 1
-    days = (
-        29
-        if month == 2 and (year % 400 == 0 or (year % 4 == 0 and year % 100))
-        else 28
-        if month == 2
-        else 30
-        if month in {4, 6, 9, 11}
-        else 31
-    )
-    return now.replace(year=year, month=month, day=min(now.day, days))
+    parsed = datetime.strptime(value, "%Y-%m").replace(tzinfo=UTC)
+    return int(parsed.timestamp() * 1_000_000)
+
+
+def month_end_exclusive_us(value: str | None) -> int | None:
+    if not value:
+        return None
+    parsed = datetime.strptime(value, "%Y-%m").replace(tzinfo=UTC)
+    year = parsed.year + (parsed.month // 12)
+    month = parsed.month % 12 + 1
+    return int(datetime(year, month, 1, tzinfo=UTC).timestamp() * 1_000_000)
 
 
 def json_value(value: Any) -> Any:

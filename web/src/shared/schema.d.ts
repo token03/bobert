@@ -120,11 +120,6 @@ export interface components {
             /** Url */
             url: string;
         };
-        /**
-         * DateWindow
-         * @enum {string}
-         */
-        DateWindow: "last_week" | "last_month" | "last_3_months" | "last_6_months" | "last_year" | "last_2_years" | "last_5_years" | "all_time";
         /** DefaultRecommendResponse */
         DefaultRecommendResponse: {
             /** Count */
@@ -169,7 +164,10 @@ export interface components {
             max_length?: number | null;
             /** Status */
             status?: string | null;
-            date_window?: components["schemas"]["DateWindow"] | null;
+            /** Min Date */
+            min_date?: string | null;
+            /** Max Date */
+            max_date?: string | null;
             /**
              * Exclude Same Set
              * @default true

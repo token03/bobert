@@ -7,7 +7,6 @@ import socket
 import time
 import uuid
 from contextlib import asynccontextmanager
-from enum import Enum
 from typing import Annotated, Any, Literal
 
 THREAD_COUNT = min(
@@ -43,17 +42,6 @@ MAX_RECOMMEND_SOURCES = 10
 log = logging.getLogger("uvicorn.error")
 
 
-class DateWindow(str, Enum):
-    last_week = "last_week"
-    last_month = "last_month"
-    last_3_months = "last_3_months"
-    last_6_months = "last_6_months"
-    last_year = "last_year"
-    last_2_years = "last_2_years"
-    last_5_years = "last_5_years"
-    all_time = "all_time"
-
-
 class RecommendFilters(BaseModel):
     min_sr: float | None = Field(default=None, ge=0)
     max_sr: float | None = Field(default=None, ge=0)
@@ -70,7 +58,8 @@ class RecommendFilters(BaseModel):
     min_length: float | None = Field(default=None, ge=0)
     max_length: float | None = Field(default=None, ge=0)
     status: str | None = Field(default=None, max_length=32)
-    date_window: DateWindow | None = None
+    min_date: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    max_date: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
     exclude_same_set: bool = True
 
 
