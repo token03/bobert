@@ -14,7 +14,7 @@ import polars as pl
 import torch
 from rich.console import Console
 from rich.table import Table
-from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold
 
 from core import STRAIN_COLUMNS
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
@@ -47,12 +47,15 @@ MAP_ATTRIBUTE_COLUMNS = {
     "submitted_date": "submitted_date",
 }
 DIFFICULTY_NEIGHBOR_K = 50
-DIFFICULTY_BATCH_SIZE = 256
+DIFFICULTY_BATCH_SIZE = 1024
 COLLECTION_TAG_MIN_MAPS = 100
 TOURNAMENT_SLOT_MIN_MAPS = 20
 RETRIEVAL_RECALL_KS = (10, 20, 50)
 RETRIEVAL_HARD_NEGATIVE_K = 100
 RETRIEVAL_HUBNESS_K = 50
+RETRIEVAL_HUBNESS_SAMPLE = 20_000
+RETRIEVAL_HUBNESS_BATCH = 2048
+CHANCE_PAIR_SAMPLES = 200_000
 
 
 @dataclass
@@ -247,6 +250,48 @@ def bottom20_mean(values: list[float]) -> float:
     return float(np.mean(np.partition(values, count - 1)[:count]))
 
 
+def eval_device() -> torch.device:
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def corpus_knn_skewness(
+    candidates: torch.Tensor,
+    densities: torch.Tensor | None,
+    retrieval_lambda: float,
+) -> float:
+    device = candidates.device
+    sample_size = min(
+        RETRIEVAL_HUBNESS_SAMPLE if device.type == "cuda" else 2_000,
+        len(candidates),
+    )
+    sample = np.random.default_rng(PROBE_SEED).choice(
+        len(candidates), size=sample_size, replace=False
+    )
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    cast = candidates.to(dtype)
+    if densities is not None:
+        densities = densities.to(dtype)
+    counts = torch.zeros(len(candidates), dtype=torch.float32, device=device)
+    for start in range(0, sample_size, RETRIEVAL_HUBNESS_BATCH):
+        rows = torch.tensor(
+            sample[start : start + RETRIEVAL_HUBNESS_BATCH], device=device
+        )
+        scores = cast[rows] @ cast.T
+        if densities is not None:
+            scores = scores - retrieval_lambda * 0.5 * densities
+        scores[torch.arange(len(rows), device=device), rows] = -torch.inf
+        neighbors = scores.topk(RETRIEVAL_HUBNESS_K, dim=1).indices
+        counts += torch.bincount(
+            neighbors.reshape(-1), minlength=len(candidates)
+        ).float()
+    deviation = (counts - counts.mean()) / counts.std()
+    return float((deviation**3).mean().item())
+
+
 def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
@@ -258,8 +303,16 @@ def evaluate_grouped_retrieval(
     candidate_indices = {
         beatmap_id: idx for idx, beatmap_id in enumerate(candidate_ids)
     }
-    candidates = target_matrix(target, candidate_ids)
+    device = eval_device()
+    candidates = torch.tensor(
+        target_matrix(target, candidate_ids), dtype=torch.float32, device=device
+    )
     densities = target_densities(target, candidate_ids)
+    densities_t = (
+        torch.tensor(densities, dtype=torch.float32, device=device)
+        if densities is not None
+        else None
+    )
 
     positives_by_query: dict[int, set[int]] = {}
     for ids in groups.values():
@@ -271,67 +324,64 @@ def evaluate_grouped_retrieval(
                 target_id for target_id in present if target_id != query_id
             )
 
+    query_ids = list(positives_by_query)
+    query_indices = torch.tensor(
+        [candidate_indices[beatmap_id] for beatmap_id in query_ids], device=device
+    )
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        sims = candidates[query_indices] @ candidates.T
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+    if densities_t is not None:
+        sims = sims - target.retrieval_lambda * 0.5 * densities_t
+    sims[torch.arange(len(query_ids), device=device), query_indices] = -torch.inf
+
+    positive_counts = [len(positives_by_query[beatmap_id]) for beatmap_id in query_ids]
+    top_count = min(
+        len(candidate_ids) - 1,
+        max(positive_counts, default=0)
+        + max(RETRIEVAL_HARD_NEGATIVE_K, RETRIEVAL_HUBNESS_K),
+    )
+    top = sims.topk(top_count, dim=1)
+    top_indices = top.indices.cpu().numpy()
+    top_values = top.values.cpu().numpy()
+
     r_precisions = []
     recalls = {cutoff: [] for cutoff in RETRIEVAL_RECALL_KS}
     query_weights = []
     local_margins = []
-    neighbor_occurrences = np.zeros(len(candidate_ids), dtype=np.int64)
-    for query_id, positive_ids in positives_by_query.items():
-        if not positive_ids:
-            continue
-        query_idx = candidate_indices[query_id]
-        similarities = candidates @ candidates[query_idx]
-        if densities is not None:
-            similarities -= target.retrieval_lambda * 0.5 * densities
-        similarities[query_idx] = -np.inf
-        positive_indices = np.asarray(
-            [candidate_indices[target_id] for target_id in positive_ids]
+    for row, query_id in enumerate(query_ids):
+        positive_ids = positives_by_query[query_id]
+        positive_count = len(positive_ids)
+        positive_indices = np.fromiter(
+            (candidate_indices[target_id] for target_id in positive_ids),
+            dtype=np.int64,
+            count=positive_count,
         )
-        positive_count = len(positive_indices)
+        row_indices = top_indices[row]
+        top_is_positive = np.isin(row_indices, positive_indices)
         query_weights.append(1 / np.sqrt(positive_count + 1))
-        top_count = min(
-            len(candidate_ids) - 1,
-            positive_count + max(RETRIEVAL_HARD_NEGATIVE_K, RETRIEVAL_HUBNESS_K),
-        )
-        top_indices = np.argpartition(similarities, -top_count)[-top_count:]
-        top_indices = top_indices[np.lexsort((top_indices, -similarities[top_indices]))]
-        top_is_positive = np.isin(top_indices, positive_indices)
-
-        hits_at_r = top_is_positive[:positive_count]
-        r_precisions.append(float(hits_at_r.mean()))
+        r_precisions.append(float(top_is_positive[:positive_count].mean()))
         for cutoff in RETRIEVAL_RECALL_KS:
-            recalls[cutoff].append(
-                float(top_is_positive[:cutoff].sum() / positive_count)
-            )
+            recalls[cutoff].append(float(top_is_positive[:cutoff].sum() / positive_count))
 
-        hard_negative_indices = top_indices[~top_is_positive][
+        hard_negative_values = top_values[row][~top_is_positive][
             :RETRIEVAL_HARD_NEGATIVE_K
         ]
-        if len(hard_negative_indices):
+        if len(hard_negative_values):
+            positive_values = (
+                sims[row, torch.tensor(positive_indices, device=device)]
+                .cpu()
+                .numpy()
+            )
             local_margins.append(
                 float(
-                    np.percentile(similarities[positive_indices], 10)
-                    - np.percentile(similarities[hard_negative_indices], 90)
+                    np.percentile(positive_values, 10)
+                    - np.percentile(hard_negative_values, 90)
                 )
             )
-
-        neighbors = top_indices[: min(RETRIEVAL_HUBNESS_K, len(top_indices))]
-        neighbor_occurrences[neighbors] += 1
-
-    standard_deviation = float(neighbor_occurrences.std())
-    hubness = (
-        float(
-            np.mean(
-                (
-                    (neighbor_occurrences - neighbor_occurrences.mean())
-                    / standard_deviation
-                )
-                ** 3
-            )
-        )
-        if standard_deviation > 0
-        else float("nan")
-    )
 
     return {
         "evaluation_id_coverage": len(covered) / len(eval_ids),
@@ -345,7 +395,9 @@ def evaluate_grouped_retrieval(
         if local_margins
         else float("nan"),
         "bottom20_local_margin": bottom20_mean(local_margins),
-        f"knn_{RETRIEVAL_HUBNESS_K}_skewness": hubness,
+        f"knn_{RETRIEVAL_HUBNESS_K}_skewness": corpus_knn_skewness(
+            candidates, densities_t, target.retrieval_lambda
+        ),
     }
 
 
@@ -365,15 +417,10 @@ def print_metrics(
     table.add_column("Metric", style="cyan", no_wrap=True)
     for name in names:
         table.add_column(name, justify="right")
-    if len(names) == 2:
-        table.add_column("Delta", justify="right")
 
     for key in keys:
         values = [metrics_by_target[name].get(key, float("nan")) for name in names]
-        row = [key, *[format_metric(value) for value in values]]
-        if len(values) == 2:
-            row.append(format_metric(values[1] - values[0]))
-        table.add_row(*row)
+        table.add_row(key, *[format_metric(value) for value in values])
     console.print(table)
 
 
@@ -416,6 +463,63 @@ def beatmapset_groups(ids: list[int]) -> np.ndarray:
     )
 
 
+def stratified_group_folds(
+    labels: np.ndarray, groups: np.ndarray, n_splits: int, seed: int
+) -> np.ndarray:
+    pair = np.stack([groups, labels], axis=1)
+    unique, pair_counts = np.unique(pair, axis=0, return_counts=True)
+    pair_counts = pair_counts.astype(np.int64)
+
+    group_values, group_index = np.unique(groups, return_inverse=True)
+    label_values, _ = np.unique(labels, return_inverse=True)
+    pair_groups = np.searchsorted(group_values, unique[:, 0])
+    pair_labels = np.searchsorted(label_values, unique[:, 1])
+
+    order = np.lexsort((-pair_counts, pair_labels))
+    pair_labels, pair_groups, pair_counts = (
+        pair_labels[order],
+        pair_groups[order],
+        pair_counts[order],
+    )
+
+    label_totals = np.bincount(pair_labels, weights=pair_counts)
+    label_order = np.lexsort((np.arange(len(label_values)), -label_totals))
+    starts = np.searchsorted(pair_labels, label_order, side="left")
+    stops = np.searchsorted(pair_labels, label_order, side="right")
+
+    rng = np.random.default_rng(seed)
+    fold_of_group = np.full(len(group_values), -1, dtype=np.int64)
+    fold_label_counts = np.zeros((n_splits, len(label_values)), dtype=np.int64)
+    fold_samples = np.zeros(n_splits, dtype=np.int64)
+    group_sizes = np.bincount(group_index, minlength=len(group_values)).astype(
+        np.int64
+    )
+
+    for label in label_order.tolist():
+        group_list = pair_groups[starts[label] : stops[label]]
+        counts = pair_counts[starts[label] : stops[label]]
+        perm = rng.permutation(len(group_list))
+        group_list = group_list[perm]
+        counts = counts[perm]
+        inner = np.lexsort((-counts, np.arange(len(counts))))
+        group_list = group_list[inner]
+        counts = counts[inner]
+        for group, count in zip(group_list.tolist(), counts.tolist()):
+            fold = int(fold_of_group[group])
+            if fold < 0:
+                projected = fold_label_counts[:, label] + count
+                candidates = np.flatnonzero(projected == projected.min())
+                if len(candidates) > 1:
+                    fewest = fold_samples[candidates]
+                    candidates = candidates[fewest == fewest.min()]
+                fold = int(candidates[0])
+                fold_of_group[group] = fold
+                fold_samples[fold] += group_sizes[group]
+            fold_label_counts[fold, label] += count
+
+    return fold_of_group[group_index]
+
+
 def fold_indices(
     groups: np.ndarray,
     device: torch.device,
@@ -428,10 +532,13 @@ def fold_indices(
         splitter = GroupKFold(PROBE_FOLDS, shuffle=True, random_state=PROBE_SEED)
         splits = splitter.split(rows, groups=groups)
     else:
-        splitter = StratifiedGroupKFold(
-            PROBE_FOLDS, shuffle=True, random_state=PROBE_SEED
+        fold_of_row = stratified_group_folds(
+            np.asarray(labels), groups, PROBE_FOLDS, PROBE_SEED
         )
-        splits = splitter.split(rows, labels, groups)
+        splits = [
+            (rows[fold_of_row != fold], rows[fold_of_row == fold])
+            for fold in range(PROBE_FOLDS)
+        ]
     return [
         (torch.tensor(train, device=device), torch.tensor(test, device=device))
         for train, test in splits
@@ -506,6 +613,7 @@ def ridge_multiclass_metrics(
         true_counts += torch.bincount(target, minlength=n_classes)
     return {
         "macro_f1": macro_f1_from_counts(tp, pred_counts - tp, true_counts - tp),
+        "macro_recall": float((tp / true_counts.clamp_min(1)).mean().item()),
     }
 
 
@@ -544,13 +652,10 @@ def multiclass_probe(
     return EvalResult(title, metrics)
 
 
-def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
+@cache
+def load_strain_rows() -> pl.DataFrame | None:
     if not STRAINS_EVAL_PATH.exists():
-        console.print(
-            f"[yellow]Skipping difficulty eval: {STRAINS_EVAL_PATH} not found.[/yellow]"
-        )
         return None
-
     strains = pl.read_parquet(
         STRAINS_EVAL_PATH, columns=["beatmap_id", "seq_len", *DIFFICULTY_COLUMNS]
     ).filter(
@@ -562,7 +667,7 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
             [pl.col(column).is_finite() for column in DIFFICULTY_COLUMNS]
         )
     )
-    strains = (
+    return (
         strains.with_columns(
             pl.col("seq_len").max().over("beatmap_id").alias("_max_len")
         )
@@ -570,6 +675,15 @@ def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
         .unique("beatmap_id", keep="last")
         .drop("_max_len")
     )
+
+
+def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
+    strains = load_strain_rows()
+    if strains is None:
+        console.print(
+            f"[yellow]Skipping difficulty eval: {STRAINS_EVAL_PATH} not found.[/yellow]"
+        )
+        return None
     ids = common_ids(targets, set(strains["beatmap_id"].to_list()))
     strains = strains.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
     ids = [int(beatmap_id) for beatmap_id in strains["beatmap_id"]]
@@ -761,6 +875,7 @@ def difficulty_neighbor_metrics(
     groups: torch.Tensor,
     densities: torch.Tensor | None,
     retrieval_lambda: float,
+    random_pair_distance: float,
 ) -> dict[str, float]:
     total = 0.0
 
@@ -768,13 +883,16 @@ def difficulty_neighbor_metrics(
         stop = min(start + DIFFICULTY_BATCH_SIZE, len(embeddings))
         scores = embeddings[start:stop] @ embeddings.T
         if densities is not None:
-            scores -= retrieval_lambda * 0.5 * densities
+            scores = scores - retrieval_lambda * 0.5 * densities
         scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
         neighbors = scores.topk(DIFFICULTY_NEIGHBOR_K, dim=1).indices
         distance = torch.abs(stars[neighbors] - stars[start:stop, None])
         total += float(distance.mean(dim=1).sum().item())
 
-    return {f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(embeddings)}
+    return {
+        f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(embeddings),
+        "random_pair_distance": random_pair_distance,
+    }
 
 
 def run_difficulty_neighbor_eval(
@@ -794,19 +912,24 @@ def run_difficulty_neighbor_eval(
         device=device,
     )
     groups = torch.tensor(data.groups, dtype=torch.long, device=device)
+    stars_np = data.normalized[:, DIFFICULTY_COLUMNS.index("stars")]
+    rng = np.random.default_rng(PROBE_SEED)
+    left = rng.integers(0, len(stars_np), CHANCE_PAIR_SAMPLES)
+    right = rng.integers(0, len(stars_np), CHANCE_PAIR_SAMPLES)
+    random_pair_distance = float(np.abs(stars_np[left] - stars_np[right]).mean())
     metrics = {}
     for target in targets:
-        embeddings = torch.tensor(
-            target_matrix(target, data.ids), dtype=torch.float32, device=device
-        )
+        embeddings = target_matrix(target, data.ids)
+        embeddings = torch.tensor(embeddings, device=device).half()
         target_density = target_densities(target, data.ids)
         densities = (
-            torch.tensor(target_density, dtype=torch.float32, device=device)
+            torch.tensor(target_density, device=device).half()
             if target_density is not None
             else None
         )
         metrics[target.name] = difficulty_neighbor_metrics(
-            embeddings, stars, groups, densities, target.retrieval_lambda
+            embeddings, stars, groups, densities, target.retrieval_lambda,
+            random_pair_distance,
         )
         del embeddings
     print_eval_result(EvalResult("Difficulty Neighbors", metrics))
@@ -881,28 +1004,38 @@ def run_collection_ngram_eval(
         COLLECTION_VERTICES_EVAL_PATH,
         columns=["collection_id", "source", "name"],
     )
-    collection_labels = {}
-    for collection_id, source, name in vertices.iter_rows():
-        labels = title_ngrams(name, valid_ngrams)
-        if labels:
-            collection_labels[(int(collection_id), int(source))] = labels
-    if not collection_labels:
+    label_rows = [
+        (int(collection_id), int(source), label)
+        for collection_id, source, name in vertices.iter_rows()
+        for label in title_ngrams(name, valid_ngrams)
+    ]
+    if not label_rows:
         console.print(
             "[yellow]Skipping Collection Ngram Probe: no labeled collections.[/yellow]"
         )
         return
-
+    collection_labels = pl.DataFrame(
+        label_rows,
+        schema={"collection_id": pl.Int64, "source": pl.Int64, "label": pl.String},
+        orient="row",
+    )
     standard_ids = set(load_standard_beatmaps([])["beatmap_id"].to_list())
     ids_by_target = set(common_ids(targets, standard_ids))
     edges = pl.read_parquet(
         COLLECTION_EDGES_EVAL_PATH,
         columns=["collection_id", "source", "beatmap_id"],
     ).filter(pl.col("beatmap_id").is_in(ids_by_target))
-    labels_by_id: dict[int, set[str]] = {}
-    for collection_id, source, beatmap_id in edges.iter_rows():
-        labels = collection_labels.get((int(collection_id), int(source)))
-        if labels:
-            labels_by_id.setdefault(int(beatmap_id), set()).update(labels)
+    beatmap_labels = (
+        edges.join(collection_labels, on=["collection_id", "source"], how="inner")
+        .select("beatmap_id", "label")
+        .unique()
+        .group_by("beatmap_id")
+        .agg(pl.col("label"))
+    )
+    labels_by_id = {
+        int(beatmap_id): set(labels)
+        for beatmap_id, labels in beatmap_labels.iter_rows()
+    }
     result = multilabel_probe(
         targets,
         labels_by_id,
