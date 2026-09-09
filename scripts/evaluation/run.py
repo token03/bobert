@@ -935,31 +935,11 @@ def run_difficulty_neighbor_eval(
     print_eval_result(EvalResult("Difficulty Neighbors", metrics))
 
 
-def run_difficulty_probe(targets: list[TargetData], data: DifficultyData) -> None:
-    device = probe_device()
-    folds = fold_indices(data.groups, device)
-    y = torch.tensor(data.normalized, dtype=torch.float32, device=device)
-    metrics = {}
-    for target in targets:
-        x = torch.tensor(
-            target_matrix(target, data.ids), dtype=torch.float32, device=device
-        )
-        pred = ridge_oof(x, y, folds)
-        scores = oof_r2(y, pred, folds)
-        metrics[target.name] = {
-            f"r2_{column}": float(scores[index].item())
-            for index, column in enumerate(DIFFICULTY_COLUMNS)
-        }
-        del x, pred, scores
-    print_eval_result(EvalResult("Difficulty Linear Probe", metrics))
-
-
 def run_difficulty_evals(targets: list[TargetData], _args: argparse.Namespace) -> None:
     data = load_difficulty_data(targets)
     if data is None:
         return
     run_difficulty_neighbor_eval(targets, data)
-    run_difficulty_probe(targets, data)
 
 
 def load_valid_ngrams(path: Path) -> set[str]:
