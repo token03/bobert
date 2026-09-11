@@ -60,4 +60,4 @@ training:
 
   masking:
     ratio: 0.30
-    mean_span_length: 3
+    mean_span_length: 2
