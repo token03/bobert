@@ -7,7 +7,6 @@ import os
 import re
 import shlex
 import subprocess
-import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -17,7 +16,6 @@ from dotenv import load_dotenv
 
 ARTIFACTS = ("bobert.pt", "embeddings.parquet", "embeddings.json")
 CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet", "strains.parquet")
-
 
 def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
     model_path = run_dir / "bobert.pt"
@@ -106,6 +104,8 @@ def main() -> int:
         parser.error(
             "version must contain only letters, numbers, dots, dashes, and underscores"
         )
+    if args.version == "current":
+        parser.error("current is reserved for the active run symlink")
 
     root = Path(__file__).resolve().parents[1]
     load_dotenv(root / ".env")
@@ -136,78 +136,56 @@ def main() -> int:
         "RequestTTY=no",
     ]
     ssh = ["ssh", *ssh_options, target]
-    remote_run = f"{remote_root}/runs/{args.version}"
-    previous = subprocess.run(
-        [*ssh, f"readlink {remote_root}/runs/current"],
-        check=False,
+    remote_path = (
+        '"$HOME"/' + shlex.quote(remote_root[2:])
+        if remote_root.startswith("~/")
+        else shlex.quote(remote_root)
+    )
+    remote_root = subprocess.run(
+        [*ssh, f"cd -- {remote_path} && pwd -P"],
+        check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    subprocess.run([*ssh, f"mkdir -p {remote_run}"], check=True)
+    stage = subprocess.run(
+        [*ssh, f"mktemp -d -- {shlex.quote(remote_root + '/runs/.deploy-XXXXXXXX')}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run([*ssh, f"mkdir -- {shlex.quote(stage + '/artifacts')}"], check=True)
+    print(f"Uploading {args.version}", flush=True)
     subprocess.run(
         [
             "scp",
             *ssh_options,
             *(str(run_dir / name) for name in ARTIFACTS),
-            f"{target}:{remote_run}/",
+            f"{target}:{stage}/artifacts/",
         ],
         check=True,
     )
     if args.metadata:
-        remote_metadata = f"{remote_root}/data/.deploy-{args.version}"
-        subprocess.run([*ssh, f"mkdir -p {remote_metadata}"], check=True)
         subprocess.run(
             [
                 "scp",
                 *ssh_options,
                 *(str(root / "data" / name) for name in CATALOGS),
-                f"{target}:{remote_metadata}/",
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [
-                *ssh,
-                f"mv -f {' '.join(f'{remote_metadata}/{name}' for name in CATALOGS)} {remote_root}/data/ && rmdir {remote_metadata}",
+                f"{target}:{stage}/",
             ],
             check=True,
         )
     subprocess.run(
         [
             *ssh,
-            f"cd {remote_root}/runs && ln -sfn -- {shlex.quote(args.version)} .current && mv -Tf -- .current current",
+            "bash -s -- " + shlex.join(
+                [remote_root, stage, args.version, str(int(args.metadata))]
+            ),
         ],
+        input=Path(__file__).with_suffix(".sh").read_text(encoding="utf-8"),
+        text=True,
         check=True,
     )
-    subprocess.run(
-        [*ssh, f"cd {remote_root} && docker compose restart api"], check=True
-    )
-
-    health = f"cd {remote_root} && docker compose exec -T api python -c " + shlex.quote(
-        "import urllib.request; "
-        "urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
-    )
-    for attempt in range(24):
-        result = subprocess.run([*ssh, health], check=False, stdout=subprocess.DEVNULL)
-        if result.returncode == 0:
-            print(f"Deployed {args.version}")
-            return 0
-        if attempt < 23:
-            time.sleep(5)
-
-    rollback = previous or ""
-    if rollback:
-        subprocess.run(
-            [
-                *ssh,
-                f"cd {remote_root}/runs && ln -sfn -- {shlex.quote(rollback)} .current && mv -Tf -- .current current",
-            ],
-            check=True,
-        )
-        subprocess.run(
-            [*ssh, f"cd {remote_root} && docker compose restart api"], check=True
-        )
-    raise RuntimeError("API health check failed; restored previous run")
+    return 0
 
 
 if __name__ == "__main__":
