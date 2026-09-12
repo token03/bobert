@@ -11,12 +11,6 @@ from torch.utils.checkpoint import checkpoint
 from .features import FEATURE_INFO
 from .osu import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
-try:
-    import torch.distributed.tensor  # noqa: F401
-    from liger_kernel.transformers.functional import liger_rms_norm
-except (ImportError, AttributeError):
-    liger_rms_norm = None
-
 
 class RMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float = 1e-5):
@@ -25,15 +19,6 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if liger_rms_norm is not None and x.device.type == "cuda":
-            compiled_backward = (
-                torch.compiler.is_compiling()
-                and torch.is_grad_enabled()
-                and (x.requires_grad or self.weight.requires_grad)
-            )
-            if not compiled_backward:
-                return liger_rms_norm(x, self.weight, self.eps, in_place=False)
-
         output = x.float()
         output = output * torch.rsqrt(
             output.square().mean(dim=-1, keepdim=True) + self.eps

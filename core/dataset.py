@@ -18,13 +18,13 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
     def __init__(
         self,
         lengths: Sequence[int],
-        batch_size: int,
+        batch_size: int | None,
         max_tokens: int,
         seed: int,
         shuffle: bool = True,
     ):
         self.lengths = [int(length) for length in lengths]
-        self.batch_size = int(batch_size)
+        self.batch_size = None if batch_size is None else int(batch_size)
         self.max_tokens = int(max_tokens)
         self.seed = int(seed)
         self.shuffle = shuffle
@@ -37,19 +37,17 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         indices = sorted(range(len(self.lengths)), key=self.lengths.__getitem__)
         batches = []
         batch: List[int] = []
-        max_len = 0
+        tokens = 0
         for index in indices:
             length = self.lengths[index]
-            next_max_len = max(max_len, length)
             if batch and (
-                len(batch) == self.batch_size
-                or next_max_len * (len(batch) + 1) > self.max_tokens
+                len(batch) == self.batch_size or tokens + length > self.max_tokens
             ):
                 batches.append(batch)
                 batch = []
-                max_len = 0
+                tokens = 0
             batch.append(index)
-            max_len = max(max_len, length)
+            tokens += length
         if batch:
             batches.append(batch)
         return batches

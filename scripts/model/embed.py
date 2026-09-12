@@ -151,7 +151,7 @@ def bucket_batch_sampler(
     mean_len = round(sum(lengths) / len(lengths))
     return LengthBucketBatchSampler(
         lengths,
-        batch_size,
+        batch_size=None,
         max_tokens=batch_size * mean_len,
         seed=seed,
         shuffle=False,
@@ -382,9 +382,7 @@ def export_embeddings(
                         vectors, cu_seqlens, int(max_seqlen)
                     )
 
-                stored = (
-                    embeddings.permute(1, 0, 2).float().cpu().numpy().astype(np.float16)
-                )
+                stored = embeddings.permute(1, 0, 2).half().cpu().numpy()
                 stop = saved_count + len(stored)
                 layer_embeddings[saved_count:stop] = stored
                 embedded_ids[saved_count:stop] = beatmap_ids.numpy()
@@ -455,7 +453,12 @@ def main():
         "--limit", type=int, default=None, help="Random sample size, e.g. 50000"
     )
     parser.add_argument("--min_sr", type=float, default=None)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Target batch size at the mean sequence length when bucketing",
+    )
     parser.add_argument("--load-chunk-size", type=int, default=100000)
     parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)
