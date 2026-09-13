@@ -71,10 +71,16 @@ def main() -> int:
         capture_output=True,
         text=True,
     ).stdout.strip()
+    script_path = f"/tmp/bobert-deploy-{Path(stage).name}.sh"
     subprocess.run(
         [
             *ssh,
-            "bash -s -- " + shlex.join([remote_root, stage, args.version, args.repo]),
+            (
+                f"cat > {shlex.quote(script_path)}"
+                f" && bash {shlex.quote(script_path)} "
+                + shlex.join([remote_root, stage, args.version, args.repo])
+                + f"; status=$?; rm -f {shlex.quote(script_path)}; exit $status"
+            ),
         ],
         input=Path(__file__).with_suffix(".sh").read_text(encoding="utf-8"),
         text=True,
