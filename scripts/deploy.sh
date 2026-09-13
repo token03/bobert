@@ -67,13 +67,16 @@ image=$(docker inspect --format '{{.Image}}' "$container")
 "${compose[@]}" config > "$stage/compose.yaml"
 printf 'services:\n  api:\n    image: %s\n' "$image" > "$stage/image.yaml"
 echo "Fetching $repo@$version"
-mkdir -p "$stage/artifacts" "$stage/catalogs"
-base="https://huggingface.co/$repo/resolve/$version"
-curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/model.safetensors" "$base/model.safetensors"
-curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/embeddings.parquet" "$base/embeddings.parquet"
-curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmaps.parquet" "$base/data/beatmaps.parquet"
-curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmapsets.parquet" "$base/data/beatmapsets.parquet"
-curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/strains.parquet" "$base/data/strains.parquet"
+(
+    umask 022
+    mkdir -p "$stage/artifacts" "$stage/catalogs"
+    base="https://huggingface.co/$repo/resolve/$version"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/model.safetensors" "$base/model.safetensors"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/embeddings.parquet" "$base/embeddings.parquet"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmaps.parquet" "$base/data/beatmaps.parquet"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmapsets.parquet" "$base/data/beatmapsets.parquet"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/strains.parquet" "$base/data/strains.parquet"
+)
 echo 'Building API while the current container stays online'
 "${compose[@]}" build api
 echo 'Switching API'
