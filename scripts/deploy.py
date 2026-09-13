@@ -7,26 +7,23 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-from core.artifacts import (
-    CATALOGS,
-    INDEX_NAME,
-    MODEL_NAME,
-    validate_catalogs,
-    validate_index,
-)
-
-ARTIFACTS = (MODEL_NAME, INDEX_NAME)
+from dotenv import dotenv_values
+from huggingface_hub import HfApi
+from huggingface_hub.errors import HfHubHTTPError
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Deploy a BoBERT run.")
-    parser.add_argument("-v", "--version", required=True)
+    parser = argparse.ArgumentParser(description="Deploy a published BoBERT release.")
     parser.add_argument(
-        "--data-dir",
-        type=Path,
-        help="Catalog directory; defaults to the workspace data/ directory",
+        "-v", "--version", required=True, help="Release tag, e.g. v13.2"
+    )
+    root = Path(__file__).resolve().parents[1]
+    env = dotenv_values(root / ".env")
+    parser.add_argument(
+        "--repo",
+        default=os.environ.get("BOBERT_HF_REPO")
+        or env.get("BOBERT_HF_REPO")
+        or "token03/bobert",
     )
     args = parser.parse_args()
 
@@ -34,27 +31,17 @@ def main() -> int:
         parser.error(
             "version must contain only letters, numbers, dots, dashes, and underscores"
         )
-    if args.version == "current":
-        parser.error("current is reserved for the active run symlink")
-
-    root = Path(__file__).resolve().parents[1]
-    load_dotenv(root / ".env")
-    target = os.getenv("DEPLOY_SSH_TARGET")
-    remote_root = os.getenv("DEPLOY_REMOTE_ROOT")
+    target = os.environ.get("DEPLOY_SSH_TARGET") or env.get("DEPLOY_SSH_TARGET")
+    remote_root = os.environ.get("DEPLOY_REMOTE_ROOT") or env.get("DEPLOY_REMOTE_ROOT")
     if not target or not remote_root:
         parser.error("DEPLOY_SSH_TARGET and DEPLOY_REMOTE_ROOT are required in .env")
-    run_dir = root / "runs" / args.version
-    data_dir = args.data_dir or root / "data"
-    required = [*(run_dir / name for name in ARTIFACTS)]
-    required.extend(data_dir / name for name in CATALOGS)
-    missing = [str(path) for path in required if not path.is_file()]
-    if missing:
-        parser.error(f"missing required files: {', '.join(missing)}")
     try:
-        validate_index(run_dir / INDEX_NAME, run_dir / MODEL_NAME)
-        validate_catalogs(data_dir)
-    except (KeyError, TypeError, ValueError) as exc:
-        parser.error(str(exc))
+        info = HfApi(token=env.get("HF_TOKEN") or None).model_info(
+            args.repo, revision=args.version
+        )
+    except HfHubHTTPError as exc:
+        parser.error(f"release not available: {exc}")
+    print(f"Deploying {args.repo}@{args.version} ({info.sha})", flush=True)
 
     ssh_options = [
         "-o",
@@ -87,33 +74,7 @@ def main() -> int:
     subprocess.run(
         [
             *ssh,
-            f"mkdir -p -- {shlex.quote(stage + '/artifacts')} {shlex.quote(stage + '/catalogs')}",
-        ],
-        check=True,
-    )
-    print(f"Uploading {args.version}", flush=True)
-    subprocess.run(
-        [
-            "scp",
-            *ssh_options,
-            *(str(run_dir / name) for name in ARTIFACTS),
-            f"{target}:{stage}/artifacts/",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "scp",
-            *ssh_options,
-            *(str(data_dir / name) for name in CATALOGS),
-            f"{target}:{stage}/catalogs/",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            *ssh,
-            "bash -s -- " + shlex.join([remote_root, stage, args.version]),
+            "bash -s -- " + shlex.join([remote_root, stage, args.version, args.repo]),
         ],
         input=Path(__file__).with_suffix(".sh").read_text(encoding="utf-8"),
         text=True,

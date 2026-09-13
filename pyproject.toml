@@ -18,7 +18,6 @@ dependencies = [
     "pyyaml>=6.0.3",
     "rotary-embedding-torch>=0.8.9",
     "safetensors>=0.6",
-    "torch==2.11.0",
     "tqdm>=4.67.1",
     "uvicorn[standard]>=0.35.0",
 ]
@@ -27,7 +26,7 @@ dependencies = [
 serve = ["torch==2.11.0"]
 train = [
     "torch==2.11.0",
-    "flash-attn==2.8.3",
+    "flash-attn==2.8.3; platform_machine == 'x86_64'",
     "dion",
     "duckdb>=1.5.4",
     "matplotlib>=3.10.6",
@@ -88,6 +87,7 @@ default-groups = ["train"]
 conflicts = [[{ group = "train" }, { group = "serve" }]]
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
 
 [[tool.uv.index]]
@@ -106,7 +106,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu128", group = "train" },
+    { index = "pytorch-cu128", group = "train", marker = "platform_machine == 'x86_64'" },
     { index = "pytorch-cpu", group = "serve" },
 ]
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }

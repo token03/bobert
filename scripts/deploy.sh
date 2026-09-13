@@ -3,10 +3,10 @@ set -Eeuo pipefail
 cd -- "$1"
 stage=$2
 version=$3
+repo=$4
+compose=(docker compose -f compose.yaml -f compose.prod.yaml)
 exec 9>.deploy.lock
 flock -n 9 || { echo 'Another deployment is running' >&2; exit 1; }
-previous=$(readlink runs/current)
-compose=(docker compose -f compose.yaml -f compose.prod.yaml)
 umask 077
 cutover=0
 swapped=0
@@ -60,11 +60,20 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 echo 'Updating code'
 git pull --ff-only
+previous=$(readlink runs/current)
 container=$("${compose[@]}" ps -q api)
 test -n "$container"
 image=$(docker inspect --format '{{.Image}}' "$container")
 "${compose[@]}" config > "$stage/compose.yaml"
 printf 'services:\n  api:\n    image: %s\n' "$image" > "$stage/image.yaml"
+echo "Fetching $repo@$version"
+mkdir -p "$stage/artifacts" "$stage/catalogs"
+base="https://huggingface.co/$repo/resolve/$version"
+curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/model.safetensors" "$base/model.safetensors"
+curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/embeddings.parquet" "$base/embeddings.parquet"
+curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmaps.parquet" "$base/data/beatmaps.parquet"
+curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmapsets.parquet" "$base/data/beatmapsets.parquet"
+curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/strains.parquet" "$base/data/strains.parquet"
 echo 'Building API while the current container stays online'
 "${compose[@]}" build api
 echo 'Switching API'

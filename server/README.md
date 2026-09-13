@@ -67,11 +67,11 @@ Requests accept 1–10 positive beatmap IDs and up to 1,000 results. Filters cov
 
 The hosted request path is Cloudflare Pages → Pages Function → gateway Worker → VPC service / Tunnel → API. The Worker applies burst and sustained recommendation rate limits. Local Vite development proxies directly to port 8008.
 
-[`scripts/deploy.py`](../scripts/deploy.py) validates and uploads a versioned run over SSH; its shell companion rebuilds the API, switches `runs/current`, waits for health, and attempts rollback on failure. It targets an already provisioned deployment. `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT`, and `CLOUDFLARE_TUNNEL_TOKEN` configure this workflow.
+[`scripts/deploy.py`](../scripts/deploy.py) checks that a release tag exists on Hugging Face, then runs its shell companion on the server. The server pulls the code, downloads the released model, index, and catalogs, rebuilds the API image, switches `runs/current` and `data/`, waits for health, and attempts rollback on failure. It targets an already provisioned deployment. `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT`, and `CLOUDFLARE_TUNNEL_TOKEN` configure this workflow.
 
 ```sh
-docker compose -f compose.yaml -f compose.prod.yaml up -d --build
-uv run deploy -v my-run --data-dir data
+uv run publish-run -v my-run
+uv run deploy -v my-run
 ```
 
-The production overlay retains the IPv6-only tunnel routing used by the hosted instance. Adjust it for your network. Deployment uploads the catalogs with the run, so rollback restores the complete artifact set.
+Publishing is required first; deployments consume the released tag. The production overlay retains the IPv6-only tunnel routing used by the hosted instance. Adjust it for your network. Catalogs are swapped with the release, so rollback restores the complete artifact set.
