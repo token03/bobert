@@ -16,6 +16,8 @@ RUN uv sync --frozen --no-default-groups --group serve --no-install-project --no
 COPY core ./core
 COPY server ./server
 
+RUN chmod -R a+rX core server
+
 RUN useradd --uid 10001 --create-home bobert && mkdir -p /app/cache && chown bobert:bobert /app/cache
 
 USER bobert
