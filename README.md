@@ -3,27 +3,11 @@
 
 BoBERT learns dense representations of osu!standard beatmaps from their hit-object sequences. Spatial patterns, rhythm, and slider geometry become fixed-size embeddings for similarity search, recommendations, and representation analysis. The project includes a data pipeline, encoder training and adaptation, evaluation tools, and a web application backed by an index of roughly 500,000 beatmaps.
 
-**The model operates solely on `.osu` files**, using the structured beatmap data to produce embeddings without audio or spectrogram inputs.
-
 ## Architecture
 
 BoBERT is a bidirectional Transformer inspired by [ModernBERT](https://arxiv.org/abs/2412.13663): rotary position embeddings, interleaved local/global attention, and packed variable-length execution. Its input representation and prediction heads are designed for structured beatmap features. The encoder uses pre-norm RMSNorm and SwiGLU feed-forward blocks.
 
-The project draws heavily on [MusicBERT](https://arxiv.org/abs/2106.05630) as inspiration for learning representations from structured musical sequences, and on [CM3P](https://github.com/OliBomby/CM3P) for its encoder architecture.
-
-```mermaid
-flowchart TD
-    A[".osu beatmap · ordered hit objects"] --> B["Feature extraction and normalization<br/>position · motion · rhythm · geometry · attributes"]
-    B --> C["Dense feature tokenizer<br/>6 numeric groups + 4 categorical embeddings"]
-    C --> D["Concatenate → linear projection → RMSNorm<br/>one 384-dimensional token per hit object"]
-    D --> E["Bidirectional encoder × 9<br/>RoPE · RMSNorm · SwiGLU<br/>local / local / global attention × 3"]
-    E --> F["Global-layer readouts<br/>RMSNorm → mean pool over hit objects"]
-    F --> G["Normalize each layer → center → renormalize<br/>average layers → normalize"]
-    G --> H["Linear adapter → normalize<br/>384-dimensional beatmap embedding"]
-    H --> I["CSLS-adjusted similarity search"]
-    E -.-> J["Pretraining: masked feature reconstruction"]
-    F -.-> K["Pretraining: auxiliary strain regression"]
-```
+![BoBERT architecture: .osu hit objects become dense feature tokens, pass through nine pre-norm attention and SwiGLU blocks with residual connections, then global-layer pooling and a linear adapter produce a 384-dimensional embedding.](docs/assets/architecture.png)
 
 ### Dense feature tokens
 
