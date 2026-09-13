@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -12,7 +11,9 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from core.artifacts import MODEL_NAME, read_index
 from core.model import EmbeddingTransform
+from core import retrieval
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import (
     fetch_beatmap_metadata,
@@ -58,8 +59,7 @@ class QueryContext:
     top_k: int
     include_same_set: bool
     allow_download: bool
-    model: str | None
-    version: str | None
+    model: Path | None
     mode: str = MODE_DEFAULT
     embedding_transform: EmbeddingTransform | None = None
     densities: np.ndarray | None = None
@@ -148,7 +148,7 @@ def get_embedding(raw_input: str, ctx: QueryContext, fixed_label: str | None = N
                 raise ValueError(
                     f"{beatmap_id} is not available in the loaded embeddings"
                 )
-            ctx.embedder = LazyEmbedder(find_model(ctx.model, ctx.version))
+            ctx.embedder = LazyEmbedder(ctx.model)
         osu_path = ensure_osu_file(beatmap_id, ctx.beatmaps_dir, ctx.allow_download)
         embedding = ctx.embedder.embed_osu(osu_path)
         if ctx.embedding_transform is not None:
@@ -315,7 +315,7 @@ def mapper_recommend(raw_input: str, ctx: QueryContext) -> None:
 def iter_neighbors(beatmap_id: int, query_embedding: np.ndarray, ctx: QueryContext):
     similarities = ctx.embeddings @ query_embedding.astype(np.float32, copy=False)
     scores = (
-        similarities - ctx.retrieval_lambda * 0.5 * ctx.densities
+        similarities - retrieval.density_term(ctx.densities, ctx.retrieval_lambda)
         if ctx.densities is not None
         else similarities
     )
@@ -341,7 +341,7 @@ def pair_rank(
 
     similarities = ctx.embeddings @ query_embedding.astype(np.float32, copy=False)
     scores = (
-        similarities - ctx.retrieval_lambda * 0.5 * ctx.densities
+        similarities - retrieval.density_term(ctx.densities, ctx.retrieval_lambda)
         if ctx.densities is not None
         else similarities
     )
@@ -536,7 +536,7 @@ def parse_args():
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
     parser.add_argument("-v", "--version")
-    parser.add_argument("--model", help="Exported BoBERT .pt model")
+    parser.add_argument("--model", help="Exported BoBERT safetensors model")
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--include-same-set", action="store_true")
     parser.add_argument("--no-download", action="store_true")
@@ -550,62 +550,49 @@ def validate_args(args: argparse.Namespace):
         raise SystemExit("Error: --graph and --mapper cannot be combined")
 
 
-def load_query_data(args: argparse.Namespace, mode: str):
-    if mode == MODE_GRAPH:
-        embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
-        beatmap_ids, embeddings, id_to_index = load_embeddings(
-            embeddings_path,
-            dtype=np.float32,
-        )
-        console.print(
-            f"[green]Loaded[/green] {len(beatmap_ids):,} graph embeddings from "
-            f"[dim]{escape(str(embeddings_path))}[/dim]"
-        )
-        return beatmap_ids, embeddings, id_to_index, embeddings_path, None
+def resolve_embeddings_path(args: argparse.Namespace) -> Path:
     if args.embeddings:
-        embeddings_path = resolve_path(args.embeddings)
-    elif args.version:
-        embeddings_path = RUNS_DIR / args.version / "embeddings.parquet"
-    elif args.model:
-        embeddings_path = resolve_path(args.model).parent / "embeddings.parquet"
-    else:
-        embeddings_path = find_model().parent / "embeddings.parquet"
-    beatmap_ids, embeddings, id_to_index = load_embeddings(
-        embeddings_path,
-        dtype=np.float16,
-        normalize=False,
-    )
-    console.print(
-        f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
-        f"[dim]{escape(str(embeddings_path))}[/dim]"
-    )
-    frame = pl.read_parquet(embeddings_path, columns=["density"])
-    densities = frame["density"].to_numpy().astype(np.float32, copy=True)
-    return beatmap_ids, embeddings, id_to_index, embeddings_path, densities
+        return resolve_path(args.embeddings)
+    if args.version:
+        return RUNS_DIR / args.version / "embeddings.parquet"
+    if args.model:
+        return resolve_path(args.model).parent / "embeddings.parquet"
+    return find_model().parent / "embeddings.parquet"
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
     mode = MODE_GRAPH if args.graph else MODE_MAPPER if args.mapper else MODE_DEFAULT
-    beatmap_ids, embeddings, id_to_index, embeddings_path, densities = load_query_data(
-        args, mode
-    )
     embedding_transform = None
     retrieval_lambda = 0.0
-    if mode != MODE_GRAPH and len(embeddings):
-        sidecar = json.loads(
-            embeddings_path.with_suffix(".json").read_text(encoding="utf-8")
+    densities = None
+    model = None
+    if mode == MODE_GRAPH:
+        embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
+        beatmap_ids, embeddings, id_to_index = load_embeddings(
+            embeddings_path, dtype=np.float32
         )
+    else:
+        embeddings_path = resolve_embeddings_path(args)
+        model = (
+            find_model(args.model, args.version)
+            if args.model or args.version
+            else embeddings_path.parent / MODEL_NAME
+        )
+        index = read_index(embeddings_path, model=model)
+        beatmap_ids = index.ids
+        embeddings = index.embeddings
+        densities = index.densities
+        id_to_index = {
+            int(value): position for position, value in enumerate(beatmap_ids)
+        }
         embedding_transform = EmbeddingTransform(
-            np.asarray(sidecar["layer_means"], dtype=np.float32)
+            np.asarray(index.metadata["layer_means"], dtype=np.float32)
         )
-        retrieval = sidecar.get("retrieval", {})
-        if retrieval.get("method") != "csls":
-            raise ValueError("Embeddings do not contain a CSLS retrieval index")
-        retrieval_lambda = float(retrieval["lambda"])
-        embeddings = embeddings.astype(np.float32, copy=True)
-        embeddings /= np.maximum(
-            np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
-        )
+        retrieval_lambda = float(index.metadata["retrieval"]["lambda"])
+    console.print(
+        f"[green]Loaded[/green] {len(beatmap_ids):,} embeddings from "
+        f"[dim]{escape(str(embeddings_path))}[/dim]"
+    )
     metadata_lookup = metadata_by_id(load_metadata(resolve_path(args.metadata)))
     if mode != MODE_MAPPER:
         apply_strain_stars(metadata_lookup)
@@ -620,6 +607,7 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         )
         densities = None
         retrieval_lambda = 0.0
+        model = None
     return QueryContext(
         beatmap_ids=beatmap_ids,
         embeddings=embeddings,
@@ -631,8 +619,7 @@ def build_context(args: argparse.Namespace) -> QueryContext:
         top_k=args.top_k,
         include_same_set=args.include_same_set,
         allow_download=not args.no_download,
-        model=args.model,
-        version=args.version,
+        model=model,
         mode=mode,
         embedding_transform=embedding_transform,
         densities=densities,

@@ -1,0 +1,23 @@
+{
+  "name": "bobert-gateway",
+  "main": "src/worker.js",
+  "workers_dev": false,
+  "preview_urls": false,
+  "compatibility_date": "2026-08-23",
+  "observability": { "enabled": true },
+  "vpc_services": [
+    { "binding": "API", "service_id": "YOUR_VPC_SERVICE_ID" }
+  ],
+  "ratelimits": [
+    {
+      "name": "RECOMMEND_BURST",
+      "namespace_id": "YOUR_BURST_NAMESPACE_ID",
+      "simple": { "limit": 20, "period": 10 }
+    },
+    {
+      "name": "RECOMMEND_SUSTAINED",
+      "namespace_id": "YOUR_SUSTAINED_NAMESPACE_ID",
+      "simple": { "limit": 90, "period": 60 }
+    }
+  ]
+}

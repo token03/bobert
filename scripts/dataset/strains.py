@@ -117,7 +117,7 @@ def _calculate_stars_batch_worker(
     return rows, failed
 
 
-def load_config(config_path: str = "./config.yaml") -> dict:
+def load_config(config_path: str = "./configs/default.yaml") -> dict:
     with open(resolve_path(config_path)) as file:
         return yaml.safe_load(file)
 
@@ -159,8 +159,7 @@ def get_beatmap_lengths(dataset_path: str) -> dict[int, int]:
         .collect()
     )
     return {
-        int(row["beatmap_id"]): int(row["len"])
-        for row in lengths.iter_rows(named=True)
+        int(row["beatmap_id"]): int(row["len"]) for row in lengths.iter_rows(named=True)
     }
 
 
@@ -285,7 +284,7 @@ def main() -> None:
         help="Sequence length to calculate (0 uses the 4096-object maximum)",
     )
     parser.add_argument("-d", "--dataset", type=str, default=None)
-    parser.add_argument("-c", "--config", default="./config.yaml")
+    parser.add_argument("-c", "--config", default="./configs/default.yaml")
     parser.add_argument("-o", "--output", default="./data/strains.parquet")
     parser.add_argument("--raw-beatmaps", default="./data/beatmaps")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -328,11 +327,7 @@ def main() -> None:
             args.batch_size,
             args.workers,
         )
-        new = (
-            pl.DataFrame(rows, schema=STRAINS_SCHEMA)
-            if rows
-            else empty_strains_df()
-        )
+        new = pl.DataFrame(rows, schema=STRAINS_SCHEMA) if rows else empty_strains_df()
         combined = pl.concat([existing, new]).unique(
             ["beatmap_id", "seq_len"], keep="last"
         )

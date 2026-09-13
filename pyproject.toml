@@ -6,36 +6,44 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    "dion",
-    "duckdb>=1.5.4",
-    "flash-attn==2.8.3",
     "fastapi>=0.116.0",
     "httpx>=0.28.1",
-    "matplotlib>=3.10.6",
-    "numba>=0.61.2",
+    "huggingface-hub>=1.0",
     "numpy>=2.2,<2.3",
     "omegaconf>=2.3.0",
     "ossapi>=5.3.3",
-    "pandas>=2.3.3",
-    "parsecore[fast]",
-    "plotly>=6.3.0",
     "polars>=1.35.1",
     "pyarrow>=21.0.0",
     "python-dotenv>=1.1.1",
-    "pytorch-lightning>=2.6.0",
     "pyyaml>=6.0.3",
+    "rotary-embedding-torch>=0.8.9",
+    "safetensors>=0.6",
+    "torch==2.11.0",
+    "tqdm>=4.67.1",
+    "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+serve = ["torch==2.11.0"]
+train = [
+    "torch==2.11.0",
+    "flash-attn==2.8.3",
+    "dion",
+    "duckdb>=1.5.4",
+    "matplotlib>=3.10.6",
+    "numba>=0.61.2",
+    "pandas>=2.3.3",
+    "parsecore[fast]",
+    "plotly>=6.3.0",
+    "pytorch-lightning>=2.6.0",
     "rapidfuzz>=3.14.5",
     "requests>=2.32.5",
     "rich>=14.1.0",
-    "rotary-embedding-torch>=0.8.9",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
     "seaborn>=0.13.2",
     "tensorboard>=2.20.0",
-    "torch==2.11.0",
-    "tqdm>=4.67.1",
     "umap-learn>=0.5.9.post2",
-    "uvicorn[standard]>=0.35.0",
 ]
 
 [project.scripts]
@@ -48,6 +56,8 @@ recommend = "scripts.evaluation.recommend:main"
 mine = "scripts.evaluation.mine:main"
 umap = "scripts.evaluation.umap:main"
 export-model = "scripts.model.export:main"
+fetch-run = "scripts.model.fetch:main"
+publish-run = "scripts.model.publish:main"
 build-dataset = "scripts.dataset.build:main"
 build-strains = "scripts.dataset.strains:main"
 fetch-beatmaps = "scripts.sources.beatmaps.metadata:main"
@@ -74,6 +84,8 @@ packages = ["server", "training", "scripts", "core"]
 "scripts/dataset/strains.py" = ["BLE001"]
 
 [tool.uv]
+default-groups = ["train"]
+conflicts = [[{ group = "train" }, { group = "serve" }]]
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
@@ -83,12 +95,20 @@ name = "nvidia"
 url = "https://pypi.nvidia.com/"
 
 [[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
+torch = [
+    { index = "pytorch-cu128", group = "train" },
+    { index = "pytorch-cpu", group = "serve" },
+]
 flash-attn = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 parsecore = { git = "https://github.com/token03/parsecore.git" }
 dion = { git = "https://github.com/microsoft/dion.git", rev = "e64832041d8e01989abf609c9550f6307efbff2a" }

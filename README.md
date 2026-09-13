@@ -21,7 +21,7 @@ Feature extraction lives in [`core/features.py`](core/features.py), and the toke
 
 ### Sequence encoder
 
-| Setting | Default in [`config.yaml`](config.yaml) |
+| Setting | Default in [`configs/default.yaml`](configs/default.yaml) |
 | --- | --- |
 | Encoder depth / width | 9 layers / 384 dimensions |
 | Attention heads | 6 |
@@ -51,7 +51,13 @@ The API runs on CPU in Docker; the frontend uses Bun. Local development connects
 
 ### Prepare artifacts
 
-The current checkout expects an exported model, its matching embedding index, and metadata catalogs. Build these with the [pipeline tools](scripts/README.md), or use a matching run supplied separately. Model weights and datasets are not included in Git.
+Download a versioned model, embedding index, and metadata catalogs from [Hugging Face](https://huggingface.co/token03/bobert):
+
+```sh
+uv run --no-default-groups --group serve fetch-run --revision v13.2
+```
+
+This uses CPU dependencies, installs the run artifacts under `runs/`, and places the metadata catalogs in `data/`:
 
 ```text
 data/
@@ -61,10 +67,12 @@ data/
 runs/
   current -> <run>
   <run>/
-    bobert.pt
+    model.safetensors
     embeddings.parquet
-    embeddings.json
+    training.yaml
 ```
+
+The catalogs are shared across runs; re-fetching a release overwrites them. Model, index, and training config stay together per run.
 
 ### Start the API and frontend
 
@@ -97,11 +105,13 @@ uv run pretrain --help
 After preparing the dataset and strain targets, train with a named run:
 
 ```sh
-uv run pretrain --config config.yaml --full -v my-run
+uv run pretrain --config configs/default.yaml --full -v my-run
 uv run embed -v my-run
 ```
 
-Pretraining saves a run configuration and exports `bobert.pt`. `export-model` also exports existing checkpoints. `adapt` trains the embedding adapter; `evaluate`, `mine`, and `umap` support retrieval analysis and exploration. The [scripts guide](scripts/README.md) maps each command to its inputs and outputs.
+Pretraining saves a run configuration and exports `model.safetensors`. `export-model` also exports existing checkpoints. `adapt` trains the embedding adapter; `evaluate`, `mine`, and `umap` support retrieval analysis and exploration. The [scripts guide](scripts/README.md) maps each command to its inputs and outputs.
+
+`uv sync` installs the default CUDA training group. For CPU serving and release downloads, use `uv sync --no-default-groups --group serve`. Both environments are resolved in `uv.lock`.
 
 ## Repository guide
 

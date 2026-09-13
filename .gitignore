@@ -27,3 +27,6 @@ visualizer/*/*.parquet
 .vscode/
 
 .venv
+
+web/gateway/wrangler.jsonc
+configs/local*.yaml

@@ -11,9 +11,9 @@ docker compose up --build api
 curl http://127.0.0.1:8008/health
 ```
 
-Compose exposes container port 8000 on host loopback port 8008. Selecting `api` starts the local service without the production tunnel.
+Compose exposes container port 8000 on host loopback port 8008. The default `compose.yaml` contains only the API; `compose.prod.yaml` adds the production tunnel and host-specific settings.
 
-For a direct Python launch, install the Python dependencies and set the path variables below to local paths before running `python -m server.app`. Default runtime paths are container paths under `/app`.
+For a direct Python launch, install with `uv sync --no-default-groups --group serve`, set the path variables below to local paths, and run `uv run --no-default-groups --group serve python -m server.app`. Default runtime paths are container paths under `/app`.
 
 ## Artifact contract
 
@@ -22,13 +22,12 @@ For a direct Python launch, install the Python dependencies and set the path var
 | `data/beatmaps.parquet` | Beatmap metadata and search/filter columns |
 | `data/beatmapsets.parquet` | Beatmapset metadata |
 | `data/strains.parquet` | Difficulty and strain catalog |
-| `runs/current/bobert.pt` | Encoder state, model arguments, feature normalization statistics |
-| `runs/current/embeddings.parquet` | `beatmap_id`, fixed-size `embedding` vectors, `density` values |
-| `runs/current/embeddings.json` | Layer centering, adapter metadata, CSLS retrieval settings |
+| `runs/current/model.safetensors` | Encoder and adapter weights, normalization tensors, model configuration in the header |
+| `runs/current/embeddings.parquet` | IDs, vectors, densities; pooling and retrieval settings in file metadata |
 
-Use artifacts from the same export. The runtime reads the index during startup and validates its shape and retrieval metadata. Missing files prevent startup. The model is loaded when online encoding is needed.
+Use artifacts from the same export. The runtime reads both files through [`core/artifacts.py`](../core/artifacts.py) and checks the model checksum recorded in the index. Missing or mismatched artifacts prevent startup.
 
-Compose mounts `data/` and `runs/` read-only and `cache/` read-write. `runs/current` selects the deployed run. SQLite caches online embeddings, metadata, and unavailable beatmaps; it is local runtime state.
+Compose mounts `data/` and `runs/` read-only and uses a named Docker volume for the writable SQLite cache. The image runs as a non-root user. `runs/current` selects the active model and index; the catalogs in `data/` are shared. SQLite caches online embeddings, metadata, and unavailable beatmaps; it is local runtime state.
 
 ## Configuration
 
@@ -37,8 +36,8 @@ Compose mounts `data/` and `runs/` read-only and `cache/` read-write. `runs/curr
 | `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` | Required osu! OAuth credentials |
 | `BOBERT_DATA_DIR` | `/app/data` |
 | `BOBERT_RUN_DIR` | `/app/runs/current` |
-| `BOBERT_MODEL_PATH` | `BOBERT_RUN_DIR/bobert.pt` |
-| `BOBERT_EMBEDDINGS_PATH` | `BOBERT_RUN_DIR/embeddings.parquet`; sidecar uses the same stem |
+| `BOBERT_MODEL_PATH` | `BOBERT_RUN_DIR/model.safetensors` |
+| `BOBERT_EMBEDDINGS_PATH` | `BOBERT_RUN_DIR/embeddings.parquet` |
 | `BOBERT_CACHE_DB` | `/app/cache/runtime.sqlite` |
 | `TORCH_NUM_THREADS` | `2`; application caps threads at two and available CPU count |
 
@@ -69,3 +68,10 @@ Requests accept 1–10 positive beatmap IDs and up to 1,000 results. Filters cov
 The hosted request path is Cloudflare Pages → Pages Function → gateway Worker → VPC service / Tunnel → API. The Worker applies burst and sustained recommendation rate limits. Local Vite development proxies directly to port 8008.
 
 [`scripts/deploy.py`](../scripts/deploy.py) validates and uploads a versioned run over SSH; its shell companion rebuilds the API, switches `runs/current`, waits for health, and attempts rollback on failure. It targets an already provisioned deployment. `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT`, and `CLOUDFLARE_TUNNEL_TOKEN` configure this workflow.
+
+```sh
+docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+uv run deploy -v my-run --data-dir data
+```
+
+The production overlay retains the IPv6-only tunnel routing used by the hosted instance. Adjust it for your network. Deployment uploads the catalogs with the run, so rollback restores the complete artifact set.

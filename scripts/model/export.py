@@ -42,12 +42,12 @@ def main() -> int:
     args = parse_args()
     checkpoint_path = resolve_checkpoint(args.checkpoint, args.version)
     config_path = resolve_path(
-        args.config or checkpoint_path.parent.parent / "config.yaml"
+        args.config or checkpoint_path.parent.parent / "training.yaml"
     )
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
     output_path = resolve_path(
-        args.output or checkpoint_path.parent.parent / "bobert.pt"
+        args.output or checkpoint_path.parent.parent / "model.safetensors"
     )
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     config = OmegaConf.load(config_path)

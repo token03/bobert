@@ -7,6 +7,7 @@ import polars as pl
 from rich.markup import escape
 from rich.table import Table
 
+from core import retrieval
 from scripts.common.mappers import mapper_ids
 from scripts.common.paths import resolve_path
 from scripts.common.query import (
@@ -119,7 +120,7 @@ def main() -> None:
             similarities.append(similarity)
             scores = similarity.copy()
             if density is not None:
-                scores -= target.retrieval_lambda * 0.5 * density
+                scores -= retrieval.density_term(density, target.retrieval_lambda)
             scores[query_index] = -np.inf
             order = np.argsort(-scores, kind="stable")
             rank = np.empty(len(ids), dtype=np.int64)

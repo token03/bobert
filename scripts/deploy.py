@@ -1,102 +1,32 @@
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import os
 import re
 import shlex
 import subprocess
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-import torch
 from dotenv import load_dotenv
 
-ARTIFACTS = ("bobert.pt", "embeddings.parquet", "embeddings.json")
-CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet", "strains.parquet")
+from core.artifacts import (
+    CATALOGS,
+    INDEX_NAME,
+    MODEL_NAME,
+    validate_catalogs,
+    validate_index,
+)
 
-def validate_run(root: Path, run_dir: Path, metadata: bool = False) -> None:
-    model_path = run_dir / "bobert.pt"
-    embeddings_path = run_dir / "embeddings.parquet"
-    sidecar = json.loads((run_dir / "embeddings.json").read_text(encoding="utf-8"))
-    parquet = pq.ParquetFile(embeddings_path)
-    schema = parquet.schema_arrow
-    if schema.names != ["beatmap_id", "embedding", "density"]:
-        raise ValueError(f"invalid embedding schema: {schema}")
-    embedding_type = schema.field("embedding").type
-    if not pa.types.is_fixed_size_list(embedding_type):
-        raise ValueError(f"embedding column must be fixed-size list: {embedding_type}")
-
-    artifact = torch.load(model_path, map_location="cpu", weights_only=True)
-    dimension = int(artifact["model_args"]["d_model"])
-    if embedding_type.list_size != dimension:
-        raise ValueError(
-            f"embedding dimension {embedding_type.list_size} does not match model dimension {dimension}"
-        )
-    if int(sidecar.get("count", -1)) != parquet.metadata.num_rows:
-        raise ValueError("embeddings.json count does not match embeddings.parquet")
-    retrieval = sidecar.get("retrieval", {})
-    density_power = retrieval.get("density_power")
-    if (
-        retrieval.get("method") != "csls"
-        or not isinstance(retrieval.get("density_k"), int)
-        or retrieval["density_k"] <= 0
-        or not isinstance(retrieval.get("lambda"), (int, float))
-        or not math.isfinite(retrieval["lambda"])
-        or retrieval["lambda"] < 0
-        or not isinstance(density_power, (int, float))
-        or not math.isfinite(density_power)
-        or density_power <= 0
-    ):
-        raise ValueError("invalid retrieval metadata")
-    density_type = schema.field("density").type
-    if not (pa.types.is_float16(density_type) or pa.types.is_float32(density_type)):
-        raise ValueError(f"density column must be floating point: {density_type}")
-    densities = pq.read_table(embeddings_path, columns=["density"])[
-        "density"
-    ].to_numpy()
-    if len(densities) != parquet.metadata.num_rows or not all(
-        math.isfinite(float(value)) for value in densities
-    ):
-        raise ValueError("density column contains invalid values")
-    if sidecar.get("pooling") != "layer_centered_mean":
-        raise ValueError("invalid embedding pooling")
-    layer_means = sidecar.get("layer_means")
-    global_layers = sorted(artifact["model_args"]["global_attention_layers"])
-    if (
-        not sidecar.get("centered")
-        or sidecar.get("layers") != global_layers
-        or not isinstance(layer_means, list)
-        or len(layer_means) != len(global_layers)
-        or any(
-            not isinstance(mean, list) or len(mean) != dimension for mean in layer_means
-        )
-    ):
-        raise ValueError("invalid layer-centered embedding metadata")
-    if sidecar.get("adapter") != artifact["model_args"].get("adapter"):
-        raise ValueError("adapter metadata does not match model")
-
-    if metadata:
-        catalogs = {
-            root / "data" / "beatmaps.parquet": {"id", "beatmapset_id"},
-            root / "data" / "beatmapsets.parquet": {"beatmap_id", "beatmapset_id"},
-            root / "data" / "strains.parquet": {"beatmap_id", "actual_stars"},
-        }
-        for path, columns in catalogs.items():
-            missing = columns - set(pq.read_schema(path).names)
-            if missing:
-                raise ValueError(f"{path.name} is missing columns: {sorted(missing)}")
+ARTIFACTS = (MODEL_NAME, INDEX_NAME)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deploy a BoBERT run.")
     parser.add_argument("-v", "--version", required=True)
     parser.add_argument(
-        "--metadata",
-        action="store_true",
-        help="Also upload beatmaps, beatmapsets, and strains catalogs.",
+        "--data-dir",
+        type=Path,
+        help="Catalog directory; defaults to the workspace data/ directory",
     )
     args = parser.parse_args()
 
@@ -114,15 +44,16 @@ def main() -> int:
     if not target or not remote_root:
         parser.error("DEPLOY_SSH_TARGET and DEPLOY_REMOTE_ROOT are required in .env")
     run_dir = root / "runs" / args.version
+    data_dir = args.data_dir or root / "data"
     required = [*(run_dir / name for name in ARTIFACTS)]
-    if args.metadata:
-        required.extend(root / "data" / name for name in CATALOGS)
-    missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
+    required.extend(data_dir / name for name in CATALOGS)
+    missing = [str(path) for path in required if not path.is_file()]
     if missing:
         parser.error(f"missing required files: {', '.join(missing)}")
     try:
-        validate_run(root, run_dir, metadata=args.metadata)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        validate_index(run_dir / INDEX_NAME, run_dir / MODEL_NAME)
+        validate_catalogs(data_dir)
+    except (KeyError, TypeError, ValueError) as exc:
         parser.error(str(exc))
 
     ssh_options = [
@@ -153,7 +84,13 @@ def main() -> int:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    subprocess.run([*ssh, f"mkdir -- {shlex.quote(stage + '/artifacts')}"], check=True)
+    subprocess.run(
+        [
+            *ssh,
+            f"mkdir -p -- {shlex.quote(stage + '/artifacts')} {shlex.quote(stage + '/catalogs')}",
+        ],
+        check=True,
+    )
     print(f"Uploading {args.version}", flush=True)
     subprocess.run(
         [
@@ -164,22 +101,19 @@ def main() -> int:
         ],
         check=True,
     )
-    if args.metadata:
-        subprocess.run(
-            [
-                "scp",
-                *ssh_options,
-                *(str(root / "data" / name) for name in CATALOGS),
-                f"{target}:{stage}/",
-            ],
-            check=True,
-        )
+    subprocess.run(
+        [
+            "scp",
+            *ssh_options,
+            *(str(data_dir / name) for name in CATALOGS),
+            f"{target}:{stage}/catalogs/",
+        ],
+        check=True,
+    )
     subprocess.run(
         [
             *ssh,
-            "bash -s -- " + shlex.join(
-                [remote_root, stage, args.version, str(int(args.metadata))]
-            ),
+            "bash -s -- " + shlex.join([remote_root, stage, args.version]),
         ],
         input=Path(__file__).with_suffix(".sh").read_text(encoding="utf-8"),
         text=True,

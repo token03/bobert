@@ -7,6 +7,10 @@ resolution-markers = [
 supported-markers = [
     "platform_machine == 'x86_64' and sys_platform == 'linux'",
 ]
+conflicts = [[
+    { package = "bobert", group = "serve" },
+    { package = "bobert", group = "train" },
+]]
 
 [[package]]
 name = "absl-py"
@@ -109,70 +113,90 @@ name = "bobert"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "dion" },
-    { name = "duckdb" },
     { name = "fastapi" },
-    { name = "flash-attn" },
     { name = "httpx" },
-    { name = "matplotlib" },
-    { name = "numba" },
+    { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "ossapi" },
-    { name = "pandas" },
-    { name = "parsecore", extra = ["fast"] },
-    { name = "plotly" },
     { name = "polars" },
     { name = "pyarrow" },
     { name = "python-dotenv" },
-    { name = "pytorch-lightning" },
     { name = "pyyaml" },
+    { name = "rotary-embedding-torch" },
+    { name = "safetensors" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "extra == 'group-6-bobert-serve'" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-6-bobert-train'" },
+    { name = "tqdm" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.dev-dependencies]
+serve = [
+    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" } },
+]
+train = [
+    { name = "dion" },
+    { name = "duckdb" },
+    { name = "flash-attn" },
+    { name = "matplotlib" },
+    { name = "numba" },
+    { name = "pandas" },
+    { name = "parsecore", extra = ["fast"], marker = "extra == 'group-6-bobert-train'" },
+    { name = "plotly" },
+    { name = "pytorch-lightning" },
     { name = "rapidfuzz" },
     { name = "requests" },
     { name = "rich" },
-    { name = "rotary-embedding-torch" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "seaborn" },
     { name = "tensorboard" },
-    { name = "torch" },
-    { name = "tqdm" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "umap-learn" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "dion", git = "https://github.com/microsoft/dion.git?rev=e64832041d8e01989abf609c9550f6307efbff2a" },
-    { name = "duckdb", specifier = ">=1.5.4" },
     { name = "fastapi", specifier = ">=0.116.0" },
-    { name = "flash-attn", url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "matplotlib", specifier = ">=3.10.6" },
-    { name = "numba", specifier = ">=0.61.2" },
+    { name = "huggingface-hub", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=2.2,<2.3" },
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "ossapi", specifier = ">=5.3.3" },
-    { name = "pandas", specifier = ">=2.3.3" },
-    { name = "parsecore", extras = ["fast"], git = "https://github.com/token03/parsecore.git" },
-    { name = "plotly", specifier = ">=6.3.0" },
     { name = "polars", specifier = ">=1.35.1" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
-    { name = "pytorch-lightning", specifier = ">=2.6.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "rotary-embedding-torch", specifier = ">=0.8.9" },
+    { name = "safetensors", specifier = ">=0.6" },
+    { name = "torch", specifier = "==2.11.0" },
+    { name = "tqdm", specifier = ">=4.67.1" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0" },
+]
+
+[package.metadata.requires-dev]
+serve = [{ name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "bobert", group = "serve" } }]
+train = [
+    { name = "dion", git = "https://github.com/microsoft/dion.git?rev=e64832041d8e01989abf609c9550f6307efbff2a" },
+    { name = "duckdb", specifier = ">=1.5.4" },
+    { name = "flash-attn", url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
+    { name = "matplotlib", specifier = ">=3.10.6" },
+    { name = "numba", specifier = ">=0.61.2" },
+    { name = "pandas", specifier = ">=2.3.3" },
+    { name = "parsecore", extras = ["fast"], git = "https://github.com/token03/parsecore.git" },
+    { name = "plotly", specifier = ">=6.3.0" },
+    { name = "pytorch-lightning", specifier = ">=2.6.0" },
     { name = "rapidfuzz", specifier = ">=3.14.5" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "rich", specifier = ">=14.1.0" },
-    { name = "rotary-embedding-torch", specifier = ">=0.8.9" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
     { name = "scipy", specifier = ">=1.16.2" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "tensorboard", specifier = ">=2.20.0" },
-    { name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" },
-    { name = "tqdm", specifier = ">=4.67.1" },
+    { name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "bobert", group = "train" } },
     { name = "umap-learn", specifier = ">=0.5.9.post2" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0" },
 ]
 
 [[package]]
@@ -197,11 +221,11 @@ wheels = [
 
 [[package]]
 name = "click"
-version = "8.4.1"
+version = "8.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9b/98/518d8e5081007684232226f475082b30087d0f585e8457db087298259f49/click-8.4.1.tar.gz", hash = "sha256:918b5633eddf6b41c32d4f454bf0de810065c74e3f7dbf8ee5452f8be88d3e96", size = 353007, upload-time = "2026-05-22T04:08:37.769Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/0d/67e5b4109ea4a837e80daa87c2c696711955e40449a97e8926672534def2/click-8.4.1-py3-none-any.whl", hash = "sha256:482be17c6991b8c19c5429a1e995d9b0efdbb63172824c41f99965dc0ade8ec2", size = 116639, upload-time = "2026-05-22T04:08:35.26Z" },
+    { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
 ]
 
 [[package]]
@@ -221,11 +245,28 @@ wheels = [
 name = "cuda-bindings"
 version = "12.9.6"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
 dependencies = [
-    { name = "cuda-pathfinder" },
+    { name = "cuda-pathfinder", marker = "extra == 'group-6-bobert-train'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3b/69/4b0375e1b120dfa7427c31c8420cfdee596ecd03955fd291a96116fa375d/cuda_bindings-12.9.6-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b2b54b95a47104eff56b5155818ab5790e3ccdba8dd51e2928ae56782aaf5b02", size = 7590574, upload-time = "2026-03-11T14:47:37.452Z" },
+]
+
+[[package]]
+name = "cuda-bindings"
+version = "13.4.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "cuda-pathfinder", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/43/56/d7b219516980f3333e232c13d727e8f4dc59afc5381cbbcfbc1215014c81/cuda_bindings-13.4.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f444d7e488cbc47e79b7be0d1cfe97201f3e1f186a18ee10f2e4da3265975b16", size = 7170956, upload-time = "2026-09-10T01:16:56.854Z" },
 ]
 
 [[package]]
@@ -240,43 +281,92 @@ wheels = [
 name = "cuda-toolkit"
 version = "12.8.1"
 source = { registry = "https://pypi.nvidia.com/" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
 wheels = [
     { url = "https://pypi.nvidia.com/cuda-toolkit/cuda_toolkit-12.8.1-py2.py3-none-any.whl", hash = "sha256:adc7906af4ecbf9a352f9dca5734eceb21daec281ccfcf5675e1d2f724fc2cba" },
 ]
 
 [package.optional-dependencies]
 cublas = [
-    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 cudart = [
-    { name = "nvidia-cuda-runtime-cu12" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 cufft = [
-    { name = "nvidia-cufft-cu12" },
+    { name = "nvidia-cufft-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 cufile = [
-    { name = "nvidia-cufile-cu12" },
+    { name = "nvidia-cufile-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti-cu12" },
+    { name = "nvidia-cuda-cupti-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 curand = [
-    { name = "nvidia-curand-cu12" },
+    { name = "nvidia-curand-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver-cu12" },
+    { name = "nvidia-cusolver-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse-cu12" },
+    { name = "nvidia-cusparse-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc-cu12" },
+    { name = "nvidia-cuda-nvrtc-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx-cu12" },
+    { name = "nvidia-nvtx-cu12", marker = "extra == 'group-6-bobert-train'" },
+]
+
+[[package]]
+name = "cuda-toolkit"
+version = "13.0.2"
+source = { registry = "https://pypi.nvidia.com/" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+wheels = [
+    { url = "https://pypi.nvidia.com/cuda-toolkit/cuda_toolkit-13.0.2-py2.py3-none-any.whl", hash = "sha256:b198824cf2f54003f50d64ada3a0f184b42ca0846c1c94192fa269ecd97a66eb" },
+]
+
+[package.optional-dependencies]
+cublas = [
+    { name = "nvidia-cublas", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+cudart = [
+    { name = "nvidia-cuda-runtime", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+cufft = [
+    { name = "nvidia-cufft", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+cufile = [
+    { name = "nvidia-cufile", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+cupti = [
+    { name = "nvidia-cuda-cupti", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+curand = [
+    { name = "nvidia-curand", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+cusolver = [
+    { name = "nvidia-cusolver", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+cusparse = [
+    { name = "nvidia-cusparse", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+nvjitlink = [
+    { name = "nvidia-nvjitlink", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+nvrtc = [
+    { name = "nvidia-cuda-nvrtc", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+nvtx = [
+    { name = "nvidia-nvtx", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
 ]
 
 [[package]]
@@ -294,7 +384,7 @@ version = "0.1.0"
 source = { git = "https://github.com/microsoft/dion.git?rev=e64832041d8e01989abf609c9550f6307efbff2a#e64832041d8e01989abf609c9550f6307efbff2a" }
 dependencies = [
     { name = "numpy" },
-    { name = "torch" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
 ]
 
 [[package]]
@@ -346,7 +436,7 @@ version = "2.8.3+cu12torch2.11cxx11abitrue"
 source = { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
 dependencies = [
     { name = "einops" },
-    { name = "torch" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
 ]
 wheels = [
     { url = "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", hash = "sha256:3d0c8e60f820321eedd7166e79c33cb816263d8be6e35c3f5ba8fe2df6fea697" },
@@ -417,6 +507,16 @@ wheels = [
 ]
 
 [[package]]
+name = "hf-xet"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/ab/522a2ab67f27971a9d48ca666d4fca85ef7d5282d142e31fd087e27b1bbe/hf_xet-1.6.0.tar.gz", hash = "sha256:2e58454a340b3556dfa4972d5451aff4fba8dd42a236600ba1a1d2b1514f0fef", size = 920527, upload-time = "2026-08-03T22:33:13.243Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/67/4e/a28359bf1c1ecf11eba22123168c138698f7cb576ac678f5a2e16cd5da08/hf_xet-1.6.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:d62671bb130879cef0ee4c9ebe47a14af6c66ec53e6d84dc15936e5ffdfac82f", size = 4464663, upload-time = "2026-08-03T22:33:03.802Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/5f/311725e2a905534dfee2dcb5b08414f249147f1f12252bfc2bd24caa075c/hf_xet-1.6.0-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:8fb4f71cba6129110c3374a33f919001ff130488fc23553698e34cc1c2a1198c", size = 4675937, upload-time = "2026-08-03T22:33:08.616Z" },
+]
+
+[[package]]
 name = "httpcore"
 version = "1.0.9"
 source = { registry = "https://pypi.org/simple" }
@@ -452,6 +552,26 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
+]
+
+[[package]]
+name = "huggingface-hub"
+version = "1.31.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "filelock" },
+    { name = "fsspec" },
+    { name = "hf-xet" },
+    { name = "httpx" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9b/f0/61159db90b5cd275d55516fe27920828e7d3be4053fdbdb27c3f70e5f1ef/huggingface_hub-1.31.0.tar.gz", hash = "sha256:f8e9e710a210613fa5d0f26bba6da05ef4aef9fba5a0f23f508f5ac4d08b6f90", size = 968039, upload-time = "2026-09-10T10:27:22.724Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/7f/3f886a625043b77312b80da2f2bf00b5ecbf5a73061af1aa0259cd258c9d/huggingface_hub-1.31.0-py3-none-any.whl", hash = "sha256:9dbb6a503cbe2494ea666695207e7262d410659e09134059deb83e5480864667", size = 798313, upload-time = "2026-09-10T10:27:20.798Z" },
 ]
 
 [[package]]
@@ -640,11 +760,27 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cublas"
+version = "13.1.0.3"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cublas/nvidia_cublas-13.1.0.3-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:ee8722c1f0145ab246bccb9e452153b5e0515fd094c3678df50b2a0888b8b171" },
+]
+
+[[package]]
 name = "nvidia-cublas-cu12"
 version = "12.8.4.1"
 source = { registry = "https://pypi.nvidia.com/" }
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cublas-cu12/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:8ac4e771d5a348c551b2a426eda6193c19aa630236b418086020df5ba9667142" },
+]
+
+[[package]]
+name = "nvidia-cuda-cupti"
+version = "13.0.85"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cuda-cupti/nvidia_cuda_cupti-13.0.85-py3-none-manylinux_2_25_x86_64.whl", hash = "sha256:4eb01c08e859bf924d222250d2e8f8b8ff6d3db4721288cf35d14252a4d933c8" },
 ]
 
 [[package]]
@@ -656,11 +792,27 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cuda-nvrtc"
+version = "13.0.88"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cuda-nvrtc/nvidia_cuda_nvrtc-13.0.88-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:ad9b6d2ead2435f11cbb6868809d2adeeee302e9bb94bcf0539c7a40d80e8575" },
+]
+
+[[package]]
 name = "nvidia-cuda-nvrtc-cu12"
 version = "12.8.93"
 source = { registry = "https://pypi.nvidia.com/" }
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cuda-nvrtc-cu12/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:a7756528852ef889772a84c6cd89d41dfa74667e24cca16bb31f8f061e3e9994" },
+]
+
+[[package]]
+name = "nvidia-cuda-runtime"
+version = "13.0.96"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cuda-runtime/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:7f82250d7782aa23b6cfe765ecc7db554bd3c2870c43f3d1821f1d18aebf0548" },
 ]
 
 [[package]]
@@ -676,10 +828,32 @@ name = "nvidia-cudnn-cu12"
 version = "9.19.0.56"
 source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cudnn-cu12/nvidia_cudnn_cu12-9.19.0.56-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:ac6ad90a075bb33a94f2b4cf4622eac13dd4dc65cf6dd9c7572a318516a36625" },
+]
+
+[[package]]
+name = "nvidia-cudnn-cu13"
+version = "9.19.0.56"
+source = { registry = "https://pypi.nvidia.com/" }
+dependencies = [
+    { name = "nvidia-cublas", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cudnn-cu13/nvidia_cudnn_cu13-9.19.0.56-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:d20e1734305e9d68889a96e3f35094d733ff1f83932ebe462753973e53a572bf" },
+]
+
+[[package]]
+name = "nvidia-cufft"
+version = "12.0.0.61"
+source = { registry = "https://pypi.nvidia.com/" }
+dependencies = [
+    { name = "nvidia-nvjitlink", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cufft/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:6c44f692dce8fd5ffd3e3df134b6cdb9c2f72d99cf40b62c32dde45eea9ddad3" },
 ]
 
 [[package]]
@@ -687,10 +861,18 @@ name = "nvidia-cufft-cu12"
 version = "11.3.3.83"
 source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cufft-cu12/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:4d2dd21ec0b88cf61b62e6b43564355e5222e4a3fb394cac0db101f2dd0d4f74" },
+]
+
+[[package]]
+name = "nvidia-cufile"
+version = "1.15.1.6"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cufile/nvidia_cufile-1.15.1.6-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:08a3ecefae5a01c7f5117351c64f17c7c62efa5fffdbe24fc7d298da19cd0b44" },
 ]
 
 [[package]]
@@ -702,6 +884,14 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-curand"
+version = "10.4.0.35"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-curand/nvidia_curand-10.4.0.35-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:1aee33a5da6e1db083fe2b90082def8915f30f3248d5896bcec36a579d941bfc" },
+]
+
+[[package]]
 name = "nvidia-curand-cu12"
 version = "10.3.9.90"
 source = { registry = "https://pypi.nvidia.com/" }
@@ -710,16 +900,40 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cusolver"
+version = "12.0.4.66"
+source = { registry = "https://pypi.nvidia.com/" }
+dependencies = [
+    { name = "nvidia-cublas", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "nvidia-cusparse", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "nvidia-nvjitlink", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cusolver/nvidia_cusolver-12.0.4.66-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:0a759da5dea5c0ea10fd307de75cdeb59e7ea4fcb8add0924859b944babf1112" },
+]
+
+[[package]]
 name = "nvidia-cusolver-cu12"
 version = "11.7.3.90"
 source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
-    { name = "nvidia-cublas-cu12" },
-    { name = "nvidia-cusparse-cu12" },
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-cublas-cu12", marker = "extra == 'group-6-bobert-train'" },
+    { name = "nvidia-cusparse-cu12", marker = "extra == 'group-6-bobert-train'" },
+    { name = "nvidia-nvjitlink-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cusolver-cu12/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:4376c11ad263152bd50ea295c05370360776f8c3427b30991df774f9fb26c450" },
+]
+
+[[package]]
+name = "nvidia-cusparse"
+version = "12.6.3.3"
+source = { registry = "https://pypi.nvidia.com/" }
+dependencies = [
+    { name = "nvidia-nvjitlink", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cusparse/nvidia_cusparse-12.6.3.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:2b3c89c88d01ee0e477cb7f82ef60a11a4bcd57b6b87c33f789350b59759360b" },
 ]
 
 [[package]]
@@ -727,7 +941,7 @@ name = "nvidia-cusparse-cu12"
 version = "12.5.8.93"
 source = { registry = "https://pypi.nvidia.com/" }
 dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
+    { name = "nvidia-nvjitlink-cu12", marker = "extra == 'group-6-bobert-train'" },
 ]
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-cusparse-cu12/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:1ec05d76bbbd8b61b06a80e1eaf8cf4959c3d4ce8e711b65ebd0443bb0ebb13b" },
@@ -742,11 +956,35 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cusparselt-cu13"
+version = "0.8.0"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-cusparselt-cu13/nvidia_cusparselt_cu13-0.8.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:25e30a8a7323935d4ad0340b95a0b69926eee755767e8e0b1cf8dd85b197d3fd" },
+]
+
+[[package]]
 name = "nvidia-nccl-cu12"
 version = "2.28.9"
 source = { registry = "https://pypi.nvidia.com/" }
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-nccl-cu12/nvidia_nccl_cu12-2.28.9-py3-none-manylinux_2_18_x86_64.whl", hash = "sha256:485776daa8447da5da39681af455aa3b2c2586ddcf4af8772495e7c532c7e5ab" },
+]
+
+[[package]]
+name = "nvidia-nccl-cu13"
+version = "2.28.9"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.28.9-py3-none-manylinux_2_18_x86_64.whl", hash = "sha256:e4553a30f34195f3fa1da02a6da3d6337d28f2003943aa0a3d247bbc25fefc42" },
+]
+
+[[package]]
+name = "nvidia-nvjitlink"
+version = "13.0.88"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-nvjitlink/nvidia_nvjitlink-13.0.88-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:13a74f429e23b921c1109976abefacc69835f2f433ebd323d3946e11d804e47b" },
 ]
 
 [[package]]
@@ -763,6 +1001,22 @@ version = "3.4.5"
 source = { registry = "https://pypi.nvidia.com/" }
 wheels = [
     { url = "https://pypi.nvidia.com/nvidia-nvshmem-cu12/nvidia_nvshmem_cu12-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:042f2500f24c021db8a06c5eec2539027d57460e1c1a762055a6554f72c369bd" },
+]
+
+[[package]]
+name = "nvidia-nvshmem-cu13"
+version = "3.4.5"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-nvshmem-cu13/nvidia_nvshmem_cu13-3.4.5-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:290f0a2ee94c9f3687a02502f3b9299a9f9fe826e6d0287ee18482e78d495b80" },
+]
+
+[[package]]
+name = "nvidia-nvtx"
+version = "13.0.85"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/nvidia-nvtx/nvidia_nvtx-13.0.85-py3-none-manylinux1_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:4936d1d6780fbe68db454f5e72a42ff64d1fd6397df9f363ae786930fd5c1cd4" },
 ]
 
 [[package]]
@@ -1024,11 +1278,11 @@ name = "pytorch-lightning"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "fsspec", extra = ["http"] },
+    { name = "fsspec", extra = ["http"], marker = "extra == 'group-6-bobert-train'" },
     { name = "lightning-utilities" },
     { name = "packaging" },
     { name = "pyyaml" },
-    { name = "torch" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
     { name = "torchmetrics" },
     { name = "tqdm" },
     { name = "typing-extensions" },
@@ -1114,11 +1368,23 @@ version = "0.8.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
-    { name = "torch" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "extra == 'group-6-bobert-serve'" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'group-6-bobert-train'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/71/38/74783585b1f0282fddd3faf1abd6dd20977255c27e31737eced2d7ec05f1/rotary_embedding_torch-0.8.9.tar.gz", hash = "sha256:b213f153cad1d108064d930544fb3af678d56515893d3f869a7a146f87997e3f", size = 7497, upload-time = "2025-07-27T01:26:14.675Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/21/05e319ebef4a8194f9c4cc09f9c3213ab846da200fa6e88699cdb7e9679a/rotary_embedding_torch-0.8.9-py3-none-any.whl", hash = "sha256:700e8de9dfbefba5f9117a66652a2520648dcc60136895f0068b6a85347cab02", size = 5872, upload-time = "2025-07-27T01:26:13.496Z" },
+]
+
+[[package]]
+name = "safetensors"
+version = "0.8.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/06/f955dbbb1859e3bd23c8ac6141af5106e7ad5fedec4a3a6e3d60f94b7001/safetensors-0.8.0.tar.gz", hash = "sha256:fabaf3e0f18a6618d9b36560682562157f77c2b71fcffc7b432be2baed9d753d", size = 325846, upload-time = "2026-06-09T07:52:25.563Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/28/50/f203ff3a3ddfe19308efc83c5a3a29ed02bf786732ec35e68bf9162f3365/safetensors-0.8.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:fd6f3f93c9a0a7cc2788ee63fb763353d4bd2e89b0751bc78fcf7dda00bea774", size = 516040, upload-time = "2026-06-09T07:52:16.29Z" },
+    { url = "https://files.pythonhosted.org/packages/27/43/41c1621732edd934d868a00d1b891584c892a7b62a9aab82ea5a0a5623ee/safetensors-0.8.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:8e080062fcde23be189565e1c3305d16751a218ecf9412c8601e64204eb6f846", size = 722361, upload-time = "2026-06-09T07:52:23.924Z" },
 ]
 
 [[package]]
@@ -1246,23 +1512,73 @@ wheels = [
 
 [[package]]
 name = "torch"
+version = "2.11.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "cuda-bindings", version = "13.4.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "cuda-toolkit", version = "13.0.2", source = { registry = "https://pypi.nvidia.com/" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "filelock", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "fsspec", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "jinja2", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "networkx", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "nvidia-cudnn-cu13", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "nvidia-cusparselt-cu13", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "nvidia-nccl-cu13", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "nvidia-nvshmem-cu13", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "setuptools", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "sympy", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "triton", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+    { name = "typing-extensions", marker = "(extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train') or (extra != 'group-6-bobert-serve' and extra != 'group-6-bobert-train')" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/c9/82638ef24d7877510f83baf821f5619a61b45568ce21c0a87a91576510aa/torch-2.11.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:0f68f4ac6d95d12e896c3b7a912b5871619542ec54d3649cf48cc1edd4dd2756", size = 530712279, upload-time = "2026-03-23T18:10:31.481Z" },
+]
+
+[[package]]
+name = "torch"
+version = "2.11.0+cpu"
+source = { registry = "https://download.pytorch.org/whl/cpu" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "filelock", marker = "extra == 'group-6-bobert-serve'" },
+    { name = "fsspec", marker = "extra == 'group-6-bobert-serve'" },
+    { name = "jinja2", marker = "extra == 'group-6-bobert-serve'" },
+    { name = "networkx", marker = "extra == 'group-6-bobert-serve'" },
+    { name = "setuptools", marker = "extra == 'group-6-bobert-serve'" },
+    { name = "sympy", marker = "extra == 'group-6-bobert-serve'" },
+    { name = "typing-extensions", marker = "extra == 'group-6-bobert-serve'" },
+]
+wheels = [
+    { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:f82e2ae20c1545bb03997d1cc3143d94e14b800038669ee1aca45808a9acc338", upload-time = "2026-04-28T00:06:24Z" },
+]
+
+[[package]]
+name = "torch"
 version = "2.11.0+cu128"
 source = { registry = "https://download.pytorch.org/whl/cu128" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
 dependencies = [
-    { name = "cuda-bindings" },
-    { name = "cuda-toolkit", extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"] },
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "jinja2" },
-    { name = "networkx" },
-    { name = "nvidia-cudnn-cu12" },
-    { name = "nvidia-cusparselt-cu12" },
-    { name = "nvidia-nccl-cu12" },
-    { name = "nvidia-nvshmem-cu12" },
-    { name = "setuptools" },
-    { name = "sympy" },
-    { name = "triton" },
-    { name = "typing-extensions" },
+    { name = "cuda-bindings", version = "12.9.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-6-bobert-train'" },
+    { name = "cuda-toolkit", version = "12.8.1", source = { registry = "https://pypi.nvidia.com/" }, extra = ["cublas", "cudart", "cufft", "cufile", "cupti", "curand", "cusolver", "cusparse", "nvjitlink", "nvrtc", "nvtx"], marker = "extra == 'group-6-bobert-train'" },
+    { name = "filelock", marker = "extra == 'group-6-bobert-train'" },
+    { name = "fsspec", marker = "extra == 'group-6-bobert-train'" },
+    { name = "jinja2", marker = "extra == 'group-6-bobert-train'" },
+    { name = "networkx", marker = "extra == 'group-6-bobert-train'" },
+    { name = "nvidia-cudnn-cu12", marker = "extra == 'group-6-bobert-train'" },
+    { name = "nvidia-cusparselt-cu12", marker = "extra == 'group-6-bobert-train'" },
+    { name = "nvidia-nccl-cu12", marker = "extra == 'group-6-bobert-train'" },
+    { name = "nvidia-nvshmem-cu12", marker = "extra == 'group-6-bobert-train'" },
+    { name = "setuptools", marker = "extra == 'group-6-bobert-train'" },
+    { name = "sympy", marker = "extra == 'group-6-bobert-train'" },
+    { name = "triton", marker = "extra == 'group-6-bobert-train'" },
+    { name = "typing-extensions", marker = "extra == 'group-6-bobert-train'" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d252cf975fb18c94a85336323ad425f473df56dab35a44b00399bd70c7a3b997", upload-time = "2026-04-27T17:42:06Z" },
@@ -1276,7 +1592,7 @@ dependencies = [
     { name = "lightning-utilities" },
     { name = "numpy" },
     { name = "packaging" },
-    { name = "torch" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/81/34/39b8b749333db56c0585d7a11fa62a283c087bb1dfc897d69fb8cedbefb1/torchmetrics-1.9.0.tar.gz", hash = "sha256:a488609948600df52d3db4fcdab02e62aab2a85ef34da67037dc3e65b8512faa", size = 581765, upload-time = "2026-03-09T17:41:22.443Z" }
 wheels = [
@@ -1383,7 +1699,7 @@ standard = [
     { name = "httptools" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "uvloop", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "uvloop", marker = "platform_python_implementation != 'PyPy' or (extra == 'group-6-bobert-serve' and extra == 'group-6-bobert-train')" },
     { name = "watchfiles" },
     { name = "websockets" },
 ]

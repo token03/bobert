@@ -1,30 +1,24 @@
 import argparse
-import json
 import math
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import polars as pl
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from core.artifacts import MODEL_NAME, write_index
 from core.dataset import (
     LengthBucketBatchSampler,
     load_beatmap_dataset,
 )
 from core.features import VectorStats, normalize
 from core.model import BobertEncoder, EmbeddingTransform
+from core.retrieval import index_retrieval
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
-
-RETRIEVAL_DENSITY_K = 500
-RETRIEVAL_LAMBDA = 0.6
-RETRIEVAL_DENSITY_POWER = 3.0
 
 
 class ExportDataset(Dataset):
@@ -61,9 +55,9 @@ def find_model(path: str | Path | None = None, version: str | None = None) -> Pa
     if path is not None:
         model_path = resolve_path(path).resolve()
     elif version is not None:
-        model_path = RUNS_DIR / version / "bobert.pt"
+        model_path = RUNS_DIR / version / MODEL_NAME
     else:
-        candidates = list(RUNS_DIR.glob("*/bobert.pt"))
+        candidates = list(RUNS_DIR.glob(f"*/{MODEL_NAME}"))
         if not candidates:
             raise FileNotFoundError(f"No exported models found in {RUNS_DIR}")
         model_path = max(candidates, key=lambda candidate: candidate.stat().st_mtime)
@@ -156,120 +150,6 @@ def bucket_batch_sampler(
         seed=seed,
         shuffle=False,
     )
-
-
-def embedding_table(beatmap_ids: list[int], embeddings: np.ndarray) -> pa.Table:
-    embeddings = np.asarray(embeddings, dtype=np.float16)
-    values = pa.array(embeddings.reshape(-1), type=pa.float16())
-    embedding_column = pa.FixedSizeListArray.from_arrays(values, embeddings.shape[1])
-    return pa.Table.from_arrays(
-        [pa.array(beatmap_ids, type=pa.int64()), embedding_column],
-        names=["beatmap_id", "embedding"],
-    )
-
-
-def write_embedding_file(
-    path: Path,
-    ids: np.ndarray,
-    embeddings: np.ndarray,
-    batch_size: int,
-    transform: Callable[[np.ndarray], np.ndarray],
-    quiet: bool = False,
-) -> None:
-    writer = None
-    try:
-        for start in tqdm(
-            range(0, len(embeddings), batch_size),
-            desc="Exporting",
-            disable=quiet,
-        ):
-            stop = min(start + batch_size, len(embeddings))
-            table = embedding_table(
-                ids[start:stop].tolist(), transform(embeddings[start:stop])
-            )
-            if writer is None:
-                writer = pq.ParquetWriter(path, table.schema)
-            writer.write_table(table)
-    finally:
-        if writer is not None:
-            writer.close()
-
-
-def index_embeddings(
-    path: Path,
-    device_name: str | None,
-    batch_size: int,
-    quiet: bool = False,
-) -> None:
-    if batch_size <= 0:
-        raise ValueError("density batch size must be positive")
-    if not path.exists():
-        raise FileNotFoundError(f"Embeddings parquet not found: {path}")
-    metadata_path = path.with_suffix(".json")
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"Embedding metadata not found: {metadata_path}")
-
-    frame = pl.read_parquet(path)
-    embeddings = frame["embedding"].to_numpy()
-    if embeddings.dtype == object:
-        embeddings = np.stack(embeddings)
-    embeddings = embeddings.astype(np.float32, copy=False)
-    embeddings /= np.maximum(np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12)
-    if len(embeddings) <= RETRIEVAL_DENSITY_K:
-        raise ValueError(f"density k must be between 1 and {len(embeddings) - 1}")
-
-    device = torch.device(
-        device_name or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
-    corpus = torch.from_numpy(embeddings).to(device=device, dtype=dtype)
-    densities = np.empty(len(embeddings), dtype=np.float32)
-    with torch.inference_mode():
-        for start in tqdm(
-            range(0, len(corpus), batch_size),
-            desc="Indexing retrieval",
-            disable=quiet,
-        ):
-            stop = min(start + batch_size, len(corpus))
-            scores = corpus[start:stop] @ corpus.T
-            scores[
-                torch.arange(stop - start, device=device),
-                torch.arange(start, stop, device=device),
-            ] = -torch.inf
-            densities[start:stop] = (
-                scores.topk(RETRIEVAL_DENSITY_K, dim=1, sorted=False)
-                .values.float()
-                .mean(dim=1)
-                .cpu()
-                .numpy()
-            )
-
-    deviation = densities.std()
-    transformed = densities**RETRIEVAL_DENSITY_POWER
-    densities = (
-        transformed - transformed.mean()
-    ) / transformed.std() * deviation + densities.mean()
-
-    temporary = path.with_name(f".{path.name}.tmp")
-    try:
-        frame.with_columns(pl.Series("density", densities)).write_parquet(temporary)
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["retrieval"] = {
-        "method": "csls",
-        "density_k": RETRIEVAL_DENSITY_K,
-        "lambda": RETRIEVAL_LAMBDA,
-        "density_power": RETRIEVAL_DENSITY_POWER,
-    }
-    metadata_path.write_text(
-        json.dumps(metadata, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    if not quiet:
-        print(f"Indexed {len(embeddings):,} embeddings in {path}")
 
 
 def export_embeddings(
@@ -397,41 +277,33 @@ def export_embeddings(
         raise RuntimeError("No beatmaps loaded for export")
 
     transform = EmbeddingTransform((layer_total / saved_count).astype(np.float32))
-    write_embedding_file(
+    metadata = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "dataset": dataset_dir.name,
+        "min_sr": min_sr,
+        "limit": limit,
+        "seed": seed,
+        "pooling": "layer_centered_mean",
+        "centered": True,
+        "layers": sorted(model.global_attention_layers),
+        "layer_means": transform.means.tolist(),
+        "adapter": model.model_args.get("adapter"),
+    }
+    write_index(
         output_path,
         embedded_ids[:saved_count],
         layer_embeddings[:saved_count],
-        flush_size,
         lambda values: model.transform(values, transform),
-        quiet,
+        metadata,
+        model=model_path,
+        batch_size=flush_size,
+        quiet=quiet,
     )
 
-    metadata_path = output_path.with_suffix(".json")
-    metadata_path.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "generated_at": datetime.now(UTC).isoformat(),
-                "model": str(model_path),
-                "dataset": str(dataset_dir),
-                "min_sr": min_sr,
-                "limit": limit,
-                "seed": seed,
-                "count": saved_count,
-                "pooling": "layer_centered_mean",
-                "centered": True,
-                "layers": sorted(model.global_attention_layers),
-                "layer_means": transform.means.tolist(),
-                "adapter": model.model_args.get("adapter"),
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
     del layer_embeddings
-    index_embeddings(
-        output_path,
+    index_retrieval(
+        str(output_path),
+        str(model_path),
         device_name,
         density_batch_size,
         quiet,
@@ -442,9 +314,9 @@ def export_embeddings(
 
 def main():
     parser = argparse.ArgumentParser(description="Export Bobert embeddings")
-    parser.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
+    parser.add_argument("--config", default=str(PROJECT_ROOT / "configs/default.yaml"))
     parser.add_argument("-v", "--version")
-    parser.add_argument("--model", help="Exported BoBERT .pt model")
+    parser.add_argument("--model", help="Exported BoBERT safetensors model")
     parser.add_argument(
         "--dataset", default=None, help="Defaults to config.data.dataset_path"
     )

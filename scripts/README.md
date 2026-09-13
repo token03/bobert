@@ -27,17 +27,19 @@ Paths below describe the default workspace layout. Check each command's argument
 | Collections | `fetch-tournaments` | osu!collector tournament API | `data/collections/tournaments.parquet` |
 | Dataset | `build-dataset` | Beatmap files and metadata | Prepared dataset under `data/dataset/` |
 | Dataset | `build-strains` | Dataset / raw beatmaps, config, parsecore | `data/strains.parquet` |
-| Model | `pretrain` | Dataset, strains, `config.yaml` | Run config, checkpoints, exported `bobert.pt` |
-| Model | `export-model` | Training checkpoint and matching config | Inference `bobert.pt` |
-| Model | `embed` | Exported encoder and dataset | `embeddings.parquet` and `embeddings.json`, including density index |
+| Model | `pretrain` | Dataset, strains, `configs/default.yaml` | Run config, checkpoints, exported `model.safetensors` |
+| Model | `export-model` | Training checkpoint and matching config | Inference `model.safetensors` |
+| Model | `embed` | Exported encoder and dataset | `embeddings.parquet`, including pooling metadata and density index |
 | Model | `adapt` | Source run and collection-derived pairs | Target run with trained linear adapter |
+| Release | `fetch-run` | Hugging Face repository and release tag | Run under `runs/`, catalogs under `data/`; updates `runs/current` |
+| Release | `publish-run` | Run, catalogs, Hugging Face write token | Model card, artifacts, and immutable release tag |
 | Evaluation | `evaluate` | Run embeddings, catalogs, evaluation labels | Per-run evaluation JSON and terminal report |
 | Evaluation | `recommend` | Source maps / mappers and embedding index | Ranked recommendations |
 | Evaluation | `mine` | Retrieval inputs and evaluation data | Mined retrieval examples |
 | Evaluation | `umap` | Embeddings and metadata | Visualization coordinates, attributes, and neighbors |
 | Evaluation | `build-eval-graph` | Collection edges, vertices, ngrams, catalogs | Graph embeddings in `data/graph.parquet` |
 | Evaluation | `build-eval-ngrams` | Collection vertices and edges | `data/collections/ngrams.txt` |
-| Deployment | `deploy` | Versioned run, optional catalogs, SSH configuration | Upload and activation on a provisioned server |
+| Deployment | `deploy` | Versioned run, catalogs, SSH configuration | Upload and activation on a provisioned server |
 
 ## Credentials
 
@@ -50,18 +52,32 @@ Start with [`.env.example`](../.env.example). Credentials depend on the selected
 | Collection-edge acquisition | Source-specific cookies: `osu_session`, `osu_stats_session`, `session_data`, `xsrf_token` |
 | `deploy` | `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT` |
 | Hosted Compose tunnel | `CLOUDFLARE_TUNNEL_TOKEN` |
+| `publish-run` | `HF_TOKEN` (write access); project `.env` takes precedence over the shell |
 
 ## Training runs
 
 After preparing `data/dataset/` and `data/strains.parquet`:
 
 ```sh
-uv run pretrain --config config.yaml --full -v my-run
+uv run pretrain --config configs/default.yaml --full -v my-run
 uv run embed -v my-run
 ```
 
 Use `pretrain --help` for proxy/validation modes, batch-size overrides, and checkpoint resume. The training runner saves the resolved configuration in the run directory. Keep it with the checkpoints: exporting a checkpoint requires its matching configuration and normalization statistics.
 
-An export consists of encoder weights and feature normalization statistics in `bobert.pt`. Embedding export adds a corpus-dependent transform and retrieval metadata in `embeddings.json`; keep it paired with `embeddings.parquet`. Re-embed after changing the encoder or adapter.
+An export stores encoder/adapter weights and feature normalization tensors in `model.safetensors`, with model configuration and the feature schema in its header. `embeddings.parquet` carries its own corpus-centering statistics, adapter provenance, retrieval settings, and model checksum. There are no JSON sidecars. Re-embed after changing the encoder or adapter. Lightning `.ckpt` files remain training checkpoints; the inference loader accepts safetensors only.
+
+Use `configs/default.yaml` as the starting point for experiments. Local copies named `configs/local*.yaml` are ignored; each run saves its resolved configuration as `training.yaml`. This snapshot is also included in published releases. For older checkpoints, pass their saved configuration explicitly with `export-model --config <path>`.
+
+## Releases
+
+```sh
+uv run publish-run -v my-run --data-dir data
+uv run --no-default-groups --group serve fetch-run --revision my-run
+```
+
+Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_REPO`. Publishing uploads the model, index, and three catalogs in one commit and tags that commit. Existing tags cannot be overwritten. `fetch-run` resolves a tag to a commit, validates the download, then activates it atomically. Use `--version` for another local run name, `--runs-dir` for a separate runs directory, or `--data-dir` for another catalog directory. Existing run directories are preserved; shared catalogs are overwritten by design.
+
+Run artifacts stay in `runs/<version>/`; catalogs live in the workspace's `data/` directory and are shared across runs.
 
 For service setup, see the [API guide](../server/README.md). The deployment command updates an existing host; initial provisioning and artifact preparation happen separately.

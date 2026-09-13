@@ -11,6 +11,7 @@ from rotary_embedding_torch import RotaryEmbedding
 from torch import nn
 
 from . import STRAIN_COLUMNS
+from .artifacts import load_model, save_model
 from .components import (
     EncoderLayer,
     HitObjectFeatureTokenizer,
@@ -155,32 +156,22 @@ class BobertEncoder(nn.Module):
     def from_pretrained(
         cls, path: str | Path, device: torch.device
     ) -> tuple[Self, VectorStats]:
-        artifact = torch.load(path, map_location="cpu", weights_only=True)
+        state, args, vector_stats = load_model(path)
         model = cls(
-            **artifact["model_args"],
+            **args,
             activation_checkpointing=False,
             use_flash=device.type == "cuda",
         )
-        model.load_state_dict(artifact["state_dict"], strict=True)
+        model.load_state_dict(state, strict=True)
         model.to(device).eval()
-        return model, artifact["vector_stats"]
+        return model, vector_stats
 
     def save_pretrained(
         self,
         path: str | Path,
         vector_stats: VectorStats,
     ) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        state = {key: value.detach().cpu() for key, value in self.state_dict().items()}
-        torch.save(
-            {
-                "model_args": self.model_args,
-                "state_dict": state,
-                "vector_stats": vector_stats,
-            },
-            path,
-        )
+        save_model(path, self.state_dict(), self.model_args, vector_stats)
 
     def get_summary(self) -> dict[str, Any]:
         total_params = sum(p.numel() for p in self.parameters())

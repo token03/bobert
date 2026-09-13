@@ -1,0 +1,29 @@
+services:
+  api:
+    build:
+      network: host
+    mem_limit: 3.5g
+    restart: unless-stopped
+    logging:
+      driver: local
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    logging:
+      driver: local
+    command: tunnel --no-autoupdate --protocol quic --edge-ip-version 6 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: "fd00:1337::/64"

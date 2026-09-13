@@ -24,7 +24,7 @@ from training.setup import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train BoBERT pretraining.")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="configs/default.yaml")
     profile = parser.add_mutually_exclusive_group()
     profile.add_argument("--proxy", action="store_true")
     profile.add_argument("--validate", action="store_true")
@@ -142,7 +142,7 @@ def main() -> int:
     trainer = create_trainer(config, RUNS_DIR, run_name=run_name, quiet=args.quiet)
     run_dir = Path(trainer.log_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(config, run_dir / "config.yaml")
+    OmegaConf.save(config, run_dir / "training.yaml")
 
     print("\nPretraining setup complete.")
     print(f"Run directory: {trainer.log_dir}")
@@ -160,7 +160,7 @@ def main() -> int:
 
     if datamodule.vector_stats is None:
         raise RuntimeError("Training completed without fitted normalization statistics")
-    model_path = run_dir / "bobert.pt"
+    model_path = run_dir / "model.safetensors"
     model.bert.save_pretrained(model_path, datamodule.vector_stats)
     print(f"Exported model: {model_path}")
 

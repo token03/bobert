@@ -37,6 +37,6 @@ Open the address printed by Vite. [`vite.config.ts`](vite.config.ts) proxies `/a
 
 Build the frontend with `bun run build` and publish `dist/` through Cloudflare Pages with the `functions/` directory. The Pages Function forwards API requests through a service binding named `GATEWAY`.
 
-The gateway uses an `API` VPC service binding and two rate-limit bindings, `RECOMMEND_BURST` and `RECOMMEND_SUSTAINED`. Provision these resources in your account and configure [`gateway/wrangler.jsonc`](gateway/wrangler.jsonc); its service ID and rate-limit namespaces describe the existing deployment. The VPC service connects to the Python API through Cloudflare Tunnel.
+The gateway uses an `API` VPC service binding and two rate-limit bindings, `RECOMMEND_BURST` and `RECOMMEND_SUSTAINED`. Copy [`gateway/wrangler.example.jsonc`](gateway/wrangler.example.jsonc) to `gateway/wrangler.jsonc` and fill in your provisioned resource IDs. The actual deployment configuration is local and Git-ignored. The VPC service connects to the Python API through Cloudflare Tunnel.
 
 From `gateway/`, install dependencies with `bun install` and deploy with `bun run deploy`. The Pages service binding and backend connectivity must also be configured in Cloudflare. Local frontend development uses the Vite proxy and does not require these bindings.

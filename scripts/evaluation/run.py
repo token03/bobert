@@ -16,7 +16,8 @@ from rich.console import Console
 from rich.table import Table
 from sklearn.model_selection import GroupKFold
 
-from core import STRAIN_COLUMNS
+from core import STRAIN_COLUMNS, retrieval
+from core.artifacts import embedding_metadata
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
 from scripts.common.text import tokenize
 
@@ -152,12 +153,7 @@ def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]
         path = target_path(target)
         name = target_name(path)
         run_dir = path.parent if path.parent.parent == RUNS_DIR else None
-        metadata_path = path.with_suffix(".json")
-        metadata = (
-            json.loads(metadata_path.read_text(encoding="utf-8"))
-            if metadata_path.exists()
-            else {}
-        )
+        metadata = embedding_metadata(path)
         center = (
             target not in no_center and name != "graph" and not metadata.get("centered")
         )
@@ -282,7 +278,7 @@ def corpus_knn_skewness(
         )
         scores = cast[rows] @ cast.T
         if densities is not None:
-            scores = scores - retrieval_lambda * 0.5 * densities
+            scores = scores - retrieval.density_term(densities, retrieval_lambda)
         scores[torch.arange(len(rows), device=device), rows] = -torch.inf
         neighbors = scores.topk(RETRIEVAL_HUBNESS_K, dim=1).indices
         counts += torch.bincount(
@@ -335,7 +331,7 @@ def evaluate_grouped_retrieval(
     finally:
         torch.backends.cuda.matmul.allow_tf32 = tf32
     if densities_t is not None:
-        sims = sims - target.retrieval_lambda * 0.5 * densities_t
+        sims = sims - retrieval.density_term(densities_t, target.retrieval_lambda)
     sims[torch.arange(len(query_ids), device=device), query_indices] = -torch.inf
 
     positive_counts = [len(positives_by_query[beatmap_id]) for beatmap_id in query_ids]
@@ -365,16 +361,16 @@ def evaluate_grouped_retrieval(
         query_weights.append(1 / np.sqrt(positive_count + 1))
         r_precisions.append(float(top_is_positive[:positive_count].mean()))
         for cutoff in RETRIEVAL_RECALL_KS:
-            recalls[cutoff].append(float(top_is_positive[:cutoff].sum() / positive_count))
+            recalls[cutoff].append(
+                float(top_is_positive[:cutoff].sum() / positive_count)
+            )
 
         hard_negative_values = top_values[row][~top_is_positive][
             :RETRIEVAL_HARD_NEGATIVE_K
         ]
         if len(hard_negative_values):
             positive_values = (
-                sims[row, torch.tensor(positive_indices, device=device)]
-                .cpu()
-                .numpy()
+                sims[row, torch.tensor(positive_indices, device=device)].cpu().numpy()
             )
             local_margins.append(
                 float(
@@ -491,9 +487,7 @@ def stratified_group_folds(
     fold_of_group = np.full(len(group_values), -1, dtype=np.int64)
     fold_label_counts = np.zeros((n_splits, len(label_values)), dtype=np.int64)
     fold_samples = np.zeros(n_splits, dtype=np.int64)
-    group_sizes = np.bincount(group_index, minlength=len(group_values)).astype(
-        np.int64
-    )
+    group_sizes = np.bincount(group_index, minlength=len(group_values)).astype(np.int64)
 
     for label in label_order.tolist():
         group_list = pair_groups[starts[label] : stops[label]]
@@ -883,7 +877,7 @@ def difficulty_neighbor_metrics(
         stop = min(start + DIFFICULTY_BATCH_SIZE, len(embeddings))
         scores = embeddings[start:stop] @ embeddings.T
         if densities is not None:
-            scores = scores - retrieval_lambda * 0.5 * densities
+            scores = scores - retrieval.density_term(densities, retrieval_lambda)
         scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
         neighbors = scores.topk(DIFFICULTY_NEIGHBOR_K, dim=1).indices
         distance = torch.abs(stars[neighbors] - stars[start:stop, None])
@@ -928,7 +922,11 @@ def run_difficulty_neighbor_eval(
             else None
         )
         metrics[target.name] = difficulty_neighbor_metrics(
-            embeddings, stars, groups, densities, target.retrieval_lambda,
+            embeddings,
+            stars,
+            groups,
+            densities,
+            target.retrieval_lambda,
             random_pair_distance,
         )
         del embeddings
@@ -1101,12 +1099,6 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
     for target in targets:
         if target.run_dir is None:
             continue
-        embedding_metadata_path = target.path.with_suffix(".json")
-        embedding_metadata = (
-            json.loads(embedding_metadata_path.read_text(encoding="utf-8"))
-            if embedding_metadata_path.exists()
-            else None
-        )
         evaluations = {
             result.name: result.metrics[target.name]
             for result in EVAL_RESULTS
@@ -1124,7 +1116,7 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                     if target.retrieval_lambda
                     else {"method": "cosine"}
                 ),
-                "embedding_metadata": embedding_metadata,
+                "embedding_metadata": embedding_metadata(target.path),
                 "evaluations": evaluations,
             }
         )

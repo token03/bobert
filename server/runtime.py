@@ -16,12 +16,14 @@ import numpy as np
 import polars as pl
 import torch
 
+from core import retrieval
+from core.artifacts import MODEL_NAME, index_id, read_index
 from core.model import BobertEncoder, EmbeddingTransform
 
-DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
 RUN_DIR = Path(os.getenv("BOBERT_RUN_DIR", "/app/runs/current"))
+DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
 CACHE_DB = Path(os.getenv("BOBERT_CACHE_DB", "/app/cache/runtime.sqlite"))
-MODEL_PATH = Path(os.getenv("BOBERT_MODEL_PATH", RUN_DIR / "bobert.pt"))
+MODEL_PATH = Path(os.getenv("BOBERT_MODEL_PATH", RUN_DIR / MODEL_NAME))
 EMBEDDINGS_PATH = Path(
     os.getenv("BOBERT_EMBEDDINGS_PATH", RUN_DIR / "embeddings.parquet")
 )
@@ -183,55 +185,22 @@ class Runtime:
         if missing:
             raise RuntimeError(f"missing required data files: {missing}")
 
-        frame = pl.read_parquet(
-            EMBEDDINGS_PATH, columns=["beatmap_id", "embedding", "density"]
-        )
-        self.static_ids = [int(value) for value in frame["beatmap_id"].to_list()]
-        self.static_embeddings = np.array(
-            frame["embedding"].to_numpy(),
-            dtype=np.float32,
-            order="C",
-            copy=True,
-        )
-        self.static_densities = (
-            frame["density"].to_numpy().astype(np.float32, copy=True)
-        )
-        del frame
-        if (
-            self.static_embeddings.ndim != 2
-            or not self.static_embeddings.flags.c_contiguous
-            or self.static_embeddings.shape[0] != len(self.static_ids)
-        ):
-            raise RuntimeError("invalid embeddings.parquet shape")
-        sidecar = json.loads(
-            EMBEDDINGS_PATH.with_suffix(".json").read_text(encoding="utf-8")
-        )
-        retrieval = sidecar.get("retrieval", {})
-        if retrieval.get("method") != "csls":
-            raise RuntimeError("embeddings do not contain a CSLS retrieval index")
-        self.retrieval_density_k = int(retrieval["density_k"])
-        self.retrieval_lambda = float(retrieval["lambda"])
-        if (
-            self.static_densities.shape != (len(self.static_ids),)
-            or not np.isfinite(self.static_densities).all()
-            or self.retrieval_density_k <= 0
-            or self.retrieval_density_k >= len(self.static_ids)
-            or not np.isfinite(self.retrieval_lambda)
-            or self.retrieval_lambda < 0
-        ):
-            raise RuntimeError("invalid CSLS retrieval index")
-        self.static_penalty = np.asarray(
-            -0.5 * self.retrieval_lambda * self.static_densities, dtype=np.float32
-        )
-        self.static_penalty.flags.writeable = False
-        del self.static_densities
-        self.transform = EmbeddingTransform(
-            np.asarray(sidecar["layer_means"], dtype=np.float32)
-        )
-        self.static_embeddings /= np.maximum(
-            np.linalg.norm(self.static_embeddings, axis=1, keepdims=True), 1e-12
+        index = read_index(EMBEDDINGS_PATH, model=MODEL_PATH)
+        self.static_ids = [int(value) for value in index.ids]
+        self.static_embeddings = np.ascontiguousarray(
+            index.embeddings, dtype=np.float32
         )
         self.static_embeddings.flags.writeable = False
+        self.static_penalty = np.negative(
+            retrieval.density_term(
+                index.densities, float(index.metadata["retrieval"]["lambda"])
+            ),
+            dtype=np.float32,
+        )
+        self.static_penalty.flags.writeable = False
+        self.transform = EmbeddingTransform(
+            np.asarray(index.metadata["layer_means"], dtype=np.float32)
+        )
         self.embedding_dim = self.static_embeddings.shape[1]
         self.static_index = {
             beatmap_id: index for index, beatmap_id in enumerate(self.static_ids)
@@ -356,18 +325,11 @@ class Runtime:
             | np.isin(ranked_values, list(accepted))
             for group, accepted in STATUS_GROUPS.items()
         }
-        ranked_status = (
-            pl.col("status")
-            .cast(pl.String, strict=False)
-            .fill_null("")
-            .str.to_lowercase()
-            .is_in(RANKED_STATUS_VALUES)
-            | pl.col("ranked")
-            .cast(pl.String, strict=False)
-            .fill_null("")
-            .str.to_lowercase()
-            .is_in(RANKED_STATUS_VALUES)
-        )
+        ranked_status = pl.col("status").cast(pl.String, strict=False).fill_null(
+            ""
+        ).str.to_lowercase().is_in(RANKED_STATUS_VALUES) | pl.col("ranked").cast(
+            pl.String, strict=False
+        ).fill_null("").str.to_lowercase().is_in(RANKED_STATUS_VALUES)
         release_date = (
             pl.when(ranked_status & pl.col("ranked_date").is_not_null())
             .then(pl.col("ranked_date"))
@@ -375,8 +337,7 @@ class Runtime:
         )
         self.static_release_dates = (
             self.static_metadata.select(
-                release_date
-                .cast(pl.String, strict=False)
+                release_date.cast(pl.String, strict=False)
                 .str.to_datetime(strict=False, time_zone="UTC")
                 .dt.epoch("us")
                 .fill_null(np.iinfo(np.int64).min)
@@ -396,17 +357,13 @@ class Runtime:
         ]
         del beatmaps
         self.inference_semaphore = threading.Semaphore(1)
-        self.cache = SQLiteCache(CACHE_DB, self.embedding_dim, RUN_DIR.resolve().name)
+        self.cache = SQLiteCache(CACHE_DB, self.embedding_dim, index_id(index.metadata))
 
         device = torch.device("cpu")
         self.model, self.vector_stats = BobertEncoder.from_pretrained(
             MODEL_PATH, device
         )
         self.model.to(device).float().eval()
-        if self.model.d_model != self.embedding_dim:
-            raise RuntimeError(
-                f"model dimension {self.model.d_model} does not match embeddings dimension {self.embedding_dim}"
-            )
 
     def default_summaries(self, seed: int | None = None) -> list[dict[str, Any]]:
         rng = random.Random(seed)
@@ -555,9 +512,7 @@ class Runtime:
             )
             np.maximum.at(best_scores, groups, scores)
             winning = scores == best_scores[groups]
-            best_positions = np.full(
-                self.static_set_group_count, -1, dtype=np.int32
-            )
+            best_positions = np.full(self.static_set_group_count, -1, dtype=np.int32)
             np.maximum.at(best_positions, groups[winning], np.flatnonzero(winning))
             available_groups = np.flatnonzero(best_positions >= 0)
         else:
@@ -570,9 +525,9 @@ class Runtime:
             available_groups = np.flatnonzero(np.isfinite(best_scores))
         result_count = min(top_k, len(available_groups))
         if result_count < len(available_groups):
-            selected = np.argpartition(
-                best_scores[available_groups], -result_count
-            )[-result_count:]
+            selected = np.argpartition(best_scores[available_groups], -result_count)[
+                -result_count:
+            ]
             selected_groups = available_groups[selected]
         else:
             selected_groups = available_groups

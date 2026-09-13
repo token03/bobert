@@ -1,5 +1,4 @@
 import argparse
-import json
 import re
 import shutil
 from datetime import UTC, datetime
@@ -8,10 +7,11 @@ import numpy as np
 import polars as pl
 import torch
 
+from core.artifacts import MODEL_NAME, validate_index, write_index
 from core.model import BobertEncoder
+from core.retrieval import index_retrieval
 from scripts.common.paths import DATA_DIR, RUNS_DIR
 from scripts.evaluation.graph import load_and_process_data
-from scripts.model.embed import index_embeddings, write_embedding_file
 from training.adapt import AdaptConfig, calibrate_adapter, sample_pairs, train_adapter
 
 EXPORT_FLUSH_SIZE = 100_000
@@ -65,8 +65,8 @@ def main() -> int:
     target_dir = RUNS_DIR / args.target
     if target_dir.exists():
         raise FileExistsError(f"Run already exists: {target_dir}")
-    source_metadata = json.loads(
-        (source_dir / "embeddings.json").read_text(encoding="utf-8")
+    source_metadata = validate_index(
+        source_dir / "embeddings.parquet", source_dir / MODEL_NAME
     )
     if source_metadata.get("adapter") is not None:
         raise ValueError("source run is already adapted")
@@ -121,31 +121,31 @@ def main() -> int:
     metadata = {
         **source_metadata,
         "generated_at": datetime.now(UTC).isoformat(),
-        "model": str(target_dir / "bobert.pt"),
         "adapter": adapter_metadata,
     }
     metadata.pop("retrieval", None)
     target_dir.mkdir(parents=True)
     model, vector_stats = BobertEncoder.from_pretrained(
-        source_dir / "bobert.pt", torch.device("cpu")
+        source_dir / MODEL_NAME, torch.device("cpu")
     )
     with torch.no_grad():
         model.adapter.proj.weight.copy_(adapter.proj.weight.detach().cpu())
     model.model_args["adapter"] = adapter_metadata
-    model.save_pretrained(target_dir / "bobert.pt", vector_stats)
-    shutil.copy2(source_dir / "config.yaml", target_dir / "config.yaml")
-    write_embedding_file(
-        target_dir / "embeddings.parquet",
+    model.save_pretrained(target_dir / MODEL_NAME, vector_stats)
+    shutil.copy2(source_dir / "training.yaml", target_dir / "training.yaml")
+    index_path = target_dir / "embeddings.parquet"
+    write_index(
+        index_path,
         frame["beatmap_id"].to_numpy(),
         embeddings,
-        EXPORT_FLUSH_SIZE,
         adapter.transform,
+        metadata,
+        model=target_dir / MODEL_NAME,
+        batch_size=EXPORT_FLUSH_SIZE,
     )
-    (target_dir / "embeddings.json").write_text(
-        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-    )
-    index_embeddings(
-        target_dir / "embeddings.parquet",
+    index_retrieval(
+        str(index_path),
+        str(target_dir / MODEL_NAME),
         args.device,
         INDEX_BATCH_SIZE,
     )
