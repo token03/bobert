@@ -5,17 +5,15 @@ BoBERT learns dense representations of osu!standard beatmaps from their hit-obje
 
 ## Architecture
 
-BoBERT is a bidirectional Transformer inspired by [ModernBERT](https://arxiv.org/abs/2412.13663): rotary position embeddings, interleaved local/global attention, and packed variable-length execution. Its input representation and prediction heads are designed for structured beatmap features. The encoder uses pre-norm RMSNorm and SwiGLU feed-forward blocks.
+BoBERT is a bidirectional Transformer inspired by [ModernBERT](https://arxiv.org/abs/2412.13663), adapted to structured beatmap features. It combines local attention for nearby patterns with periodic global attention across the beatmap, producing a 384-dimensional representation.
 
 ![BoBERT architecture: .osu hit objects become dense feature tokens, pass through nine pre-norm attention and SwiGLU blocks with residual connections, then global-layer pooling and a linear adapter produce a 384-dimensional embedding.](docs/assets/architecture.png)
 
 ### Dense feature tokens
 
-[`core/osu.py`](core/osu.py) parses hit objects and timing information; [`core/features.py`](core/features.py) constructs normalized continuous and categorical features. These include position, jump distance and direction, onset intervals and rhythmic phase, sustain duration, slider span geometry, curve residuals, and object attributes.
+Each hit object is described by spatial, rhythmic, slider-geometry, and categorical features. An [FT-Transformer](https://arxiv.org/abs/2106.11959)-inspired tokenizer embeds related feature groups and combines them into a single dense vector: **one hit object becomes one sequence token**. This preserves continuous measurements while keeping sequences compact.
 
-The tokenizer in [`core/components.py`](core/components.py) follows the feature-wise embedding idea of [FT-Transformer](https://arxiv.org/abs/2106.11959), adapted to groups of related measurements. Each numeric group has its own learned projection with a zero-centered nonlinearity, `tanh(Wx + b) − tanh(b)`. Object-type and validity masks suppress inapplicable features. Geometry projections are combined into two groups, giving six numeric embeddings alongside four categorical embeddings.
-
-Each group is 16-dimensional in the default configuration. The ten groups are concatenated into a 160-dimensional vector, projected to width 384, and RMS-normalized. **One hit object becomes one sequence token**; feature groups are fused within that token. Continuous measurements are preserved without expanding them into a discrete event vocabulary.
+Feature extraction lives in [`core/features.py`](core/features.py), and the tokenizer in [`core/components.py`](core/components.py).
 
 ### Sequence encoder
 
@@ -23,22 +21,17 @@ Each group is 16-dimensional in the default configuration. The ten groups are co
 | --- | --- |
 | Encoder depth / width | 9 layers / 384 dimensions |
 | Attention heads | 6 |
-| SwiGLU intermediate width | 1,024 |
 | Sequence length limit | 4,096 hit objects |
-| Global attention | Layers 3, 6, and 9 |
-| Local attention | Other layers, up to 128 objects on either side |
+| Attention pattern | Global every third layer; local otherwise, ±128 objects |
 | Positional representation | Rotary position embeddings (RoPE) |
-| Residual blocks | Pre-norm RMSNorm, bias-free attention and feed-forward projections |
 
-Local attention models nearby patterns while periodic global layers exchange information across the beatmap. CUDA execution uses FlashAttention 2's variable-length kernels. Sequences are packed with cumulative sequence offsets, preserving beatmap boundaries without padding every map to the longest sequence. A PyTorch attention implementation supports CPU inference. Training also supports `torch.compile`, length bucketing, mixed precision, and activation checkpointing.
+FlashAttention 2 and packed variable-length sequences reduce padding overhead during GPU training. A PyTorch attention path supports CPU inference. The encoder implementation is in [`core/model.py`](core/model.py).
 
 ### Learning and embedding extraction
 
-Pretraining masks spans of hit objects and reconstructs their continuous and categorical features with feature-specific heads. The default mask ratio is 30%, with a mean span length of two objects. An auxiliary head predicts aim, speed, and related strain targets from pooled encoder states. These objectives encourage both local pattern reconstruction and map-level representations.
+Pretraining masks spans of hit objects and learns to reconstruct their features. An auxiliary objective predicts aim, speed, and related strain targets, encouraging the model to capture both local patterns and map-level characteristics.
 
-For retrieval, BoBERT mean-pools normalized hidden states at each global-attention layer. It L2-normalizes each layer's pooled vector, subtracts its corpus mean, renormalizes, averages across layers, and normalizes the result. A linear adapter can then be trained with collection-derived positive pairs and a symmetric in-batch contrastive objective. Final embeddings are indexed with a density-adjusted CSLS scoring rule, used primarily to reduce the disproportionate influence of maps with more hit objects. This correction operates on embedding-neighborhood density rather than directly penalizing hit-object count.
-
-The corpus centering statistics and retrieval settings belong to the exported embedding index: online queries must use the same transform as the stored vectors.
+For retrieval, representations from the global-attention layers are pooled, centered, and combined into a normalized beatmap embedding. A lightweight linear adapter learns from collection-derived positive pairs to refine similarity for recommendations.
 
 ## Run locally
 
