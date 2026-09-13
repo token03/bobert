@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         "--source", default="compare", help="Run name or embeddings parquet"
     )
     parser.add_argument(
-        "--disjoint", default="v12.1", help="Run name or embeddings parquet"
+        "--disjoint", default="v13.1", help="Run name or embeddings parquet"
     )
     parser.add_argument("--source-k", type=int, default=50, help="Source rank cutoff")
     parser.add_argument(
