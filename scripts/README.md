@@ -80,6 +80,6 @@ Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_
 
 Run artifacts stay in `runs/<version>/`; catalogs live in the workspace's `data/` directory and are shared across runs.
 
-`deploy -v <tag>` runs on the provisioned server: it pulls the code, downloads that release from Hugging Face with `curl`, rebuilds the API image, swaps the run and catalogs, and rolls back on a failed health check. It requires the release to be published first and uses `DEPLOY_SSH_TARGET` and `DEPLOY_REMOTE_ROOT`. Rollback only needs the previous run directory, which is retained on the server.
+`deploy -v <tag>` runs on the provisioned server: it pulls the code, downloads that release from Hugging Face with `curl`, rebuilds the API image, swaps the run and catalogs, and rolls back on a failed health check. It requires the release to be published first and uses `DEPLOY_SSH_TARGET` and `DEPLOY_REMOTE_ROOT`. The disposable SQLite cache is reset on every switch so container users cannot conflict over stale files. Rollback only needs the previous run directory, which is retained on the server.
 
 For service setup, see the [API guide](../server/README.md). The deployment command updates an existing host; initial provisioning happens separately.

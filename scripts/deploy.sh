@@ -32,6 +32,7 @@ rollback() {
     fi
     ln -sfn -- "$previous" runs/.current || return
     mv -Tf -- runs/.current runs/current || return
+    docker compose --project-directory "$PWD" -f "$stage/compose.yaml" -f "$stage/image.yaml" run --rm -T --no-deps --user root --entrypoint /bin/sh api -c 'rm -f /app/cache/runtime.sqlite*' || return
     docker compose --project-directory "$PWD" -f "$stage/compose.yaml" -f "$stage/image.yaml" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 api
 }
 finish() {
@@ -98,6 +99,7 @@ for file in beatmaps.parquet beatmapsets.parquet strains.parquet; do
 done
 ln -sfn -- "$version" runs/.current
 mv -Tf -- runs/.current runs/current
+"${compose[@]}" run --rm -T --no-deps --user root --entrypoint /bin/sh api -c 'rm -f /app/cache/runtime.sqlite*'
 "${compose[@]}" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 api
 cutover=0
 python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1])' "$stage"
