@@ -1,73 +1,42 @@
-# React + TypeScript + Vite
+# BoBERT web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React and TypeScript frontend for finding similar osu! beatmaps, filtering recommendations, and previewing audio. Built with Vite, TanStack Router, TanStack Query, and TanStack Form.
 
-Currently, two official plugins are available:
+## Development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Start the [API](../server/README.md) on `127.0.0.1:8008`, then run from this directory:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```sh
+bun install
+bun run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open the address printed by Vite. [`vite.config.ts`](vite.config.ts) proxies `/api` to the local backend. From the repository root, `mise run dev` starts both services after dependencies and model artifacts are prepared.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Commands
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+| Command | Purpose |
+| --- | --- |
+| `bun run dev` | Development server with API proxy |
+| `bun run build` | Type-check and build into `dist/` |
+| `bun run lint` | ESLint |
+| `bun run preview` | Preview the static build; an API route must be provided separately |
+| `bun run generate:api` | Regenerate `src/shared/schema.d.ts` from the running local API |
+
+## Source guide
+
+- `src/features/recommend/`: form, filters, results, and beatmap cards.
+- `src/features/audio/`: shared audio-preview state and controls.
+- `src/routes/`: TanStack route definitions; `routeTree.gen.ts` is generated.
+- `src/shared/`: typed API client, generated schema, formatting, and UI utilities.
+- `src/styles/`: global styles and theme.
+- `functions/`: Cloudflare Pages API forwarding function.
+- `gateway/`: separately deployed Cloudflare Worker.
+
+## Cloudflare deployment
+
+Build the frontend with `bun run build` and publish `dist/` through Cloudflare Pages with the `functions/` directory. The Pages Function forwards API requests through a service binding named `GATEWAY`.
+
+The gateway uses an `API` VPC service binding and two rate-limit bindings, `RECOMMEND_BURST` and `RECOMMEND_SUSTAINED`. Provision these resources in your account and configure [`gateway/wrangler.jsonc`](gateway/wrangler.jsonc); its service ID and rate-limit namespaces describe the existing deployment. The VPC service connects to the Python API through Cloudflare Tunnel.
+
+From `gateway/`, install dependencies with `bun install` and deploy with `bun run deploy`. The Pages service binding and backend connectivity must also be configured in Cloudflare. Local frontend development uses the Vite proxy and does not require these bindings.
