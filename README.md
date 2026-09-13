@@ -37,6 +37,14 @@ Pretraining masks spans of hit objects and learns to reconstruct their features.
 
 For retrieval, representations from the global-attention layers are pooled, centered, and combined into a normalized beatmap embedding. A lightweight linear adapter learns from collection-derived positive pairs to refine similarity for recommendations.
 
+## Limitations
+
+- **Short maps can have less reliable neighbors.** Each token summarizes its surrounding patterns and, through global attention, wider map context. Mean pooling compresses these representations into one vector. Maps with fewer hit objects provide fewer observations to average over, so their neighborhoods can be sparser and noisier.
+- **Pooling loses detail.** A single embedding summarizes the whole map; distinctive short sections can be diluted by more common patterns elsewhere. Map-level similarity does not necessarily imply that every section plays similarly.
+- **Long maps are truncated.** Only the first 4,096 hit objects are encoded; later objects are currently discarded. Pooling embeddings from multiple segments is a possible extension for extremely long maps.
+- **Only osu!standard is supported.** Other game modes would require extending the feature tokenizer and masked-feature prediction heads, along with mode-specific data preparation and training.
+- **Uncached CPU inference can be slow.** Encoding the longest supported maps can take several seconds, depending on hardware. GPU-precomputed embeddings and cached online results make this less frequent, but previously unseen maps still incur the encoding cost.
+
 ## Run locally
 
 The API runs on CPU in Docker; the frontend uses Bun. Local development connects Vite directly to the API.
