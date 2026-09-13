@@ -1,7 +1,11 @@
 # BoBERT
 **Bidirectional osu! Beatmap Encoder Representations from Transformers**
 
-BoBERT learns dense representations of osu!standard beatmaps from their hit-object sequences. Spatial patterns, rhythm, and slider geometry become fixed-size embeddings for similarity search, recommendations, and representation analysis. The project includes a data pipeline, encoder training and adaptation, evaluation tools, and a web application backed by an index of roughly 500,000 beatmaps.
+BoBERT learns dense representations of osu!standard beatmaps from their hit-object sequences. Spatial patterns, rhythm, and slider geometry become fixed-size embeddings. The encoder was pretrained on roughly **500,000 beatmaps**, then adapted for recommendation and similarity search using labelled data from thousands of collections.
+
+While recommendation and similarity search motivated the project, the pretrained embeddings can be adapted to a wider range of representation-learning tasks, including classification, clustering, and attribute prediction. The repository includes the data pipeline, encoder training and adaptation, evaluation tools, and a web application.
+
+**[Try the beatmap recommender →](https://bobert-web.pages.dev/)**
 
 ## Architecture
 
