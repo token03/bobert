@@ -8,7 +8,7 @@
   overflow: hidden;
 }
 
-.beatmap-card button,
+.beatmap-card button:not(.cover-preview),
 .row-actions a {
   border: 0;
   border-radius: var(--radius-sm);
@@ -119,7 +119,6 @@
 
 .source-content {
   align-items: stretch;
-  border-radius: var(--card-overlap) 0 0 var(--card-overlap);
   padding: var(--space-xl) var(--space-xl) var(--space-xl) var(--radius-md);
 }
 
@@ -283,7 +282,6 @@
 .map-content {
   align-items: center;
   border: 1px solid transparent;
-  border-radius: var(--card-overlap) var(--radius-md) var(--radius-md) var(--card-overlap);
   padding: calc(var(--space-xl) - 1px) calc(var(--space-xl) - 1px) calc(var(--space-xl) - 1px) calc(var(--radius-md) - 1px);
 }
 
@@ -970,14 +968,12 @@
   .map-content {
     margin-top: calc(var(--card-overlap) * -1);
     margin-left: 0;
-    border-radius: var(--card-overlap) var(--card-overlap) var(--radius-md) var(--radius-md);
     padding: calc(var(--radius-md) - 1px) calc(var(--space-xl) - 1px) calc(var(--space-xl) - 1px);
   }
 
   .source-content {
     margin-top: calc(var(--card-overlap) * -1);
     margin-left: 0;
-    border-radius: var(--card-overlap) var(--card-overlap) 0 0;
     padding: var(--radius-md) var(--space-xl) var(--space-xl);
   }
   .cover-preview {

@@ -5,7 +5,7 @@ BoBERT learns dense representations of osu!standard beatmaps from their hit-obje
 
 While recommendation and similarity search motivated the project, the pretrained embeddings can be adapted to a wider range of representation-learning tasks, including classification, clustering, and attribute prediction. The repository includes the data pipeline, encoder training and adaptation, evaluation tools, and a web application.
 
-**[Try the beatmap recommender →](https://bobert-web.pages.dev/)**
+**[Click here to try the search tool](https://bobert-web.pages.dev/)**
 
 ## Architecture
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Tabs } from '@base-ui/react/tabs'
+import { DiceFive, GithubLogo, MagnifyingGlass } from '@phosphor-icons/react'
 import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
@@ -101,6 +102,7 @@ export function RecommendPage() {
   const resultsRef = useRef<HTMLDivElement>(null)
   const [outgoingResults, setOutgoingResults] = useState<BeatmapMetadata[] | null>(null)
   const [resultsHeight, setResultsHeight] = useState(0)
+  const [isRolling, setIsRolling] = useState(false)
   const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
   const [sourceView, setSourceView] = useState<{ beatmapId: number | null; direction: SweepDirection; animate: boolean }>({ beatmapId: null, direction: 'left', animate: false })
   const form = useRecommendForm(search, runManualRecommend)
@@ -337,7 +339,7 @@ export function RecommendPage() {
 
       <section className={styles['results-panel']}>
         <div className={styles['recommend-layout']}>
-          {sourceSwap && sourceBeatmap ? (
+          {!isRolling && sourceSwap && sourceBeatmap ? (
             <BeatmapCard
               variant="source"
               beatmap={sourceBeatmap}
@@ -349,7 +351,7 @@ export function RecommendPage() {
               sweepPhase={sourceSweepPhase}
               onSweepEnd={finishSourceSweep}
             />
-          ) : sourceBeatmap ? (
+          ) : !isRolling && sourceBeatmap ? (
             <SourceBeatmapPager
               beatmaps={sourceBeatmaps}
               beatmap={sourceBeatmap}
@@ -361,7 +363,35 @@ export function RecommendPage() {
               activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
               isPreviewPlaying={audio.isPlaying}
             />
-          ) : showSourcePlaceholder ? <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${cardStyles['source-card-placeholder']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true" /> : null}
+          ) : !isRolling && showSourcePlaceholder ? <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${cardStyles['source-card-placeholder']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true" /> : isRolling || beatmapIds === null ? (
+            <header className={styles['intro']}>
+              <h1>bobert</h1>
+              <p>to find similar beatmaps, enter a beatmap id or use <span className={styles['intro-action']}><MagnifyingGlass aria-hidden="true" /> search similar</span> on a map below. have fun!</p>
+              <div className={styles['intro-actions']}>
+                <button
+                  type="button"
+                  disabled={isLoading || isRolling || !hasResults}
+                  onClick={() => {
+                    setIsRolling(true)
+                    const beatmap = resultBeatmaps[Math.floor(Math.random() * resultBeatmaps.length)]
+                    void searchBeatmap(beatmap, 'left')
+                  }}
+                >
+                  <DiceFive
+                    className={styles['pick-dice']}
+                    data-rolling={isRolling || undefined}
+                    aria-hidden="true"
+                    onAnimationEnd={() => setIsRolling(false)}
+                  />
+                  pick for me
+                </button>
+                <a href="https://github.com/token03/bobert" target="_blank" rel="noreferrer" aria-label="view source on github" title="view source on github">
+                  <GithubLogo aria-hidden="true" />
+                  view source
+                </a>
+              </div>
+            </header>
+          ) : null}
           {recommendForm}
           <div
             ref={resultsRef}

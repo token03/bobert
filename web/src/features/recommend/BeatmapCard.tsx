@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, DownloadSimple, Metronome, Pause, Play, MagnifyingGlass, Star } from '@phosphor-icons/react'
+import { ArrowSquareOut, Check, Clock, Copy, Metronome, Pause, Play, MagnifyingGlass, Star } from '@phosphor-icons/react'
 import { useState } from 'react'
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { displayArtist, displayTitle, formatFixedNumber, formatLength, formatMatch, formatNumber, statusLabel } from '../../shared/format'
@@ -310,7 +310,7 @@ function CardActions({
         <Check className={styles['copy-check-icon']} />
       </button>
       <button type="button" onClick={(event) => handleActionClick(event, () => window.location.assign(`osu://b/${beatmap.beatmap_id}`))} aria-label="Open beatmap in osu!" title="Open in osu!">
-        <DownloadSimple />
+        <ArrowSquareOut />
       </button>
     </div>
   )

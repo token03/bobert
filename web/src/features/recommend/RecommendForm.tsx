@@ -273,7 +273,11 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
       onSubmit={(event) => {
         event.preventDefault()
         if (commitBeatmapDraft()) {
-          void form.handleSubmit()
+          if (!form.getFieldValue('beatmap').trim()) {
+            onReset(form.state.values)
+          } else {
+            void form.handleSubmit()
+          }
         }
       }}
     >
