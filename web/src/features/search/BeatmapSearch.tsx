@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Combobox } from '@base-ui/react/combobox'
 import { ArrowLeft, CaretRight, Star } from '@phosphor-icons/react'
+import { parseBeatmapIds } from '../../shared/beatmapIds'
+import { formatDifficultyStat, formatLength, formatNumber } from '../../shared/format'
 import type { SearchSet } from './search'
 import { searchBeatmaps, startSearch } from './searchClient'
-import { parseBeatmapIds } from './filters'
-import { formatDifficultyStat, formatLength, formatNumber } from '../../shared/format'
 import styles from './BeatmapSearch.module.css'
 
 type Props = {

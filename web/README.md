@@ -28,9 +28,10 @@ Open the address printed by Vite. [`vite.config.ts`](vite.config.ts) proxies `/a
 ## Source guide
 
 - `src/features/recommend/`: form, filters, results, and beatmap cards.
+- `src/features/search/`: local beatmap search engine, worker, and combobox picker.
 - `src/features/audio/`: shared audio-preview state and controls.
 - `src/routes/`: TanStack route definitions; `routeTree.gen.ts` is generated.
-- `src/shared/`: typed API client, generated schema, formatting, and UI utilities.
+- `src/shared/`: typed API client, generated schema, formatting, beatmap ID parsing, and UI utilities.
 - `src/styles/`: global styles and theme.
 - `functions/`: Cloudflare Pages API forwarding function.
 - `gateway/`: separately deployed Cloudflare Worker.
