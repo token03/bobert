@@ -178,7 +178,6 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
                 {bpm !== null && length !== null ? <span className={styles.tempo}>{formatNumber(bpm, 0)} BPM · {formatLength(length)}</span> : null}
                 <span className={styles.meta}>
                   <span data-status={selectedSet.status}>{statusLabel(selectedSet.status)}</span>
-                  <small>{diffs.length} difficulties</small>
                 </span>
               </div>
             )}
