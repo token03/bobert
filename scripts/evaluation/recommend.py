@@ -557,7 +557,7 @@ def resolve_embeddings_path(args: argparse.Namespace) -> Path:
         return RUNS_DIR / args.version / "embeddings.parquet"
     if args.model:
         return resolve_path(args.model).parent / "embeddings.parquet"
-    return find_model().parent / "embeddings.parquet"
+    return RUNS_DIR / "current" / "embeddings.parquet"
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:

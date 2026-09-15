@@ -76,6 +76,7 @@ class TargetData:
 class EvalResult:
     name: str
     metrics: dict[str, dict[str, float]]
+    detail: dict[str, object] | None = None
 
 
 EVAL_RESULTS: list[EvalResult] = []
@@ -288,6 +289,24 @@ def corpus_knn_skewness(
     return float((deviation**3).mean().item())
 
 
+def paired_ap_test(
+    first: dict[int, float], second: dict[int, float], permutations: int = 20000
+) -> dict[str, object]:
+    common = sorted(set(first) & set(second))
+    diffs = np.array([second[query_id] - first[query_id] for query_id in common])
+    observed = float(diffs.mean()) if len(diffs) else 0.0
+    generator = np.random.default_rng(PROBE_SEED)
+    null = (
+        generator.choice([-1.0, 1.0], size=(permutations, len(diffs))) * diffs
+    ).mean(axis=1)
+    return {
+        "delta": observed,
+        "p_value": float((np.abs(null) >= abs(observed)).mean()),
+        "queries": len(diffs),
+        "permutations": permutations,
+    }
+
+
 def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
@@ -311,14 +330,22 @@ def evaluate_grouped_retrieval(
     )
 
     positives_by_query: dict[int, set[int]] = {}
+    set_ids = beatmapset_groups(candidate_ids)
     for ids in groups.values():
         present = [
             beatmap_id for beatmap_id in dict.fromkeys(ids) if beatmap_id in covered
         ]
         for query_id in present:
+            query_set = set_ids[candidate_indices[query_id]]
             positives_by_query.setdefault(query_id, set()).update(
-                target_id for target_id in present if target_id != query_id
+                target_id
+                for target_id in present
+                if target_id != query_id
+                and set_ids[candidate_indices[target_id]] != query_set
             )
+    positives_by_query = {
+        query_id: ids for query_id, ids in positives_by_query.items() if ids
+    }
 
     query_ids = list(positives_by_query)
     query_indices = torch.tensor(
@@ -333,6 +360,13 @@ def evaluate_grouped_retrieval(
     if densities_t is not None:
         sims = sims - retrieval.density_term(densities_t, target.retrieval_lambda)
     sims[torch.arange(len(query_ids), device=device), query_indices] = -torch.inf
+    query_sets = set_ids[query_indices.cpu().numpy()]
+    columns_by_set = {
+        s: torch.from_numpy(np.flatnonzero(set_ids == s)).to(device)
+        for s in np.unique(query_sets)
+    }
+    for row, s in enumerate(query_sets):
+        sims[row, columns_by_set[s]] = -torch.inf
 
     positive_counts = [len(positives_by_query[beatmap_id]) for beatmap_id in query_ids]
     top_count = min(
@@ -346,8 +380,12 @@ def evaluate_grouped_retrieval(
 
     r_precisions = []
     recalls = {cutoff: [] for cutoff in RETRIEVAL_RECALL_KS}
+    average_precisions = []
+    ndcgs = {cutoff: [] for cutoff in RETRIEVAL_RECALL_KS}
     query_weights = []
     local_margins = []
+    query_rows = []
+    ranked_by_query = {}
     for row, query_id in enumerate(query_ids):
         positive_ids = positives_by_query[query_id]
         positive_count = len(positive_ids)
@@ -356,18 +394,63 @@ def evaluate_grouped_retrieval(
             dtype=np.int64,
             count=positive_count,
         )
-        row_indices = top_indices[row]
-        top_is_positive = np.isin(row_indices, positive_indices)
+        keep = []
+        seen = set()
+        for position, (column, score) in enumerate(
+            zip(top_indices[row], top_values[row])
+        ):
+            if not np.isfinite(score):
+                break
+            s = int(set_ids[int(column)])
+            if s in seen:
+                continue
+            seen.add(s)
+            keep.append(position)
+        keep = np.asarray(keep, dtype=np.int64)
+        ranked = top_indices[row][keep].astype(np.int64)
+        ranked_scores = top_values[row][keep]
+        ranked_by_query[query_id] = ranked
+        is_positive = np.isin(ranked, positive_indices)
+        hits = np.flatnonzero(is_positive) + 1
         query_weights.append(1 / np.sqrt(positive_count + 1))
-        r_precisions.append(float(top_is_positive[:positive_count].mean()))
+        r_precisions.append(float(is_positive[:positive_count].mean()))
         for cutoff in RETRIEVAL_RECALL_KS:
-            recalls[cutoff].append(
-                float(top_is_positive[:cutoff].sum() / positive_count)
+            recalls[cutoff].append(float(is_positive[:cutoff].sum() / positive_count))
+        if len(hits):
+            average_precision = float(
+                (np.arange(1, len(hits) + 1) / hits).sum() / positive_count
             )
+            best_rank = int(hits[0])
+        else:
+            average_precision = 0.0
+            best_rank = None
+        average_precisions.append(average_precision)
+        for cutoff in RETRIEVAL_RECALL_KS:
+            relevant = is_positive[:cutoff].astype(np.float64)
+            discounts = 1.0 / np.log2(np.arange(2, len(relevant) + 2))
+            ideal = (1.0 / np.log2(np.arange(2, min(positive_count, cutoff) + 2))).sum()
+            ndcgs[cutoff].append(float((relevant * discounts).sum() / ideal))
+        query_rows.append(
+            {
+                "query_id": int(query_id),
+                "positives": positive_count,
+                "ap": average_precision,
+                "r_precision": float(is_positive[:positive_count].mean()),
+                **{
+                    f"recall@{cutoff}": float(
+                        is_positive[:cutoff].sum() / positive_count
+                    )
+                    for cutoff in RETRIEVAL_RECALL_KS
+                },
+                **{
+                    f"ndcg@{cutoff}": ndcgs[cutoff][-1]
+                    for cutoff in RETRIEVAL_RECALL_KS
+                },
+                "best_rank": best_rank,
+            }
+        )
 
-        hard_negative_values = top_values[row][~top_is_positive][
-            :RETRIEVAL_HARD_NEGATIVE_K
-        ]
+        hard_negative_values = ranked_scores[~is_positive][:RETRIEVAL_HARD_NEGATIVE_K]
         if len(hard_negative_values):
             positive_values = (
                 sims[row, torch.tensor(positive_indices, device=device)].cpu().numpy()
@@ -379,6 +462,53 @@ def evaluate_grouped_retrieval(
                 )
             )
 
+    detail_groups = []
+    for group_id, ids in groups.items():
+        present = [
+            beatmap_id for beatmap_id in dict.fromkeys(ids) if beatmap_id in covered
+        ]
+        group_rows = []
+        for query_id in present:
+            if query_id not in ranked_by_query:
+                continue
+            query_set = set_ids[candidate_indices[query_id]]
+            mates = [
+                target_id
+                for target_id in present
+                if target_id != query_id
+                and set_ids[candidate_indices[target_id]] != query_set
+            ]
+            if not mates:
+                group_rows.append(
+                    {
+                        "query_id": int(query_id),
+                        "positives": 0,
+                        "ap": 0.0,
+                        "best_rank": None,
+                    }
+                )
+                continue
+            mate_columns = np.array(
+                [candidate_indices[target_id] for target_id in mates]
+            )
+            flags = np.isin(ranked_by_query[query_id], mate_columns)
+            found = np.flatnonzero(flags) + 1
+            group_rows.append(
+                {
+                    "query_id": int(query_id),
+                    "positives": len(mates),
+                    "ap": float(
+                        (np.arange(1, len(found) + 1) / found).sum() / len(mates)
+                    )
+                    if len(found)
+                    else 0.0,
+                    "best_rank": int(found[0]) if len(found) else None,
+                }
+            )
+        detail_groups.append(
+            {"group_id": str(group_id), "maps": len(present), "queries": group_rows}
+        )
+
     return {
         "evaluation_id_coverage": len(covered) / len(eval_ids),
         "evaluation_queries": float(len(positives_by_query)),
@@ -387,6 +517,11 @@ def evaluate_grouped_retrieval(
             f"macro_recall@{cutoff}": weighted_mean(values, query_weights)
             for cutoff, values in recalls.items()
         },
+        "macro_ap": weighted_mean(average_precisions, query_weights),
+        **{
+            f"macro_ndcg@{cutoff}": weighted_mean(values, query_weights)
+            for cutoff, values in ndcgs.items()
+        },
         "median_local_margin": float(np.median(local_margins))
         if local_margins
         else float("nan"),
@@ -394,7 +529,7 @@ def evaluate_grouped_retrieval(
         f"knn_{RETRIEVAL_HUBNESS_K}_skewness": corpus_knn_skewness(
             candidates, densities_t, target.retrieval_lambda
         ),
-    }
+    }, {"groups": detail_groups, "queries": query_rows, "paired": None}
 
 
 def format_metric(value: float) -> str:
@@ -760,15 +895,29 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
         )
         return
     candidate_ids = common_ids(targets)
-    print_eval_result(
-        EvalResult(
-            "Grouped Retrieval",
-            {
-                target.name: evaluate_grouped_retrieval(target, groups, candidate_ids)
-                for target in targets
-            },
-        )
+    per_target = {
+        target.name: evaluate_grouped_retrieval(target, groups, candidate_ids)
+        for target in targets
+    }
+    result = EvalResult(
+        "Grouped Retrieval",
+        {name: metrics for name, (metrics, _) in per_target.items()},
+        {name: detail for name, (_, detail) in per_target.items()},
     )
+    print_eval_result(result)
+    if len(targets) == 2:
+        first, second = targets[0].name, targets[1].name
+        test = paired_ap_test(
+            {row["query_id"]: row["ap"] for row in result.detail[first]["queries"]},
+            {row["query_id"]: row["ap"] for row in result.detail[second]["queries"]},
+        )
+        paired = {"first": first, "second": second, **test}
+        result.detail[first]["paired"] = paired
+        result.detail[second]["paired"] = paired
+        console.print(
+            f"[dim]Paired AP Δ ({second} − {first}): {test['delta']:+.4f}, "
+            f"p={test['p_value']:.4f} (permutation, n={test['queries']})[/dim]"
+        )
 
 
 def run_categorical_probe(
@@ -1104,6 +1253,11 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
             for result in EVAL_RESULTS
             if target.name in result.metrics
         }
+        details = {
+            result.name: result.detail[target.name]
+            for result in EVAL_RESULTS
+            if result.detail and target.name in result.detail
+        }
         payload = json_value(
             {
                 "generated_at": generated_at,
@@ -1118,6 +1272,7 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                 ),
                 "embedding_metadata": embedding_metadata(target.path),
                 "evaluations": evaluations,
+                "details": details,
             }
         )
         output = target.run_dir / filename

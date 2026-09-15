@@ -292,10 +292,16 @@ class HitObjectFeatureTokenizer(nn.Module):
             ("curve_residual_1_dx", "curve_residual_1_dy"),
             ("curve_residual_2_dx", "curve_residual_2_dy"),
         )
+        anchor_numeric = (("log_gray_anchor_count",),)
         numeric_indices = []
         numeric_mask = []
-        numeric_sizes = [*map(len, common_numeric), 3, *map(len, geometry_numeric)]
-        for feature_names in common_numeric + geometry_numeric:
+        numeric_sizes = [
+            *map(len, common_numeric),
+            3,
+            *map(len, geometry_numeric),
+            *map(len, anchor_numeric),
+        ]
+        for feature_names in common_numeric + geometry_numeric + anchor_numeric:
             indices = [self.continuous[feature] for feature in feature_names]
             numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
             numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
@@ -327,12 +333,14 @@ class HitObjectFeatureTokenizer(nn.Module):
             self.continuous["spinner_rhythm_sin"],
         )
 
-        categorical_names = (
+        categorical_names = [
             "is_new_combo",
             "incoming_motion_valid",
             "span_count_bin",
+            "red_anchor_bin",
             "object_type",
-        )
+        ]
+        self.categorical_kinds = tuple(categorical_names)
         categorical_indices = []
         categorical_cardinalities = []
         category_offsets = []
@@ -362,7 +370,7 @@ class HitObjectFeatureTokenizer(nn.Module):
             torch.tensor(category_offsets, dtype=torch.long),
             persistent=False,
         )
-        self.out = nn.Linear(10 * d_feat, d_model, bias=False)
+        self.out = nn.Linear((6 + len(categorical_names)) * d_feat, d_model, bias=False)
         self.norm = RMSNorm(d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -415,21 +423,27 @@ class HitObjectFeatureTokenizer(nn.Module):
                 is_slider,
                 is_slider,
                 is_slider,
+                is_slider,
             ),
             dim=-1,
         )
         numeric_tokens = numeric_tokens * numeric_active[..., None]
 
         categorical_lookup = categorical_ids + self.category_offsets
-        categorical_active = torch.stack(
-            (
-                categorical_ids[..., 0] != 0,
-                ~incoming_valid,
-                is_slider,
-                object_type != OBJECT_TYPE_CIRCLE,
-            ),
-            dim=-1,
-        )
+        activations = []
+        for position, name in enumerate(self.categorical_kinds):
+            column = categorical_ids[..., position]
+            if name == "is_new_combo":
+                activations.append(column != 0)
+            elif name == "incoming_motion_valid":
+                activations.append(~incoming_valid)
+            elif name == "span_count_bin":
+                activations.append(is_slider)
+            elif name == "red_anchor_bin":
+                activations.append(is_slider)
+            else:
+                activations.append(object_type != OBJECT_TYPE_CIRCLE)
+        categorical_active = torch.stack(activations, dim=-1)
         categorical_lookup = torch.where(
             categorical_active,
             categorical_lookup,

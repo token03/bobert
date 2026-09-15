@@ -166,6 +166,15 @@ class BobertEncoder(nn.Module):
         model.to(device).eval()
         return model, vector_stats
 
+    def to_inference(self, device: torch.device) -> Self:
+        if device.type == "cuda":
+            return self.to(device=device, dtype=torch.bfloat16).eval()
+        model = self.to(device=device, dtype=torch.float32).eval()
+        with torch.no_grad():
+            for tensor in (model.rotary_emb.freqs, model.rotary_emb.cached_freqs):
+                tensor.copy_(tensor.bfloat16().float())
+        return model
+
     def save_pretrained(
         self,
         path: str | Path,
@@ -338,8 +347,6 @@ class BobertEncoder(nn.Module):
         vector_stats: VectorStats,
         beatmap_id: int | None = None,
     ) -> np.ndarray:
-        if self.rotary_emb.cached_freqs.device.type == "cpu":
-            self.rotary_emb.cached_freqs = self.rotary_emb.cached_freqs.bfloat16()
         beatmap = parse_osu_bytes(
             content,
             beatmap_id=beatmap_id,
@@ -353,18 +360,10 @@ class BobertEncoder(nn.Module):
             build_beatmap_tensor(beatmap, self.max_seq_len), vector_stats
         )
         device = next(self.parameters()).device
-        vectors = vectors.to(device)
+        vectors = vectors.to(device=device, dtype=next(self.parameters()).dtype)
         length = vectors.shape[0]
         cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device=device)
-        amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-        with (
-            torch.inference_mode(),
-            torch.autocast(
-                device_type=device.type,
-                dtype=amp_dtype,
-                enabled=device.type == "cuda",
-            ),
-        ):
+        with torch.inference_mode():
             embeddings = self.embed_packed(vectors, cu_seqlens, length)
         return embeddings[:, 0].float().cpu().numpy().astype(np.float32)
 

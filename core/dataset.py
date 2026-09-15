@@ -246,6 +246,9 @@ def load_beatmap_dataset(
         "curve_residual_1_dy",
         "curve_residual_2_dx",
         "curve_residual_2_dy",
+        "curve_type_char",
+        "num_anchors",
+        "hard_anchor_ratio",
     ]
 
     chunks = _chunk_beatmap_ids(all_beatmap_ids, chunk_size)

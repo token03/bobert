@@ -20,6 +20,7 @@ CENTER_Y = OSU_STAGE_HEIGHT / 2.0
 DEFAULT_PRE_START_MS = 200.0
 
 SPAN_COUNT_CARDINALITY = 5
+RED_ANCHOR_BIN_CARDINALITY = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +72,18 @@ FEATURES = (
         "span_count_bin",
         "attribute",
         cardinality=SPAN_COUNT_CARDINALITY,
+        conditional="slider",
+    ),
+    Feature(
+        "log_gray_anchor_count",
+        "attribute",
+        standardize=True,
+        conditional="slider",
+    ),
+    Feature(
+        "red_anchor_bin",
+        "attribute",
+        cardinality=RED_ANCHOR_BIN_CARDINALITY,
         conditional="slider",
     ),
 )
@@ -340,6 +353,30 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
             .otherwise(4)
             .cast(pl.Int32)
             .alias("span_count_bin"),
+        )
+        .with_columns(
+            pl.col("num_anchors")
+            .fill_null(0)
+            .clip(0, 4096)
+            .alias("_gray_anchor_count"),
+            (
+                pl.col("hard_anchor_ratio").fill_null(0.0)
+                * pl.col("num_anchors").fill_null(0).clip(0, 4096)
+            )
+            .round()
+            .clip(0, 4096)
+            .alias("_red_anchor_count"),
+        )
+        .with_columns(
+            pl.when(is_slider)
+            .then(pl.col("_gray_anchor_count").log1p())
+            .otherwise(0.0)
+            .alias("log_gray_anchor_count"),
+            pl.when(is_slider)
+            .then(pl.col("_red_anchor_count").clip(0, 3))
+            .otherwise(0)
+            .cast(pl.Int32)
+            .alias("red_anchor_bin"),
         )
     )
     return df

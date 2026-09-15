@@ -363,7 +363,7 @@ class Runtime:
         self.model, self.vector_stats = BobertEncoder.from_pretrained(
             MODEL_PATH, device
         )
-        self.model.to(device).float().eval()
+        self.model.to_inference(device)
 
     def default_summaries(self, seed: int | None = None) -> list[dict[str, Any]]:
         rng = random.Random(seed)

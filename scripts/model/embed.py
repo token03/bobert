@@ -70,10 +70,7 @@ def load_model(model_path: Path, device: torch.device, quiet: bool = False):
     model, vector_stats = BobertEncoder.from_pretrained(model_path, device)
     if not quiet:
         print(f"Loaded model: {model_path}")
-    if device.type == "cuda":
-        model.to(device).bfloat16().eval()
-    else:
-        model.to(device).float().eval()
+    model.to_inference(device)
     return model, vector_stats
 
 
@@ -195,9 +192,9 @@ def export_embeddings(
             print("Compiling embedding tokenizer and encoder with torch.compile...")
         model.compile_encoder(mode=config.runtime.compile_mode)
 
-    amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     output_path.parent.mkdir(parents=True, exist_ok=True)
     layer_count = len(model.global_attention_layers)
+    model_dtype = next(model.parameters()).dtype
     layer_total = np.zeros((layer_count, model.d_model), dtype=np.float64)
     layer_embeddings = np.empty(
         (len(ids), layer_count, model.d_model), dtype=np.float16
@@ -251,16 +248,13 @@ def export_embeddings(
             for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
                 loader, desc="Embedding", leave=False, disable=quiet
             ):
-                vectors = vectors.to(device, non_blocking=True)
+                vectors = vectors.to(
+                    device=device, dtype=model_dtype, non_blocking=True
+                )
                 cu_seqlens = cu_seqlens.to(device, non_blocking=True)
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=amp_dtype,
-                    enabled=device.type == "cuda",
-                ):
-                    embeddings = model.embed_packed(
-                        vectors, cu_seqlens, int(max_seqlen)
-                    )
+                embeddings = model.embed_packed(
+                    vectors, cu_seqlens, int(max_seqlen)
+                )
 
                 stored = embeddings.permute(1, 0, 2).half().cpu().numpy()
                 stop = saved_count + len(stored)
