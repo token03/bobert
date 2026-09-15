@@ -177,8 +177,10 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
                 <span className={styles.info}><strong>{selectedSet.title}</strong><small>{selectedSet.artist} · {selectedSet.creator}</small></span>
                 <span className={styles.meta}>
                   <span data-status={selectedSet.status}>{statusLabel(selectedSet.status)}</span>
-                  <small>{diffs.length} difficulties</small>
-                  {bpm !== null && length !== null ? <small>{formatNumber(bpm, 0)} BPM · {formatLength(length)}</small> : null}
+                  <small>
+                    {bpm !== null && length !== null ? `${formatNumber(bpm, 0)} BPM · ${formatLength(length)} · ` : null}
+                    {diffs.length} difficulties
+                  </small>
                 </span>
               </div>
             )}
