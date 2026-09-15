@@ -39,11 +39,11 @@ For retrieval, representations from the global-attention layers are pooled, cent
 
 ## Limitations
 
-- **Short maps can have less reliable neighbors.** Each token summarizes its surrounding patterns and, through global attention, wider map context. Mean pooling compresses these representations into one vector. Maps with fewer hit objects provide fewer observations to average over, so their neighborhoods can be sparser and noisier.
-- **Pooling loses detail.** A single embedding summarizes the whole map; distinctive short sections can be diluted by more common patterns elsewhere. Map-level similarity does not necessarily imply that every section plays similarly.
-- **Long maps are truncated.** Only the first 4,096 hit objects are encoded; later objects are currently discarded. Pooling embeddings from multiple segments is a possible extension for extremely long maps.
-- **1/3rd rhythms do not align with 1/4th rhythms.** Maps mapped primarily in 1/3rd rhythms show low similarity to comparable 1/4th maps, particularly for streams. Note that the model remains invariant to octave doubling (such as 1/2 versus 1/4).
-- **Only osu!standard is supported.** Other game modes would require extending the feature tokenizer and masked-feature prediction heads, along with mode-specific data preparation and training.
+- The model consumes hit objects only. Map attributes like AR, CS, OD, and HP are not read, so embeddings do not reflect them.
+- Maps with few hit objects give the model fewer observations to average over, so their nearest neighbors are less reliable.
+- Only the first 4,096 hit objects are encoded; anything past that is discarded.
+- Within a map, 1/3 and 1/4 rhythms are distinguished, but across maps they sit in separate regions. The same stream mapped in 1/3 and in 1/4 will not be treated as similar.
+- Only osu!standard is supported; other modes would need their own features and training.
 
 ## Run locally
 
