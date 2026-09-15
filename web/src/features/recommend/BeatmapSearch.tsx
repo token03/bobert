@@ -4,6 +4,7 @@ import { ArrowLeft, CaretRight, Star } from '@phosphor-icons/react'
 import type { SearchSet } from './search'
 import { searchBeatmaps, startSearch } from './searchClient'
 import { parseBeatmapIds } from './filters'
+import { formatDifficultyStat, formatLength, formatNumber } from '../../shared/format'
 import styles from './BeatmapSearch.module.css'
 
 type Props = {
@@ -16,10 +17,16 @@ type Props = {
 
 const statusLabel = (status: number) => (status === 2 ? 'Ranked' : status === 1 ? 'Loved' : 'Unranked')
 
+function median(values: number[]): number | null {
+  if (!values.length) return null
+  const sorted = [...values].sort((left, right) => left - right)
+  const middle = sorted.length >> 1
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
+}
+
 export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemoveLast }: Props) {
   const [anchor, setAnchor] = useState<Element | null>(null)
   const [found, setFound] = useState<SearchSet[]>([])
-  const [resolvedQuery, setResolvedQuery] = useState('')
   const [searchStatus, setSearchStatus] = useState('')
   const [open, setOpen] = useState(false)
   const [highlighted, setHighlighted] = useState<string | null>(null)
@@ -40,26 +47,29 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
   useEffect(() => {
     if (query.trim().length < 2 || parseBeatmapIds(query)) return
     let active = true
+    const loading = setTimeout(() => setSearchStatus('Searching…'), 200)
     const timer = setTimeout(() => {
       void searchBeatmaps(query).then((results) => {
         if (!active) return
+        clearTimeout(loading)
         setFound(results)
-        setResolvedQuery(query)
         setSearchStatus(results.length ? '' : 'No matching beatmaps')
       }).catch((error: Error) => {
         if (!active) return
+        clearTimeout(loading)
         setFound([])
-        setResolvedQuery(query)
         setSearchStatus(error.message)
       })
     }, 30)
-    return () => { active = false; clearTimeout(timer) }
+    return () => { active = false; clearTimeout(timer); clearTimeout(loading) }
   }, [query])
 
   const visible = query.trim().length >= 2 && !parseBeatmapIds(query)
   const results = visible ? found : []
-  const status = !visible ? '' : resolvedQuery === query ? searchStatus : found.length ? '' : 'Searching…'
+  const status = visible && !results.length ? searchStatus : ''
   const diffs = selectedSet?.diffs ?? []
+  const bpm = median(diffs.map((diff) => diff.bpm).filter((value) => value > 0))
+  const length = median(diffs.map((diff) => diff.length).filter((value) => value > 0))
 
   const openSet = (set: SearchSet) => {
     const index = results.findIndex((candidate) => candidate.id === set.id)
@@ -100,7 +110,7 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
         setHighlighted(null)
         onQuery(value)
       }}
-      open={open && visible}
+      open={open && visible && Boolean(results.length || selectedSet || status)}
       onOpenChange={(nextOpen, details) => {
         if (!nextOpen && selectedSet && details.reason === 'escape-key') {
           details.cancel()
@@ -165,7 +175,11 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
                 <button type="button" onClick={() => { back(); inputElement.current?.focus() }} aria-label="Back to beatmapsets"><ArrowLeft /></button>
                 <span className={styles.cover} style={{ backgroundImage: `url(https://assets.ppy.sh/beatmaps/${selectedSet.id}/covers/list.jpg)` }} />
                 <span className={styles.info}><strong>{selectedSet.title}</strong><small>{selectedSet.artist} · {selectedSet.creator}</small></span>
-                <span className={styles.meta}><span data-status={selectedSet.status}>{statusLabel(selectedSet.status)}</span><small>{diffs.length} difficulties</small></span>
+                <span className={styles.meta}>
+                  <span data-status={selectedSet.status}>{statusLabel(selectedSet.status)}</span>
+                  <small>{diffs.length} difficulties</small>
+                  {bpm !== null && length !== null ? <small>{formatNumber(bpm, 0)} BPM · {formatLength(length)}</small> : null}
+                </span>
               </div>
             )}
             {!selectedSet && status && <div className={styles.status} role="status">{status}</div>}
@@ -173,6 +187,11 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
               {selectedSet ? diffs.map((diff) => (
                 <Combobox.Item key={diff.id} value={`map:${diff.id}`} className={styles.item}>
                   <span className={styles.version}>{diff.version}</span>
+                  <span className={styles.difficulty}>
+                    {([['AR', diff.ar], ['CS', diff.cs], ['OD', diff.od], ['HP', diff.hp]] as const).map(([label, value]) => (
+                      <span key={label}><span className={styles.difficultyLabel}>{label}</span>{formatDifficultyStat(value)}</span>
+                    ))}
+                  </span>
                   <span className={styles.stats}>
                     <span className={styles.stars} aria-label={`${diff.stars?.toFixed(2) ?? 'Unknown'} stars`}><Star aria-hidden="true" />{diff.stars?.toFixed(2) ?? '—'}</span>
                   </span>

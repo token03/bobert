@@ -155,12 +155,13 @@ export function RecommendPage() {
     await navigate({ search: normalizedValues, replace: historyMode === 'replace' })
 
     try {
-      await queryClient.fetchQuery(options)
+      const data = await queryClient.fetchQuery(options)
       if (shouldScroll) {
         scrollToPageTop()
       }
+      return data
     } catch {
-      return
+      return null
     }
   }
 
@@ -190,7 +191,7 @@ export function RecommendPage() {
     await runRecommend(values, 'push', false)
   }
 
-  async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<void>, preloadCover = true) {
+  async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<unknown>, preloadCover = true) {
     const currentSource = selectedSource
     setSourceView((view) => ({ ...view, beatmapId: null, animate: false }))
     setSourceSwap({
@@ -249,11 +250,17 @@ export function RecommendPage() {
     const knownBeatmap = [...(response?.results ?? []), ...(defaults.data?.results ?? [])].find((beatmap) => beatmap.beatmap_id === nextBeatmapId)
     if (knownBeatmap) {
       await swapSourceBeatmap(knownBeatmap, 'left', request, false)
-    } else {
-      void lookupBeatmapSet(nextBeatmapId).then((setId) => {
-        if (setId !== null) new Image().src = cardCoverUrl(setId)
-      }).catch(() => {})
-      await request
+      return
+    }
+
+    void lookupBeatmapSet(nextBeatmapId).then((setId) => {
+      if (setId !== null) new Image().src = cardCoverUrl(setId)
+    }).catch(() => {})
+
+    const data = await request
+    const nextSource = data?.sources.find((source) => source.beatmap_id === nextBeatmapId)?.metadata ?? data?.sources[0]?.metadata ?? null
+    if (nextSource && nextSource.beatmap_id !== selectedSource?.beatmap_id) {
+      await swapSourceBeatmap(nextSource, 'left', Promise.resolve(), true)
     }
   }
 

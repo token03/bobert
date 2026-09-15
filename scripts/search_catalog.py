@@ -80,6 +80,12 @@ def load_sets(catalog_path: str, embeddings_path: str) -> pl.DataFrame:
             pl.col("id"),
             pl.col("version"),
             pl.col("difficulty_rating").round(2).alias("stars"),
+            pl.col("ar"),
+            pl.col("cs"),
+            pl.col("accuracy").alias("od"),
+            pl.col("drain").alias("hp"),
+            pl.col("bpm"),
+            pl.col("total_length"),
         ).alias("diffs"),
     ).collect()
 
@@ -138,7 +144,7 @@ def build_sections(
     term_postings = collect_postings(rows)
     terms = sorted(term_postings)
 
-    diff_columns: list[list[int]] = [[], [], []]
+    diff_columns: list[list[int]] = [[], [], [], [], [], [], [], [], []]
     previous_id = 0
     for entry in rows:
         diffs = sorted(entry["diffs"], key=lambda diff: diff["id"])
@@ -147,6 +153,12 @@ def build_sections(
             diff_columns[0].append((delta << 1) ^ (delta >> 31))
             diff_columns[1].append(string_index[diff["version"] or ""])
             diff_columns[2].append(round((diff["stars"] or 0) * 100))
+            diff_columns[3].append(min(round((diff["ar"] or 0) * 10), 255))
+            diff_columns[4].append(min(round((diff["cs"] or 0) * 10), 255))
+            diff_columns[5].append(min(round((diff["od"] or 0) * 10), 255))
+            diff_columns[6].append(min(round((diff["hp"] or 0) * 10), 255))
+            diff_columns[7].append(min(round((diff["bpm"] or 0) * 10), 10000))
+            diff_columns[8].append(min(round(diff["total_length"] or 0), 3600))
             previous_id = diff["id"]
 
     set_columns: list[list[int]] = [[], [], [], [], [], []]
@@ -204,7 +216,7 @@ def build_sections(
 def write_artifact(
     sections: dict[str, bytes], counts: tuple[int, ...], output: Path
 ) -> int:
-    header = bytearray(b"BBS5")
+    header = bytearray(b"BBS6")
     for value in counts:
         header += encode_varint(value)
     for name in SECTION_NAMES:

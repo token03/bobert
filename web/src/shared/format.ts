@@ -33,6 +33,10 @@ export function formatLength(value: number | null): string {
   return `${minutes}:${seconds}`
 }
 
+export function formatDifficultyStat(value: number | null): string {
+  return value === 10 ? '10\u2008' : formatFixedNumber(value, 1)
+}
+
 export function formatMatch(value: number): string {
   return `${(value * 100).toFixed(0)}%`
 }

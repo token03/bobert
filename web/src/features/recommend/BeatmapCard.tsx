@@ -1,7 +1,7 @@
 import { ArrowSquareOut, Check, Clock, Copy, Metronome, Pause, Play, MagnifyingGlass, Star } from '@phosphor-icons/react'
 import { useState } from 'react'
 import type { CSSProperties, FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
-import { displayArtist, displayTitle, formatFixedNumber, formatLength, formatMatch, formatNumber, statusLabel } from '../../shared/format'
+import { displayArtist, displayTitle, formatDifficultyStat, formatFixedNumber, formatLength, formatMatch, formatNumber, statusLabel } from '../../shared/format'
 import { Stat } from '../../shared/ui/Stat'
 import type { BeatmapMetadata } from '../../shared/types'
 import { beatmapUrl, cardCoverUrl, coverUrl, userUrl } from '../../shared/urls'
@@ -250,10 +250,6 @@ function BeatmapStats({ beatmap, variant = 'result', actions }: { beatmap: Beatm
       </div>
     </div>
   )
-}
-
-function formatDifficultyStat(value: number | null) {
-  return value === 10 ? '10\u2008' : formatFixedNumber(value, 1)
 }
 
 function CardActions({

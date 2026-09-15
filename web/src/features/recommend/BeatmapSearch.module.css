@@ -129,13 +129,35 @@
 .stats > span {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  justify-content: flex-end;
+  gap: 5px;
   min-width: 48px;
 }
 
-.stats svg { width: 13px; height: 13px; color: var(--muted-soft); }
+.stats svg { width: 13px; height: 13px; color: var(--text-stat); }
 .stars { color: var(--text-stat); font-weight: 600; }
+
+.difficulty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  color: var(--text-stat);
+  font-size: var(--font-size-detail);
+  font-variant-numeric: tabular-nums;
+}
+
+.difficulty > span {
+  display: grid;
+  grid-template-columns: 2ch 3ch;
+  align-items: baseline;
+  column-gap: 3px;
+}
+
+.difficultyLabel {
+  color: var(--text-stat-label);
+  font-weight: var(--font-weight-semibold);
+}
 
 .status {
   padding: 12px;
@@ -167,3 +189,7 @@
 }
 .detailHeading button:hover { background: var(--control-hover); }
 .detailHeading button:focus-visible { outline: 2px solid var(--text-stat); outline-offset: -2px; }
+
+@media (max-width: 520px) {
+  .difficulty { display: none; }
+}
