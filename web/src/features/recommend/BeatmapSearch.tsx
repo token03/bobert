@@ -175,12 +175,10 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
                 <button type="button" onClick={() => { back(); inputElement.current?.focus() }} aria-label="Back to beatmapsets"><ArrowLeft /></button>
                 <span className={styles.cover} style={{ backgroundImage: `url(https://assets.ppy.sh/beatmaps/${selectedSet.id}/covers/list.jpg)` }} />
                 <span className={styles.info}><strong>{selectedSet.title}</strong><small>{selectedSet.artist} · {selectedSet.creator}</small></span>
+                {bpm !== null && length !== null ? <span className={styles.tempo}>{formatNumber(bpm, 0)} BPM · {formatLength(length)}</span> : null}
                 <span className={styles.meta}>
                   <span data-status={selectedSet.status}>{statusLabel(selectedSet.status)}</span>
-                  <small>
-                    {bpm !== null && length !== null ? `${formatNumber(bpm, 0)} BPM · ${formatLength(length)} · ` : null}
-                    {diffs.length} difficulties
-                  </small>
+                  <small>{diffs.length} difficulties</small>
                 </span>
               </div>
             )}

@@ -175,6 +175,15 @@
 
 .detailHeading strong, .detailHeading small { display: block; }
 .detailHeading small { color: var(--muted); }
+.detailHeading .tempo {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--font-size-detail);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
 .detailHeading button {
   display: grid;
   place-items: center;
