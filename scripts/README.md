@@ -38,6 +38,7 @@ Paths below describe the default workspace layout. Check each command's argument
 | Evaluation | `mine` | Retrieval inputs and evaluation data | Mined retrieval examples |
 | Evaluation | `umap` | Embeddings and metadata | Visualization coordinates, attributes, and neighbors |
 | Evaluation | `build-eval-graph` | Collection edges, vertices, ngrams, catalogs | Graph embeddings in `data/graph.parquet` |
+| Web | `build-search` | Embedding index, beatmap catalog | `web/public/search.bin` client search artifact |
 | Evaluation | `build-eval-ngrams` | Collection vertices and edges | `data/collections/ngrams.txt` |
 | Deployment | `deploy` | Published release tag, SSH configuration | Fetches the release on the server, rebuilds the API, and swaps the run and catalogs |
 

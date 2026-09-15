@@ -7,6 +7,7 @@ import { ArrowCounterClockwise, CaretDown, Check, Clock, MagnifyingGlass, Metron
 import { defaultFilters, maxBeatmaps, parseBeatmapIds } from './filters'
 import type { RecommendFormValues } from './filters'
 import { DateRangeFilter } from './DateRangeFilter'
+import { BeatmapSearch } from './BeatmapSearch'
 import { RangeFilter } from './RangeFilter'
 import type { RangeFilterConfig } from './RangeFilter'
 import type { useRecommendForm } from './useRecommendForm'
@@ -193,7 +194,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
     }
     const result = addBeatmaps(beatmapDraft, true)
     if (result === null) {
-      setBeatmapInputError('Enter a beatmap ID or beatmap link.')
+      setBeatmapInputError('Choose a difficulty from search, or enter a beatmap ID or link.')
       return false
     }
     return result !== false
@@ -221,7 +222,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
   }
 
   function updateBeatmapDraft(value: string) {
-    setBeatmapDraft(value.replace(/\D/g, ''))
+    setBeatmapDraft(value)
     if (beatmapInputError) {
       setBeatmapInputError(null)
     }
@@ -304,46 +305,12 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
                         ))}
                       </span>
                     ) : null}
-                    <input
-                      id="beatmap"
-                      name={field.name}
-                      value={beatmapDraft}
-                      inputMode="numeric"
-                      pattern="[0-9]*"
-                      autoComplete="off"
-                      aria-invalid={beatmapError ? 'true' : 'false'}
-                      aria-describedby={beatmapError ? 'beatmap-error' : undefined}
-                      data-error={Boolean(beatmapError)}
-                      onChange={(event) => updateBeatmapDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Backspace' && !beatmapDraft) {
-                          removeLastBeatmap()
-                          return
-                        }
-                        if ((event.key === ' ' || event.key === ',') && beatmapDraft.trim()) {
-                          event.preventDefault()
-                          commitBeatmapDraft()
-                          return
-                        }
-                        if (event.key === 'Enter' && beatmapDraft.trim() && !commitBeatmapDraft()) {
-                          event.preventDefault()
-                          return
-                        }
-                        if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !/\d/.test(event.key)) {
-                          event.preventDefault()
-                        }
-                      }}
-                      onPaste={(event) => {
-                        event.preventDefault()
-                        if (!searchPastedBeatmaps(event.clipboardData.getData('text'), true)) {
-                          setBeatmapInputError('Enter a beatmap ID or paste a beatmap link.')
-                        }
-                      }}
-                      onBlur={() => {
-                        field.handleBlur()
-                        commitBeatmapDraft()
-                      }}
-                      placeholder={beatmapIds.length ? '' : 'Beatmap ID, or paste a link'}
+                    <BeatmapSearch
+                      query={beatmapDraft}
+                      hasSelection={beatmapIds.length > 0}
+                      onQuery={updateBeatmapDraft}
+                      onSelect={(value) => { searchPastedBeatmaps(value, true) }}
+                      onRemoveLast={removeLastBeatmap}
                     />
                     <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
                       {submitDisabled ? <Spinner className={styles['spinner-icon']} /> : <MagnifyingGlass />}

@@ -6,7 +6,7 @@ import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanst
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
 import { useAudioPreview } from '../audio/useAudioPreview'
-import { fetchBeatmapSummary, fetchDefaultRecommendations, recommendBeatmaps } from '../../shared/api'
+import { fetchDefaultRecommendations, recommendBeatmaps } from '../../shared/api'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata } from '../../shared/types'
 import { cardCoverUrl, coverUrl } from '../../shared/urls'
@@ -17,6 +17,7 @@ import { BeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
 import { ResultsList } from './ResultsList'
 import { useRecommendForm } from './useRecommendForm'
+import { lookupBeatmapSet } from './searchClient'
 import cardStyles from './BeatmapCard.module.css'
 import listStyles from './ResultsList.module.css'
 import styles from './RecommendPage.module.css'
@@ -244,26 +245,16 @@ export function RecommendPage() {
       return
     }
 
-    let requestDone = false
-    const request = runRecommend(values).finally(() => {
-      requestDone = true
-    })
+    const request = runRecommend(values)
     const knownBeatmap = [...(response?.results ?? []), ...(defaults.data?.results ?? [])].find((beatmap) => beatmap.beatmap_id === nextBeatmapId)
-
-    try {
-      const beatmap = knownBeatmap ?? await queryClient.fetchQuery<BeatmapMetadata>({
-        queryKey: ['beatmap', nextBeatmapId],
-        queryFn: ({ signal }) => fetchBeatmapSummary(nextBeatmapId, signal),
-        staleTime,
-      })
-      if (!requestDone) {
-        await swapSourceBeatmap(beatmap, 'left', request, false)
-        return
-      }
-    } catch {
-      return request
+    if (knownBeatmap) {
+      await swapSourceBeatmap(knownBeatmap, 'left', request, false)
+    } else {
+      void lookupBeatmapSet(nextBeatmapId).then((setId) => {
+        if (setId !== null) new Image().src = cardCoverUrl(setId)
+      }).catch(() => {})
+      await request
     }
-    await request
   }
 
   async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {

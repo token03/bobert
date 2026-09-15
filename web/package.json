@@ -5,8 +5,9 @@
   "packageManager": "bun@1.4.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "generate:search": "uv run --project .. build-search",
+    "dev": "uv run --project .. build-search --check && vite",
+    "build": "bun scripts/search.ts && tsc -b && vite build",
     "generate:api": "bunx openapi-typescript@7.13.0 http://127.0.0.1:8008/api/openapi.json --output src/shared/schema.d.ts",
     "lint": "eslint .",
     "preview": "vite preview"

@@ -25,15 +25,3 @@ export async function fetchDefaultRecommendations(signal?: AbortSignal): Promise
 
   return data
 }
-
-export async function fetchBeatmapSummary(beatmapId: number, signal?: AbortSignal): Promise<Schemas['BeatmapSummary']> {
-  const { data, response } = await client.GET('/api/beatmaps/{beatmap_id}/summary', {
-    params: { path: { beatmap_id: beatmapId } },
-    signal,
-  })
-  if (!data) {
-    throw new Error(`Request failed with ${response.status}`)
-  }
-
-  return data
-}

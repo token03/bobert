@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
+    "brotli>=1.2.0",
     "fastapi>=0.116.0",
     "httpx>=0.28.1",
     "huggingface-hub>=1.0",
@@ -58,6 +59,7 @@ export-model = "scripts.model.export:main"
 fetch-run = "scripts.model.fetch:main"
 publish-run = "scripts.model.publish:main"
 build-dataset = "scripts.dataset.build:main"
+build-search = "scripts.search_catalog:main"
 build-strains = "scripts.dataset.strains:main"
 fetch-beatmaps = "scripts.sources.beatmaps.metadata:main"
 download-beatmaps = "scripts.sources.beatmaps.files:main"
