@@ -141,6 +141,10 @@
   padding: 0 calc(var(--control-height) + var(--space-lg)) 0 var(--space-xl);
 }
 
+.search-entry {
+  display: contents;
+}
+
 .search-pill:focus-within {
   border-color: var(--border);
   box-shadow: none;
@@ -1130,18 +1134,34 @@
   .control-panel {
     --control-height: 44px;
     border-radius: var(--radius-md);
+    padding: 8px;
+  }
+
+  .primary-controls {
+    gap: 8px;
   }
 
   .search-pill {
     flex-wrap: wrap;
     height: auto;
-    gap: 4px;
-    padding: 0 48px 0 10px;
-    background: var(--input);
-    border: 1px solid var(--border);
+    gap: 6px;
+    padding: 0;
+    overflow: visible;
   }
 
-  .search-pill:focus-within {
+  .search-entry {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    padding: 0 48px 0 12px;
+    background: var(--input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .search-entry:focus-within {
     border-color: var(--accent-muted);
   }
 
@@ -1154,11 +1174,14 @@
 
   .beatmap-tokens {
     flex-basis: 100%;
-    padding-top: 4px;
+    gap: 6px;
   }
 
   .beatmap-token {
     height: 44px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    padding-left: 10px;
   }
 
   .control-panel .beatmap-token button {
@@ -1177,8 +1200,12 @@
     right: 0;
     width: 44px;
     height: 44px;
-    background: var(--surface);
+    background: transparent;
     color: var(--text);
+  }
+
+  .search-pill[data-error='true'] {
+    padding-right: 0;
   }
 
   .filter-controls {

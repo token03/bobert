@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Combobox } from '@base-ui/react/combobox'
-import { ArrowLeft, CaretRight, Star } from '@phosphor-icons/react'
+import { ArrowLeft, CaretRight, MagnifyingGlass, Spinner, Star } from '@phosphor-icons/react'
 import { parseBeatmapIds } from '../../shared/beatmapIds'
 import { formatDifficultyStat, formatLength, formatNumber } from '../../shared/format'
 import type { SearchSet } from './search'
@@ -10,6 +10,9 @@ import styles from './BeatmapSearch.module.css'
 type Props = {
   query: string
   hasSelection: boolean
+  isLoading: boolean
+  buttonClassName: string
+  spinnerClassName: string
   onQuery: (value: string) => void
   onSelect: (value: string) => void
   onRemoveLast: () => void
@@ -24,10 +27,9 @@ function median(values: number[]): number | null {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
 }
 
-export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemoveLast }: Props) {
+export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName, spinnerClassName, onQuery, onSelect, onRemoveLast }: Props) {
   const [anchor, setAnchor] = useState<Element | null>(null)
-  const [found, setFound] = useState<SearchSet[]>([])
-  const [searchStatus, setSearchStatus] = useState('')
+  const [searchResult, setSearchResult] = useState<{ query: string; sets: SearchSet[]; status: string }>({ query: '', sets: [], status: '' })
   const [open, setOpen] = useState(false)
   const [highlighted, setHighlighted] = useState<string | null>(null)
   const [selectedSet, setSelectedSet] = useState<SearchSet | null>(null)
@@ -36,7 +38,7 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
   const highlightIndex = useRef(-1)
   const highlightTarget = useRef<number | null>(null)
   const inputRef = useCallback((node: HTMLInputElement | null) => {
-    setAnchor(node?.parentElement ?? null)
+    setAnchor(node?.closest('[data-search-anchor]') ?? null)
     inputElement.current = node
   }, [])
 
@@ -47,26 +49,21 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
   useEffect(() => {
     if (query.trim().length < 2 || parseBeatmapIds(query)) return
     let active = true
-    const loading = setTimeout(() => setSearchStatus('Searching…'), 200)
     const timer = setTimeout(() => {
       void searchBeatmaps(query).then((results) => {
         if (!active) return
-        clearTimeout(loading)
-        setFound(results)
-        setSearchStatus(results.length ? '' : 'No matching beatmaps')
+        setSearchResult({ query, sets: results, status: results.length ? '' : 'No matching beatmaps' })
       }).catch((error: Error) => {
         if (!active) return
-        clearTimeout(loading)
-        setFound([])
-        setSearchStatus(error.message)
+        setSearchResult({ query, sets: [], status: error.message })
       })
     }, 30)
-    return () => { active = false; clearTimeout(timer); clearTimeout(loading) }
+    return () => { active = false; clearTimeout(timer) }
   }, [query])
 
   const visible = query.trim().length >= 2 && !parseBeatmapIds(query)
-  const results = visible ? found : []
-  const status = visible && !results.length ? searchStatus : ''
+  const results = visible && searchResult.query === query ? searchResult.sets : []
+  const status = visible ? (searchResult.query === query ? searchResult.status : 'Searching…') : ''
   const diffs = selectedSet?.diffs ?? []
   const bpm = median(diffs.map((diff) => diff.bpm).filter((value) => value > 0))
   const length = median(diffs.map((diff) => diff.length).filter((value) => value > 0))
@@ -141,6 +138,9 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
         ref={inputRef}
         placeholder={hasSelection ? 'Add another beatmap…' : 'Artist, title, mapper, ID or link'}
         enterKeyHint="search"
+        autoComplete="off"
+        autoCapitalize="none"
+        spellCheck={false}
         onFocus={startSearch}
         onKeyDown={(event) => {
           if (event.key === 'Backspace' && !query) onRemoveLast()
@@ -168,6 +168,15 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
           }
         }}
       />
+      {query.trim() && !parseBeatmapIds(query) ? (
+        <Combobox.Trigger className={buttonClassName} aria-label="Show matching beatmaps" onClick={() => inputElement.current?.focus()}>
+          <MagnifyingGlass />
+        </Combobox.Trigger>
+      ) : (
+        <button className={buttonClassName} type="submit" disabled={isLoading} aria-label="Recommend">
+          {isLoading ? <Spinner className={spinnerClassName} /> : <MagnifyingGlass />}
+        </button>
+      )}
       <Combobox.Portal>
         <Combobox.Positioner anchor={anchor} positionMethod="fixed" sideOffset={6} align="start" className={styles.positioner}>
           <Combobox.Popup className={styles.popup}>

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import { Select } from '@base-ui/react/select'
 import { useStore } from '@tanstack/react-form'
-import { ArrowCounterClockwise, CaretDown, Check, Clock, MagnifyingGlass, Metronome, Spinner, Star, Tag, X, XCircle } from '@phosphor-icons/react'
+import { ArrowCounterClockwise, CaretDown, Check, Clock, Metronome, Star, Tag, X, XCircle } from '@phosphor-icons/react'
 import { parseBeatmapIds } from '../../shared/beatmapIds'
 import { defaultFilters, maxBeatmaps } from './filters'
 import type { RecommendFormValues } from './filters'
@@ -293,7 +293,7 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
 
               return (
                 <span className={styles['input-with-status']}>
-                  <span className={styles['search-pill']} data-error={Boolean(beatmapError)}>
+                  <span className={styles['search-pill']} data-search-anchor data-error={Boolean(beatmapError)}>
                     {beatmapIds.length ? (
                       <span ref={beatmapTokensRef} className={styles['beatmap-tokens']} role="list" aria-label="Source beatmaps">
                         {beatmapIds.map((beatmapId) => (
@@ -306,17 +306,18 @@ export function RecommendForm({ form, isLoading, onRangeChange, onSelectChange, 
                         ))}
                       </span>
                     ) : null}
-                    <BeatmapSearch
-                      query={beatmapDraft}
-                      hasSelection={beatmapIds.length > 0}
-                      onQuery={updateBeatmapDraft}
-                      onSelect={(value) => { searchPastedBeatmaps(value, true) }}
-                      onRemoveLast={removeLastBeatmap}
-                    />
-                    <button className={`${styles['primary-button']} ${styles['search-button']}`} type="submit" disabled={submitDisabled} aria-label="Recommend">
-                      {submitDisabled ? <Spinner className={styles['spinner-icon']} /> : <MagnifyingGlass />}
-                      <span className={styles['sr-only']}>Recommend</span>
-                    </button>
+                    <span className={styles['search-entry']}>
+                      <BeatmapSearch
+                        query={beatmapDraft}
+                        hasSelection={beatmapIds.length > 0}
+                        isLoading={submitDisabled}
+                        buttonClassName={`${styles['primary-button']} ${styles['search-button']}`}
+                        spinnerClassName={styles['spinner-icon']}
+                        onQuery={updateBeatmapDraft}
+                        onSelect={(value) => { searchPastedBeatmaps(value, true) }}
+                        onRemoveLast={removeLastBeatmap}
+                      />
+                    </span>
                   </span>
                   {beatmapError ? (
                     <>
