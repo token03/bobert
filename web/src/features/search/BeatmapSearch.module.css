@@ -201,4 +201,47 @@
 
 @media (max-width: 520px) {
   .difficulty { display: none; }
+
+  .item,
+  .set {
+    min-height: 48px;
+  }
+
+  .info strong,
+  .info small,
+  .version {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .set {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) 12px;
+    gap: 6px 10px;
+  }
+
+  .set .meta {
+    grid-column: 2;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .set .chevron {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .detailHeading {
+    flex-wrap: wrap;
+  }
+
+  .detailHeading .info {
+    flex-basis: calc(100% - 110px);
+  }
+
+  .detailHeading button {
+    width: 44px;
+    height: 44px;
+  }
 }

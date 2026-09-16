@@ -139,7 +139,8 @@ export function BeatmapSearch({ query, hasSelection, onQuery, onSelect, onRemove
       <Combobox.Input
         id="beatmap"
         ref={inputRef}
-        placeholder={hasSelection ? '' : 'Artist, title, mapper, ID or link'}
+        placeholder={hasSelection ? 'Add another beatmap…' : 'Artist, title, mapper, ID or link'}
+        enterKeyHint="search"
         onFocus={startSearch}
         onKeyDown={(event) => {
           if (event.key === 'Backspace' && !query) onRemoveLast()

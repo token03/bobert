@@ -346,6 +346,19 @@
 }
 
 @media (max-width: 760px) {
+  .source-pager {
+    padding-bottom: 44px;
+  }
+
+  .source-tabs {
+    height: 44px;
+  }
+
+  .source-tab {
+    width: 44px;
+    height: 44px;
+  }
+
   .intro {
     flex-wrap: wrap;
   }

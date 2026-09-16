@@ -287,6 +287,7 @@ function CardActions({
           title="Search similar"
         >
           <MagnifyingGlass />
+          <span className={styles['action-label']}>Search similar</span>
         </button>
       ) : null}
       <button
@@ -304,9 +305,11 @@ function CardActions({
       >
         <Copy className={styles['copy-action-icon']} />
         <Check className={styles['copy-check-icon']} />
+        <span className={styles['action-label']}>{copied ? 'Copied' : 'Copy ID'}</span>
       </button>
-      <button type="button" onClick={(event) => handleActionClick(event, () => window.location.assign(`osu://b/${beatmap.beatmap_id}`))} aria-label="Open beatmap in osu!" title="Open in osu!">
+      <button className={styles['open-action']} type="button" onClick={(event) => handleActionClick(event, () => window.location.assign(`osu://b/${beatmap.beatmap_id}`))} aria-label="Open beatmap in osu!" title="Open in osu!">
         <ArrowSquareOut />
+        <span className={styles['action-label']}>osu!</span>
       </button>
     </div>
   )

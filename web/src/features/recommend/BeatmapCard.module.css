@@ -1,3 +1,7 @@
+.action-label {
+  display: none;
+}
+
 .beatmap-card {
   position: relative;
   display: grid;
@@ -1010,6 +1014,213 @@
     display: none;
   }
 }
+@media (max-width: 760px), (hover: none) {
+  .beatmap-row {
+    height: auto;
+    min-height: var(--result-card-height);
+  }
+
+  .result-meta-slot > * {
+    grid-area: auto;
+  }
+
+  .beatmap-card .result-meta-details,
+  .beatmap-card .result-meta-actions {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+
+  .beatmap-card .row-actions button {
+    width: auto;
+    min-width: 44px;
+    min-height: 44px;
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .cover-play-overlay {
+    opacity: 1;
+    transform: none;
+  }
+
+  .cover-play-button {
+    border-radius: 50%;
+    background: var(--overlay-preview);
+  }
+}
+
+@media (max-width: 760px) {
+  .beatmap-row {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+  }
+
+  .beatmap-row > .cover-preview {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1;
+    width: 64px;
+    height: 64px;
+    min-height: 0;
+    border-radius: var(--radius-sm);
+    aspect-ratio: 1;
+  }
+
+  .cover-preview img {
+    object-position: center;
+  }
+
+  .beatmap-card .beatmap-card-content {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin: 0;
+    border: 0;
+    padding: 12px;
+  }
+
+  .map-main,
+  .result-summary {
+    min-height: 0;
+    padding: 0;
+  }
+
+  .result-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .result-copy {
+    min-height: 64px;
+    padding-left: 76px;
+    align-content: center;
+  }
+
+  .map-title,
+  .artist-line,
+  .version-line,
+  .version-line span:first-child,
+  .creator-credit {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .map-title {
+    font-size: 16px;
+  }
+
+  .artist-line,
+  .version-line {
+    font-size: 13px;
+  }
+
+  .result-meta,
+  .source-meta {
+    min-width: 0;
+    justify-items: stretch;
+    gap: 8px;
+  }
+
+  .creator-credit {
+    text-align: left;
+  }
+
+  .result-meta-slot {
+    justify-items: stretch;
+    gap: 10px;
+  }
+
+  .result-meta-details,
+  .source-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 0;
+  }
+
+  .match-pill {
+    font-size: 13px;
+  }
+
+  .result-meta-actions .row-actions,
+  .row-actions {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+    width: 100%;
+  }
+
+  .beatmap-card .row-actions button {
+    flex: 1;
+    grid-template-columns: 18px auto;
+    justify-content: center;
+    gap: 6px;
+    background: var(--surface);
+    padding: 8px;
+    font-size: 12px;
+  }
+
+  .action-label {
+    display: inline;
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .beatmap-card .row-actions .open-action {
+    display: none;
+  }
+
+  .beatmap-card .stat-strip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+    gap: 10px;
+    padding: 10px 0 0;
+    border-top: 1px solid var(--separator);
+  }
+
+  .beatmap-card .stat-row-main,
+  .beatmap-card .stat-row-sub {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .beatmap-card .stat-side {
+    flex-wrap: wrap;
+    width: 100%;
+    gap: 10px;
+    border: 0;
+    padding: 0;
+  }
+
+  .beatmap-card .stat-row .stat-item {
+    min-width: 0;
+    grid-template-columns: auto auto;
+    gap: 4px;
+  }
+
+  .beatmap-card .stat-row .stat-item strong {
+    width: auto;
+    font-size: 12px;
+  }
+
+  .source-meta-separator,
+  .source-stat-separator {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .source-card[data-sweep-phase] {
     animation-duration: 1ms;
