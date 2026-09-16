@@ -130,6 +130,7 @@ Pretraining saves a run configuration and exports `model.safetensors`. `export-m
 - [CM3P](https://github.com/OliBomby/CM3P) by OliBomby: inspiration for the encoder architecture.
 - [ModernBERT](https://github.com/AnswerDotAI/ModernBERT): efficient bidirectional encoders with rotary embeddings and alternating attention.
 - [FT-Transformer](https://github.com/yandex-research/rtdl-revisiting-models): feature-wise embeddings for numerical and categorical inputs.
+- [parsecore](https://github.com/Apart-Studio/parsecore): star ratings and structural strain factors used as the auxiliary training targets.
 - [osu!collector](https://osucollector.com/) and [osu!stats](https://osustats.ppy.sh/): labelled collection data used for adaptation and evaluation.
 - [Beatconnect](https://beatconnect.io/): `.osu` files used to build the dataset.
 - [osu!](https://osu.ppy.sh/) and its mapping community: beatmaps and metadata underlying the project.
