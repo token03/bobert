@@ -959,7 +959,7 @@
     transform: translateX(calc(var(--space-lg) * -0.5));
   }
 
-  .filter-controls > [data-filter='status'] {
+  .filter-controls > [data-filter='date'] {
     grid-column: 10 / 12;
     grid-row: 1;
   }
@@ -990,7 +990,7 @@
     grid-column: 9 / 11;
   }
 
-  .filter-controls > [data-filter='date'] {
+  .filter-controls > [data-filter='status'] {
     grid-column: 11 / 13;
   }
 
@@ -999,8 +999,14 @@
   .filter-controls > [data-filter='cs'],
   .filter-controls > [data-filter='bpm'],
   .filter-controls > [data-filter='length'],
-  .filter-controls > [data-filter='date'] {
+  .filter-controls > [data-filter='status'] {
     grid-row: 2;
+  }
+}
+@media (760px < width <= 1500px) {
+  .filter-controls > [data-filter='date'] {
+    grid-column: 10 / 13;
+    width: calc(100% - var(--control-height) - var(--space-lg));
   }
 }
 @media (max-width: 760px) {
