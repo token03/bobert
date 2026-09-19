@@ -62,8 +62,9 @@ export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName,
   }, [query])
 
   const visible = query.trim().length >= 2 && !parseBeatmapIds(query)
-  const results = visible && searchResult.query === query ? searchResult.sets : []
-  const status = visible ? (searchResult.query === query ? searchResult.status : 'Searching…') : ''
+  const searching = visible && searchResult.query !== query
+  const results = visible ? searchResult.sets : []
+  const status = visible ? (searching ? (results.length ? '' : 'Searching…') : searchResult.status) : ''
   const diffs = selectedSet?.diffs ?? []
   const bpm = median(diffs.map((diff) => diff.bpm).filter((value) => value > 0))
   const length = median(diffs.map((diff) => diff.length).filter((value) => value > 0))
@@ -192,7 +193,7 @@ export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName,
               </div>
             )}
             {!selectedSet && status && <div className={styles.status} role="status">{status}</div>}
-            <Combobox.List>
+            <Combobox.List aria-busy={searching}>
               {selectedSet ? diffs.map((diff) => (
                 <Combobox.Item key={diff.id} value={`map:${diff.id}`} className={styles.item}>
                   <span className={styles.version}>{diff.version}</span>
