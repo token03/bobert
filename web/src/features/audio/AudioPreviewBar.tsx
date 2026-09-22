@@ -1,4 +1,4 @@
-import { Pause, Play, SpeakerHigh, SpeakerX } from '@phosphor-icons/react'
+import { Pause, Play, SpeakerHigh, SpeakerLow, SpeakerX } from '@phosphor-icons/react'
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
@@ -37,6 +37,7 @@ export function AudioPreviewBar({
   const progressRef = useRef<HTMLInputElement>(null)
   const [localVolume, setLocalVolume] = useState(volume)
   const volumeValue = muted ? 0 : localVolume
+  const VolumeIcon = volumeValue === 0 ? SpeakerX : volumeValue < 0.5 ? SpeakerLow : SpeakerHigh
   const progressStyle = { '--range-progress': '0%' } as CSSProperties
   const volumeStyle = { '--range-progress': `${volumeValue * 100}%` } as CSSProperties
 
@@ -70,7 +71,7 @@ export function AudioPreviewBar({
       onPointerDown={onPointerDown}
       onFocus={onPointerDown}
     >
-      <button type="button" className={styles['audio-control-button']} onClick={onTogglePlay} aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>
+      <button type="button" className={styles['audio-control-button']} data-playing={isPlaying || undefined} onClick={onTogglePlay} aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>
         {isPlaying ? <Pause weight="fill" /> : <Play weight="fill" />}
       </button>
 
@@ -95,7 +96,7 @@ export function AudioPreviewBar({
 
       <div className={styles['audio-volume']}>
         <button type="button" className={styles['audio-control-button']} onClick={onToggleMuted} aria-label={muted ? 'Unmute preview' : 'Mute preview'}>
-          {muted || volume === 0 ? <SpeakerX /> : <SpeakerHigh />}
+          <VolumeIcon />
         </button>
         <input
           type="range"

@@ -54,24 +54,30 @@
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 26px;
-  min-height: 26px;
-  border: 0;
-  border-radius: var(--space-md);
-  background: var(--surface-strong);
+  width: var(--action-size);
+  min-height: var(--action-size);
+  background: transparent;
   color: var(--muted);
-  padding: var(--space-md);
+  padding: 0;
+  transition: color 0.12s ease;
 }
 
 .audio-control-button:hover {
-  background: var(--surface);
-  color: var(--heading);
+  color: var(--text);
+}
+
+.audio-control-button[data-playing='true'] {
+  color: var(--accent-light);
+}
+
+.audio-control-button:focus-visible {
+  outline: 2px solid var(--accent-muted);
+  outline-offset: 1px;
 }
 
 .audio-control-button svg {
-  width: 11px;
-  height: 11px;
-  opacity: 0.85;
+  width: var(--icon-md);
+  height: var(--icon-md);
 }
 .audio-pill-main {
   display: grid;
