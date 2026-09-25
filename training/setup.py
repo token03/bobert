@@ -131,7 +131,7 @@ def create_trainer(
             )
         )
     if not quiet:
-        callbacks.append(TQDMProgressBar(refresh_rate=1))
+        callbacks.append(TQDMProgressBar(refresh_rate=25))
     callbacks.extend(extra_callbacks or [])
 
     return pl.Trainer(

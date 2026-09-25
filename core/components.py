@@ -407,9 +407,7 @@ class HitObjectFeatureTokenizer(nn.Module):
             ),
             dim=-2,
         )
-        numeric_hidden = torch.einsum(
-            "...gi,gif->...gf", numeric_inputs, self.numeric_weight
-        )
+        numeric_hidden = (numeric_inputs[..., None] * self.numeric_weight).sum(dim=-2)
         numeric_tokens = torch.tanh(numeric_hidden + self.numeric_bias) - torch.tanh(
             self.numeric_bias
         )
@@ -480,43 +478,6 @@ class SpanMasker(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
         self.mask_token_embed = nn.Parameter(torch.randn(1, 1, d_model))
-        continuous = FEATURE_INFO["continuous"]
-        categorical = FEATURE_INFO["categorical"]
-        self.register_buffer(
-            "right_delta_indices",
-            torch.tensor(
-                [
-                    continuous["log_jump_distance"],
-                    continuous["jump_direction_cos"],
-                    continuous["jump_direction_sin"],
-                    continuous["log_onset_ioi_ms"],
-                    continuous["onset_rhythm_cos"],
-                    continuous["onset_rhythm_sin"],
-                    categorical["incoming_motion_valid"]["index"],
-                ],
-                dtype=torch.long,
-            ),
-            persistent=False,
-        )
-
-    def corrupt_inputs_packed(
-        self,
-        packed_vectors: torch.Tensor,
-        right_zero_idx: torch.Tensor,
-        right_random_idx: torch.Tensor,
-    ) -> torch.Tensor:
-        encoder_x = packed_vectors.clone()
-        features = self.right_delta_indices
-        encoder_x[right_zero_idx[:, None], features[None, :]] = 0
-        source_idx = torch.randint(
-            packed_vectors.shape[0],
-            (right_random_idx.numel(),),
-            device=packed_vectors.device,
-        )
-        encoder_x[right_random_idx[:, None], features[None, :]] = packed_vectors[
-            source_idx[:, None], features[None, :]
-        ]
-        return encoder_x
 
     def forward_packed(
         self,

@@ -1,8 +1,7 @@
-from functools import partial
-import math
-import random
+from functools import lru_cache, partial
 from typing import List
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
@@ -10,49 +9,51 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from core.dataset import LengthBucketBatchSampler, load_beatmap_dataset
 from core.features import FEATURE_INFO, fit_stats, normalize
 
+RIGHT_DELTA_FEATURES = torch.tensor(
+    [
+        FEATURE_INFO["continuous"]["log_jump_distance"],
+        FEATURE_INFO["continuous"]["jump_direction_cos"],
+        FEATURE_INFO["continuous"]["jump_direction_sin"],
+        FEATURE_INFO["continuous"]["log_onset_ioi_ms"],
+        FEATURE_INFO["continuous"]["onset_rhythm_cos"],
+        FEATURE_INFO["continuous"]["onset_rhythm_sin"],
+        FEATURE_INFO["categorical"]["incoming_motion_valid"]["index"],
+    ]
+)
+
+
+@lru_cache(maxsize=8)
+def span_length_distribution(mean_span_length: float) -> tuple[np.ndarray, np.ndarray]:
+    lengths = np.arange(1, max(1, int(mean_span_length * 2)) + 1)
+    std = float(mean_span_length) / 3.0
+    weights = np.exp(-0.5 * ((lengths - mean_span_length) / std) ** 2)
+    return lengths, weights / weights.sum()
+
 
 def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tensor:
-    mask = torch.zeros(int(length), dtype=torch.bool)
-    target = round(int(length) * float(ratio))
+    length = int(length)
+    mask = np.zeros(length, dtype=bool)
+    target = round(length * float(ratio))
     if target <= 0:
-        return mask
+        return torch.from_numpy(mask)
 
-    max_span_len = max(1, int(mean_span_length * 2))
-    span_lengths = list(range(1, max_span_len + 1))
-    std = float(mean_span_length) / 3.0
-    weights = [
-        math.exp(-0.5 * ((span_len - mean_span_length) / std) ** 2)
-        for span_len in span_lengths
-    ]
-    total_weight = sum(weights)
-    weights = [weight / total_weight for weight in weights]
+    span_lengths, weights = span_length_distribution(float(mean_span_length))
+    spans = np.random.choice(span_lengths, size=target, p=weights)
+    ends = np.cumsum(spans)
+    count = min(int(np.searchsorted(ends, target)) + 1, max(1, length - target + 1))
+    spans = spans[:count]
+    spans[-1] -= max(0, int(ends[count - 1]) - target)
+    masked = int(spans.sum())
 
-    spans = []
-    masked = 0
-    while masked < target and len(spans) < max(1, length - target + 1):
-        span_len = random.choices(span_lengths, weights=weights, k=1)[0]
-        span_len = min(span_len, target - masked)
-        if span_len <= 0:
-            break
-        spans.append(span_len)
-        masked += span_len
-    if not spans:
-        return mask
+    extra_gaps = max(0, length - masked - (count - 1))
+    gap_weights = np.random.random(count + 1)
+    gaps = (gap_weights / (gap_weights.sum() or 1.0) * extra_gaps).astype(np.int64)
+    gaps[-1] += extra_gaps - gaps.sum()
 
-    interior_gaps = max(0, len(spans) - 1)
-    extra_gaps = max(0, int(length) - masked - interior_gaps)
-    gap_weights = [random.random() for _ in range(len(spans) + 1)]
-    gap_weight_sum = sum(gap_weights) or 1.0
-    gaps = [int((weight / gap_weight_sum) * extra_gaps) for weight in gap_weights]
-    gaps[-1] += extra_gaps - sum(gaps)
-
-    position = gaps[0]
-    for index, span_len in enumerate(spans):
-        mask[position : position + span_len] = True
-        position += span_len
-        if index + 1 < len(spans):
-            position += 1 + gaps[index + 1]
-    return mask
+    starts = gaps[0] + np.concatenate(([0], np.cumsum(spans[:-1] + 1 + gaps[1:-1])))
+    offsets = np.cumsum(spans) - spans
+    mask[np.repeat(starts - offsets, spans) + np.arange(masked)] = True
+    return torch.from_numpy(mask)
 
 
 def collate_pretrain(
@@ -88,24 +89,34 @@ def collate_pretrain(
     right_split = torch.rand(right_border_idx.numel())
     strain = torch.tensor([item["strain"] for item in batch], dtype=torch.float32)
     strain_targets = (strain - strain_stats["mean"]) / strain_stats["std"]
+    packed_vectors = normalize(
+        torch.cat([vector[:length] for vector, length in zip(vectors, lengths)], dim=0),
+        vector_stats,
+    )
     return {
-        "packed_vectors": normalize(
-            torch.cat(
-                [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
-            ),
-            vector_stats,
+        "packed_vectors": corrupt_right_borders(
+            packed_vectors,
+            right_border_idx[right_split < 0.8],
+            right_border_idx[(right_split >= 0.8) & (right_split < 0.9)],
         ),
         "strain_targets": strain_targets,
         "masked_idx": masked_idx,
         "mask_token_idx": masked_idx[split < 0.8],
         "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
-        "right_border_zero_idx": right_border_idx[right_split < 0.8],
-        "right_border_random_idx": right_border_idx[
-            (right_split >= 0.8) & (right_split < 0.9)
-        ],
         "cu_seqlens": cu_seqlens,
         "max_seqlen": max(lengths),
     }
+
+
+def corrupt_right_borders(
+    packed_vectors: torch.Tensor, zero_idx: torch.Tensor, random_idx: torch.Tensor
+) -> torch.Tensor:
+    features = RIGHT_DELTA_FEATURES[None, :]
+    source_idx = torch.randint(packed_vectors.shape[0], (random_idx.numel(),))
+    source = packed_vectors[source_idx[:, None], features]
+    packed_vectors[zero_idx[:, None], features] = 0
+    packed_vectors[random_idx[:, None], features] = source
+    return packed_vectors
 
 
 def prepare_vector(vec, augment, max_seq_len):

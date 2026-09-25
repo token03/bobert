@@ -15,33 +15,20 @@ from core.features import (
     FEATURES_BY_NAME,
     VECTOR_DIM,
 )
+from core.model import configure_inductor
 from core.osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
 from .loader import BobertDataModule, preallocation_batch_size
 from .setup import create_optimizer, create_scheduler
 
 
-def compile_encoder(model: nn.Module, config: DictConfig) -> None:
-    if not config.runtime.compile_model:
-        return
-    print("Compiling BERT pre-training tokenizer and encoder with torch.compile...")
-    model.bert.compile_encoder(mode=config.runtime.compile_mode)
-
-
-def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor, metrics=None):
+def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor):
     zero = sum(output["continuous"].sum() * 0.0 for output in predictions.values())
     losses = {name: zero for name in ("spatial", "rhythm", "attribute")}
     if targets.shape[0] == 0:
         return {**losses, "total": zero}
 
-    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
-    masks = {
-        "common": torch.ones_like(object_type, dtype=torch.bool),
-        "slider": object_type == OBJECT_TYPE_SLIDER,
-        "spinner": object_type == OBJECT_TYPE_SPINNER,
-    }
-    for group, mask in masks.items():
-        update_metrics = metrics is not None and bool(torch.any(mask))
+    for group, mask in mlm_group_masks(targets).items():
         output = predictions[group]
         continuous_names = [
             name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
@@ -51,7 +38,7 @@ def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor, metrics=None):
             continuous_loss = (
                 F.smooth_l1_loss(
                     output["continuous"],
-                    targets[:, indices],
+                    torch.stack([targets[:, index] for index in indices], dim=1),
                     beta=0.5,
                     reduction="none",
                 )
@@ -61,10 +48,6 @@ def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor, metrics=None):
             for index, name in enumerate(continuous_names):
                 loss_group = FEATURES_BY_NAME[name].family
                 losses[loss_group] = losses[loss_group] + continuous_loss[index]
-                if update_metrics:
-                    metrics["mae"][name].update(
-                        output["continuous"][mask, index], targets[mask, indices[index]]
-                    )
 
         for name, logits in output["categorical"].items():
             info = FEATURE_INFO["categorical"][name]
@@ -79,14 +62,98 @@ def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor, metrics=None):
                 .sum()
             )
             losses[loss_group] = losses[loss_group] + categorical_loss
-            if update_metrics:
-                metrics["f1"][name].update(
-                    logits[mask], targets[mask, info["index"]].long()
-                )
 
     count = targets.shape[0]
     losses = {name: loss / count for name, loss in losses.items()}
     return {**losses, "total": sum(losses.values())}
+
+
+def update_mlm_metrics(
+    predictions: dict[str, Any], targets: torch.Tensor, metrics: nn.ModuleDict
+) -> None:
+    for group, mask in mlm_group_masks(targets).items():
+        if not bool(torch.any(mask)):
+            continue
+        output = predictions[group]
+        for index, name in enumerate(
+            name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
+        ):
+            metrics["mae"][name].update(
+                output["continuous"][mask, index],
+                targets[mask, FEATURE_INFO["continuous"][name]],
+            )
+        for name, logits in output["categorical"].items():
+            metrics["f1"][name].update(
+                logits[mask],
+                targets[mask, FEATURE_INFO["categorical"][name]["index"]].long(),
+            )
+
+
+def mlm_group_masks(targets: torch.Tensor) -> dict[str, torch.Tensor]:
+    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
+    return {
+        "common": torch.ones_like(object_type, dtype=torch.bool),
+        "slider": object_type == OBJECT_TYPE_SLIDER,
+        "spinner": object_type == OBJECT_TYPE_SPINNER,
+    }
+
+
+def pretraining_step(model: nn.Module, batch: dict[str, torch.Tensor]):
+    predictions, targets = model.forward_packed(
+        batch["packed_vectors"],
+        batch["masked_idx"],
+        batch["mask_token_idx"],
+        batch["random_dst_idx"],
+        batch["cu_seqlens"],
+        batch["positions"],
+    )
+    losses = mlm_loss(predictions["mlm"], targets["mlm"])
+    losses["mlm"] = losses["total"]
+    strain_losses = F.smooth_l1_loss(
+        predictions["strain"], batch["strain_targets"], reduction="none"
+    ).mean(dim=0)
+    strain_by_target = dict(zip(STRAIN_COLUMNS, strain_losses, strict=True))
+    losses["strain_aim"] = strain_by_target["aim"]
+    losses["strain_speed"] = strain_by_target["speed"]
+    losses["strain_aim_children"] = torch.stack(
+        [strain_by_target[name] for name in ("slider", "snap", "flow", "agility")]
+    ).mean()
+    losses["strain_speed_children"] = torch.stack(
+        [strain_by_target[name] for name in ("tap", "rhythm")]
+    ).mean()
+    losses["strain"] = sum(
+        losses[name]
+        for name in (
+            "strain_aim",
+            "strain_speed",
+            "strain_aim_children",
+            "strain_speed_children",
+        )
+    )
+    losses["strain_by_target"] = strain_losses
+    losses["total"] = losses["mlm"] + losses["strain"]
+    return losses, predictions["mlm"], targets["mlm"]
+
+
+def step_inputs(batch: dict[str, Any], max_seq_len: int) -> dict[str, torch.Tensor]:
+    inputs = {
+        name: batch[name]
+        for name in (
+            "packed_vectors",
+            "masked_idx",
+            "mask_token_idx",
+            "random_dst_idx",
+            "cu_seqlens",
+            "strain_targets",
+        )
+    }
+    positions = torch.arange(batch["max_seqlen"], device=inputs["cu_seqlens"].device)
+    torch._dynamo.mark_dynamic(inputs["packed_vectors"], 0)
+    for name in ("masked_idx", "mask_token_idx", "random_dst_idx", "cu_seqlens"):
+        torch._dynamo.maybe_mark_dynamic(inputs[name], 0)
+    torch._dynamo.maybe_mark_dynamic(inputs["strain_targets"], 0)
+    torch._dynamo.mark_dynamic(positions, 0, min=1, max=max_seq_len)
+    return {**inputs, "positions": positions}
 
 
 class BobertModule(pl.LightningModule):
@@ -102,6 +169,13 @@ class BobertModule(pl.LightningModule):
         self.config = config
         self.datamodule = datamodule
         self.quiet = quiet
+        self.step = pretraining_step
+        if config.runtime.compile_model:
+            print("Compiling BERT pre-training step with torch.compile...")
+            configure_inductor()
+            self.step = torch.compile(
+                pretraining_step, mode=config.runtime.compile_mode
+            )
         self.val_metrics = nn.ModuleDict(
             {
                 "f1": nn.ModuleDict(
@@ -137,45 +211,12 @@ class BobertModule(pl.LightningModule):
             },
         }
 
-    def forward(self, batch):
-        return self.model.forward_packed(
-            batch["packed_vectors"],
-            batch["masked_idx"],
-            batch["mask_token_idx"],
-            batch["random_dst_idx"],
-            batch["right_border_zero_idx"],
-            batch["right_border_random_idx"],
-            batch["cu_seqlens"],
-            batch["max_seqlen"],
-        )
-
     def _shared_step(self, batch: dict[str, Any], metrics=None):
-        predictions, targets, _ = self(batch)
-        losses = mlm_loss(predictions["mlm"], targets["mlm"], metrics)
-        losses["mlm"] = losses["total"]
-        strain_losses = F.smooth_l1_loss(
-            predictions["strain"], batch["strain_targets"], reduction="none"
-        ).mean(dim=0)
-        strain_by_target = dict(zip(STRAIN_COLUMNS, strain_losses, strict=True))
-        losses["strain_aim"] = strain_by_target["aim"]
-        losses["strain_speed"] = strain_by_target["speed"]
-        losses["strain_aim_children"] = torch.stack(
-            [strain_by_target[name] for name in ("slider", "snap", "flow", "agility")]
-        ).mean()
-        losses["strain_speed_children"] = torch.stack(
-            [strain_by_target[name] for name in ("tap", "rhythm")]
-        ).mean()
-        losses["strain"] = sum(
-            losses[name]
-            for name in (
-                "strain_aim",
-                "strain_speed",
-                "strain_aim_children",
-                "strain_speed_children",
-            )
+        losses, mlm_predictions, mlm_targets = self.step(
+            self.model, step_inputs(batch, self.config.data.max_seq_len)
         )
-        losses["strain_by_target"] = strain_losses
-        losses["total"] = losses["mlm"] + losses["strain"]
+        if metrics is not None:
+            update_mlm_metrics(mlm_predictions, mlm_targets, metrics)
         return losses, batch["strain_targets"].shape[0]
 
     def on_fit_start(self):
@@ -245,14 +286,6 @@ class BobertModule(pl.LightningModule):
         )
         masked_idx = packed_mask.nonzero(as_tuple=False).flatten()
         split = torch.rand(masked_idx.numel(), device=self.device)
-        starts = torch.zeros_like(packed_mask)
-        starts[cu_seqlens[:-1].long()] = True
-        right_border_idx = (
-            (torch.roll(packed_mask, shifts=1) & ~packed_mask & ~starts)
-            .nonzero(as_tuple=False)
-            .flatten()
-        )
-        right_split = torch.rand(right_border_idx.numel(), device=self.device)
         return {
             "packed_vectors": packed_vectors,
             "strain_targets": torch.randn(
@@ -264,10 +297,6 @@ class BobertModule(pl.LightningModule):
             "masked_idx": masked_idx,
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
-            "right_border_zero_idx": right_border_idx[right_split < 0.8],
-            "right_border_random_idx": right_border_idx[
-                (right_split >= 0.8) & (right_split < 0.9)
-            ],
             "cu_seqlens": cu_seqlens,
             "max_seqlen": max_seq_len,
             "batch_size": batch_size,

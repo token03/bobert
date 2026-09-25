@@ -65,6 +65,13 @@ class EmbeddingAdapter(nn.Module):
         return self(values).float().cpu().numpy()
 
 
+def configure_inductor() -> None:
+    inductor = torch._inductor.config
+    inductor.max_autotune_prune_choices_based_on_shared_mem = True
+    inductor.autotune_num_choices_displayed = 0
+    inductor.online_softmax = False
+
+
 class BobertEncoder(nn.Module):
     def __init__(
         self,
@@ -197,6 +204,7 @@ class BobertEncoder(nn.Module):
         return self.feature_tokenizer(x)
 
     def compile_encoder(self, mode: str = "default") -> None:
+        configure_inductor()
         self.embed_sequences = torch.compile(
             self.embed_sequences, mode=mode, dynamic=False
         )
@@ -213,19 +221,6 @@ class BobertEncoder(nn.Module):
         torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
         torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
         return self._encode(packed_embeddings, cu_seqlens, positions)
-
-    def encode_with_embedding(
-        self,
-        packed_embeddings: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        packed_output, layer_embeddings = self.encode_with_layer_embeddings(
-            packed_embeddings,
-            cu_seqlens,
-            max_seqlen,
-        )
-        return packed_output, layer_embeddings.mean(dim=0)
 
     def encode_with_layer_embeddings(
         self,
@@ -403,31 +398,25 @@ class BobertForPretraining(nn.Module):
         masked_idx: torch.Tensor,
         mask_token_idx: torch.Tensor,
         random_dst_idx: torch.Tensor,
-        right_border_zero_idx: torch.Tensor,
-        right_border_random_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        positions: torch.Tensor,
     ):
         packed_targets = {"mlm": packed_vectors.index_select(0, masked_idx)}
-        encoder_vectors = self.masker.corrupt_inputs_packed(
-            packed_vectors,
-            right_border_zero_idx,
-            right_border_random_idx,
-        )
-        torch._dynamo.mark_dynamic(encoder_vectors, 0)
-        packed_embed = self.bert.embed_sequences(encoder_vectors)
+        packed_embed = self.bert.feature_tokenizer(packed_vectors)
         packed_input = self.masker.forward_packed(
             packed_embed,
             mask_token_idx,
             random_dst_idx,
         )
-        encoded, embedding = self.bert.encode_with_embedding(
+        global_embeddings: list[torch.Tensor] = []
+        encoded = self.bert._encode(
             packed_input,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+            cu_seqlens,
+            positions,
+            global_embeddings=global_embeddings,
         )
         predictions = {
             "mlm": self.mlm_head(encoded.index_select(0, masked_idx)),
-            "strain": self.strain_head(embedding),
+            "strain": self.strain_head(torch.stack(global_embeddings).mean(dim=0)),
         }
-        return predictions, packed_targets, masked_idx
+        return predictions, packed_targets

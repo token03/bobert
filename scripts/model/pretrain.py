@@ -15,7 +15,7 @@ from scripts.common.paths import (
     run_name_from_checkpoint,
 )
 from training.loader import BobertDataModule
-from training.pretrain import BobertModule, compile_encoder
+from training.pretrain import BobertModule
 from training.setup import (
     create_trainer,
     setup_device,
@@ -126,7 +126,6 @@ def main() -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BobertForPretraining.from_config(config, device)
-    compile_encoder(model, config)
     summary = model.get_summary()
 
     print("\n--- BERT Encoder Information ---")
