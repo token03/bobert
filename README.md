@@ -9,33 +9,26 @@ While recommendation and similarity search motivated the project, the pretrained
 
 ## Architecture
 
-BoBERT is a bidirectional Transformer inspired by [ModernBERT](https://arxiv.org/abs/2412.13663), adapted to structured beatmap features. It combines local attention for nearby patterns with periodic global attention across the beatmap, producing a 384-dimensional representation.
+BoBERT is a bidirectional Transformer encoder in the style of [ModernBERT](https://arxiv.org/abs/2412.13663), with one token per hit object. An [FT-Transformer](https://arxiv.org/abs/2106.11959)-style tokenizer embeds each object's spatial, rhythmic, and slider features, the encoder mixes local and global attention, and pooled outputs from the global layers become a 384-dimensional beatmap vector.
 
-![BoBERT architecture: .osu hit objects become dense feature tokens, pass through nine pre-norm attention and SwiGLU blocks with residual connections, then global-layer pooling and a linear adapter produce a 384-dimensional embedding.](docs/assets/architecture.png)
+![BoBERT architecture: each hit object's 28 features are grouped into six continuous and five categorical 16-d embeddings, concatenated and projected to a 384-d token. Tokens pass through nine pre-norm attention and SwiGLU blocks, with ±128-object local attention except at layers 3, 6 and 9, which attend globally. Those three layers are mean-pooled and passed through a linear adapter to give the 384-d beatmap vector.](docs/assets/architecture.png)
 
-### Dense feature tokens
-
-Each hit object is described by spatial, rhythmic, slider-geometry, and categorical features. An [FT-Transformer](https://arxiv.org/abs/2106.11959)-inspired tokenizer embeds related feature groups and combines them into a single dense vector: **one hit object becomes one sequence token**. This preserves continuous measurements while keeping sequences compact.
-
-Feature extraction lives in [`core/features.py`](core/features.py), and the tokenizer in [`core/components.py`](core/components.py).
-
-### Sequence encoder
+### Encoder
 
 | Setting | Default in [`configs/default.yaml`](configs/default.yaml) |
 | --- | --- |
-| Encoder depth / width | 9 layers / 384 dimensions |
-| Attention heads | 6 |
+| Parameters | 16.1M |
+| Depth / width / heads | 9 layers / 384 / 6 |
 | Sequence length limit | 4,096 hit objects |
-| Attention pattern | Global every third layer; local otherwise, ±128 objects |
-| Positional representation | Rotary position embeddings (RoPE) |
+| Attention | Global at layers 3, 6, 9; ±128-object window otherwise |
 
-FlashAttention 2 and packed variable-length sequences reduce padding overhead during GPU training. A PyTorch attention path supports CPU inference. The encoder implementation is in [`core/model.py`](core/model.py).
+### Pretraining
 
-### Learning and embedding extraction
+- **Masked reconstruction.** 30% of hit objects are masked in short spans, and the model predicts all of their features. We follow the original BERT's 80/10/10 masking recipe while also corrupting features on border neighbors.
+- **Strain regression.** A linear head predicts difficulty strain values from the mean-pooled global layers. This objective supervises the mean-pooled embedding directly and makes sure it carries strain information.
 
-Pretraining masks spans of hit objects and learns to reconstruct their features. An auxiliary objective predicts aim, speed, and related strain targets, encouraging the model to capture both local patterns and map-level characteristics.
 
-For retrieval, representations from the global-attention layers are pooled, centered, and combined into a normalized beatmap embedding. A lightweight linear adapter learns from collection-derived positive pairs to refine similarity for recommendations.
+The beatmap vector is the mean-pooled output of the three global layers. Pretraining with masked reconstruction and strain regression alone already gives strong retrieval. A linear adapter, initialized to identity and trained contrastively on maps that share collections, then refines the ranking of neighbors and makes similarity scores more meaningful.
 
 ## Limitations
 
@@ -54,7 +47,7 @@ The API runs on CPU in Docker; the frontend uses Bun. Local development connects
 Download a versioned model, embedding index, and metadata catalogs from [Hugging Face](https://huggingface.co/token03/bobert):
 
 ```sh
-uv run --no-default-groups --group serve fetch-run --revision v13.2
+uv run --no-default-groups --group serve fetch-run --revision v14.1
 ```
 
 This uses CPU dependencies, installs the run artifacts under `runs/`, and places the metadata catalogs in `data/`:
