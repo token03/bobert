@@ -10,7 +10,7 @@ import { fetchDefaultRecommendations, recommendBeatmaps } from '../../shared/api
 import { parseBeatmapIds } from '../../shared/beatmapIds'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata } from '../../shared/types'
-import { cardCoverUrl, coverUrl } from '../../shared/urls'
+import { cardCoverUrl } from '../../shared/urls'
 import { buildRecommendRequest, defaultFilters, normalizeBeatmapInput } from './filters'
 import type { RecommendFormValues } from './filters'
 import { RecommendForm } from './RecommendForm'
@@ -34,57 +34,6 @@ type SourceSwap = {
 
 const loadingCards = Array.from({ length: 100 }, (_, index) => index)
 const staleTime = 5 * 60_000
-const coverBatchCount = 16
-const coverBatchTimeout = 500
-
-const coverCache = new Map<number, Promise<void>>()
-
-function preloadCover(beatmapsetId: number) {
-  let request = coverCache.get(beatmapsetId)
-  if (!request) {
-    const image = new Image()
-    image.src = coverUrl(beatmapsetId)
-    request = image.decode().catch(() => new Promise<void>((resolve) => {
-      image.onload = () => resolve()
-      image.onerror = () => resolve()
-    }))
-    coverCache.set(beatmapsetId, request)
-  }
-  return request
-}
-
-function useCoversReady(beatmaps: BeatmapMetadata[]) {
-  const [batch, setBatch] = useState<{ key: string; ready: boolean }>({ key: '', ready: false })
-  const key = beatmaps
-    .slice(0, coverBatchCount)
-    .flatMap((beatmap) => (beatmap.beatmapset_id === null ? [] : [String(beatmap.beatmapset_id)]))
-    .join('|')
-
-  useEffect(() => {
-    if (key === '') {
-      return
-    }
-
-    let cancelled = false
-    const reveal = () => {
-      if (!cancelled) {
-        setBatch({ key, ready: true })
-      }
-    }
-    const timer = setTimeout(reveal, coverBatchTimeout)
-    Promise.all(key.split('|').map((id) => preloadCover(Number(id)))).then(() => {
-      clearTimeout(timer)
-      reveal()
-    })
-
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [key])
-
-  return key === '' || (batch.key === key && batch.ready)
-}
 
 function recommendationOptions(values: RecommendFormValues) {
   return queryOptions({
@@ -140,7 +89,7 @@ export function RecommendPage() {
   }
 
   async function runRecommend(values: RecommendFormValues, historyMode: HistoryMode = 'push', shouldScroll = true) {
-    if (hasResults && coversReady && !isLoading) {
+    if (hasResults && !isLoading) {
       setResultsHeight(resultsRef.current?.getBoundingClientRect().height ?? 0)
       setOutgoingResults(resultBeatmaps)
     }
@@ -290,9 +239,8 @@ export function RecommendPage() {
   const defaultResponse = beatmapIds === null ? defaults.data : undefined
   const resultBeatmaps = response?.results ?? defaultResponse?.results ?? []
   const hasResults = resultBeatmaps.length > 0
-  const coversReady = useCoversReady(resultBeatmaps)
   const showDefaultResults = defaultResponse !== undefined
-  const showLoadingRecommendations = isLoading || (!requestError && !response && !showDefaultResults) || (hasResults && !coversReady)
+  const showLoadingRecommendations = isLoading || (!requestError && !response && !showDefaultResults)
   const recommendForm = (
     <div className={styles['sticky-search-wrap']}>
       <RecommendForm

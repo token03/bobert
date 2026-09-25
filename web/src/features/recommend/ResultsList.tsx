@@ -3,8 +3,6 @@ import { BeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
 import styles from './ResultsList.module.css'
 
-const revealCount = 16
-
 type ResultsListProps = {
   beatmaps: BeatmapMetadata[]
   onCopy: (beatmapId: number) => Promise<void>
@@ -18,7 +16,7 @@ type ResultsListProps = {
 export function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPreview, activePreviewSetId, isPreviewPlaying }: ResultsListProps) {
   return (
     <div className={styles['result-list']} data-results-list>
-      {beatmaps.map((beatmap, index) => (
+      {beatmaps.map((beatmap) => (
         <BeatmapCard
           key={beatmap.beatmap_id}
           beatmap={beatmap}
@@ -28,7 +26,6 @@ export function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPrevi
           onPlayPreview={onPlayPreview}
           activePreviewSetId={activePreviewSetId}
           isPreviewPlaying={isPreviewPlaying}
-          revealIndex={index < revealCount ? index : undefined}
         />
       ))}
     </div>
