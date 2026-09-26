@@ -36,7 +36,7 @@ The beatmap vector is the mean-pooled output of the three global layers. Pretrai
 - Maps with few hit objects give the model fewer observations to average over, so their nearest neighbors are less reliable.
 - Only the first 4,096 hit objects are encoded; anything past that is discarded.
 - Within a map, 1/3 and 1/4 rhythms are distinguished, but across maps they sit in separate regions. The same stream mapped in 1/3 and in 1/4 will not be treated as similar.
-- Only osu!standard is supported; other modes would need their own features and training.
+- Only osu!standard is modelled. `build-features` also extracts taiko, catch, and mania features, but no model is trained on them yet.
 
 ## Run locally
 
@@ -95,7 +95,7 @@ uv sync --frozen
 uv run pretrain --help
 ```
 
-After preparing the dataset and strain targets, train with a named run:
+After building features (`build-features`) and strain targets (`build-strains`), train with a named run:
 
 ```sh
 uv run pretrain --config configs/default.yaml --full -v my-run
@@ -112,7 +112,7 @@ Pretraining saves a run configuration and exports `model.safetensors`. `export-m
 | --- | --- |
 | [`core/`](core/) | Beatmap parsing, features, encoder, and dataset primitives |
 | [`training/`](training/) | Lightning modules, data loading, objectives, and optimizers |
-| [`scripts/`](scripts/README.md) | Data acquisition, dataset construction, training entry points, and evaluation |
+| [`scripts/`](scripts/README.md) | Data acquisition, feature extraction, training entry points, and evaluation |
 | [`server/`](server/README.md) | FastAPI application, retrieval runtime, and online embedding cache |
 | [`web/`](web/README.md) | React application and Cloudflare gateway |
 | `data/`, `runs/`, `cache/` | Local datasets, model artifacts, and runtime state |

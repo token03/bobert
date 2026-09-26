@@ -6,7 +6,12 @@ import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from core.dataset import LengthBucketBatchSampler, load_beatmap_dataset
+from core.dataset import (
+    FeatureStore,
+    FeatureView,
+    LengthBucketBatchSampler,
+    select_beatmaps,
+)
 from core.features import FEATURE_INFO, fit_stats, normalize
 
 RIGHT_DELTA_FEATURES = torch.tensor(
@@ -148,45 +153,65 @@ def prepare_vector(vec, augment, max_seq_len):
 
 
 class BeatmapDataset(Dataset):
-    def __init__(self, data, max_seq_len, augment):
-        self.beatmap_data = data
+    def __init__(self, store, positions, strains, max_seq_len, augment):
+        self.store = store
+        self.positions = positions
+        self.strains = strains
         self.max_seq_len = int(max_seq_len)
         self.augment = augment
 
     def __len__(self):
-        return len(self.beatmap_data)
+        return len(self.positions)
 
     def __getitem__(self, idx):
-        item = self.beatmap_data[idx]
+        position = int(self.positions[idx])
         return {
-            **item,
+            "beatmap_id": int(self.store.beatmap_ids[position]),
             "hitobjects": prepare_vector(
-                item["hitobjects"],
+                self.store.vector(position, self.max_seq_len),
                 self.augment,
                 self.max_seq_len,
             ),
+            "strain": tuple(self.strains[idx].tolist()),
         }
+
+    def lengths(self):
+        return np.minimum(self.store.lengths[self.positions], self.max_seq_len)
+
+    def vectors(self):
+        return FeatureView(self.store, np.sort(self.positions), self.max_seq_len)
 
 
 def load_data(data_config, max_seq_len, sample_size):
-    rows = load_beatmap_dataset(
-        data_config.dataset_path,
+    store = FeatureStore(data_config.features_path, "std")
+    if store.max_seq_len is not None and store.max_seq_len < max_seq_len:
+        raise ValueError(
+            f"{data_config.features_path} stores at most {store.max_seq_len} tokens "
+            f"per map; rebuild it with --max-seq-len {max_seq_len}"
+        )
+    positions, strains = select_beatmaps(
+        store,
         dataset_seed=data_config.dataset_seed,
-        max_seq_len=max_seq_len,
+        strains_path=data_config.strains_path,
+        strain_seq_len=max_seq_len,
         sample_size=sample_size,
-        chunk_size=int(getattr(data_config, "load_chunk_size", 5000)),
         min_sr=data_config.min_sr,
         max_sr=data_config.max_sr,
-        strains_path=data_config.strains_path,
         include_strains=True,
     )
-    return rows
+    print(f"Selected {len(positions):,} of {len(store):,} beatmaps.")
+    return store, positions, strains
 
 
-def split_loaded_data(data, val_split, seed):
-    val_size = int(len(data) * val_split)
+def split_indices(count, val_split, seed):
+    val_size = int(count * val_split)
     generator = torch.Generator().manual_seed(int(seed))
-    return random_split(data, [len(data) - val_size, val_size], generator=generator)
+    train, val = random_split(
+        range(count), [count - val_size, val_size], generator=generator
+    )
+    return np.asarray(train.indices, dtype=np.int64), np.asarray(
+        val.indices, dtype=np.int64
+    )
 
 
 def dataloader_kwargs(data_config):
@@ -203,10 +228,7 @@ def dataloader_kwargs(data_config):
 
 
 def lengths(dataset):
-    return [
-        min(int(item["hitobjects"].shape[0]), dataset.max_seq_len)
-        for item in dataset.beatmap_data
-    ]
+    return dataset.lengths().tolist()
 
 
 def token_budget(sample_lengths, batch_size):
@@ -258,26 +280,29 @@ class BobertDataModule(pl.LightningDataModule):
         return int(self.config.data.max_seq_len)
 
     def setup(self, stage=None):
-        data = load_data(
+        store, positions, strains = load_data(
             self.config.data,
             self.max_seq_len,
             self.config.training.data.sample_size,
         )
-        train_data, val_data = split_loaded_data(
-            data,
+        train_idx, val_idx = split_indices(
+            len(positions),
             self.config.data.val_split,
             self.config.data.dataset_seed,
         )
-        self.vector_stats = fit_stats([item["hitobjects"] for item in train_data])
-        strain = torch.tensor(
-            [item["strain"] for item in train_data], dtype=torch.float32
+        self.train_dataset = BeatmapDataset(
+            store, positions[train_idx], strains[train_idx], self.max_seq_len, True
         )
+        self.val_dataset = BeatmapDataset(
+            store, positions[val_idx], strains[val_idx], self.max_seq_len, False
+        )
+        print("Fitting feature normalization statistics...")
+        self.vector_stats = fit_stats(self.train_dataset.vectors())
+        strain = torch.from_numpy(strains[train_idx])
         strain_std = strain.std(dim=0, correction=0)
         if torch.any(strain_std <= 1e-6):
             raise ValueError("Strain targets must have non-zero variance")
         self.strain_stats = {"mean": strain.mean(dim=0), "std": strain_std}
-        self.train_dataset = BeatmapDataset(train_data, self.max_seq_len, True)
-        self.val_dataset = BeatmapDataset(val_data, self.max_seq_len, False)
         print(
             f"Data split: {len(self.train_dataset)} training, "
             f"{len(self.val_dataset)} validation"

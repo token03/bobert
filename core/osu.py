@@ -2,18 +2,24 @@ import bisect
 import io
 import math
 import os
-from collections.abc import Iterable, Iterator
-from typing import NamedTuple
+from collections.abc import Collection, Iterable, Iterator
+from typing import Final, NamedTuple
 
-OBJECT_TYPE_CIRCLE = 0
-OBJECT_TYPE_SLIDER = 1
-OBJECT_TYPE_SPINNER = 2
+OBJECT_TYPE_CIRCLE: Final = 0
+OBJECT_TYPE_SLIDER: Final = 1
+OBJECT_TYPE_SPINNER: Final = 2
+OBJECT_TYPE_HOLD: Final = 3
 
-MAX_TIME_MS = 36000000
-MAX_COORDINATE = 100000
-INT32_MAX = 2**31 - 1
-BEZIER_TOLERANCE = 0.25
-CATMULL_DETAIL = 50
+MODE_MANIA: Final = 3
+
+MAX_TIME_MS: Final = 36000000
+MAX_COORDINATE: Final = 100000
+INT32_MIN: Final = -(2**31)
+INT32_MAX: Final = 2**31 - 1
+FLOAT32_MAX: Final = 3.4028235e38
+BEZIER_TOLERANCE: Final = 0.25
+CATMULL_DETAIL: Final = 50
+INVALID_GEOMETRY = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 ACTIVE_SECTIONS = frozenset(
     ("general", "metadata", "difficulty", "timingpoints", "hitobjects")
 )
@@ -42,34 +48,38 @@ class RawTimingPoint(NamedTuple):
     effects: int
 
 
-class RawHitObject(NamedTuple):
-    object_index: int
-    x: int
-    y: int
-    time: int
-    object_type: int
-    is_new_combo: int
-    curve_type: str | None
-    slides: int | None
-    pixel_length: float | None
-    end_time: int
-    hit_sound: int
-    bpm: float
-    timing_origin: int
-    end_bpm: float
-    end_timing_origin: int
-    kiai_time: int
-    num_anchors: int
-    hard_anchor_ratio: float
-    slider_end_x: int
-    slider_end_y: int
-    slider_path_valid: int
-    span_end_dx: float
-    span_end_dy: float
-    curve_residual_1_dx: float
-    curve_residual_1_dy: float
-    curve_residual_2_dx: float
-    curve_residual_2_dy: float
+class HitObjects:
+    def __init__(self) -> None:
+        self.object_index: list[int] = []
+        self.x: list[int] = []
+        self.y: list[int] = []
+        self.time: list[int] = []
+        self.object_type: list[int] = []
+        self.is_new_combo: list[int] = []
+        self.hit_sound: list[int] = []
+        self.end_time: list[int] = []
+        self.pixel_length: list[float] = []
+        self.bpm: list[float] = []
+        self.timing_origin: list[int] = []
+        self.end_bpm: list[float] = []
+        self.end_timing_origin: list[int] = []
+        self.curve_type_char: list[str] = []
+        self.num_anchors: list[int] = []
+        self.kiai_time: list[int] = []
+        self.slider_repeats: list[int] = []
+        self.hard_anchor_ratio: list[float] = []
+        self.slider_end_x: list[int] = []
+        self.slider_end_y: list[int] = []
+        self.slider_path_valid: list[int] = []
+        self.span_end_dx: list[float] = []
+        self.span_end_dy: list[float] = []
+        self.curve_residual_1_dx: list[float] = []
+        self.curve_residual_1_dy: list[float] = []
+        self.curve_residual_2_dx: list[float] = []
+        self.curve_residual_2_dy: list[float] = []
+
+    def __len__(self) -> int:
+        return len(self.time)
 
 
 class RawBeatmap(NamedTuple):
@@ -83,7 +93,8 @@ class RawBeatmap(NamedTuple):
     slider_tick: float
     difficulty_rating: float
     timing_points: list[RawTimingPoint]
-    hit_objects: list[RawHitObject]
+    hit_objects: HitObjects
+    mode: int = 0
 
 
 def extract_beatmap_record(beatmap: RawBeatmap) -> dict:
@@ -98,45 +109,6 @@ def extract_beatmap_record(beatmap: RawBeatmap) -> dict:
         "slider_tick": beatmap.slider_tick,
         "difficulty_rating": beatmap.difficulty_rating,
     }
-
-
-def extract_hitobject_records(beatmap: RawBeatmap) -> list[dict]:
-    return [
-        {
-            "beatmap_id": beatmap.beatmap_id,
-            "category": beatmap.category,
-            "object_index": hitobject.object_index,
-            "x": hitobject.x,
-            "y": hitobject.y,
-            "time": hitobject.time,
-            "object_type": hitobject.object_type,
-            "is_new_combo": hitobject.is_new_combo,
-            "hit_sound": hitobject.hit_sound,
-            "end_time": hitobject.end_time,
-            "pixel_length": hitobject.pixel_length or 0.0,
-            "bpm": hitobject.bpm,
-            "timing_origin": hitobject.timing_origin,
-            "end_bpm": hitobject.end_bpm,
-            "end_timing_origin": hitobject.end_timing_origin,
-            "curve_type_char": hitobject.curve_type or "",
-            "num_anchors": hitobject.num_anchors,
-            "kiai_time": hitobject.kiai_time,
-            "slider_repeats": (
-                hitobject.slides - 1 if hitobject.slides is not None else 0
-            ),
-            "hard_anchor_ratio": hitobject.hard_anchor_ratio,
-            "slider_end_x": hitobject.slider_end_x,
-            "slider_end_y": hitobject.slider_end_y,
-            "slider_path_valid": hitobject.slider_path_valid,
-            "span_end_dx": hitobject.span_end_dx,
-            "span_end_dy": hitobject.span_end_dy,
-            "curve_residual_1_dx": hitobject.curve_residual_1_dx,
-            "curve_residual_1_dy": hitobject.curve_residual_1_dy,
-            "curve_residual_2_dx": hitobject.curve_residual_2_dx,
-            "curve_residual_2_dy": hitobject.curve_residual_2_dy,
-        }
-        for hitobject in beatmap.hit_objects
-    ]
 
 
 class TimingSection(NamedTuple):
@@ -324,7 +296,7 @@ def _path_vertices(curve_type: str, points: list[Point]) -> Iterable[Point]:
 def _slider_geometry(
     curve_type: str, points: list[Point], expected_length: float
 ) -> tuple[float, float, float, float, float, float, float]:
-    invalid = (0.0,) * 7
+    invalid = INVALID_GEOMETRY
     if not points or expected_length < 0 or not math.isfinite(expected_length):
         return invalid
     if curve_type == "L" and len(points) == 2:
@@ -442,12 +414,20 @@ def _preprocess_timing_points(
     return sections
 
 
+def _finite_float32(values: tuple[float, ...]) -> bool:
+    for value in values:
+        if not (math.isfinite(value) and abs(value) <= FLOAT32_MAX):
+            return False
+    return True
+
+
 def parse_osu_file(
     file_path: str,
     max_hitobject_lines: int | None = None,
     max_curve_points: int | None = None,
     *,
     validate_dataset: bool = False,
+    modes: Collection[int] = (0,),
     _content: bytes | None = None,
     _beatmap_id: int | None = None,
 ) -> RawBeatmap | None:
@@ -467,28 +447,36 @@ def parse_osu_file(
             io.BytesIO(_content), encoding="utf-8", errors="ignore"
         )
 
-    data = {
-        "beatmap_id": filename_beatmap_id,
+    beatmap_id = filename_beatmap_id
+    difficulty: dict[str, float] = {
         "hp_drain": 5.0,
         "cs": 5.0,
         "od": 5.0,
         "ar": 5.0,
         "slider_multiplier": 1.4,
         "slider_tick": 1.0,
-        "category": category,
         "difficulty_rating": 0.0,
     }
 
-    timing_points = []
-    timing_sections = None
-    dataset_valid_sections = []
-    section_start_times = []
+    timing_points: list[RawTimingPoint] = []
+    timing_sections: list[TimingSection] | None = None
+    dataset_valid_sections: list[bool] = []
+    section_start_times: list[int] = []
     timing_index = -1
+    section_count = 0
+    cached_index = -2
+    active_section: TimingSection | None = None
+    section_valid = True
+    bpm = 120.0
+    timing_origin = 0
+    kiai = 0
     previous_object_time = -1
-    hit_objects = []
+    hit_objects = HitObjects()
+    object_count = 0
     hitobject_line_count = 0
     curve_point_count = 0
     section_name = ""
+    mode = 0
 
     with source as file:
         for raw_line in file:
@@ -503,19 +491,20 @@ def parse_osu_file(
                 continue
 
             if section_name == "general":
-                if validate_dataset and line.lower().startswith("mode:"):
+                if line.lower().startswith("mode:"):
                     try:
-                        if int(line.split(":", 1)[1].strip() or 0) != 0:
-                            return None
+                        mode = int(line.split(":", 1)[1].strip() or 0)
                     except ValueError:
                         pass
+                    if validate_dataset and mode not in modes:
+                        return None
                 continue
 
             if section_name == "metadata":
                 if filename_beatmap_id is None and line.lower().startswith(
                     "beatmapid:"
                 ):
-                    data["beatmap_id"] = int(line.split(":", 1)[1])
+                    beatmap_id = int(line.split(":", 1)[1])
                 continue
 
             if section_name == "difficulty":
@@ -524,7 +513,7 @@ def parse_osu_file(
                     key = parts[0].strip().lower()
                     if key in DIFFICULTY_KEYS:
                         try:
-                            data[DIFFICULTY_KEYS[key]] = float(parts[1].strip())
+                            difficulty[DIFFICULTY_KEYS[key]] = float(parts[1].strip())
                         except ValueError:
                             pass
                 continue
@@ -567,12 +556,15 @@ def parse_osu_file(
             is_circle = type_flags & 1
             is_slider = type_flags & 2
             is_spinner = type_flags & 8
+            is_hold = mode == MODE_MANIA and type_flags & 128
             if is_circle:
                 object_type = OBJECT_TYPE_CIRCLE
             elif is_slider:
                 object_type = OBJECT_TYPE_SLIDER
             elif is_spinner:
                 object_type = OBJECT_TYPE_SPINNER
+            elif is_hold:
+                object_type = OBJECT_TYPE_HOLD
             else:
                 continue
 
@@ -587,7 +579,7 @@ def parse_osu_file(
 
             if abs(x) > MAX_COORDINATE or abs(y) > MAX_COORDINATE:
                 continue
-            if validate_dataset and not -(2**31) <= hit_sound <= INT32_MAX:
+            if validate_dataset and not INT32_MIN <= hit_sound <= INT32_MAX:
                 return None
 
             if timing_sections is None:
@@ -598,15 +590,16 @@ def parse_osu_file(
                 if validate_dataset:
                     dataset_valid_sections = [
                         math.isfinite(section.bpm)
-                        and abs(section.bpm) <= 3.4028235e38
-                        and -(2**31) <= section.timing_origin < 2**31
+                        and abs(section.bpm) <= FLOAT32_MAX
+                        and INT32_MIN <= section.timing_origin <= INT32_MAX
                         for section in timing_sections
                     ]
                 section_start_times = [item.start_time for item in timing_sections]
+                section_count = len(section_start_times)
 
             if time >= previous_object_time:
                 while (
-                    timing_index + 1 < len(section_start_times)
+                    timing_index + 1 < section_count
                     and section_start_times[timing_index + 1] <= time
                 ):
                     timing_index += 1
@@ -614,20 +607,24 @@ def parse_osu_file(
                 timing_index = bisect.bisect_right(section_start_times, time) - 1
             previous_object_time = time
 
-            active_section = (
-                timing_sections[timing_index] if timing_index >= 0 else None
-            )
-            if (
-                validate_dataset
-                and timing_index >= 0
-                and not dataset_valid_sections[timing_index]
-            ):
+            if timing_index != cached_index:
+                cached_index = timing_index
+                if timing_index >= 0:
+                    active_section = timing_sections[timing_index]
+                    section_valid = (
+                        not validate_dataset or dataset_valid_sections[timing_index]
+                    )
+                    bpm = active_section.bpm
+                    timing_origin = active_section.timing_origin
+                    kiai = active_section.kiai
+                else:
+                    active_section = None
+                    section_valid = True
+                    bpm = 120.0
+                    timing_origin = 0
+                    kiai = 0
+            if not section_valid:
                 return None
-            bpm = active_section.bpm if active_section is not None else 120.0
-            timing_origin = (
-                active_section.timing_origin if active_section is not None else 0
-            )
-            kiai = active_section.kiai if active_section is not None else 0
 
             curve_type = None
             slides = None
@@ -637,7 +634,7 @@ def parse_osu_file(
             num_hard_anchors = 0
             slider_end_x = 0
             slider_end_y = 0
-            slider_geometry = (0.0,) * 7
+            slider_geometry = INVALID_GEOMETRY
 
             if object_type == OBJECT_TYPE_SLIDER:
                 try:
@@ -681,7 +678,7 @@ def parse_osu_file(
                         )
                     if active_section is not None and math.isfinite(pixel_length):
                         slider_velocity = (
-                            data["slider_multiplier"]
+                            difficulty["slider_multiplier"]
                             * 100.0
                             * active_section.sv_multiplier
                         )
@@ -695,6 +692,11 @@ def parse_osu_file(
             elif object_type == OBJECT_TYPE_SPINNER:
                 try:
                     end_time = int(parts[5])
+                except (ValueError, IndexError):
+                    continue
+            elif object_type == OBJECT_TYPE_HOLD:
+                try:
+                    end_time = int(parts[5].split(":", 1)[0])
                 except (ValueError, IndexError):
                     continue
 
@@ -716,68 +718,70 @@ def parse_osu_file(
                 num_hard_anchors / num_anchors if num_anchors > 0 else 0.0
             )
             if validate_dataset and not (
-                -(2**31) <= time < 2**31
-                and -(2**31) <= end_time < 2**31
+                INT32_MIN <= time <= INT32_MAX
+                and INT32_MIN <= end_time <= INT32_MAX
                 and (
                     object_type != OBJECT_TYPE_SLIDER
-                    or all(
-                        math.isfinite(value) and abs(value) <= 3.4028235e38
-                        for value in (pixel_length or 0.0, *slider_geometry[1:])
-                    )
+                    or _finite_float32((pixel_length or 0.0, *slider_geometry[1:]))
                 )
             ):
                 return None
-            hit_objects.append(
-                RawHitObject(
-                    object_index=len(hit_objects),
-                    x=x,
-                    y=y,
-                    time=time,
-                    object_type=object_type,
-                    is_new_combo=1 if type_flags & 4 else 0,
-                    curve_type=curve_type,
-                    slides=slides,
-                    pixel_length=pixel_length,
-                    end_time=end_time,
-                    hit_sound=hit_sound,
-                    bpm=bpm,
-                    timing_origin=timing_origin,
-                    end_bpm=end_bpm,
-                    end_timing_origin=end_timing_origin,
-                    kiai_time=kiai,
-                    num_anchors=num_anchors,
-                    hard_anchor_ratio=hard_anchor_ratio,
-                    slider_end_x=slider_end_x,
-                    slider_end_y=slider_end_y,
-                    slider_path_valid=int(slider_geometry[0]),
-                    span_end_dx=slider_geometry[1],
-                    span_end_dy=slider_geometry[2],
-                    curve_residual_1_dx=slider_geometry[3],
-                    curve_residual_1_dy=slider_geometry[4],
-                    curve_residual_2_dx=slider_geometry[5],
-                    curve_residual_2_dy=slider_geometry[6],
-                )
-            )
+            hit_objects.object_index.append(object_count)
+            hit_objects.x.append(x)
+            hit_objects.y.append(y)
+            hit_objects.time.append(time)
+            hit_objects.object_type.append(object_type)
+            hit_objects.is_new_combo.append(1 if type_flags & 4 else 0)
+            hit_objects.hit_sound.append(hit_sound)
+            hit_objects.end_time.append(end_time)
+            hit_objects.pixel_length.append(pixel_length or 0.0)
+            hit_objects.bpm.append(bpm)
+            hit_objects.timing_origin.append(timing_origin)
+            hit_objects.end_bpm.append(end_bpm)
+            hit_objects.end_timing_origin.append(end_timing_origin)
+            hit_objects.curve_type_char.append(curve_type or "")
+            hit_objects.num_anchors.append(num_anchors)
+            hit_objects.kiai_time.append(kiai)
+            hit_objects.slider_repeats.append(slides - 1 if slides is not None else 0)
+            hit_objects.hard_anchor_ratio.append(hard_anchor_ratio)
+            hit_objects.slider_end_x.append(slider_end_x)
+            hit_objects.slider_end_y.append(slider_end_y)
+            hit_objects.slider_path_valid.append(int(slider_geometry[0]))
+            hit_objects.span_end_dx.append(slider_geometry[1])
+            hit_objects.span_end_dy.append(slider_geometry[2])
+            hit_objects.curve_residual_1_dx.append(slider_geometry[3])
+            hit_objects.curve_residual_1_dy.append(slider_geometry[4])
+            hit_objects.curve_residual_2_dx.append(slider_geometry[5])
+            hit_objects.curve_residual_2_dy.append(slider_geometry[6])
+            object_count += 1
 
     if (
-        data["beatmap_id"] is None
+        beatmap_id is None
         or not timing_points
-        or not hit_objects
+        or object_count == 0
         or (
             validate_dataset
             and (
-                not -(2**63) <= data["beatmap_id"] < 2**63
-                or len(hit_objects) < 2
-                or len(hit_objects) > 16_384
+                not -(2**63) <= beatmap_id < 2**63
+                or object_count < 2
+                or object_count > (max_hitobject_lines or 16_384)
                 or not all(
-                    math.isfinite(data[field]) and abs(data[field]) <= 3.4028235e38
+                    math.isfinite(difficulty[field])
+                    and abs(difficulty[field]) <= FLOAT32_MAX
                     for field in DIFFICULTY_KEYS.values()
                 )
             )
         )
     ):
         return None
-    return RawBeatmap(**data, timing_points=timing_points, hit_objects=hit_objects)
+    return RawBeatmap(
+        beatmap_id=beatmap_id,
+        category=category,
+        **difficulty,
+        timing_points=timing_points,
+        hit_objects=hit_objects,
+        mode=mode,
+    )
 
 
 def parse_osu_bytes(

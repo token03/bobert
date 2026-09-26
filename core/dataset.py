@@ -1,20 +1,267 @@
-from pathlib import Path
+import hashlib
+import json
+import os
 import random
-import re
-from typing import Any, Dict, List, Optional, Sequence
+import struct
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from types import ModuleType
+from typing import NamedTuple
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
+import torch
 from torch.utils.data import Sampler
-from tqdm import tqdm
 
-from . import STRAIN_COLUMNS
-from .features import build_feature_tensors
+from . import STRAIN_COLUMNS, catch, features, mania, osu, taiko
 
-HITOBJECT_ID_RANGE = 100_000
+FORMAT_VERSION = 1
+MAGIC = b"BOBFEAT1"
+FOOTER = struct.Struct("<Q8s")
+CODEC = pa.Codec("zstd", compression_level=3)
 
 
-class LengthBucketBatchSampler(Sampler[List[int]]):
+class Ruleset(NamedTuple):
+    mode_int: int
+    field_names: tuple[str, ...]
+    columns: tuple[str, ...]
+    build: Callable
+    sources: tuple[ModuleType, ...]
+
+
+RULESETS = {
+    "std": Ruleset(
+        0,
+        features.FIELD_NAMES,
+        features.HITOBJECT_COLUMNS,
+        features.build_feature_tensors,
+        (features, osu),
+    ),
+    "taiko": Ruleset(
+        1,
+        taiko.FIELD_NAMES,
+        taiko.HITOBJECT_COLUMNS,
+        taiko.build_feature_tensors,
+        (taiko, features, osu),
+    ),
+    "catch": Ruleset(
+        2,
+        catch.FIELD_NAMES,
+        catch.HITOBJECT_COLUMNS,
+        catch.build_feature_tensors,
+        (catch, features, osu),
+    ),
+    "mania": Ruleset(
+        3,
+        mania.FIELD_NAMES,
+        mania.HITOBJECT_COLUMNS,
+        mania.build_feature_tensors,
+        (mania, features, osu),
+    ),
+}
+MODE_NAMES = {ruleset.mode_int: name for name, ruleset in RULESETS.items()}
+
+
+def source_hash(mode: str) -> str:
+    digest = hashlib.sha256()
+    for module in RULESETS[mode].sources:
+        digest.update(Path(str(module.__file__)).read_bytes())
+    return digest.hexdigest()[:16]
+
+
+def feature_path(features_dir: str | Path, mode: str) -> Path:
+    return Path(features_dir) / f"{mode}_features.bin"
+
+
+def encode_vector(vector: np.ndarray | torch.Tensor) -> bytes:
+    array = np.ascontiguousarray(np.asarray(vector))
+    if array.dtype != np.float16 or array.ndim != 2:
+        raise ValueError(f"unexpected feature array {array.dtype} {array.shape}")
+    return CODEC.compress(array.tobytes(), asbytes=True)
+
+
+class FeatureWriter:
+    def __init__(self, path: str | Path, mode: str, max_seq_len: int | None):
+        self.path = Path(path)
+        self.mode = mode
+        self.max_seq_len = max_seq_len
+        self.field_names = RULESETS[mode].field_names
+        self.temporary = self.path.with_name(self.path.name + ".tmp")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = self.temporary.open("wb")
+        self.beatmap_ids: list[int] = []
+        self.lengths: list[int] = []
+        self.block_sizes: list[int] = []
+        self.object_counts: list[int] = []
+        self.seen: set[int] = set()
+
+    def append(
+        self, beatmap_id: int, object_count: int, length: int, block: bytes
+    ) -> None:
+        beatmap_id = int(beatmap_id)
+        if beatmap_id in self.seen:
+            return
+        self.file.write(block)
+        self.seen.add(beatmap_id)
+        self.beatmap_ids.append(beatmap_id)
+        self.lengths.append(int(length))
+        self.block_sizes.append(len(block))
+        self.object_counts.append(int(object_count))
+
+    def close(self) -> dict:
+        block_offsets = np.concatenate(
+            ([0], np.cumsum(self.block_sizes, dtype=np.int64))
+        )
+        sections = {}
+        for name, values in (
+            ("beatmap_id", np.asarray(self.beatmap_ids, dtype=np.int64)),
+            ("block_offsets", block_offsets.astype(np.int64)),
+            ("lengths", np.asarray(self.lengths, dtype=np.int64)),
+            ("object_count", np.asarray(self.object_counts, dtype=np.int64)),
+        ):
+            sections[name] = [self.file.tell(), len(values)]
+            self.file.write(values.tobytes())
+        meta = {
+            "format": FORMAT_VERSION,
+            "mode": self.mode,
+            "fields": list(self.field_names),
+            "dtype": "float16",
+            "compression": "zstd",
+            "max_seq_len": self.max_seq_len,
+            "maps": len(self.beatmap_ids),
+            "tokens": int(sum(self.lengths)),
+            "source_hash": source_hash(self.mode),
+            "created_at": datetime.now(UTC).isoformat(),
+            "sections": sections,
+        }
+        encoded = json.dumps(meta).encode()
+        self.file.write(encoded)
+        self.file.write(FOOTER.pack(len(encoded), MAGIC))
+        self.file.flush()
+        os.fsync(self.file.fileno())
+        self.file.close()
+        os.replace(self.temporary, self.path)
+        return meta
+
+    def abort(self) -> None:
+        self.file.close()
+        self.temporary.unlink(missing_ok=True)
+
+
+def read_meta(path: str | Path) -> dict:
+    path = Path(path)
+    with path.open("rb") as file:
+        file.seek(-FOOTER.size, os.SEEK_END)
+        length, magic = FOOTER.unpack(file.read(FOOTER.size))
+        if magic != MAGIC:
+            raise ValueError(f"{path} is not a feature file")
+        file.seek(-FOOTER.size - length, os.SEEK_END)
+        meta = json.loads(file.read(length))
+    if meta["format"] != FORMAT_VERSION:
+        raise ValueError(f"unsupported feature format {meta['format']}")
+    return meta
+
+
+def read_section(path: str | Path, meta: dict, name: str) -> np.ndarray:
+    offset, count = meta["sections"][name]
+    return np.fromfile(path, dtype=np.int64, count=count, offset=offset)
+
+
+def stored_beatmap_ids(features_dir: str | Path) -> set[int]:
+    beatmap_ids = set()
+    for mode in RULESETS:
+        path = feature_path(features_dir, mode)
+        if path.exists():
+            beatmap_ids.update(
+                read_section(path, read_meta(path), "beatmap_id").tolist()
+            )
+    return beatmap_ids
+
+
+class FeatureStore:
+    def __init__(self, path: str | Path, mode: str | None = None):
+        self.path = Path(path)
+        self.meta = read_meta(self.path)
+        self.mode = self.meta["mode"]
+        if mode is not None and self.mode != mode:
+            raise ValueError(f"{self.path} holds {self.mode} features, not {mode}")
+        self.field_names = tuple(self.meta["fields"])
+        expected = RULESETS[self.mode].field_names
+        if self.field_names != expected:
+            raise ValueError(
+                f"{self.path} fields do not match the {self.mode} feature schema; "
+                "rebuild it with build-features"
+            )
+        if self.meta["source_hash"] != source_hash(self.mode):
+            print(
+                f"Warning: {self.path.name} was built from different feature code; "
+                "rebuild it with build-features if features changed"
+            )
+        self.max_seq_len = self.meta["max_seq_len"]
+        self.beatmap_ids = self._section("beatmap_id")
+        self.block_offsets = self._section("block_offsets")
+        self.lengths = self._section("lengths")
+        self.object_counts = self._section("object_count")
+        self._blocks: np.ndarray | None = None
+
+    def _section(self, name: str) -> np.ndarray:
+        return read_section(self.path, self.meta, name)
+
+    @property
+    def blocks(self) -> np.ndarray:
+        if self._blocks is None:
+            size = int(self.block_offsets[-1])
+            self._blocks = (
+                np.memmap(self.path, dtype=np.uint8, mode="r", shape=(size,))
+                if size
+                else np.empty(0, dtype=np.uint8)
+            )
+        return self._blocks
+
+    def __getstate__(self):
+        return {**self.__dict__, "_blocks": None}
+
+    def __len__(self) -> int:
+        return len(self.beatmap_ids)
+
+    def vector(self, position: int, max_seq_len: int | None = None) -> torch.Tensor:
+        length = int(self.lengths[position])
+        dim = len(self.field_names)
+        block = self.blocks[
+            int(self.block_offsets[position]) : int(self.block_offsets[position + 1])
+        ]
+        rows = np.frombuffer(
+            CODEC.decompress(block, decompressed_size=length * dim * 2, asbytes=True),
+            dtype=np.float16,
+        ).reshape(length, dim)
+        if max_seq_len is not None:
+            rows = rows[: int(max_seq_len)]
+        return torch.from_numpy(rows.copy())
+
+
+class FeatureView(Sequence[torch.Tensor]):
+    def __init__(
+        self, store: FeatureStore, positions: np.ndarray, max_seq_len: int | None
+    ):
+        self.store = store
+        self.positions = positions
+        self.max_seq_len = max_seq_len
+
+    def __len__(self) -> int:
+        return len(self.positions)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [
+                self.store.vector(int(position), self.max_seq_len)
+                for position in self.positions[index]
+            ]
+        return self.store.vector(int(self.positions[index]), self.max_seq_len)
+
+
+class LengthBucketBatchSampler(Sampler[list[int]]):
     def __init__(
         self,
         lengths: Sequence[int],
@@ -33,10 +280,10 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
     def __len__(self) -> int:
         return len(self._batches())
 
-    def _batches(self) -> List[List[int]]:
+    def _batches(self) -> list[list[int]]:
         indices = sorted(range(len(self.lengths)), key=self.lengths.__getitem__)
         batches = []
-        batch: List[int] = []
+        batch: list[int] = []
         tokens = 0
         for index in indices:
             length = self.lengths[index]
@@ -60,29 +307,8 @@ class LengthBucketBatchSampler(Sampler[List[int]]):
         yield from batches
 
 
-def scan_dataset_parquet(path: str | Path) -> pl.LazyFrame:
-    path_obj = Path(path)
-    source = path_obj / "**" / "*.parquet" if path_obj.is_dir() else path_obj
-    return pl.scan_parquet(str(source))
-
-
-def _scan_hitobject_range(path: Path, lower: int, upper: int) -> pl.LazyFrame:
-    files = sorted(path.rglob("*.parquet"))
-    ranged_files = []
-    for file in files:
-        match = re.fullmatch(r"part-(\d+)-(\d+)\.parquet", file.name)
-        if match is None:
-            return scan_dataset_parquet(path)
-        file_lower, file_upper = map(int, match.groups())
-        if file_lower <= upper and file_upper >= lower:
-            ranged_files.append(str(file))
-    if not ranged_files:
-        return scan_dataset_parquet(path)
-    return pl.scan_parquet(ranged_files)
-
-
 def _best_supported_strains_lf(
-    strains_lf: pl.LazyFrame, seq_len: Optional[int]
+    strains_lf: pl.LazyFrame, seq_len: int | None
 ) -> pl.LazyFrame:
     strains_lf = strains_lf.with_columns(
         pl.when(pl.col("seq_len") == 0)
@@ -105,45 +331,9 @@ def _best_supported_strains_lf(
     )
 
 
-def _selected_beatmaps_lf(
-    beatmaps_path: str | Path,
-    strains_path: str | Path,
-    ids_to_load: Optional[List[int]],
-    strain_seq_len: Optional[int],
-    min_sr: Optional[float],
-    max_sr: Optional[float],
-    include_strains: bool,
-) -> pl.LazyFrame:
-    beatmaps_lf = (
-        scan_dataset_parquet(beatmaps_path).select("beatmap_id").unique("beatmap_id")
-    )
-
-    if ids_to_load:
-        beatmaps_lf = beatmaps_lf.filter(pl.col("beatmap_id").is_in(ids_to_load))
-
-    if min_sr is None and max_sr is None and not include_strains:
-        return beatmaps_lf
-
-    strains_lf = _best_supported_strains_lf(
-        scan_dataset_parquet(strains_path), strain_seq_len
-    )
-    strains_lf = strains_lf.filter(
-        pl.all_horizontal(
-            [pl.col(column).is_finite() for column in ("stars", *STRAIN_COLUMNS)]
-        )
-    )
-
-    if min_sr is not None:
-        strains_lf = strains_lf.filter(pl.col("stars") >= min_sr)
-    if max_sr is not None:
-        strains_lf = strains_lf.filter(pl.col("stars") <= max_sr)
-
-    return beatmaps_lf.join(strains_lf, on="beatmap_id", how="inner")
-
-
 def _sample_beatmap_ids(
-    beatmap_ids: List[int], sample_size: Optional[int], dataset_seed: int
-) -> List[int]:
+    beatmap_ids: list[int], sample_size: int | None, dataset_seed: int
+) -> list[int]:
     beatmap_ids = sorted(int(bid) for bid in beatmap_ids)
     if sample_size is None or sample_size <= 0 or sample_size >= len(beatmap_ids):
         return beatmap_ids
@@ -153,148 +343,64 @@ def _sample_beatmap_ids(
     return sorted(int(bid) for bid in selected)
 
 
-def _chunk_beatmap_ids(beatmap_ids: List[int], chunk_size: int) -> List[List[int]]:
-    chunks = []
-    chunk = []
-    bucket = None
-    for beatmap_id in beatmap_ids:
-        next_bucket = beatmap_id // HITOBJECT_ID_RANGE
-        if chunk and (next_bucket != bucket or len(chunk) >= chunk_size):
-            chunks.append(chunk)
-            chunk = []
-        chunk.append(beatmap_id)
-        bucket = next_bucket
-    if chunk:
-        chunks.append(chunk)
-    return chunks
-
-
-def load_beatmap_dataset(
-    dataset_path: str,
+def select_beatmaps(
+    store: FeatureStore,
     dataset_seed: int,
-    max_seq_len: Optional[int] = None,
-    strain_seq_len: Optional[int] = None,
-    ids_to_load: Optional[List[int]] = None,
-    sample_size: Optional[int] = None,
-    strains_path: str = "./data/strains.parquet",
-    chunk_size: int = 5000,
-    min_sr: Optional[float] = None,
-    max_sr: Optional[float] = None,
+    strains_path: str | Path | None = None,
+    strain_seq_len: int | None = None,
+    beatmap_ids: Sequence[int] | None = None,
+    sample_size: int | None = None,
+    min_sr: float | None = None,
+    max_sr: float | None = None,
     include_strains: bool = False,
-    quiet: bool = False,
-) -> List[Dict[str, Any]]:
-    dataset_path = Path(dataset_path).expanduser()
-    strains_path = Path(strains_path).expanduser()
-
-    strain_seq_len = max_seq_len if strain_seq_len is None else strain_seq_len
-
-    beatmaps_path = dataset_path / "beatmaps"
-    hitobjects_path = dataset_path / "hitobjects"
-
-    if not beatmaps_path.exists() or not hitobjects_path.exists():
-        raise FileNotFoundError(f"Parquet dataset not found at '{dataset_path}'.")
-    if ids_to_load:
-        ids_to_load = [int(bid) for bid in ids_to_load]
-        if not quiet:
-            print(f"Pre-filtered to load {len(ids_to_load)} specific beatmap IDs.")
-
-    selected_beatmaps = _selected_beatmaps_lf(
-        beatmaps_path,
-        strains_path,
-        ids_to_load,
-        strain_seq_len,
-        min_sr,
-        max_sr,
-        include_strains,
-    ).collect(engine="streaming")
-
-    all_beatmap_ids = _sample_beatmap_ids(
-        selected_beatmaps["beatmap_id"].unique().to_list(),
-        None if ids_to_load else sample_size,
-        dataset_seed,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    selected = pl.LazyFrame(
+        {
+            "beatmap_id": store.beatmap_ids,
+            "_position": np.arange(len(store), dtype=np.int64),
+        }
     )
-    if len(all_beatmap_ids) < selected_beatmaps["beatmap_id"].n_unique():
-        selected_beatmaps = selected_beatmaps.filter(
-            pl.col("beatmap_id").is_in(all_beatmap_ids)
+    if beatmap_ids is not None:
+        selected = selected.filter(
+            pl.col("beatmap_id").is_in([int(bid) for bid in beatmap_ids])
         )
 
-    if not quiet:
-        print(
-            f"Selected {len(all_beatmap_ids)} beatmaps. "
-            f"Processing in chunks of {chunk_size}..."
+    if include_strains or min_sr is not None or max_sr is not None:
+        if strains_path is None:
+            raise ValueError("strains_path is required to filter or load strains")
+        strains_lf = _best_supported_strains_lf(
+            pl.scan_parquet(Path(strains_path).expanduser()), strain_seq_len
         )
-    all_beatmap_data = []
-
-    hitobject_cols = [
-        "beatmap_id",
-        "object_index",
-        "x",
-        "y",
-        "time",
-        "object_type",
-        "is_new_combo",
-        "end_time",
-        "pixel_length",
-        "bpm",
-        "timing_origin",
-        "end_bpm",
-        "slider_repeats",
-        "slider_path_valid",
-        "span_end_dx",
-        "span_end_dy",
-        "curve_residual_1_dx",
-        "curve_residual_1_dy",
-        "curve_residual_2_dx",
-        "curve_residual_2_dy",
-        "curve_type_char",
-        "num_anchors",
-        "hard_anchor_ratio",
-    ]
-
-    chunks = _chunk_beatmap_ids(all_beatmap_ids, chunk_size)
-    for chunk_ids in tqdm(chunks, desc="Processing Chunks", disable=quiet):
-        beatmaps_chunk = selected_beatmaps.filter(pl.col("beatmap_id").is_in(chunk_ids))
-        lo = int(chunk_ids[0])
-        hi = int(chunk_ids[-1])
-        hitobjects_chunk = (
-            _scan_hitobject_range(hitobjects_path, lo, hi)
-            .select(hitobject_cols)
-            .filter(pl.col("beatmap_id").is_between(lo, hi))
-            .filter(pl.col("beatmap_id").is_in(chunk_ids))
-            .collect(engine="streaming")
+        mode_int = RULESETS[store.mode].mode_int
+        if "mode_int" in strains_lf.collect_schema():
+            strains_lf = strains_lf.filter(pl.col("mode_int") == mode_int)
+        elif mode_int != 0:
+            strains_lf = strains_lf.filter(pl.lit(False))
+        strains_lf = strains_lf.filter(
+            pl.all_horizontal(
+                [pl.col(column).is_finite() for column in ("stars", *STRAIN_COLUMNS)]
+            )
+        )
+        if min_sr is not None:
+            strains_lf = strains_lf.filter(pl.col("stars") >= min_sr)
+        if max_sr is not None:
+            strains_lf = strains_lf.filter(pl.col("stars") <= max_sr)
+        selected = selected.join(
+            strains_lf.select("beatmap_id", *STRAIN_COLUMNS),
+            on="beatmap_id",
+            how="inner",
         )
 
-        if hitobjects_chunk.is_empty():
-            continue
+    frame = selected.collect().sort("beatmap_id")
+    sampled = _sample_beatmap_ids(
+        frame["beatmap_id"].to_list(), sample_size, dataset_seed
+    )
+    if len(sampled) < frame.height:
+        frame = frame.filter(pl.col("beatmap_id").is_in(sampled))
 
-        hitobject_data, ids = build_feature_tensors(
-            beatmaps_chunk,
-            hitobjects_chunk,
-            max_seq_len=max_seq_len,
-        )
-        strains_by_id = (
-            {
-                int(row["beatmap_id"]): tuple(
-                    float(row[name]) for name in STRAIN_COLUMNS
-                )
-                for row in beatmaps_chunk.select(
-                    "beatmap_id", *STRAIN_COLUMNS
-                ).iter_rows(named=True)
-            }
-            if include_strains
-            else {}
-        )
-
-        for bid, vectors in zip(ids, hitobject_data):
-            bid_int = int(bid)
-            item = {
-                "beatmap_id": bid_int,
-                "hitobjects": vectors,
-            }
-            if include_strains:
-                item["strain"] = strains_by_id[bid_int]
-            all_beatmap_data.append(item)
-
-    if not quiet:
-        print(f"Loaded data for {len(all_beatmap_data)} beatmaps.")
-    return all_beatmap_data
+    strains = (
+        frame.select(STRAIN_COLUMNS).to_numpy().astype(np.float32)
+        if include_strains
+        else None
+    )
+    return frame["_position"].to_numpy(), strains

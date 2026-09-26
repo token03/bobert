@@ -7,13 +7,13 @@ import httpx
 import pandas as pd
 import tqdm
 
+from core.dataset import stored_beatmap_ids
 from scripts.common.failures import load_failures, save_failures
 from scripts.common.osu import get_api_tiers, get_sharded_path, is_valid_osu_file
-from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
+from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR, FEATURES_DIR
 from scripts.sources.beatmaps.metadata import fetch_missing_beatmaps
 
 BEATMAPS_DIR = DATA_DIR / "beatmaps"
-DATASET_BEATMAPS_DIR = DATA_DIR / "dataset" / "beatmaps"
 FAILED_DOWNLOADS_PATH = DATA_DIR / ".failed_downloads.json"
 COLLECTION_EDGES_PATH = COLLECTIONS_DIR / "edges.parquet"
 
@@ -56,17 +56,6 @@ def scan_raw_beatmaps(path) -> set[str]:
     return {
         osu_file.stem for osu_file in path.glob("**/*.osu") if osu_file.stem.isdigit()
     }
-
-
-def scan_dataset_beatmaps(path) -> set[str]:
-    if not path.exists():
-        return set()
-    try:
-        beatmap_ids = pd.read_parquet(path, columns=["beatmap_id"])["beatmap_id"]
-        return {str(bid) for bid in beatmap_ids.unique()}
-    except Exception as e:
-        print(f"Warning: failed to scan parsed dataset at {path}: {e}")
-        return set()
 
 
 def load_collection_ids() -> list[str]:
@@ -270,11 +259,11 @@ def main():
     print("Scanning existing raw and parsed beatmaps...")
     scan_start = time.time()
     raw_ids = scan_raw_beatmaps(BEATMAPS_DIR)
-    dataset_ids = scan_dataset_beatmaps(DATASET_BEATMAPS_DIR)
-    existing_ids = raw_ids | dataset_ids
+    feature_ids = {str(bid) for bid in stored_beatmap_ids(FEATURES_DIR)}
+    existing_ids = raw_ids | feature_ids
     print(
         f"Scan completed in {time.time() - scan_start:.3f}s - "
-        f"raw: {len(raw_ids):,}, dataset: {len(dataset_ids):,}"
+        f"raw: {len(raw_ids):,}, features: {len(feature_ids):,}"
     )
 
     failed_ids = {} if args.retry_failed else load_failures(FAILED_DOWNLOADS_PATH)

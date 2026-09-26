@@ -3,7 +3,7 @@
 Run commands from the repository root with `uv run <command>`. Install the development environment with `uv sync --frozen`; its current target is Linux x86-64, Python 3.12, and CUDA 12.8. Most commands expose `--help`; some acquisition tools are interactive.
 
 ```text
-sources → dataset + strain targets → pretrain → embed → recommend / evaluate
+sources → features + strain targets → pretrain → embed → recommend / evaluate
                                              ↓
 collection data → adaptation pairs → adapt → embed
 ```
@@ -25,11 +25,12 @@ Paths below describe the default workspace layout. Check each command's argument
 | Collections | `fetch-collection-vertices` | Collection sources | `data/collections/vertices.parquet` |
 | Collections | `fetch-collection-edges` | Collection vertices and source access | `data/collections/edges.parquet` |
 | Collections | `fetch-tournaments` | osu!collector tournament API | `data/collections/tournaments.parquet` |
-| Dataset | `build-dataset` | Beatmap files and metadata | Prepared dataset under `data/dataset/` |
-| Dataset | `build-strains` | Dataset / raw beatmaps, config, parsecore | `data/strains.parquet` |
-| Model | `pretrain` | Dataset, strains, `configs/default.yaml` | Run config, checkpoints, exported `model.safetensors` |
+| Dataset | `build-features` | `.osu` files under `data/beatmaps/` | `{std,taiko,catch,mania}_features.bin` under `data/features/` |
+| Dataset | `build-strains` | std features, raw beatmaps, config, parsecore | `data/strains.parquet` |
+| Dataset | `build-dataset` | `.osu` files under `data/beatmaps/` | Parsed std hit objects as parquet under `data/dataset/`, for exploration; training does not read it |
+| Model | `pretrain` | std features, strains, `configs/default.yaml` | Run config, checkpoints, exported `model.safetensors` |
 | Model | `export-model` | Training checkpoint and matching config | Inference `model.safetensors` |
-| Model | `embed` | Exported encoder and dataset | `embeddings.parquet`, including pooling metadata and density index |
+| Model | `embed` | Exported encoder and std features | `embeddings.parquet`, including pooling metadata and density index |
 | Model | `adapt` | Source run and collection-derived pairs | Target run with trained linear adapter |
 | Release | `fetch-run` | Hugging Face repository and release tag | Run under `runs/`, catalogs under `data/`; updates `runs/current` |
 | Release | `publish-run` | Run, catalogs, Hugging Face write token | Model card, artifacts, and immutable release tag |
@@ -44,7 +45,7 @@ Paths below describe the default workspace layout. Check each command's argument
 
 ## Credentials
 
-Start with [`.env.example`](../.env.example). Credentials depend on the selected source; local dataset building and training do not require network credentials once inputs are available.
+Start with [`.env.example`](../.env.example). Credentials depend on the selected source; local feature building and training do not require network credentials once inputs are available.
 
 | Commands / source | Environment |
 | --- | --- |
@@ -55,9 +56,24 @@ Start with [`.env.example`](../.env.example). Credentials depend on the selected
 | Hosted Compose tunnel | `CLOUDFLARE_TUNNEL_TOKEN` |
 | `publish-run` | `HF_TOKEN` (write access); project `.env` takes precedence over the shell |
 
+## Feature files
+
+`build-features` parses every `.osu` file once and writes one file per mode to `data/features/`. Each map's float16 feature rows, capped at `--max-seq-len`, are stored as one zstd block, followed by an index of beatmap IDs, block offsets, token counts, and parsed object counts. Training and `embed` memory-map the file and decompress maps as they are read, so RAM use does not grow with the corpus. Filters such as star rating, sampling, and the validation split are applied at load time, so changing them needs no rebuild.
+
+Each file also records its feature names and a hash of the feature code. Loading fails if the names differ from the current schema and warns if only the hash differs. Rebuild after changing features. Parse timeouts and errors are logged to `data/features/failures.jsonl`.
+
+On first run, `build-features` compiles `core/osu.py` with mypyc into `~/.cache/bobert/native/`, keyed by the source hash, and falls back to pure Python if compilation fails. Output is the same either way. `--no-compile` skips compilation.
+
+| Mode | Token | Features |
+| --- | --- | --- |
+| std | Hit object | The encoder's 28 features ([`core/features.py`](../core/features.py)) |
+| taiko | Hit object | Onset timing, drumroll and swell duration, don/kat/drumroll/swell, big notes |
+| catch | Hit object | Horizontal position, log movement distance and direction from the previous exit, onset timing, juice stream duration, end offset and x-only curve residuals, banana duration |
+| mania | Event: a time where any note starts or any hold ends | Onset timing, key count, and a state per column (empty, tap, hold head, held, or release) for up to 10 keys. Columns are placed in 11 hand-relative slots, counted outward from the centre for each hand plus a centre slot, so a column's slot depends on its position relative to the middle rather than its index |
+
 ## Training runs
 
-After preparing `data/dataset/` and `data/strains.parquet`:
+After building `data/features/std_features.bin` (`build-features`) and `data/strains.parquet` (`build-strains`):
 
 ```sh
 uv run pretrain --config configs/default.yaml --full -v my-run

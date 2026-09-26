@@ -157,10 +157,8 @@ def beatconnect_beatmap_to_dict(beatmap: dict, beatmapset: dict) -> dict:
 
 def osu_file_to_dict(path: Path) -> dict:
     content = path.read_bytes()
-    beatmap = parse_osu_file(
-        str(path), _content=content, _beatmap_id=int(path.stem)
-    )
-    if beatmap is None or not beatmap.hit_objects:
+    beatmap = parse_osu_file(str(path), _content=content, _beatmap_id=int(path.stem))
+    if beatmap is None or not len(beatmap.hit_objects):
         raise ValueError(f"Could not parse beatmap metadata from {path}")
 
     sections = {"general": {}, "metadata": {}}
@@ -177,11 +175,12 @@ def osu_file_to_dict(path: Path) -> dict:
     mode_int = int(sections["general"].get("mode", 0))
     mode = {0: "osu", 1: "taiko", 2: "fruits", 3: "mania"}.get(mode_int)
     beatmapset_id = int(metadata.get("beatmapsetid", -1))
-    times = [obj.time for obj in beatmap.hit_objects]
-    end_times = [obj.end_time for obj in beatmap.hit_objects]
-    bpms = [obj.bpm for obj in beatmap.hit_objects if obj.bpm > 0]
+    hit_objects = beatmap.hit_objects
+    times = hit_objects.time
+    end_times = hit_objects.end_time
+    bpms = [bpm for bpm in hit_objects.bpm if bpm > 0]
     counts = {
-        object_type: sum(obj.object_type == object_type for obj in beatmap.hit_objects)
+        object_type: hit_objects.object_type.count(object_type)
         for object_type in (
             OBJECT_TYPE_CIRCLE,
             OBJECT_TYPE_SLIDER,
@@ -264,11 +263,7 @@ def fetch_beatconnect_metadata(
         beatmapset = beatconnect_beatmapset(beatmapset_id)
 
     beatmap = next(
-        (
-            bm
-            for bm in beatmapset.get("beatmaps", [])
-            if int(bm["id"]) == beatmap_id
-        ),
+        (bm for bm in beatmapset.get("beatmaps", []) if int(bm["id"]) == beatmap_id),
         None,
     )
     if beatmap is None:

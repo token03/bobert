@@ -13,13 +13,12 @@ from rich.progress import (
 )
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
+from core.dataset import stored_beatmap_ids
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.io import atomic_json, atomic_pyarrow_table
-from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
+from scripts.common.paths import BEATMAPS_PATH, DATA_DIR, FEATURES_DIR
 
-DATASET_BEATMAPS_DIR = DATA_DIR / "dataset" / "beatmaps"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 
 TAGS_JSON_PATH = DATA_DIR / "tags.json"
@@ -56,20 +55,17 @@ def load_intersection_data():
         print(f"[red]Error: {BEATMAPS_PATH} not found[/red]")
         exit(1)
 
-    if not DATASET_BEATMAPS_DIR.exists():
-        print(f"[red]Error: {DATASET_BEATMAPS_DIR} not found[/red]")
-        exit(1)
-
     print("[cyan]Loading beatmaps.parquet...[/cyan]")
     beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
 
-    print("[cyan]Loading dataset...[/cyan]")
-    dataset = pq.ParquetDataset(DATASET_BEATMAPS_DIR)
-    dataset_df = dataset.read().to_pandas()
+    print("[cyan]Loading feature index...[/cyan]")
+    dataset_ids = stored_beatmap_ids(FEATURES_DIR)
+    if not dataset_ids:
+        print(f"[red]Error: no feature files found in {FEATURES_DIR}[/red]")
+        exit(1)
 
     # Find intersection
     beatmaps_ids = set(beatmaps_df["id"])
-    dataset_ids = set(dataset_df["beatmap_id"])
     intersection_beatmap_ids = beatmaps_ids & dataset_ids
 
     print(

@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import chain, repeat
 from typing import Literal
 
 import numpy as np
@@ -10,7 +11,6 @@ from .osu import (
     OBJECT_TYPE_SLIDER,
     OBJECT_TYPE_SPINNER,
     RawBeatmap,
-    extract_hitobject_records,
 )
 
 OSU_STAGE_WIDTH = 512
@@ -127,9 +127,196 @@ FEATURE_INFO = {
 
 VectorStats = dict[str, tuple[torch.Tensor, torch.Tensor]]
 
+BEATMAPS_SCHEMA = {
+    "beatmap_id": pl.Int64,
+    "category": pl.String,
+    "hp_drain": pl.Float32,
+    "cs": pl.Float32,
+    "od": pl.Float32,
+    "ar": pl.Float32,
+    "slider_multiplier": pl.Float32,
+    "slider_tick": pl.Float32,
+    "difficulty_rating": pl.Float32,
+}
 
-def _log_ratio_angle(value: pl.Expr) -> pl.Expr:
+HITOBJECTS_SCHEMA = {
+    "beatmap_id": pl.Int64,
+    "category": pl.String,
+    "object_index": pl.Int32,
+    "x": pl.Int32,
+    "y": pl.Int32,
+    "time": pl.Int32,
+    "object_type": pl.Int8,
+    "is_new_combo": pl.Int8,
+    "hit_sound": pl.Int32,
+    "end_time": pl.Int32,
+    "pixel_length": pl.Float32,
+    "bpm": pl.Float32,
+    "timing_origin": pl.Int32,
+    "end_bpm": pl.Float32,
+    "end_timing_origin": pl.Int32,
+    "curve_type_char": pl.String,
+    "num_anchors": pl.Int32,
+    "kiai_time": pl.Int8,
+    "slider_repeats": pl.Int32,
+    "hard_anchor_ratio": pl.Float32,
+    "slider_end_x": pl.Int32,
+    "slider_end_y": pl.Int32,
+    "slider_path_valid": pl.Int8,
+    "span_end_dx": pl.Float32,
+    "span_end_dy": pl.Float32,
+    "curve_residual_1_dx": pl.Float32,
+    "curve_residual_1_dy": pl.Float32,
+    "curve_residual_2_dx": pl.Float32,
+    "curve_residual_2_dy": pl.Float32,
+}
+
+
+TIMING_COLUMNS = (
+    "beatmap_id",
+    "object_index",
+    "time",
+    "object_type",
+    "end_time",
+    "bpm",
+    "end_bpm",
+)
+HITOBJECT_COLUMNS = (
+    *TIMING_COLUMNS,
+    "x",
+    "y",
+    "is_new_combo",
+    "pixel_length",
+    "slider_repeats",
+    "slider_path_valid",
+    "span_end_dx",
+    "span_end_dy",
+    "curve_residual_1_dx",
+    "curve_residual_1_dy",
+    "curve_residual_2_dx",
+    "curve_residual_2_dy",
+    "num_anchors",
+    "hard_anchor_ratio",
+)
+
+
+def beatmap_frames(
+    beatmaps: Sequence[RawBeatmap],
+    columns: Sequence[str] | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    beatmaps_df = pl.DataFrame(
+        (beatmap[:9] for beatmap in beatmaps), schema=BEATMAPS_SCHEMA, orient="row"
+    )
+    counts = [len(beatmap.hit_objects) for beatmap in beatmaps]
+    series = []
+    for name in HITOBJECTS_SCHEMA if columns is None else columns:
+        if name == "beatmap_id":
+            values = chain.from_iterable(
+                repeat(beatmap.beatmap_id, count)
+                for beatmap, count in zip(beatmaps, counts)
+            )
+        elif name == "category":
+            values = chain.from_iterable(
+                repeat(beatmap.category, count)
+                for beatmap, count in zip(beatmaps, counts)
+            )
+        else:
+            values = chain.from_iterable(
+                getattr(beatmap.hit_objects, name) for beatmap in beatmaps
+            )
+        series.append(pl.Series(name, list(values), dtype=HITOBJECTS_SCHEMA[name]))
+    return beatmaps_df, pl.DataFrame(series)
+
+
+def log_ratio_angle(value: pl.Expr) -> pl.Expr:
     return value.clip(lower_bound=1e-6).log() * (2 * np.pi / np.log(2))
+
+
+def beat_angle(duration_ms: pl.Expr) -> pl.Expr:
+    return log_ratio_angle(duration_ms * pl.col("bpm") / 60000.0)
+
+
+def bad_bpm() -> pl.Expr:
+    return (
+        ~pl.col("bpm").is_finite()
+        | (pl.col("bpm") <= 0)
+        | (pl.col("bpm") > 1000)
+        | ~pl.col("end_bpm").is_finite()
+        | (pl.col("end_bpm") <= 0)
+        | (pl.col("end_bpm") > 1000)
+    )
+
+
+def pack_vectors(
+    df: pl.LazyFrame, field_names: Sequence[str]
+) -> tuple[list[torch.Tensor], np.ndarray]:
+    packed = df.select(
+        "beatmap_id",
+        *(
+            pl.when(pl.col(name).cast(pl.Float16).is_finite())
+            .then(pl.col(name).cast(pl.Float16))
+            .otherwise(0.0)
+            .alias(name)
+            for name in field_names
+        ),
+    ).collect(engine="streaming")
+    if packed.is_empty():
+        return [], np.empty(0, dtype=np.int64)
+
+    ids = packed["beatmap_id"].to_numpy()
+    split_indices = np.flatnonzero(ids[:-1] != ids[1:]) + 1
+    vectors = torch.from_numpy(packed.select(field_names).to_numpy(order="c"))
+    lengths = np.diff(np.concatenate(([0], split_indices, [len(vectors)])))
+    return list(torch.split(vectors, lengths.tolist())), ids[
+        np.concatenate(([0], split_indices))
+    ]
+
+
+def onset_features(df: pl.LazyFrame) -> pl.LazyFrame:
+    prev_time = pl.col("time").shift(1).over("beatmap_id")
+    return (
+        df.with_columns(prev_time.alias("_prev_time"))
+        .with_columns(
+            (
+                pl.col("time")
+                - pl.col("_prev_time").fill_null(pl.col("time") - DEFAULT_PRE_START_MS)
+            )
+            .clip(0, 5000)
+            .alias("_onset_ioi_ms"),
+            pl.when(pl.col("_prev_time").is_null())
+            .then(0)
+            .when(pl.col("time") - pl.col("_prev_time") >= 5000)
+            .then(2)
+            .otherwise(1)
+            .cast(pl.Int32)
+            .alias("onset_state"),
+        )
+        .with_columns(
+            pl.col("_onset_ioi_ms").log1p().alias("log_onset_ioi_ms"),
+            beat_angle(pl.col("_onset_ioi_ms")).cos().alias("onset_rhythm_cos"),
+            beat_angle(pl.col("_onset_ioi_ms")).sin().alias("onset_rhythm_sin"),
+        )
+    )
+
+
+def valid_timing(hitobjects_lf: pl.LazyFrame, min_objects: int = 10) -> pl.LazyFrame:
+    good_maps = (
+        hitobjects_lf.group_by("beatmap_id")
+        .agg(
+            pl.len().alias("_n"),
+            bad_bpm().fill_null(True).any().alias("_has_bad_bpm"),
+        )
+        .filter((pl.col("_n") >= min_objects) & ~pl.col("_has_bad_bpm"))
+        .select("beatmap_id")
+    )
+    return hitobjects_lf.join(good_maps, on="beatmap_id", how="semi")
+
+
+def sort_and_truncate(df: pl.LazyFrame, max_seq_len: int | None) -> pl.LazyFrame:
+    df = df.sort(["beatmap_id", "time", "object_index"])
+    if max_seq_len is not None:
+        df = df.group_by("beatmap_id", maintain_order=True).head(int(max_seq_len))
+    return df
 
 
 def _filter_invalid_maps(
@@ -143,17 +330,7 @@ def _filter_invalid_maps(
         valid_hitobjects.group_by("beatmap_id")
         .agg(
             pl.len().alias("_n"),
-            (
-                ~pl.col("bpm").is_finite()
-                | (pl.col("bpm") <= 0)
-                | (pl.col("bpm") > 1000)
-                | ~pl.col("end_bpm").is_finite()
-                | (pl.col("end_bpm") <= 0)
-                | (pl.col("end_bpm") > 1000)
-            )
-            .fill_null(True)
-            .any()
-            .alias("_has_bad_bpm"),
+            bad_bpm().fill_null(True).any().alias("_has_bad_bpm"),
         )
         .filter((pl.col("_n") >= 10) & ~pl.col("_has_bad_bpm"))
         .select("beatmap_id")
@@ -264,10 +441,10 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
         )
         .with_columns(
             pl.col("onset_ioi_ms").log1p().alias("log_onset_ioi_ms"),
-            _log_ratio_angle(pl.col("onset_ioi_ms") * pl.col("bpm") / 60000.0)
+            log_ratio_angle(pl.col("onset_ioi_ms") * pl.col("bpm") / 60000.0)
             .cos()
             .alias("onset_rhythm_cos"),
-            _log_ratio_angle(pl.col("onset_ioi_ms") * pl.col("bpm") / 60000.0)
+            log_ratio_angle(pl.col("onset_ioi_ms") * pl.col("bpm") / 60000.0)
             .sin()
             .alias("onset_rhythm_sin"),
             pl.when(is_slider)
@@ -284,7 +461,7 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
             .alias("log_spinner_duration_ms"),
             pl.when(is_slider)
             .then(
-                _log_ratio_angle(
+                log_ratio_angle(
                     pl.col("_span_duration_ms") * pl.col("bpm") / 60000.0
                 ).cos()
             )
@@ -292,7 +469,7 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
             .alias("span_rhythm_cos"),
             pl.when(is_slider)
             .then(
-                _log_ratio_angle(
+                log_ratio_angle(
                     pl.col("_span_duration_ms") * pl.col("bpm") / 60000.0
                 ).sin()
             )
@@ -300,7 +477,7 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
             .alias("span_rhythm_sin"),
             pl.when(is_spinner)
             .then(
-                _log_ratio_angle(
+                log_ratio_angle(
                     pl.col("_spinner_duration_ms") * pl.col("bpm") / 60000.0
                 ).cos()
             )
@@ -308,7 +485,7 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
             .alias("spinner_rhythm_cos"),
             pl.when(is_spinner)
             .then(
-                _log_ratio_angle(
+                log_ratio_angle(
                     pl.col("_spinner_duration_ms") * pl.col("bpm") / 60000.0
                 ).sin()
             )
@@ -382,51 +559,24 @@ def _apply_features(df: pl.LazyFrame) -> pl.LazyFrame:
     return df
 
 
-def _finalize_vectors(
-    df: pl.DataFrame, split_indices: np.ndarray
-) -> list[torch.Tensor]:
-    packed = torch.from_numpy(df.select(FIELD_NAMES).to_numpy(order="c"))
-    lengths = np.diff(np.concatenate(([0], split_indices, [len(packed)])))
-    return list(torch.split(packed, lengths.tolist()))
-
-
 def build_feature_tensors(
     beatmaps_df: pl.DataFrame,
     hitobjects_df: pl.DataFrame,
     max_seq_len: int | None = None,
 ):
     hitobjects_lf = _filter_invalid_maps(beatmaps_df.lazy(), hitobjects_df.lazy())
-    df = (
-        _apply_features(_prepare_objects(hitobjects_lf, max_seq_len))
-        .select(
-            "beatmap_id",
-            *(
-                pl.when(pl.col(name).cast(pl.Float16).is_finite())
-                .then(pl.col(name).cast(pl.Float16))
-                .otherwise(0.0)
-                .alias(name)
-                for name in FIELD_NAMES
-            ),
-        )
-        .collect(engine="streaming")
+    return pack_vectors(
+        _apply_features(_prepare_objects(hitobjects_lf, max_seq_len)), FIELD_NAMES
     )
-    if df.is_empty():
-        return [], np.empty(0, dtype=np.int64)
-
-    ids = df["beatmap_id"].to_numpy()
-    split_indices = np.flatnonzero(ids[:-1] != ids[1:]) + 1
-    vectors = _finalize_vectors(df, split_indices)
-    unique_ids = ids[np.concatenate(([0], split_indices))]
-    return vectors, unique_ids
 
 
 def build_beatmap_tensor(
     beatmap: RawBeatmap, max_seq_len: int | None = None
 ) -> torch.Tensor:
+    if beatmap.mode != 0:
+        raise ValueError("only osu!standard beatmaps are supported")
     vectors, _ = build_feature_tensors(
-        pl.DataFrame({"beatmap_id": [beatmap.beatmap_id]}),
-        pl.DataFrame(extract_hitobject_records(beatmap)),
-        max_seq_len=max_seq_len,
+        *beatmap_frames([beatmap], HITOBJECT_COLUMNS), max_seq_len
     )
     if not vectors:
         raise ValueError("could not engineer hitobject features")

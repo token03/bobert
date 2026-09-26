@@ -1,20 +1,15 @@
 import argparse
-import math
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import polars as pl
 import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from core.artifacts import MODEL_NAME, write_index
-from core.dataset import (
-    LengthBucketBatchSampler,
-    load_beatmap_dataset,
-)
+from core.dataset import FeatureStore, LengthBucketBatchSampler, select_beatmaps
 from core.features import VectorStats, normalize
 from core.model import BobertEncoder, EmbeddingTransform
 from core.retrieval import index_retrieval
@@ -22,15 +17,19 @@ from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
 
 
 class ExportDataset(Dataset):
-    def __init__(self, beatmaps):
-        self.beatmaps = beatmaps
+    def __init__(self, store: FeatureStore, positions: np.ndarray, max_seq_len: int):
+        self.store = store
+        self.positions = positions
+        self.max_seq_len = max_seq_len
 
     def __len__(self):
-        return len(self.beatmaps)
+        return len(self.positions)
 
     def __getitem__(self, idx):
-        item = self.beatmaps[idx]
-        return int(item["beatmap_id"]), item["hitobjects"]
+        position = int(self.positions[idx])
+        return int(self.store.beatmap_ids[position]), self.store.vector(
+            position, self.max_seq_len
+        )
 
 
 def collate_export(batch, max_seq_len: int, vector_stats: VectorStats):
@@ -74,74 +73,18 @@ def load_model(model_path: Path, device: torch.device, quiet: bool = False):
     return model, vector_stats
 
 
-def sample_ids(
-    dataset_dir: Path,
-    limit: int | None,
-    seed: int,
-    min_sr: float | None,
-    max_seq_len: int | None,
-):
-    beatmaps_dir = dataset_dir / "beatmaps"
-    beatmaps_df = pl.read_parquet(beatmaps_dir, columns=["beatmap_id"])
-    ids = np.array(sorted(beatmaps_df["beatmap_id"].unique().to_list()), dtype=np.int64)
-
-    if min_sr is not None:
-        strains_path = PROJECT_ROOT / "data" / "strains.parquet"
-        if not strains_path.exists():
-            raise FileNotFoundError(f"Strains file not found: {strains_path}")
-
-        strains_lf = pl.scan_parquet(strains_path)
-        if "seq_len" in strains_lf.collect_schema().names() and max_seq_len is not None:
-            strains_lf = strains_lf.with_columns(
-                pl.when(pl.col("seq_len") == 0)
-                .then(pl.lit(2_147_483_647))
-                .otherwise(pl.col("seq_len"))
-                .alias("_strain_order")
-            ).filter((pl.col("seq_len") > 0) & (pl.col("seq_len") <= max_seq_len))
-            best_lengths = strains_lf.group_by("beatmap_id").agg(
-                pl.col("_strain_order").max().alias("_strain_order")
-            )
-            strains_lf = strains_lf.join(
-                best_lengths, on=["beatmap_id", "_strain_order"], how="inner"
-            )
-
-        eligible_ids = set(
-            strains_lf.filter(pl.col("stars") >= min_sr)
-            .select("beatmap_id")
-            .unique()
-            .collect()["beatmap_id"]
-            .to_list()
-        )
-        ids = np.array([bid for bid in ids if int(bid) in eligible_ids], dtype=np.int64)
-
-    if limit is not None and limit > 0 and len(ids) > limit:
-        rng = np.random.default_rng(seed)
-        ids = rng.choice(ids, size=limit, replace=False)
-    return [int(x) for x in ids]
-
-
-def chunked(values: list[int], chunk_size: int):
-    for start in range(0, len(values), chunk_size):
-        yield values[start : start + chunk_size]
-
-
 def bucket_batch_sampler(
-    beatmaps: list[dict],
+    lengths: np.ndarray,
     batch_size: int,
-    max_seq_len: int,
     use_length_buckets: bool,
     seed: int,
 ):
-    if not use_length_buckets:
+    if not use_length_buckets or len(lengths) == 0:
         return None
 
-    lengths = [min(int(item["hitobjects"].shape[0]), max_seq_len) for item in beatmaps]
-    if not lengths:
-        return None
-
-    mean_len = round(sum(lengths) / len(lengths))
+    mean_len = round(float(lengths.mean()))
     return LengthBucketBatchSampler(
-        lengths,
+        lengths.tolist(),
         batch_size=None,
         max_tokens=batch_size * mean_len,
         seed=seed,
@@ -152,12 +95,11 @@ def bucket_batch_sampler(
 def export_embeddings(
     config_path: Path,
     model_path: Path,
-    dataset_dir: Path | None,
+    features_path: Path | None,
     output_path: Path,
     limit: int | None,
     min_sr: float | None,
     batch_size: int,
-    load_chunk_size: int,
     flush_size: int,
     seed: int,
     device_name: str | None,
@@ -165,21 +107,26 @@ def export_embeddings(
     quiet: bool = False,
 ):
     config = OmegaConf.load(config_path)
-    if load_chunk_size <= 0:
-        raise ValueError("load_chunk_size must be positive")
     if flush_size <= 0:
         raise ValueError("flush_size must be positive")
 
-    dataset_dir = dataset_dir or resolve_path(config.data.dataset_path)
-    dataset_dir = resolve_path(dataset_dir)
+    features_path = resolve_path(features_path or config.data.features_path)
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model, vector_stats = load_model(find_model(model_path), device, quiet)
     max_seq_len = model.max_seq_len
-    ids = sample_ids(dataset_dir, limit, seed, min_sr, max_seq_len)
+    store = FeatureStore(features_path, "std")
+    positions, _ = select_beatmaps(
+        store,
+        dataset_seed=seed,
+        strains_path=resolve_path(config.data.strains_path),
+        strain_seq_len=max_seq_len,
+        sample_size=limit,
+        min_sr=min_sr,
+    )
     if not quiet:
-        print(f"Embedding {len(ids):,} beatmaps from {dataset_dir}")
+        print(f"Embedding {len(positions):,} beatmaps from {features_path}")
 
     with torch.inference_mode():
         model.rotary_emb(
@@ -197,75 +144,47 @@ def export_embeddings(
     model_dtype = next(model.parameters()).dtype
     layer_total = np.zeros((layer_count, model.d_model), dtype=np.float64)
     layer_embeddings = np.empty(
-        (len(ids), layer_count, model.d_model), dtype=np.float16
+        (len(positions), layer_count, model.d_model), dtype=np.float16
     )
-    embedded_ids = np.empty(len(ids), dtype=np.int64)
+    embedded_ids = np.empty(len(positions), dtype=np.int64)
     saved_count = 0
 
+    batch_sampler = bucket_batch_sampler(
+        np.minimum(store.lengths[positions], max_seq_len),
+        batch_size,
+        bool(config.training.trainer.use_length_buckets),
+        seed,
+    )
+    loader_kwargs = {
+        "shuffle": False,
+        "num_workers": 0,
+        "pin_memory": device.type == "cuda",
+        "collate_fn": lambda batch: collate_export(batch, max_seq_len, vector_stats),
+    }
+    if batch_sampler is None:
+        loader_kwargs["batch_size"] = batch_size
+    else:
+        loader_kwargs["batch_sampler"] = batch_sampler
+    loader = DataLoader(ExportDataset(store, positions, max_seq_len), **loader_kwargs)
+
     with torch.inference_mode():
-        chunk_count = math.ceil(len(ids) / load_chunk_size)
-        for id_chunk in tqdm(
-            chunked(ids, load_chunk_size),
-            total=chunk_count,
-            desc="Loading chunks",
-            disable=quiet,
+        for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
+            loader, desc="Embedding", disable=quiet
         ):
-            beatmaps = load_beatmap_dataset(
-                str(dataset_dir),
-                dataset_seed=seed,
-                max_seq_len=max_seq_len,
-                ids_to_load=id_chunk,
-                min_sr=min_sr,
-                max_sr=None,
-                chunk_size=max(1, int(load_chunk_size / 10)),
-                quiet=quiet,
+            vectors = vectors.to(device=device, dtype=model_dtype, non_blocking=True)
+            cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+            embeddings = model.embed_packed(vectors, cu_seqlens, int(max_seqlen))
+
+            stored = embeddings.permute(1, 0, 2).half().cpu().numpy()
+            stop = saved_count + len(stored)
+            layer_embeddings[saved_count:stop] = stored
+            embedded_ids[saved_count:stop] = beatmap_ids.numpy()
+            normalized = stored.astype(np.float32)
+            normalized /= np.maximum(
+                np.linalg.norm(normalized, axis=-1, keepdims=True), 1e-12
             )
-            if not beatmaps:
-                continue
-
-            dataset = ExportDataset(beatmaps)
-            batch_sampler = bucket_batch_sampler(
-                beatmaps,
-                batch_size,
-                max_seq_len,
-                bool(config.training.trainer.use_length_buckets),
-                seed,
-            )
-            loader_kwargs = {
-                "shuffle": False,
-                "num_workers": 0,
-                "pin_memory": device.type == "cuda",
-                "collate_fn": lambda batch: collate_export(
-                    batch, max_seq_len, vector_stats
-                ),
-            }
-            if batch_sampler is None:
-                loader_kwargs["batch_size"] = batch_size
-            else:
-                loader_kwargs["batch_sampler"] = batch_sampler
-            loader = DataLoader(dataset, **loader_kwargs)
-
-            for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
-                loader, desc="Embedding", leave=False, disable=quiet
-            ):
-                vectors = vectors.to(
-                    device=device, dtype=model_dtype, non_blocking=True
-                )
-                cu_seqlens = cu_seqlens.to(device, non_blocking=True)
-                embeddings = model.embed_packed(
-                    vectors, cu_seqlens, int(max_seqlen)
-                )
-
-                stored = embeddings.permute(1, 0, 2).half().cpu().numpy()
-                stop = saved_count + len(stored)
-                layer_embeddings[saved_count:stop] = stored
-                embedded_ids[saved_count:stop] = beatmap_ids.numpy()
-                normalized = stored.astype(np.float32)
-                normalized /= np.maximum(
-                    np.linalg.norm(normalized, axis=-1, keepdims=True), 1e-12
-                )
-                layer_total += normalized.sum(axis=0, dtype=np.float64)
-                saved_count = stop
+            layer_total += normalized.sum(axis=0, dtype=np.float64)
+            saved_count = stop
 
     if saved_count == 0:
         raise RuntimeError("No beatmaps loaded for export")
@@ -273,7 +192,7 @@ def export_embeddings(
     transform = EmbeddingTransform((layer_total / saved_count).astype(np.float32))
     metadata = {
         "generated_at": datetime.now(UTC).isoformat(),
-        "dataset": dataset_dir.name,
+        "dataset": features_path.name,
         "min_sr": min_sr,
         "limit": limit,
         "seed": seed,
@@ -312,7 +231,7 @@ def main():
     parser.add_argument("-v", "--version")
     parser.add_argument("--model", help="Exported BoBERT safetensors model")
     parser.add_argument(
-        "--dataset", default=None, help="Defaults to config.data.dataset_path"
+        "--features", default=None, help="Defaults to config.data.features_path"
     )
     parser.add_argument("--output", default=None)
     parser.add_argument(
@@ -325,7 +244,6 @@ def main():
         default=64,
         help="Target batch size at the mean sequence length when bucketing",
     )
-    parser.add_argument("--load-chunk-size", type=int, default=100000)
     parser.add_argument("--flush-size", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None, choices=("cpu", "cuda"))
@@ -337,14 +255,13 @@ def main():
     export_embeddings(
         config_path=resolve_path(args.config),
         model_path=model_path,
-        dataset_dir=Path(args.dataset) if args.dataset else None,
+        features_path=Path(args.features) if args.features else None,
         output_path=resolve_path(
             args.output or model_path.parent / "embeddings.parquet"
         ),
         limit=args.limit,
         min_sr=args.min_sr,
         batch_size=args.batch_size,
-        load_chunk_size=args.load_chunk_size,
         flush_size=args.flush_size,
         seed=args.seed,
         device_name=args.device,
