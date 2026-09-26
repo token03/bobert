@@ -478,8 +478,9 @@ def main() -> None:
         if 0 not in recalculated_modes:
             beatmap_lengths = {}
         else:
-            features_path = (
-                args.features or load_config(args.config)["data"]["features_path"]
+            features_path = args.features or str(
+                Path(load_config(args.config)["data"]["features_dir"])
+                / "std_features.bin"
             )
             features_path = str(resolve_path(features_path))
             print("Loading beatmap IDs from std features...")

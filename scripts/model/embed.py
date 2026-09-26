@@ -9,7 +9,12 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from core.artifacts import MODEL_NAME, write_index
-from core.dataset import FeatureStore, LengthBucketBatchSampler, select_beatmaps
+from core.dataset import (
+    FeatureStore,
+    LengthBucketBatchSampler,
+    feature_path,
+    select_beatmaps,
+)
 from core.features import VectorStats, normalize
 from core.model import BobertEncoder, EmbeddingTransform
 from core.retrieval import index_retrieval
@@ -110,7 +115,9 @@ def export_embeddings(
     if flush_size <= 0:
         raise ValueError("flush_size must be positive")
 
-    features_path = resolve_path(features_path or config.data.features_path)
+    features_path = resolve_path(
+        features_path or feature_path(config.data.features_dir, "std")
+    )
     device = torch.device(
         device_name or ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -231,7 +238,7 @@ def main():
     parser.add_argument("-v", "--version")
     parser.add_argument("--model", help="Exported BoBERT safetensors model")
     parser.add_argument(
-        "--features", default=None, help="Defaults to config.data.features_path"
+        "--features", default=None, help="Defaults to std in config.data.features_dir"
     )
     parser.add_argument("--output", default=None)
     parser.add_argument(

@@ -9,6 +9,7 @@ from rotary_embedding_torch.rotary_embedding_torch import rotate_half
 from torch.utils.checkpoint import checkpoint
 
 from .features import FEATURE_INFO
+from .modes import ModeSpec
 from .osu import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
 
@@ -474,6 +475,87 @@ class HitObjectFeatureTokenizer(nn.Module):
         return self.norm(self.out(features))
 
 
+class ModeFeatureTokenizer(nn.Module):
+    def __init__(self, spec: ModeSpec, d_feat: int, d_model: int):
+        super().__init__()
+        self.spec = spec
+        numeric_indices, numeric_mask, sizes = [], [], []
+        for group in spec.groups:
+            indices = [spec.index[name] for name in group]
+            numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
+            numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
+            sizes.append(len(indices))
+        self.group_names = tuple(group[0] for group in spec.groups)
+        self.numeric_weight = nn.Parameter(torch.zeros(len(sizes), 3, d_feat))
+        self.numeric_bias = nn.Parameter(torch.empty(len(sizes), d_feat))
+        for group, size in enumerate(sizes):
+            nn.init.xavier_uniform_(
+                self.numeric_weight[group, :size].T,
+                gain=nn.init.calculate_gain("tanh"),
+            )
+            bound = 1 / size**0.5
+            nn.init.uniform_(self.numeric_bias[group], -bound, bound)
+        self.register_buffer(
+            "numeric_indices", torch.tensor(numeric_indices), persistent=False
+        )
+        self.register_buffer(
+            "numeric_mask", torch.tensor(numeric_mask), persistent=False
+        )
+
+        self.categorical_names = tuple(name for name, _ in spec.categorical)
+        cardinalities = [cardinality for _, cardinality in spec.categorical]
+        offsets = [1 + sum(cardinalities[:i]) for i in range(len(cardinalities))]
+        self.register_buffer(
+            "categorical_indices",
+            torch.tensor([spec.index[name] for name in self.categorical_names]),
+            persistent=False,
+        )
+        self.register_buffer(
+            "categorical_cardinalities", torch.tensor(cardinalities), persistent=False
+        )
+        self.register_buffer(
+            "category_offsets", torch.tensor(offsets), persistent=False
+        )
+        self.categorical_weight = nn.Parameter(
+            torch.empty(1 + sum(cardinalities), d_feat)
+        )
+        nn.init.normal_(self.categorical_weight, std=d_feat**-0.5)
+        with torch.no_grad():
+            self.categorical_weight[0].zero_()
+        self.register_buffer(
+            "normalization",
+            torch.stack(
+                (torch.zeros(len(spec.features)), torch.ones(len(spec.features)))
+            ),
+        )
+        self.out = nn.Linear(
+            (len(sizes) + len(cardinalities)) * d_feat, d_model, bias=False
+        )
+        self.norm = RMSNorm(d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        numeric = x[..., self.numeric_indices] * self.numeric_mask.to(x.dtype)
+        hidden = (numeric[..., None] * self.numeric_weight).sum(dim=-2)
+        numeric_tokens = torch.tanh(hidden + self.numeric_bias) - torch.tanh(
+            self.numeric_bias
+        )
+        numeric_tokens = (
+            numeric_tokens * self.spec.gate_mask(x, self.group_names)[..., None]
+        )
+        ids = x[..., self.categorical_indices].round().long().clamp_min(0)
+        ids = torch.minimum(ids, self.categorical_cardinalities - 1)
+        lookup = torch.where(
+            self.spec.gate_mask(x, self.categorical_names),
+            ids + self.category_offsets,
+            torch.zeros_like(ids),
+        )
+        categorical_tokens = F.embedding(lookup, self.categorical_weight, padding_idx=0)
+        features = torch.cat(
+            (numeric_tokens.flatten(-2), categorical_tokens.flatten(-2)), dim=-1
+        )
+        return self.norm(self.out(features))
+
+
 class SpanMasker(nn.Module):
     def __init__(self, d_model: int):
         super().__init__()
@@ -564,3 +646,27 @@ class StrainHead(nn.Module):
 
     def forward(self, embedding: torch.Tensor) -> torch.Tensor:
         return self.proj(embedding)
+
+
+class ModeMaskedLMHead(nn.Module):
+    def __init__(self, spec: ModeSpec, d_model: int):
+        super().__init__()
+        self.sizes = (
+            len(spec.continuous),
+            *(cardinality for _, cardinality in spec.categorical),
+        )
+        self.dense = nn.Linear(d_model, d_model)
+        self.norm = RMSNorm(d_model)
+        self.decoder = nn.Linear(d_model, sum(self.sizes))
+
+    def forward(self, packed_output: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        hidden = self.norm(F.gelu(self.dense(packed_output)))
+        return self.decoder(hidden).split(self.sizes, dim=-1)
+
+
+class ModePretrainingHeads(nn.Module):
+    def __init__(self, spec: ModeSpec, d_model: int):
+        super().__init__()
+        self.masker = SpanMasker(d_model)
+        self.mlm_head = ModeMaskedLMHead(spec, d_model)
+        self.strain_head = StrainHead(d_model, 1)

@@ -1,18 +1,21 @@
+import random
 from functools import lru_cache, partial
-from typing import List
 
 import numpy as np
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Sampler, random_split
 
+from core import STRAIN_COLUMNS
 from core.dataset import (
     FeatureStore,
     FeatureView,
     LengthBucketBatchSampler,
+    feature_path,
     select_beatmaps,
 )
 from core.features import FEATURE_INFO, fit_stats, normalize
+from core.modes import MODE_SPECS
 
 RIGHT_DELTA_FEATURES = torch.tensor(
     [
@@ -25,6 +28,10 @@ RIGHT_DELTA_FEATURES = torch.tensor(
         FEATURE_INFO["categorical"]["incoming_motion_valid"]["index"],
     ]
 )
+MODE_RIGHT_DELTA_FEATURES = {
+    mode: torch.tensor([spec.index[name] for name in spec.right_border])
+    for mode, spec in MODE_SPECS.items()
+}
 
 
 @lru_cache(maxsize=8)
@@ -62,13 +69,15 @@ def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tenso
 
 
 def collate_pretrain(
-    batch: List[dict],
+    batch: list[dict],
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
     vector_stats,
+    mode_stats,
     strain_stats,
 ):
+    mode = batch[0]["mode"]
     vectors = [item["hitobjects"] for item in batch]
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
@@ -93,16 +102,24 @@ def collate_pretrain(
     )
     right_split = torch.rand(right_border_idx.numel())
     strain = torch.tensor([item["strain"] for item in batch], dtype=torch.float32)
-    strain_targets = (strain - strain_stats["mean"]) / strain_stats["std"]
-    packed_vectors = normalize(
-        torch.cat([vector[:length] for vector, length in zip(vectors, lengths)], dim=0),
-        vector_stats,
+    strain_targets = (strain - strain_stats[mode]["mean"]) / strain_stats[mode]["std"]
+    packed_vectors = torch.cat(
+        [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
     )
+    if mode == "std":
+        packed_vectors = normalize(packed_vectors, vector_stats)
+        right_delta_features = RIGHT_DELTA_FEATURES
+    else:
+        mean, std = mode_stats[mode]
+        packed_vectors = (packed_vectors.float() - mean) / std
+        right_delta_features = MODE_RIGHT_DELTA_FEATURES[mode]
     return {
+        "mode": mode,
         "packed_vectors": corrupt_right_borders(
             packed_vectors,
             right_border_idx[right_split < 0.8],
             right_border_idx[(right_split >= 0.8) & (right_split < 0.9)],
+            right_delta_features,
         ),
         "strain_targets": strain_targets,
         "masked_idx": masked_idx,
@@ -114,9 +131,12 @@ def collate_pretrain(
 
 
 def corrupt_right_borders(
-    packed_vectors: torch.Tensor, zero_idx: torch.Tensor, random_idx: torch.Tensor
+    packed_vectors: torch.Tensor,
+    zero_idx: torch.Tensor,
+    random_idx: torch.Tensor,
+    features: torch.Tensor,
 ) -> torch.Tensor:
-    features = RIGHT_DELTA_FEATURES[None, :]
+    features = features[None, :]
     source_idx = torch.randint(packed_vectors.shape[0], (random_idx.numel(),))
     source = packed_vectors[source_idx[:, None], features]
     packed_vectors[zero_idx[:, None], features] = 0
@@ -165,13 +185,15 @@ class BeatmapDataset(Dataset):
 
     def __getitem__(self, idx):
         position = int(self.positions[idx])
+        vector = self.store.vector(position, self.max_seq_len)
+        if self.store.mode == "std":
+            vector = prepare_vector(vector, self.augment, self.max_seq_len)
+        elif self.augment:
+            vector = MODE_SPECS[self.store.mode].augment(vector)
         return {
+            "mode": self.store.mode,
             "beatmap_id": int(self.store.beatmap_ids[position]),
-            "hitobjects": prepare_vector(
-                self.store.vector(position, self.max_seq_len),
-                self.augment,
-                self.max_seq_len,
-            ),
+            "hitobjects": vector,
             "strain": tuple(self.strains[idx].tolist()),
         }
 
@@ -182,11 +204,46 @@ class BeatmapDataset(Dataset):
         return FeatureView(self.store, np.sort(self.positions), self.max_seq_len)
 
 
-def load_data(data_config, max_seq_len, sample_size):
-    store = FeatureStore(data_config.features_path, "std")
+class MixedDataset(Dataset):
+    def __init__(self, datasets: dict[str, BeatmapDataset]):
+        self.datasets = datasets
+
+    def __len__(self):
+        return sum(len(dataset) for dataset in self.datasets.values())
+
+    def __getitem__(self, key):
+        mode, idx = key
+        return self.datasets[mode][idx]
+
+
+class MixedBatchSampler(Sampler[list[tuple[str, int]]]):
+    def __init__(self, samplers: dict[str, Sampler], seed: int, shuffle: bool):
+        self.samplers = samplers
+        self.seed = int(seed)
+        self.shuffle = shuffle
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        return sum(len(sampler) for sampler in self.samplers.values())
+
+    def __iter__(self):
+        batches = [
+            [(mode, index) for index in batch]
+            for mode, sampler in self.samplers.items()
+            for batch in sampler
+        ]
+        if self.shuffle:
+            random.Random(self.seed + self.epoch).shuffle(batches)
+        self.epoch += 1
+        yield from batches
+
+
+def load_data(data_config, mode, max_seq_len, sample_size):
+    path = feature_path(data_config.features_dir, mode)
+    store = FeatureStore(path, mode)
     if store.max_seq_len is not None and store.max_seq_len < max_seq_len:
         raise ValueError(
-            f"{data_config.features_path} stores at most {store.max_seq_len} tokens "
+            f"{path} stores at most {store.max_seq_len} tokens "
             f"per map; rebuild it with --max-seq-len {max_seq_len}"
         )
     positions, strains = select_beatmaps(
@@ -198,8 +255,9 @@ def load_data(data_config, max_seq_len, sample_size):
         min_sr=data_config.min_sr,
         max_sr=data_config.max_sr,
         include_strains=True,
+        targets=STRAIN_COLUMNS if mode == "std" else ("stars",),
     )
-    print(f"Selected {len(positions):,} of {len(store):,} beatmaps.")
+    print(f"{mode}: selected {len(positions):,} of {len(store):,} beatmaps.")
     return store, positions, strains
 
 
@@ -227,44 +285,33 @@ def dataloader_kwargs(data_config):
     return kwargs
 
 
-def lengths(dataset):
-    return dataset.lengths().tolist()
+def token_budget(datasets, batch_size):
+    lengths = np.concatenate([dataset.lengths() for dataset in datasets.values()])
+    return int(batch_size) * round(float(lengths.mean()))
 
 
-def token_budget(sample_lengths, batch_size):
-    mean_len = int(round(sum(sample_lengths) / len(sample_lengths)))
-    return int(batch_size) * mean_len
-
-
-def bucketed_loader(dataset, collate_fn, datamodule, train):
+def mixed_loader(datasets, collate_fn, datamodule, train):
     config = datamodule.config
-    loader_kwargs = {
-        "collate_fn": collate_fn,
-        **dataloader_kwargs(config.data),
-    }
-    if not config.training.trainer.use_length_buckets:
-        return DataLoader(
-            dataset,
-            batch_size=datamodule.batch_size,
+    samplers = {
+        mode: LengthBucketBatchSampler(
+            dataset.lengths().tolist(),
+            datamodule.batch_size,
+            max_tokens=datamodule.max_tokens,
+            seed=config.data.dataset_seed,
             shuffle=train,
-            **loader_kwargs,
         )
-
-    sample_lengths = lengths(dataset)
-    batch_sampler = LengthBucketBatchSampler(
-        sample_lengths,
-        datamodule.batch_size,
-        max_tokens=token_budget(sample_lengths, datamodule.batch_size),
-        seed=config.data.dataset_seed,
-        shuffle=train,
+        for mode, dataset in datasets.items()
+    }
+    return DataLoader(
+        MixedDataset(datasets),
+        batch_sampler=MixedBatchSampler(samplers, config.data.dataset_seed, train),
+        collate_fn=collate_fn,
+        **dataloader_kwargs(config.data),
     )
-    return DataLoader(dataset, batch_sampler=batch_sampler, **loader_kwargs)
 
 
-def preallocation_batch_size(dataset, batch_size, max_seq_len):
-    sample_lengths = lengths(dataset)
-    max_tokens = token_budget(sample_lengths, batch_size)
-    return max(1, min(int(batch_size), max_tokens // int(max_seq_len)))
+def preallocation_batch_size(max_tokens, batch_size, max_seq_len):
+    return max(1, min(int(batch_size), int(max_tokens) // int(max_seq_len)))
 
 
 class BobertDataModule(pl.LightningDataModule):
@@ -273,40 +320,48 @@ class BobertDataModule(pl.LightningDataModule):
         self.config = config
         self.batch_size = config.training.trainer.batch_size
         self.vector_stats = None
-        self.strain_stats = None
+        self.mode_stats = {}
+        self.strain_stats = {}
 
     @property
     def max_seq_len(self):
         return int(self.config.data.max_seq_len)
 
     def setup(self, stage=None):
-        store, positions, strains = load_data(
-            self.config.data,
-            self.max_seq_len,
-            self.config.training.data.sample_size,
-        )
-        train_idx, val_idx = split_indices(
-            len(positions),
-            self.config.data.val_split,
-            self.config.data.dataset_seed,
-        )
-        self.train_dataset = BeatmapDataset(
-            store, positions[train_idx], strains[train_idx], self.max_seq_len, True
-        )
-        self.val_dataset = BeatmapDataset(
-            store, positions[val_idx], strains[val_idx], self.max_seq_len, False
-        )
-        print("Fitting feature normalization statistics...")
-        self.vector_stats = fit_stats(self.train_dataset.vectors())
-        strain = torch.from_numpy(strains[train_idx])
-        strain_std = strain.std(dim=0, correction=0)
-        if torch.any(strain_std <= 1e-6):
-            raise ValueError("Strain targets must have non-zero variance")
-        self.strain_stats = {"mean": strain.mean(dim=0), "std": strain_std}
-        print(
-            f"Data split: {len(self.train_dataset)} training, "
-            f"{len(self.val_dataset)} validation"
-        )
+        data_config = self.config.data
+        self.train_datasets, self.val_datasets = {}, {}
+        for mode in data_config.modes:
+            store, positions, strains = load_data(
+                data_config,
+                mode,
+                self.max_seq_len,
+                self.config.training.data.sample_size,
+            )
+            train_idx, val_idx = split_indices(
+                len(positions), data_config.val_split, data_config.dataset_seed
+            )
+            train = BeatmapDataset(
+                store, positions[train_idx], strains[train_idx], self.max_seq_len, True
+            )
+            self.train_datasets[mode] = train
+            self.val_datasets[mode] = BeatmapDataset(
+                store, positions[val_idx], strains[val_idx], self.max_seq_len, False
+            )
+            print(f"Fitting {mode} feature normalization statistics...")
+            if mode == "std":
+                self.vector_stats = fit_stats(train.vectors())
+            else:
+                self.mode_stats[mode] = MODE_SPECS[mode].fit_stats(train.vectors())
+            strain = torch.from_numpy(strains[train_idx])
+            strain_std = strain.std(dim=0, correction=0)
+            if torch.any(strain_std <= 1e-6):
+                raise ValueError(f"{mode} strain targets must have non-zero variance")
+            self.strain_stats[mode] = {"mean": strain.mean(dim=0), "std": strain_std}
+            print(
+                f"{mode} split: {len(train_idx):,} training, "
+                f"{len(val_idx):,} validation"
+            )
+        self.max_tokens = token_budget(self.train_datasets, self.batch_size)
 
     def _collate(self):
         config = self.config.training.masking
@@ -316,11 +371,12 @@ class BobertDataModule(pl.LightningDataModule):
             masking_ratio=config.ratio,
             mean_span_length=config.mean_span_length,
             vector_stats=self.vector_stats,
+            mode_stats=self.mode_stats,
             strain_stats=self.strain_stats,
         )
 
     def train_dataloader(self):
-        return bucketed_loader(self.train_dataset, self._collate(), self, True)
+        return mixed_loader(self.train_datasets, self._collate(), self, True)
 
     def val_dataloader(self):
-        return bucketed_loader(self.val_dataset, self._collate(), self, False)
+        return mixed_loader(self.val_datasets, self._collate(), self, False)

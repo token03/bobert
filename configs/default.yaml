@@ -1,5 +1,6 @@
 data:
-  features_path: "./data/features/std_features.bin"
+  features_dir: "./data/features"
+  modes: [std, taiko, catch, mania]
   strains_path: "./data/strains.parquet"
   dataset_seed: 42
 

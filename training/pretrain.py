@@ -16,6 +16,7 @@ from core.features import (
     VECTOR_DIM,
 )
 from core.model import configure_inductor
+from core.modes import MODE_SPECS, ModeSpec
 from core.osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
 from .loader import BobertDataModule, preallocation_batch_size
@@ -98,7 +99,28 @@ def mlm_group_masks(targets: torch.Tensor) -> dict[str, torch.Tensor]:
     }
 
 
-def pretraining_step(model: nn.Module, batch: dict[str, torch.Tensor]):
+def mode_mlm_loss(spec: ModeSpec, predictions, targets: torch.Tensor) -> torch.Tensor:
+    count = max(targets.shape[0], 1)
+    names = spec.continuous
+    continuous = F.smooth_l1_loss(
+        predictions[0],
+        targets[:, [spec.index[name] for name in names]],
+        beta=0.5,
+        reduction="none",
+    )
+    loss = (continuous * spec.gate_mask(targets, names)).sum()
+    active = spec.gate_mask(targets, [name for name, _ in spec.categorical])
+    for position, ((name, _), logits) in enumerate(
+        zip(spec.categorical, predictions[1:])
+    ):
+        categorical = F.cross_entropy(
+            logits, targets[:, spec.index[name]].long(), reduction="none"
+        )
+        loss = loss + (categorical * active[:, position]).sum()
+    return loss / count
+
+
+def pretraining_step(model: nn.Module, batch: dict[str, torch.Tensor], mode: str):
     predictions, targets = model.forward_packed(
         batch["packed_vectors"],
         batch["masked_idx"],
@@ -106,7 +128,14 @@ def pretraining_step(model: nn.Module, batch: dict[str, torch.Tensor]):
         batch["random_dst_idx"],
         batch["cu_seqlens"],
         batch["positions"],
+        mode,
     )
+    if mode != "std":
+        mlm = mode_mlm_loss(MODE_SPECS[mode], predictions["mlm"], targets["mlm"])
+        strain = F.smooth_l1_loss(predictions["strain"], batch["strain_targets"])
+        losses = {"mlm": mlm, "strain": strain, "total": mlm + strain}
+        return losses, predictions["mlm"], targets["mlm"]
+
     losses = mlm_loss(predictions["mlm"], targets["mlm"])
     losses["mlm"] = losses["total"]
     strain_losses = F.smooth_l1_loss(
@@ -173,6 +202,7 @@ class BobertModule(pl.LightningModule):
         if config.runtime.compile_model:
             print("Compiling BERT pre-training step with torch.compile...")
             configure_inductor()
+            torch._dynamo.config.cache_size_limit = 64
             self.step = torch.compile(
                 pretraining_step, mode=config.runtime.compile_mode
             )
@@ -213,13 +243,18 @@ class BobertModule(pl.LightningModule):
 
     def _shared_step(self, batch: dict[str, Any], metrics=None):
         losses, mlm_predictions, mlm_targets = self.step(
-            self.model, step_inputs(batch, self.config.data.max_seq_len)
+            self.model,
+            step_inputs(batch, self.config.data.max_seq_len),
+            batch["mode"],
         )
-        if metrics is not None:
+        if metrics is not None and batch["mode"] == "std":
             update_mlm_metrics(mlm_predictions, mlm_targets, metrics)
         return losses, batch["strain_targets"].shape[0]
 
     def on_fit_start(self):
+        with torch.no_grad():
+            for mode, stats in self.datamodule.mode_stats.items():
+                self.model.bert.mode_tokenizers[mode].normalization.copy_(stats)
         if self.global_rank == 0:
             print("Running max-length preallocation pass...")
 
@@ -253,7 +288,7 @@ class BobertModule(pl.LightningModule):
 
     def _create_preallocation_batch(self, max_seq_len: int) -> dict[str, Any]:
         batch_size = preallocation_batch_size(
-            self.datamodule.train_dataset,
+            self.datamodule.max_tokens,
             self.config.training.trainer.batch_size,
             max_seq_len,
         )
@@ -287,6 +322,7 @@ class BobertModule(pl.LightningModule):
         masked_idx = packed_mask.nonzero(as_tuple=False).flatten()
         split = torch.rand(masked_idx.numel(), device=self.device)
         return {
+            "mode": "std",
             "packed_vectors": packed_vectors,
             "strain_targets": torch.randn(
                 batch_size,
@@ -322,6 +358,7 @@ class BobertModule(pl.LightningModule):
         return losses["total"]
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
+        mode = batch["mode"]
         losses, target_count = self._shared_step(batch, self.val_metrics)
         self.log(
             "val_loss",
@@ -330,6 +367,17 @@ class BobertModule(pl.LightningModule):
             sync_dist=True,
             batch_size=target_count,
         )
+        if mode != "std":
+            self.log_dict(
+                {
+                    f"val_{mode}_loss": losses["total"],
+                    f"val_{mode}_mlm_loss": losses["mlm"],
+                    f"val_{mode}_strain_loss": losses["strain"],
+                },
+                sync_dist=True,
+                batch_size=target_count,
+            )
+            return losses["total"]
         self.log_dict(
             {
                 "val_spatial_loss": losses["spatial"],

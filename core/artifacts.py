@@ -19,6 +19,7 @@ MODEL_NAME = "model.safetensors"
 INDEX_NAME = "embeddings.parquet"
 CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet", "strains.parquet")
 INDEX_VERSION = 3
+MODEL_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +38,9 @@ def checksum(path: str | Path) -> str:
 def model_config(path: str | Path) -> dict[str, Any]:
     with safe_open(path, framework="pt", device="cpu") as artifact:
         config = json.loads(artifact.metadata()["bobert"])
-    if config["version"] != 1 or config["features"] != [asdict(f) for f in FEATURES]:
+    if config["version"] != MODEL_VERSION or config["features"] != [
+        asdict(f) for f in FEATURES
+    ]:
         raise ValueError("unsupported model format or feature schema")
     return config
 
@@ -58,7 +61,7 @@ def save_model(
         tensors[f"normalization.{name}.mean"] = mean.detach().cpu().contiguous()
         tensors[f"normalization.{name}.std"] = std.detach().cpu().contiguous()
     config = {
-        "version": 1,
+        "version": MODEL_VERSION,
         "model_args": args,
         "features": [asdict(f) for f in FEATURES],
         "normalized_features": list(stats),

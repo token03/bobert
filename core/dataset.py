@@ -353,6 +353,7 @@ def select_beatmaps(
     min_sr: float | None = None,
     max_sr: float | None = None,
     include_strains: bool = False,
+    targets: Sequence[str] = STRAIN_COLUMNS,
 ) -> tuple[np.ndarray, np.ndarray | None]:
     selected = pl.LazyFrame(
         {
@@ -378,7 +379,10 @@ def select_beatmaps(
             strains_lf = strains_lf.filter(pl.lit(False))
         strains_lf = strains_lf.filter(
             pl.all_horizontal(
-                [pl.col(column).is_finite() for column in ("stars", *STRAIN_COLUMNS)]
+                [
+                    pl.col(column).is_finite()
+                    for column in dict.fromkeys(("stars", *targets))
+                ]
             )
         )
         if min_sr is not None:
@@ -386,7 +390,7 @@ def select_beatmaps(
         if max_sr is not None:
             strains_lf = strains_lf.filter(pl.col("stars") <= max_sr)
         selected = selected.join(
-            strains_lf.select("beatmap_id", *STRAIN_COLUMNS),
+            strains_lf.select("beatmap_id", *targets),
             on="beatmap_id",
             how="inner",
         )
@@ -399,8 +403,6 @@ def select_beatmaps(
         frame = frame.filter(pl.col("beatmap_id").is_in(sampled))
 
     strains = (
-        frame.select(STRAIN_COLUMNS).to_numpy().astype(np.float32)
-        if include_strains
-        else None
+        frame.select(targets).to_numpy().astype(np.float32) if include_strains else None
     )
     return frame["_position"].to_numpy(), strains

@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     profile.add_argument("--proxy", action="store_true")
     profile.add_argument("--validate", action="store_true")
     profile.add_argument("--full", action="store_true")
-    parser.add_argument("--features-path")
+    parser.add_argument("--features-dir")
     parser.add_argument("--sample-size", type=int)
     parser.add_argument("--dataset-seed", type=int)
     parser.add_argument("--batch-size", type=int)
@@ -65,8 +65,8 @@ def load_config(args: argparse.Namespace) -> DictConfig:
         config.training.data.sample_size = None
         config.training.trainer.epochs = 20
 
-    if args.features_path:
-        config.data.features_path = args.features_path
+    if args.features_dir:
+        config.data.features_dir = args.features_dir
     if args.sample_size is not None:
         config.training.data.sample_size = args.sample_size
     if args.dataset_seed is not None:
@@ -154,10 +154,8 @@ def main() -> int:
         ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
     )
 
-    if datamodule.vector_stats is None:
-        raise RuntimeError("Training completed without fitted normalization statistics")
     model_path = run_dir / "model.safetensors"
-    model.bert.save_pretrained(model_path, datamodule.vector_stats)
+    model.bert.save_pretrained(model_path, datamodule.vector_stats or {})
     print(f"Exported model: {model_path}")
 
     print("\nBoBERT pretraining completed!")

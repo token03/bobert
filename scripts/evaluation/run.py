@@ -148,7 +148,35 @@ def load_embeddings(
     return beatmap_ids, embeddings, id_to_index, densities
 
 
-def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]:
+@cache
+def star_range_ids(min_sr: float, max_sr: float) -> np.ndarray:
+    columns = pl.read_parquet_schema(STRAINS_EVAL_PATH)
+    strains = pl.read_parquet(
+        STRAINS_EVAL_PATH,
+        columns=[
+            c for c in ("beatmap_id", "mode_int", "seq_len", "stars") if c in columns
+        ],
+    )
+    if "mode_int" in strains.columns:
+        strains = strains.filter(pl.col("mode_int") == 0)
+    return (
+        strains.sort("seq_len")
+        .unique("beatmap_id", keep="last")
+        .filter(
+            pl.col("stars").is_finite() & pl.col("stars").is_between(min_sr, max_sr)
+        )["beatmap_id"]
+        .to_numpy()
+        .astype(np.int64)
+    )
+
+
+def load_targets(
+    targets: list[str],
+    *,
+    no_center: set[str],
+    star_range: tuple[float, float] | None = None,
+) -> list[TargetData]:
+    allowed = None if star_range is None else star_range_ids(*star_range)
     loaded = []
     for target in targets:
         path = target_path(target)
@@ -161,6 +189,12 @@ def load_targets(targets: list[str], *, no_center: set[str]) -> list[TargetData]
         beatmap_ids, embeddings, id_to_index, densities = load_embeddings(
             path, center=False
         )
+        if allowed is not None:
+            keep = np.isin(beatmap_ids, allowed)
+            beatmap_ids = beatmap_ids[keep]
+            embeddings = embeddings[keep]
+            densities = None if densities is None else densities[keep]
+            id_to_index = {int(bid): idx for idx, bid in enumerate(beatmap_ids)}
         retrieval = metadata.get("retrieval", {})
         retrieval_lambda = (
             float(retrieval.get("lambda", 0.0))
@@ -1297,6 +1331,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Only run grouped retrieval",
     )
     parser.add_argument(
+        "--sr-range",
+        nargs=2,
+        type=float,
+        default=(2.0, 14.0),
+        metavar=("MIN", "MAX"),
+        help="Only evaluate standard maps whose star rating is in this range",
+    )
+    parser.add_argument(
+        "--no-sr-filter",
+        action="store_true",
+        help="Evaluate all standard maps regardless of star rating",
+    )
+    parser.add_argument(
         "--no-center",
         action="store_true",
         help="Only L2-normalize the preceding target",
@@ -1321,7 +1368,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     EVAL_RESULTS.clear()
-    targets = load_targets(args.targets, no_center=args.no_center)
+    targets = load_targets(
+        args.targets,
+        no_center=args.no_center,
+        star_range=None if args.no_sr_filter else tuple(args.sr_range),
+    )
     evals = [run_grouped_retrieval]
     if not args.retrieval_only:
         evals += [

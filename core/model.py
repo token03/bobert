@@ -16,11 +16,14 @@ from .components import (
     EncoderLayer,
     HitObjectFeatureTokenizer,
     MaskedLMHead,
+    ModeFeatureTokenizer,
+    ModePretrainingHeads,
     RMSNorm,
     SpanMasker,
     StrainHead,
 )
 from .features import VectorStats, build_beatmap_tensor, normalize
+from .modes import MODE_SPECS
 from .osu import parse_osu_bytes
 
 
@@ -87,6 +90,7 @@ class BobertEncoder(nn.Module):
         activation_checkpointing: bool,
         feature_token_dim: int,
         use_flash: bool,
+        modes: Sequence[str],
         adapter: dict[str, Any] | None = None,
     ):
         super().__init__()
@@ -107,11 +111,19 @@ class BobertEncoder(nn.Module):
             "max_seq_len": max_seq_len,
             "feature_token_dim": feature_token_dim,
             "adapter": adapter,
+            "modes": list(modes),
         }
 
         self.feature_tokenizer = HitObjectFeatureTokenizer(
             d_feat=feature_token_dim,
             d_model=d_model,
+        )
+        self.mode_tokenizers = nn.ModuleDict(
+            {
+                mode: ModeFeatureTokenizer(MODE_SPECS[mode], feature_token_dim, d_model)
+                for mode in modes
+                if mode != "std"
+            }
         )
 
         self.layers = nn.ModuleList(
@@ -157,6 +169,7 @@ class BobertEncoder(nn.Module):
             activation_checkpointing=runtime_config.activation_checkpointing,
             feature_token_dim=model_config.feature_token_dim,
             use_flash=use_flash,
+            modes=data_config.modes,
         )
 
     @classmethod
@@ -200,8 +213,10 @@ class BobertEncoder(nn.Module):
             "parameter_efficiency": trainable_params / total_params,
         }
 
-    def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
-        return self.feature_tokenizer(x)
+    def embed_sequences(self, x: torch.Tensor, mode: str = "std") -> torch.Tensor:
+        if mode == "std":
+            return self.feature_tokenizer(x)
+        return self.mode_tokenizers[mode](x)
 
     def compile_encoder(self, mode: str = "default") -> None:
         configure_inductor()
@@ -318,9 +333,10 @@ class BobertEncoder(nn.Module):
         packed_vectors: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
+        mode: str = "std",
     ) -> torch.Tensor:
         torch._dynamo.mark_dynamic(packed_vectors, 0)
-        packed_input = self.embed_sequences(packed_vectors)
+        packed_input = self.embed_sequences(packed_vectors, mode)
         _, embeddings = self.encode_with_layer_embeddings(
             packed_input,
             cu_seqlens,
@@ -376,6 +392,12 @@ class BobertForPretraining(nn.Module):
         self.masker = masker
         self.mlm_head = mlm_head
         self.strain_head = strain_head
+        self.mode_heads = nn.ModuleDict(
+            {
+                mode: ModePretrainingHeads(tokenizer.spec, bert_model.d_model)
+                for mode, tokenizer in bert_model.mode_tokenizers.items()
+            }
+        )
 
     @classmethod
     def from_config(
@@ -400,10 +422,12 @@ class BobertForPretraining(nn.Module):
         random_dst_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
         positions: torch.Tensor,
+        mode: str,
     ):
+        heads = self if mode == "std" else self.mode_heads[mode]
         packed_targets = {"mlm": packed_vectors.index_select(0, masked_idx)}
-        packed_embed = self.bert.feature_tokenizer(packed_vectors)
-        packed_input = self.masker.forward_packed(
+        packed_embed = self.bert.embed_sequences(packed_vectors, mode)
+        packed_input = heads.masker.forward_packed(
             packed_embed,
             mask_token_idx,
             random_dst_idx,
@@ -416,7 +440,7 @@ class BobertForPretraining(nn.Module):
             global_embeddings=global_embeddings,
         )
         predictions = {
-            "mlm": self.mlm_head(encoded.index_select(0, masked_idx)),
-            "strain": self.strain_head(torch.stack(global_embeddings).mean(dim=0)),
+            "mlm": heads.mlm_head(encoded.index_select(0, masked_idx)),
+            "strain": heads.strain_head(torch.stack(global_embeddings).mean(dim=0)),
         }
         return predictions, packed_targets
