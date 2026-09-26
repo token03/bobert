@@ -1,10 +1,9 @@
 data:
-  dataset_path: "./data/dataset"
+  features_path: "./data/features/std_features.bin"
   strains_path: "./data/strains.parquet"
   dataset_seed: 42
 
   max_seq_len: 4096
-  load_chunk_size: 10000
   val_split: 0.1
 
   min_sr: 2.0

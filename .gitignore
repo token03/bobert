@@ -31,3 +31,6 @@ visualizer/*/*.parquet
 
 web/gateway/wrangler.jsonc
 configs/local*.yaml
+
+# Precomputed features
+data/features/

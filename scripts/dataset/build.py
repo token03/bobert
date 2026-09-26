@@ -16,6 +16,7 @@ import polars as pl
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+from core.features import beatmap_frames
 from core.osu import (
     RawBeatmap,
     parse_osu_file,
@@ -36,51 +37,6 @@ def multiprocessing_context():
         return mp.get_context("fork")
     except ValueError:
         return mp.get_context()
-
-
-BEATMAPS_SCHEMA = {
-    "beatmap_id": pl.Int64,
-    "category": pl.String,
-    "hp_drain": pl.Float32,
-    "cs": pl.Float32,
-    "od": pl.Float32,
-    "ar": pl.Float32,
-    "slider_multiplier": pl.Float32,
-    "slider_tick": pl.Float32,
-    "difficulty_rating": pl.Float32,
-}
-
-HITOBJECTS_SCHEMA = {
-    "beatmap_id": pl.Int64,
-    "category": pl.String,
-    "object_index": pl.Int32,
-    "x": pl.Int32,
-    "y": pl.Int32,
-    "time": pl.Int32,
-    "object_type": pl.Int8,
-    "is_new_combo": pl.Int8,
-    "hit_sound": pl.Int32,
-    "end_time": pl.Int32,
-    "pixel_length": pl.Float32,
-    "bpm": pl.Float32,
-    "timing_origin": pl.Int32,
-    "end_bpm": pl.Float32,
-    "end_timing_origin": pl.Int32,
-    "curve_type_char": pl.String,
-    "num_anchors": pl.Int32,
-    "kiai_time": pl.Int8,
-    "slider_repeats": pl.Int32,
-    "hard_anchor_ratio": pl.Float32,
-    "slider_end_x": pl.Int32,
-    "slider_end_y": pl.Int32,
-    "slider_path_valid": pl.Int8,
-    "span_end_dx": pl.Float32,
-    "span_end_dy": pl.Float32,
-    "curve_residual_1_dx": pl.Float32,
-    "curve_residual_1_dy": pl.Float32,
-    "curve_residual_2_dx": pl.Float32,
-    "curve_residual_2_dy": pl.Float32,
-}
 
 
 def log_worker_failure(
@@ -172,9 +128,7 @@ def _write_worker_batch(
     batch_num: int,
     beatmaps: list[RawBeatmap],
 ):
-    pl.DataFrame(
-        (beatmap[:9] for beatmap in beatmaps), schema=BEATMAPS_SCHEMA, orient="row"
-    ).write_parquet(
+    beatmap_frames(beatmaps)[0].write_parquet(
         os.path.join(temp_dir, "beatmaps", f"worker-{pid}-batch-{batch_num}.parquet"),
         compression="lz4",
     )
@@ -182,47 +136,10 @@ def _write_worker_batch(
     for beatmap in beatmaps:
         buckets[beatmap.beatmap_id // 100_000].append(beatmap)
 
-    def rows(bucket_maps):
-        for beatmap in bucket_maps:
-            for obj in beatmap.hit_objects:
-                yield (
-                    beatmap.beatmap_id,
-                    beatmap.category,
-                    obj.object_index,
-                    obj.x,
-                    obj.y,
-                    obj.time,
-                    obj.object_type,
-                    obj.is_new_combo,
-                    obj.hit_sound,
-                    obj.end_time,
-                    obj.pixel_length or 0.0,
-                    obj.bpm,
-                    obj.timing_origin,
-                    obj.end_bpm,
-                    obj.end_timing_origin,
-                    obj.curve_type or "",
-                    obj.num_anchors,
-                    obj.kiai_time,
-                    obj.slides - 1 if obj.slides is not None else 0,
-                    obj.hard_anchor_ratio,
-                    obj.slider_end_x,
-                    obj.slider_end_y,
-                    obj.slider_path_valid,
-                    obj.span_end_dx,
-                    obj.span_end_dy,
-                    obj.curve_residual_1_dx,
-                    obj.curve_residual_1_dy,
-                    obj.curve_residual_2_dx,
-                    obj.curve_residual_2_dy,
-                )
-
     for bucket, bucket_maps in buckets.items():
         bucket_dir = Path(temp_dir) / "hitobjects" / f"_bucket={bucket}"
         bucket_dir.mkdir(exist_ok=True)
-        pl.DataFrame(
-            rows(bucket_maps), schema=HITOBJECTS_SCHEMA, orient="row"
-        ).write_parquet(
+        beatmap_frames(bucket_maps)[1].write_parquet(
             bucket_dir / f"worker-{pid}-batch-{batch_num}.parquet", compression="lz4"
         )
 

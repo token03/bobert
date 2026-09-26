@@ -44,6 +44,7 @@ train = [
     "seaborn>=0.13.2",
     "tensorboard>=2.20.0",
     "umap-learn>=0.5.9.post2",
+    "mypy>=1.18",
 ]
 
 [project.scripts]
@@ -59,6 +60,7 @@ export-model = "scripts.model.export:main"
 fetch-run = "scripts.model.fetch:main"
 publish-run = "scripts.model.publish:main"
 build-dataset = "scripts.dataset.build:main"
+build-features = "scripts.dataset.features:main"
 build-search = "scripts.search_catalog:main"
 build-strains = "scripts.dataset.strains:main"
 fetch-beatmaps = "scripts.sources.beatmaps.metadata:main"

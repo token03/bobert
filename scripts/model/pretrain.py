@@ -29,10 +29,9 @@ def parse_args() -> argparse.Namespace:
     profile.add_argument("--proxy", action="store_true")
     profile.add_argument("--validate", action="store_true")
     profile.add_argument("--full", action="store_true")
-    parser.add_argument("--dataset-path")
+    parser.add_argument("--features-path")
     parser.add_argument("--sample-size", type=int)
     parser.add_argument("--dataset-seed", type=int)
-    parser.add_argument("--load-chunk-size", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--resume-ckpt")
@@ -66,14 +65,12 @@ def load_config(args: argparse.Namespace) -> DictConfig:
         config.training.data.sample_size = None
         config.training.trainer.epochs = 20
 
-    if args.dataset_path:
-        config.data.dataset_path = args.dataset_path
+    if args.features_path:
+        config.data.features_path = args.features_path
     if args.sample_size is not None:
         config.training.data.sample_size = args.sample_size
     if args.dataset_seed is not None:
         config.data.dataset_seed = args.dataset_seed
-    if args.load_chunk_size is not None:
-        config.data.load_chunk_size = args.load_chunk_size
     if args.batch_size is not None:
         config.training.trainer.batch_size = args.batch_size
     if args.epochs is not None:
