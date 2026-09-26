@@ -276,17 +276,27 @@ def fetch_beatconnect_metadata(
     return beatconnect_beatmap_to_dict(beatmap, beatmapset)
 
 
-def fetch_beatmaps_metadata(api: Ossapi, beatmap_ids: list[int]) -> list[dict]:
+def fetch_beatmaps_metadata(
+    api: Ossapi, beatmap_ids: list[int], *, allow_missing: bool = False
+) -> list[dict]:
     try:
         beatmaps = ossapi_request(api.beatmaps, beatmap_ids)
     except Exception:
         beatmaps = []
 
     records = {int(bm.id): beatmap_to_dict(bm) for bm in beatmaps}
+    can_fallback = not allow_missing or bool(beatconnect_api_token())
     for beatmap_id in beatmap_ids:
         if beatmap_id not in records:
-            records[beatmap_id] = fetch_beatconnect_metadata(beatmap_id)
-    return [records[beatmap_id] for beatmap_id in beatmap_ids]
+            if allow_missing:
+                if can_fallback:
+                    try:
+                        records[beatmap_id] = fetch_beatconnect_metadata(beatmap_id)
+                    except (httpx.HTTPError, ValueError):
+                        pass
+            else:
+                records[beatmap_id] = fetch_beatconnect_metadata(beatmap_id)
+    return [records[beatmap_id] for beatmap_id in beatmap_ids if beatmap_id in records]
 
 
 def fetch_beatmap_metadata(

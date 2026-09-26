@@ -1,5 +1,6 @@
 import argparse
 import signal
+from pathlib import Path
 
 import pandas as pd
 from rich import print
@@ -27,20 +28,12 @@ SAVE_INTERVAL = 5000
 def load_existing_beatmaps():
     if not BEATMAPS_PATH.exists():
         return pd.DataFrame(), set()
-    try:
-        beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
-        existing_ids = (
-            {str(bid) for bid in beatmaps_df["id"].unique()}
-            if "id" in beatmaps_df.columns
-            else set()
-        )
-        print(
-            f"[yellow]Resuming: Found {len(existing_ids)} beatmaps already on disk.[/yellow]"
-        )
-        return beatmaps_df, existing_ids
-    except Exception as e:
-        print(f"[red]Error loading Parquet: {e}. Starting fresh.[/red]")
-        return pd.DataFrame(), set()
+    beatmaps_df = pd.read_parquet(BEATMAPS_PATH)
+    existing_ids = {str(bid) for bid in beatmaps_df["id"].unique()}
+    print(
+        f"[yellow]Resuming: Found {len(existing_ids)} beatmaps already on disk.[/yellow]"
+    )
+    return beatmaps_df, existing_ids
 
 
 def fetch_status_beatmaps(api, statuses):
@@ -191,10 +184,15 @@ def fetch_missing_beatmaps(
                 batch = todo_ids[i : i + BATCH_SIZE]
 
                 try:
-                    records = fetch_beatmaps_metadata(api, batch)
+                    records = fetch_beatmaps_metadata(api, batch, allow_missing=True)
                     new_data.extend(records)
+                    fetched_ids = {int(record["id"]) for record in records}
                     for bid in batch:
-                        failed_ids.pop(str(bid), None)
+                        if bid in fetched_ids:
+                            failed_ids.pop(str(bid), None)
+                        else:
+                            bid_s = str(bid)
+                            failed_ids[bid_s] = int(failed_ids.get(bid_s, 0)) + 1
                 except Exception as e:
                     bar.console.print(f"[red]Batch failed: {e}[/red]")
                     for bid in batch:
@@ -233,6 +231,9 @@ def fetch_missing_beatmaps(
 def main():
     parser = argparse.ArgumentParser(description="Fetch beatmap metadata from osu!")
     parser.add_argument(
+        "--ids-file", type=Path, help="Fetch missing IDs from a newline-delimited file"
+    )
+    parser.add_argument(
         "--retry-failed", action="store_true", help="Retry cached metadata failures"
     )
     for status in ("wip", "pending", "qualified", "graveyard"):
@@ -240,12 +241,19 @@ def main():
             f"--{status}", action="store_true", help=f"fetch {status} beatmaps"
         )
     args = parser.parse_args()
+    if args.ids_file and not args.ids_file.is_file():
+        parser.error(f"IDs file not found: {args.ids_file}")
     statuses = [
         status
         for status in ("wip", "pending", "qualified", "graveyard")
         if getattr(args, status)
     ]
-    fetch_missing_beatmaps(statuses=statuses, retry_failed=args.retry_failed)
+    ids = (
+        {int(line) for line in args.ids_file.read_text().splitlines() if line.strip()}
+        if args.ids_file
+        else None
+    )
+    fetch_missing_beatmaps(ids=ids, statuses=statuses, retry_failed=args.retry_failed)
 
 
 if __name__ == "__main__":
