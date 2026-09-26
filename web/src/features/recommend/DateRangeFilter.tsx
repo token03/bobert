@@ -1,17 +1,17 @@
 import { useRef, useState } from 'react'
-import { Popover } from '@base-ui/react/popover'
 import { Select } from '@base-ui/react/select'
-import { CalendarDots, CaretDown, CaretLeft, CaretRight, X } from '@phosphor-icons/react'
+import { CalendarDots, CaretDown, CaretLeft, CaretRight } from '@phosphor-icons/react'
+import { FilterPopover } from './FilterPopover'
 import styles from './RecommendForm.module.css'
 
-export const minDateBound = '2007-10'
+const minDateBound = '2007-10'
 const boundYear = 2007
 const monthLabels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 type DateRangeFilterProps = {
-  minValue: string
-  maxValue: string
-  onValueCommit: (min: string, max: string) => void
+  min: string | undefined
+  max: string | undefined
+  onValueCommit: (min: string | undefined, max: string | undefined) => void
 }
 
 function maxDateBound() {
@@ -42,14 +42,19 @@ function formatRange(min: string, max: string) {
   return min ? `≥${formatShort(min)}` : `≤${formatShort(max)}`
 }
 
-export function DateRangeFilter({ minValue, maxValue, onValueCommit }: DateRangeFilterProps) {
+export function DateRangeFilter({ min, max, onValueCommit }: DateRangeFilterProps) {
+  const minValue = min ?? ''
+  const maxValue = max ?? ''
   const [open, setOpen] = useState(false)
   const upper = maxDateBound()
   const upperYear = upper.slice(0, 4)
   const [fromYear, setFromYear] = useState(() => parseMonth(minValue)?.year ?? upperYear)
   const [toYear, setToYear] = useState(() => parseMonth(maxValue)?.year ?? upperYear)
   const active = Boolean(minValue || maxValue)
-  const display = active ? formatRange(minValue, maxValue) : 'Date'
+
+  function commit(nextMin: string, nextMax: string) {
+    onValueCommit(nextMin || undefined, nextMax || undefined)
+  }
 
   function clampRange(nextMin: string, nextMax: string, changed: 'min' | 'max'): [string, string] {
     if (nextMin && nextMin < minDateBound) {
@@ -78,7 +83,7 @@ export function DateRangeFilter({ minValue, maxValue, onValueCommit }: DateRange
     const value = `${year}-${month}`
     const current = side === 'min' ? minValue : maxValue
     if (current === value) {
-      onValueCommit(side === 'min' ? '' : minValue, side === 'min' ? maxValue : '')
+      commit(side === 'min' ? '' : minValue, side === 'min' ? maxValue : '')
       return
     }
     const [nextMin, nextMax] = clampRange(
@@ -92,7 +97,7 @@ export function DateRangeFilter({ minValue, maxValue, onValueCommit }: DateRange
     if (nextMax) {
       setToYear(nextMax.slice(0, 4))
     }
-    onValueCommit(nextMin, nextMax)
+    commit(nextMin, nextMax)
   }
 
   function monthDisabled(side: 'min' | 'max', year: string, month: string) {
@@ -105,7 +110,12 @@ export function DateRangeFilter({ minValue, maxValue, onValueCommit }: DateRange
   }
 
   return (
-    <Popover.Root
+    <FilterPopover
+      filterKey="date"
+      label="Date"
+      mark={<CalendarDots />}
+      display={active ? formatRange(minValue, maxValue) : 'Date'}
+      active={active}
       open={open}
       onOpenChange={(nextOpen) => {
         setOpen(nextOpen)
@@ -114,69 +124,34 @@ export function DateRangeFilter({ minValue, maxValue, onValueCommit }: DateRange
           setToYear(parseMonth(maxValue)?.year ?? upperYear)
         }
       }}
+      onClear={() => commit('', '')}
+      popupClassName={styles['date-popover']}
     >
-      <span className={styles['range-filter-wrap']} data-active={active || undefined} data-filter="date">
-        <Popover.Trigger
-          className={styles['range-filter-trigger']}
-          data-active={active || undefined}
-          aria-label={`Date: ${formatRange(minValue, maxValue)}`}
-        >
-          <span className={styles['range-trigger-mark']} aria-hidden="true">
-            <CalendarDots />
-          </span>
-          <span className={styles['range-trigger-value']}>{display}</span>
-          {!active ? <CaretDown className={styles['range-trigger-chevron']} aria-hidden="true" /> : null}
-        </Popover.Trigger>
-        {active ? (
-          <button
-            className={styles['range-trigger-clear']}
-            type="button"
-            onClick={() => onValueCommit('', '')}
-            aria-label="Clear date filter"
-          >
-            <X />
-          </button>
-        ) : null}
-      </span>
-
-      <Popover.Portal>
-        <Popover.Positioner
-          className={styles['range-popover-positioner']}
-          positionMethod="fixed"
-          sideOffset={6}
-          align="center"
-          collisionAvoidance={{ side: 'flip', align: 'shift' }}
-        >
-          <Popover.Popup className={`${styles['range-popover']} ${styles['date-popover']}`}>
-            <Popover.Title className={styles['sr-only']}>Date range</Popover.Title>
-            <div className={styles['date-columns']}>
-              <MonthPanel
-                label="From"
-                viewYear={fromYear}
-                selected={parseMonth(minValue)}
-                minValue={minValue}
-                maxValue={maxValue}
-                upperYear={upperYear}
-                onViewYear={setFromYear}
-                onPick={(year, month) => pick('min', year, month)}
-                isDisabled={(year, month) => monthDisabled('min', year, month)}
-              />
-              <MonthPanel
-                label="To"
-                viewYear={toYear}
-                selected={parseMonth(maxValue)}
-                minValue={minValue}
-                maxValue={maxValue}
-                upperYear={upperYear}
-                onViewYear={setToYear}
-                onPick={(year, month) => pick('max', year, month)}
-                isDisabled={(year, month) => monthDisabled('max', year, month)}
-              />
-            </div>
-          </Popover.Popup>
-        </Popover.Positioner>
-      </Popover.Portal>
-    </Popover.Root>
+      <div className={styles['date-columns']}>
+        <MonthPanel
+          label="From"
+          viewYear={fromYear}
+          selected={parseMonth(minValue)}
+          minValue={minValue}
+          maxValue={maxValue}
+          upperYear={upperYear}
+          onViewYear={setFromYear}
+          onPick={(year, month) => pick('min', year, month)}
+          isDisabled={(year, month) => monthDisabled('min', year, month)}
+        />
+        <MonthPanel
+          label="To"
+          viewYear={toYear}
+          selected={parseMonth(maxValue)}
+          minValue={minValue}
+          maxValue={maxValue}
+          upperYear={upperYear}
+          onViewYear={setToYear}
+          onPick={(year, month) => pick('max', year, month)}
+          isDisabled={(year, month) => monthDisabled('max', year, month)}
+        />
+      </div>
+    </FilterPopover>
   )
 }
 

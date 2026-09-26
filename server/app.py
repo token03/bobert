@@ -87,6 +87,8 @@ class BeatmapSummary(BaseModel):
     drain: float | None
     bpm: float | None
     total_length: float | None
+    play_count: int | None
+    favourite_count: int | None
     last_updated: str | None
     ranked_date: str | None
     submitted_date: str | None

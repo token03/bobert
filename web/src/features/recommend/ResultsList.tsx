@@ -1,5 +1,5 @@
 import type { BeatmapMetadata } from '../../shared/types'
-import { BeatmapCard } from './BeatmapCard'
+import { ResultBeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
 import styles from './ResultsList.module.css'
 
@@ -17,7 +17,7 @@ export function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPrevi
   return (
     <div className={styles['result-list']} data-results-list>
       {beatmaps.map((beatmap) => (
-        <BeatmapCard
+        <ResultBeatmapCard
           key={beatmap.beatmap_id}
           beatmap={beatmap}
           onCopy={onCopy}

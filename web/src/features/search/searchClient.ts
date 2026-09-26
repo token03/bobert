@@ -1,11 +1,15 @@
-import type { SearchSet } from './search'
+import type { CatalogStats, SearchSet } from './search'
 
-export type SearchRequest = { query: string } | { beatmapId: number }
-type SearchReply = { id: number; results?: SearchSet[]; setId?: number | null; error?: string }
+export type SearchRequest =
+  | { type: 'search'; query: string }
+  | { type: 'set'; beatmapId: number }
+  | { type: 'title'; beatmapId: number }
+  | { type: 'stats' }
+type SearchReply = { id: number; result?: unknown; error?: string }
 
 let worker: Worker | null = null
 let requestId = 0
-const pending = new Map<number, { resolve: (reply: SearchReply) => void; reject: (error: Error) => void }>()
+const pending = new Map<number, { resolve: (result: unknown) => void; reject: (error: Error) => void }>()
 
 export function startSearch() {
   if (worker) return
@@ -14,7 +18,7 @@ export function startSearch() {
     const request = pending.get(data.id)
     pending.delete(data.id)
     if (data.error) request?.reject(new Error(data.error))
-    else request?.resolve(data)
+    else request?.resolve(data.result)
   }
   worker.onerror = () => {
     for (const request of pending.values()) request.reject(new Error('Could not load search. Try a beatmap ID or link.'))
@@ -24,19 +28,27 @@ export function startSearch() {
   }
 }
 
-function send(request: SearchRequest): Promise<SearchReply> {
+function send<T>(request: SearchRequest): Promise<T> {
   startSearch()
   const id = ++requestId
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
+    pending.set(id, { resolve: resolve as (result: unknown) => void, reject })
     worker!.postMessage({ ...request, id })
   })
 }
 
-export async function searchBeatmaps(query: string): Promise<SearchSet[]> {
-  return (await send({ query })).results!
+export function searchBeatmaps(query: string): Promise<SearchSet[]> {
+  return send({ type: 'search', query })
 }
 
-export async function lookupBeatmapSet(beatmapId: number): Promise<number | null> {
-  return (await send({ beatmapId })).setId ?? null
+export function lookupBeatmapSet(beatmapId: number): Promise<number | null> {
+  return send({ type: 'set', beatmapId })
+}
+
+export function lookupBeatmapTitle(beatmapId: number): Promise<string | null> {
+  return send({ type: 'title', beatmapId })
+}
+
+export function fetchCatalogStats(): Promise<CatalogStats> {
+  return send({ type: 'stats' })
 }

@@ -33,6 +33,9 @@ STRAINS_PATH = DATA_DIR / "strains.parquet"
 FILTERED_SCORE_THRESHOLD = 0.1
 FILTERED_SCORE_BATCH_SIZE = 8192
 DEFAULT_COUNTS = (15, 40, 30, 15)
+DEFAULT_ERA_STARTS = (2018, 2021, 2023)
+DEFAULT_FAVOURITE_PERCENTILE = 0.75
+DEFAULT_MIN_FAVOURITES = 150
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 STATUS_GROUPS = {
     "ranked": {"1", "2", "3", "ranked", "approved", "qualified"},
@@ -240,11 +243,24 @@ class Runtime:
             .sort("difficulty_rating", descending=True)
             .unique("beatmapset_id", keep="first", maintain_order=True)
             .join(pl.DataFrame({"id": self.static_ids}), on="id", how="semi")
+            .filter(pl.col("difficulty_rating").is_between(5, 9, closed="left"))
+            .with_columns(
+                pl.coalesce("ranked_date", "submitted_date")
+                .cast(pl.String)
+                .str.slice(0, 4)
+                .cast(pl.Int32, strict=False)
+                .alias("_year")
+            )
             .filter(
-                pl.col("difficulty_rating").is_between(5, 9, closed="left"),
-                pl.col("play_count") > 50000,
-                pl.col("favourite_count")
-                >= pl.min_horizontal(pl.col("play_count") / 250, pl.lit(1000)),
+                pl.col("favourite_count").rank("average").over("_year")
+                / pl.len().over("_year")
+                >= DEFAULT_FAVOURITE_PERCENTILE,
+                pl.col("favourite_count") >= DEFAULT_MIN_FAVOURITES,
+            )
+            .with_columns(
+                pl.sum_horizontal(
+                    pl.col("_year") >= start for start in DEFAULT_ERA_STARTS
+                ).alias("_era")
             )
             .sort("id")
         )
@@ -348,10 +364,14 @@ class Runtime:
         )
         self.default_pools = [
             [
-                self.public_summary(int(row["id"]), row)
-                for row in defaults.filter(
-                    pl.col("difficulty_rating").floor() == star
-                ).iter_rows(named=True)
+                [
+                    self.public_summary(int(row["id"]), row)
+                    for row in defaults.filter(
+                        pl.col("difficulty_rating").floor() == star,
+                        pl.col("_era") == era,
+                    ).iter_rows(named=True)
+                ]
+                for era in range(len(DEFAULT_ERA_STARTS) + 1)
             ]
             for star in range(5, 9)
         ]
@@ -367,11 +387,16 @@ class Runtime:
 
     def default_summaries(self, seed: int | None = None) -> list[dict[str, Any]]:
         rng = random.Random(seed)
-        results = [
-            item
-            for pool, count in zip(self.default_pools, DEFAULT_COUNTS)
-            for item in rng.sample(pool, count)
-        ]
+        results = []
+        for eras, count in zip(self.default_pools, DEFAULT_COUNTS):
+            queues = [rng.sample(pool, len(pool)) for pool in eras]
+            rng.shuffle(queues)
+            picked = 0
+            while picked < count and any(queues):
+                for queue in queues:
+                    if queue and picked < count:
+                        results.append(queue.pop())
+                        picked += 1
         rng.shuffle(results)
         return results
 
@@ -611,6 +636,8 @@ def public_summary(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
         "drain": json_value(metadata.get("drain")),
         "bpm": json_value(metadata.get("bpm")),
         "total_length": json_value(metadata.get("total_length")),
+        "play_count": json_value(metadata.get("play_count")),
+        "favourite_count": json_value(metadata.get("favourite_count")),
         "last_updated": json_value(metadata.get("last_updated")),
         "ranked_date": json_value(metadata.get("ranked_date")),
         "submitted_date": json_value(metadata.get("submitted_date")),
