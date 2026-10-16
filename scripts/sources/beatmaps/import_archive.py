@@ -1,11 +1,11 @@
 import argparse
-import os
 import tarfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
 import pandas as pd
 
+from core.raw import write_map
 from scripts.common.osu import get_sharded_path, is_valid_osu_file
 from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
 from scripts.sources.beatmaps.metadata import fetch_missing_beatmaps
@@ -45,9 +45,7 @@ def import_archive(
 ) -> None:
     metadata_by_id = {}
     if BEATMAPS_PATH.exists():
-        metadata = pd.read_parquet(
-            BEATMAPS_PATH, columns=["id", "status", "mode_int"]
-        )
+        metadata = pd.read_parquet(BEATMAPS_PATH, columns=["id", "status", "mode_int"])
         metadata_by_id = dict(
             zip(
                 metadata["id"].astype(int),
@@ -96,13 +94,7 @@ def import_archive(
                 imported += 1
 
             if not dry_run:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                temp_path = destination.with_suffix(".tmp")
-                try:
-                    temp_path.write_bytes(content)
-                    os.replace(temp_path, destination)
-                finally:
-                    temp_path.unlink(missing_ok=True)
+                write_map(destination, content)
 
             metadata_row = metadata_by_id.get(beatmap_id)
             status = metadata_row[0] if metadata_row else None
@@ -121,16 +113,16 @@ def import_archive(
     print(f"Standard maps needing metadata refresh: {len(refresh_ids):,}")
 
     if refresh_metadata and refresh_ids and not dry_run:
-        fetch_missing_beatmaps(
-            refresh_ids, refresh=True, retry_failed=retry_failed
-        )
+        fetch_missing_beatmaps(refresh_ids, refresh=True, retry_failed=retry_failed)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="Import a monthly osu! beatmap archive"
     )
-    parser.add_argument("archive", type=Path, help="Path to a tar archive of .osu files")
+    parser.add_argument(
+        "archive", type=Path, help="Path to a tar archive of .osu files"
+    )
     parser.add_argument(
         "--output-dir", type=Path, default=BEATMAPS_DIR, help="Sharded output directory"
     )

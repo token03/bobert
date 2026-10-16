@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import os
-
+from core.raw import map_path
 from scripts.common.api import beatconnect_api_token
 
 DOWNLOAD_HEADERS = {
@@ -61,5 +60,4 @@ def get_shard_from_id(beatmap_id: str | int) -> str:
 
 
 def get_sharded_path(beatmap_id: str | int, base_dir: str) -> str:
-    shard = get_shard_from_id(beatmap_id)
-    return os.path.join(base_dir, shard, f"{beatmap_id}.osu")
+    return str(map_path(beatmap_id, base_dir))

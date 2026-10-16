@@ -8,6 +8,7 @@ import pandas as pd
 import tqdm
 
 from core.dataset import stored_beatmap_ids
+from core.raw import find_maps, map_id, write_map
 from scripts.common.failures import load_failures, save_failures
 from scripts.common.osu import get_api_tiers, get_sharded_path, is_valid_osu_file
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR, FEATURES_DIR
@@ -53,9 +54,7 @@ def load_ids_file(path: str) -> list[str]:
 def scan_raw_beatmaps(path) -> set[str]:
     if not path.exists():
         return set()
-    return {
-        osu_file.stem for osu_file in path.glob("**/*.osu") if osu_file.stem.isdigit()
-    }
+    return {map_id(path) for path in find_maps(path) if map_id(path).isdigit()}
 
 
 def load_collection_ids() -> list[str]:
@@ -103,8 +102,7 @@ async def download_job(
         await rate_limiter.backoff(min(backoff, MAX_RATE_LIMIT_BACKOFF))
 
     if response.status_code == 200 and is_valid_osu_file(response.content):
-        with open(file_path, "wb") as outfile:
-            outfile.write(response.content)
+        write_map(file_path, response.content)
         return True, None
 
     if response.status_code != 200:

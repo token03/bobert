@@ -12,6 +12,7 @@ import yaml
 from parsecore.Performance.rulesets.osu.fast import FastDifficulty
 from tqdm import tqdm
 
+from core.raw import read_map
 from scripts.common.osu import get_sharded_path
 from scripts.common.paths import resolve_path
 
@@ -105,7 +106,7 @@ def _calculate_batch_worker(
     for beatmap_id, mode_int in beatmaps:
         path = get_sharded_path(beatmap_id, raw_beatmap_path)
         try:
-            data = Path(path).read_bytes()
+            data = read_map(path)
             file_mode = re.search(rb"(?im)^Mode\s*:\s*([0-3])\s*$", data)
             if (int(file_mode.group(1)) if file_mode else 0) != mode_int:
                 failed += 1
@@ -182,7 +183,7 @@ def _calculate_stars_batch_worker(
     for beatmap_id, seq_len in entries:
         path = get_sharded_path(beatmap_id, raw_beatmap_path)
         try:
-            data = Path(path).read_bytes()
+            data = read_map(path)
             rows.append(
                 {
                     "beatmap_id": beatmap_id,

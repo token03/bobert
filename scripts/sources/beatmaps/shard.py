@@ -1,27 +1,27 @@
-import sys
-import shutil
-from pathlib import Path
-from tqdm import tqdm
 import argparse
+import sys
+from pathlib import Path
 
+from tqdm import tqdm
+
+from core.raw import find_maps, map_id, read_map, write_map
 from scripts.common.osu import get_shard_from_id, is_valid_osu_file
 from scripts.common.paths import DATA_DIR
 
 
 def read_osu_mode(file_path: Path) -> int:
     section = None
-    with file_path.open("rb") as f:
-        for raw_line in f:
-            line = raw_line.decode("utf-8", errors="ignore").strip()
-            if not line or line.startswith("//"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line[1:-1].lower()
-                if section != "general" and section is not None:
-                    return 0
-                continue
-            if section == "general" and line.lower().startswith("mode:"):
-                return int(line.split(":", 1)[1].strip())
+    for raw_line in read_map(file_path).splitlines():
+        line = raw_line.decode("utf-8", errors="ignore").strip()
+        if not line or line.startswith("//"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].lower()
+            if section != "general" and section is not None:
+                return 0
+            continue
+        if section == "general" and line.lower().startswith("mode:"):
+            return int(line.split(":", 1)[1].strip())
     return 0
 
 
@@ -48,8 +48,7 @@ def shard_beatmaps(
         sys.exit(1)
 
     print(f"Scanning for .osu files in {scan_path}...")
-    pattern = "**/*.osu" if recursive else "*.osu"
-    candidate_files = [f for f in scan_path.glob(pattern) if f.is_file()]
+    candidate_files = [f for f in find_maps(scan_path, recursive) if f.is_file()]
 
     if not candidate_files:
         print("No .osu files found in the root directory. Already sharded or empty?")
@@ -66,13 +65,13 @@ def shard_beatmaps(
     skipped_mode = 0
 
     for file_path in candidate_files:
-        beatmap_id = file_path.stem
+        beatmap_id = map_id(file_path)
         if not beatmap_id.isdigit():
             skipped_invalid_name += 1
             continue
 
         try:
-            if not is_valid_osu_file(file_path.read_bytes()):
+            if not is_valid_osu_file(read_map(file_path)):
                 skipped_invalid_file += 1
                 continue
             if mode is not None and read_osu_mode(file_path) != mode:
@@ -127,26 +126,33 @@ def shard_beatmaps(
             shard_dir.mkdir(parents=True, exist_ok=True)
 
         for beatmap_id, source_path in files:
-            dest_path = shard_dir / f"{beatmap_id}.osu"
+            dest_path = shard_dir / f"{beatmap_id}.osu.zst"
+            plain_path = dest_path.with_suffix("")
 
             try:
-                if dest_path.exists() and not overwrite:
+                existing = dest_path.exists() or plain_path.exists()
+                if source_path == dest_path or (existing and not overwrite):
                     skipped_existing_count += 1
                     continue
 
                 if dry_run:
-                    if dest_path.exists():
+                    if existing:
                         overwritten_count += 1
                     else:
                         moved_count += 1
                     continue
 
-                if dest_path.exists():
-                    dest_path.unlink()
+                if existing:
                     overwritten_count += 1
                 else:
                     moved_count += 1
-                shutil.move(str(source_path), str(dest_path))
+                content = read_map(source_path)
+                write_map(dest_path, content)
+                if read_map(dest_path) != content:
+                    raise ValueError(f"Verification failed: {dest_path}")
+                source_path.unlink()
+                if overwrite and plain_path != source_path:
+                    plain_path.unlink(missing_ok=True)
             except Exception as e:
                 error_count += 1
                 print(f"\nError processing {source_path.name}: {e}")
@@ -163,7 +169,7 @@ def shard_beatmaps(
 
     if not dry_run:
         print(
-            f"\nSharding complete! Structure: {output_path}/{{00-99}}/{{beatmap_id}}.osu"
+            f"\nSharding complete! Structure: {output_path}/{{00-99}}/{{beatmap_id}}.osu.zst"
         )
 
 

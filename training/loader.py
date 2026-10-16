@@ -293,8 +293,12 @@ class BobertDataModule(pl.LightningDataModule):
         self.train_dataset = BeatmapDataset(
             store, positions[train_idx], strains[train_idx], self.max_seq_len, True
         )
-        self.val_dataset = BeatmapDataset(
-            store, positions[val_idx], strains[val_idx], self.max_seq_len, False
+        self.val_dataset = (
+            BeatmapDataset(
+                store, positions[val_idx], strains[val_idx], self.max_seq_len, False
+            )
+            if len(val_idx)
+            else None
         )
         print("Fitting feature normalization statistics...")
         self.vector_stats = fit_stats(self.train_dataset.vectors())
@@ -304,8 +308,7 @@ class BobertDataModule(pl.LightningDataModule):
             raise ValueError("Strain targets must have non-zero variance")
         self.strain_stats = {"mean": strain.mean(dim=0), "std": strain_std}
         print(
-            f"Data split: {len(self.train_dataset)} training, "
-            f"{len(self.val_dataset)} validation"
+            f"Data split: {len(self.train_dataset)} training, {len(val_idx)} validation"
         )
 
     def _collate(self):

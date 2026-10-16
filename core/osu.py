@@ -5,6 +5,8 @@ import os
 from collections.abc import Collection, Iterable, Iterator
 from typing import Final, NamedTuple
 
+from core.raw import read_map
+
 OBJECT_TYPE_CIRCLE: Final = 0
 OBJECT_TYPE_SLIDER: Final = 1
 OBJECT_TYPE_SPINNER: Final = 2
@@ -431,15 +433,23 @@ def parse_osu_file(
     _content: bytes | None = None,
     _beatmap_id: int | None = None,
 ) -> RawBeatmap | None:
+    source: io.TextIOBase
     if _content is None:
         try:
-            filename_beatmap_id = int(os.path.splitext(os.path.basename(file_path))[0])
+            filename_beatmap_id = int(
+                os.path.splitext(os.path.basename(file_path).removesuffix(".zst"))[0]
+            )
         except ValueError:
             filename_beatmap_id = None
         category = os.path.basename(os.path.dirname(file_path))
-        source = open(  # noqa: SIM115
-            file_path, "r", encoding="utf-8", errors="ignore"
-        )
+        if file_path.endswith(".zst"):
+            source = io.TextIOWrapper(
+                io.BytesIO(read_map(file_path)), encoding="utf-8", errors="ignore"
+            )
+        else:
+            source = open(  # noqa: SIM115
+                file_path, "r", encoding="utf-8", errors="ignore"
+            )
     else:
         filename_beatmap_id = _beatmap_id
         category = ""
