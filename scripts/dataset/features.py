@@ -18,6 +18,7 @@ from core.dataset import (
     feature_path,
 )
 from core.features import beatmap_frames
+from core.raw import find_maps
 from scripts.common.paths import resolve_path
 from scripts.dataset.native import compile_parser, load_parser
 
@@ -108,19 +109,7 @@ def process_chunk(task: tuple[list[str], tuple[int, ...], int]):
 
 
 def find_beatmap_files(root_dir: str | Path) -> list[str]:
-    files = [
-        os.path.join(root, file)
-        for root, _, names in os.walk(root_dir)
-        for file in names
-        if file.endswith(".osu")
-    ]
-    return sorted(
-        files,
-        key=lambda path: (
-            int(Path(path).stem) if Path(path).stem.isdecimal() else 2**63,
-            path,
-        ),
-    )
+    return [str(path) for path in find_maps(root_dir)]
 
 
 def build_features(
@@ -133,7 +122,7 @@ def build_features(
     sample_seed: int = 42,
     compiled: bool = True,
 ) -> dict[str, dict]:
-    print(f"Finding .osu files under {beatmaps_dir}...")
+    print(f"Finding raw beatmaps under {beatmaps_dir}...")
     files = find_beatmap_files(beatmaps_dir)
     if sample_size and len(files) > sample_size:
         files = sorted(random.Random(sample_seed).sample(files, sample_size))

@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     profile.add_argument("--proxy", action="store_true")
     profile.add_argument("--validate", action="store_true")
     profile.add_argument("--full", action="store_true")
+    parser.add_argument("--no-validation", action="store_true")
     parser.add_argument("--features-dir")
     parser.add_argument("--sample-size", type=int)
     parser.add_argument("--dataset-seed", type=int)
@@ -64,6 +65,10 @@ def load_config(args: argparse.Namespace) -> DictConfig:
     elif args.full:
         config.training.data.sample_size = None
         config.training.trainer.epochs = 20
+        config.data.val_split = 0
+
+    if args.no_validation:
+        config.data.val_split = 0
 
     if args.features_dir:
         config.data.features_dir = args.features_dir

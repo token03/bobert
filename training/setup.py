@@ -112,6 +112,7 @@ def create_trainer(
     quiet: bool = False,
 ) -> pl.Trainer:
     trainer_config = config.training.trainer
+    validation = config.data.val_split > 0
     csv_logger = CSVLogger(save_dir=runs_dir, name="", version=run_name)
     loggers = [
         csv_logger,
@@ -121,10 +122,14 @@ def create_trainer(
     if trainer_config.save_checkpoints:
         callbacks.append(
             ModelCheckpoint(
-                filename="epoch-{epoch:02d}-{val_loss:.4f}",
+                filename=(
+                    "epoch-{epoch:02d}-{val_loss:.4f}"
+                    if validation
+                    else "epoch-{epoch:02d}"
+                ),
                 auto_insert_metric_name=False,
                 save_top_k=1,
-                monitor="val_loss",
+                monitor="val_loss" if validation else None,
                 mode="min",
                 save_last=True,
                 enable_version_counter=False,
@@ -147,4 +152,5 @@ def create_trainer(
         log_every_n_steps=10,
         enable_model_summary=False,
         num_sanity_val_steps=0,
+        limit_val_batches=1.0 if validation else 0,
     )

@@ -109,6 +109,10 @@ export interface components {
             bpm: number | null;
             /** Total Length */
             total_length: number | null;
+            /** Play Count */
+            play_count: number | null;
+            /** Favourite Count */
+            favourite_count: number | null;
             /** Last Updated */
             last_updated: string | null;
             /** Ranked Date */
@@ -237,6 +241,10 @@ export interface components {
             bpm: number | null;
             /** Total Length */
             total_length: number | null;
+            /** Play Count */
+            play_count: number | null;
+            /** Favourite Count */
+            favourite_count: number | null;
             /** Last Updated */
             last_updated: string | null;
             /** Ranked Date */

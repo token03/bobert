@@ -344,9 +344,10 @@ class BobertDataModule(pl.LightningDataModule):
                 store, positions[train_idx], strains[train_idx], self.max_seq_len, True
             )
             self.train_datasets[mode] = train
-            self.val_datasets[mode] = BeatmapDataset(
-                store, positions[val_idx], strains[val_idx], self.max_seq_len, False
-            )
+            if len(val_idx):
+                self.val_datasets[mode] = BeatmapDataset(
+                    store, positions[val_idx], strains[val_idx], self.max_seq_len, False
+                )
             print(f"Fitting {mode} feature normalization statistics...")
             if mode == "std":
                 self.vector_stats = fit_stats(train.vectors())
@@ -379,4 +380,6 @@ class BobertDataModule(pl.LightningDataModule):
         return mixed_loader(self.train_datasets, self._collate(), self, True)
 
     def val_dataloader(self):
+        if not self.val_datasets:
+            return []
         return mixed_loader(self.val_datasets, self._collate(), self, False)

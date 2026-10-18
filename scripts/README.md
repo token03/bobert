@@ -17,17 +17,18 @@ Paths below describe the default workspace layout. Check each command's argument
 | Stage | Command | Inputs | Outputs / effect |
 | --- | --- | --- | --- |
 | Sources | `fetch-beatmaps` | Source IDs and metadata APIs | `data/beatmaps.parquet` |
-| Sources | `download-beatmaps` | Beatmap catalog and download sources | Local `.osu` files under `data/beatmaps/` |
+| Sources | `download-beatmaps` | Beatmap catalog and download sources | Local `.osu.zst` files under `data/beatmaps/` |
 | Sources | `import-beatmaps` | Local tar archive of `.osu` files | Imported beatmap files |
 | Sources | `fetch-beatmapsets` | Beatmap catalog and metadata APIs | `data/beatmapsets.parquet` |
 | Sources | `fetch-mapper` | Mapper selection and osu! API | Updates beatmap catalog and fetch progress |
 | Sources | `shard-beatmaps` | Local beatmap files | Beatmap archive shards |
+| Sources | `compress-beatmaps` | Existing `.osu` files | Verified `.osu.zst` copies; optional verified removal of originals |
 | Collections | `fetch-collection-vertices` | Collection sources | `data/collections/vertices.parquet` |
 | Collections | `fetch-collection-edges` | Collection vertices and source access | `data/collections/edges.parquet` |
 | Collections | `fetch-tournaments` | osu!collector tournament API | `data/collections/tournaments.parquet` |
-| Dataset | `build-features` | `.osu` files under `data/beatmaps/` | `{std,taiko,catch,mania}_features.bin` under `data/features/` |
+| Dataset | `build-features` | Raw beatmaps under `data/beatmaps/` | `{std,taiko,catch,mania}_features.bin` under `data/features/` |
 | Dataset | `build-strains` | std features, raw beatmaps, config, parsecore | `data/strains.parquet` |
-| Dataset | `build-dataset` | `.osu` files under `data/beatmaps/` | Parsed std hit objects as parquet under `data/dataset/`, for exploration; training does not read it |
+| Dataset | `build-dataset` | Raw beatmaps under `data/beatmaps/` | Parsed std hit objects as parquet under `data/dataset/`, for exploration; training does not read it |
 | Model | `pretrain` | std features, strains, `configs/default.yaml` | Run config, checkpoints, exported `model.safetensors` |
 | Model | `export-model` | Training checkpoint and matching config | Inference `model.safetensors` |
 | Model | `embed` | Exported encoder and std features | `embeddings.parquet`, including pooling metadata and density index |
@@ -56,9 +57,22 @@ Start with [`.env.example`](../.env.example). Credentials depend on the selected
 | Hosted Compose tunnel | `CLOUDFLARE_TUNNEL_TOKEN` |
 | `publish-run` | `HF_TOKEN` (write access); project `.env` takes precedence over the shell |
 
+## Raw beatmaps
+
+Downloads, archive imports, and sharding write lossless zstd level-9 files with checksums to `data/beatmaps/{00-99}/{beatmap_id}.osu.zst`. Raw-map readers also accept existing `.osu` files. When both copies exist, discovery and ID lookups prefer the compressed copy, avoiding duplicate feature rows. Rebuild workers decompress one map at a time in memory; no full-corpus extraction is needed. Training and embedding from feature files do not read raw maps.
+
+To migrate an existing corpus:
+
+```sh
+uv run compress-beatmaps
+uv run compress-beatmaps --verify-only --remove-originals
+```
+
+The first command retains all originals and verifies every compressed file byte-for-byte. It is resumable and refuses to overwrite a compressed copy that differs from its original. Run a sample feature build before the second command. Removal only starts after the entire corpus passes verification, and each original is verified again immediately before deletion. Do not run downloads, imports, or sharding against the corpus during migration.
+
 ## Feature files
 
-`build-features` parses every `.osu` file once and writes one file per mode to `data/features/`. Each map's float16 feature rows, capped at `--max-seq-len`, are stored as one zstd block, followed by an index of beatmap IDs, block offsets, token counts, and parsed object counts. Training and `embed` memory-map the file and decompress maps as they are read, so RAM use does not grow with the corpus. Filters such as star rating, sampling, and the validation split are applied at load time, so changing them needs no rebuild.
+`build-features` parses every raw beatmap once and writes one file per mode to `data/features/`. Each map's float16 feature rows, capped at `--max-seq-len`, are stored as one zstd block, followed by an index of beatmap IDs, block offsets, token counts, and parsed object counts. Training and `embed` memory-map the file and decompress maps as they are read, so RAM use does not grow with the corpus. Filters such as star rating, sampling, and the validation split are applied at load time, so changing them needs no rebuild.
 
 Each file also records its feature names and a hash of the feature code. Loading fails if the names differ from the current schema and warns if only the hash differs. Rebuild after changing features. Parse timeouts and errors are logged to `data/features/failures.jsonl`.
 
@@ -80,7 +94,7 @@ uv run pretrain --config configs/default.yaml --full -v my-run
 uv run embed -v my-run
 ```
 
-Use `pretrain --help` for proxy/validation modes, batch-size overrides, and checkpoint resume. The training runner saves the resolved configuration in the run directory. Keep it with the checkpoints: exporting a checkpoint requires its matching configuration and normalization statistics.
+`--full` trains on all selected maps without validation; `--no-validation` does the same for any other mode. Use `pretrain --help` for proxy/validation modes, batch-size overrides, and checkpoint resume. The training runner saves the resolved configuration in the run directory. Keep it with the checkpoints: exporting a checkpoint requires its matching configuration and normalization statistics.
 
 An export stores encoder/adapter weights and feature normalization tensors in `model.safetensors`, with model configuration and the feature schema in its header. `embeddings.parquet` carries its own corpus-centering statistics, adapter provenance, retrieval settings, and model checksum. There are no JSON sidecars. Re-embed after changing the encoder or adapter. Lightning `.ckpt` files remain training checkpoints; the inference loader accepts safetensors only.
 

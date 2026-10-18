@@ -1,6 +1,6 @@
 # BoBERT web
 
-React and TypeScript frontend for finding similar osu! beatmaps, filtering recommendations, and previewing audio. Built with Vite, TanStack Router, TanStack Query, and TanStack Form.
+React and TypeScript frontend for finding similar osu! beatmaps, filtering recommendations, and previewing audio. Built with Vite, TanStack Router, and TanStack Query.
 
 ## Development
 

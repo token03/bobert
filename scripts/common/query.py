@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import requests
+
+from core.raw import map_id, read_map, write_map
 from scripts.common.osu import (
     API_TIERS,
     DOWNLOAD_HEADERS,
@@ -15,7 +17,6 @@ from scripts.common.osu import (
     is_valid_osu_file,
 )
 from scripts.common.paths import PROJECT_ROOT
-
 
 DEFAULT_METADATA_PATH = PROJECT_ROOT / "data" / "beatmaps.parquet"
 DEFAULT_BEATMAPS_DIR = PROJECT_ROOT / "data" / "beatmaps"
@@ -142,7 +143,7 @@ def sharded_osu_path(beatmap_id: int, beatmaps_dir: Path) -> Path:
 def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -> Path:
     path = sharded_osu_path(beatmap_id, beatmaps_dir)
     if path.exists():
-        content = path.read_bytes()
+        content = read_map(path)
         if is_valid_osu_file(content):
             return path
 
@@ -157,8 +158,7 @@ def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -
         try:
             response = requests.get(url, headers=DOWNLOAD_HEADERS, timeout=15)
             if response.status_code == 200 and is_valid_osu_file(response.content):
-                path.write_bytes(response.content)
-                return path
+                return write_map(path, response.content)
             errors.append(f"{tier['name']}: HTTP {response.status_code}")
         except requests.exceptions.RequestException as exc:
             errors.append(f"{tier['name']}: {exc}")
@@ -196,11 +196,11 @@ class LazyEmbedder:
     def embed_osu(self, path: Path) -> np.ndarray:
         self.load()
         try:
-            beatmap_id = int(path.stem)
+            beatmap_id = int(map_id(path))
         except ValueError:
             beatmap_id = None
         return self.model.embed_osu_bytes(
-            path.read_bytes(), self.vector_stats, beatmap_id=beatmap_id
+            read_map(path), self.vector_stats, beatmap_id=beatmap_id
         )
 
 

@@ -638,3 +638,41 @@ export function findSetId(corpus: SearchCorpus, beatmapId: number): number | nul
   const index = corpus.mapIds.indexOf(beatmapId)
   return index < 0 ? null : corpus.mapSetIds[index]
 }
+
+export type CatalogStat = 'stars' | 'ar' | 'cs' | 'bpm' | 'length'
+export type CatalogHistogram = { resolution: number; counts: Uint32Array }
+export type CatalogStats = Record<CatalogStat, CatalogHistogram>
+
+function histogram(values: Uint32Array, count: number, divisor: number, resolution: number, max: number): CatalogHistogram {
+  const buckets = Math.round(max / resolution)
+  const counts = new Uint32Array(buckets + 1)
+  const scale = divisor * resolution
+  for (let index = 0; index < count; index++) {
+    counts[Math.min(buckets, Math.floor(values[index] / scale + 1e-6))]++
+  }
+  return { resolution, counts }
+}
+
+export function catalogStats(corpus: SearchCorpus): CatalogStats {
+  const count = corpus.diffIds.length
+  return {
+    stars: histogram(corpus.diffStars, count, 100, 0.1, 15),
+    ar: histogram(corpus.diffAr, count, 10, 0.1, 11),
+    cs: histogram(corpus.diffCs, count, 10, 0.1, 11),
+    bpm: histogram(corpus.diffBpm, count, 10, 1, 400),
+    length: histogram(corpus.diffLength, count, 1, 1, 1800),
+  }
+}
+
+export function beatmapTitle(corpus: SearchCorpus, beatmapId: number): string | null {
+  const diff = corpus.diffIds.indexOf(beatmapId)
+  if (diff < 0) return null
+  let low = 0
+  let high = corpus.setDiffStart.length - 1
+  while (low < high) {
+    const middle = (low + high + 1) >>> 1
+    if (corpus.setDiffStart[middle] <= diff) low = middle
+    else high = middle - 1
+  }
+  return corpus.strings[corpus.setTitle[low]]
+}

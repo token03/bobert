@@ -11,6 +11,8 @@ data/*.pt
 data/**/*.json
 data/**/*.txt
 data/**/*.osu
+data/**/*.osu.zst
+data/beatmaps/**/*.tmp
 data/**/*.parquet
 data/**/*.csv
 data/*.tar.gz

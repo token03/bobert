@@ -76,6 +76,18 @@
   padding: var(--space-xl) var(--space-4xl);
 }
 
+.intro[data-entering] {
+  animation: intro-in 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes intro-in {
+  from {
+    opacity: 0;
+    clip-path: inset(0 100% 0 0);
+    transform: translateX(calc(var(--space-5xl) * -1));
+  }
+}
+
 .intro h1 {
   flex-shrink: 0;
   margin: 0;
@@ -397,7 +409,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pick-dice[data-rolling='true'] {
+  .pick-dice[data-rolling='true'],
+  .intro[data-entering] {
     animation-duration: 1ms;
   }
 

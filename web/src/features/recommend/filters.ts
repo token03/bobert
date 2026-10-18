@@ -1,176 +1,46 @@
 import { z } from 'zod'
 import { parseBeatmapIds } from '../../shared/beatmapIds'
 import type { RecommendFilters, RecommendRequest } from '../../shared/types'
+import { rangeFilters } from './rangeFilters'
+import type { RangeParam } from './rangeFilters'
 
 export const maxBeatmaps = 10
+export const topK = 100
+export const statuses = ['ranked', 'loved', 'unranked'] as const
 
-export const defaultFilters = {
-  beatmap: '',
-  topK: '100',
-  minSr: '',
-  maxSr: '',
-  minBpm: '',
-  maxBpm: '',
-  minLength: '',
-  maxLength: '',
-  minAr: '',
-  maxAr: '',
-  minCs: '',
-  maxCs: '',
-  minOd: '0',
-  maxOd: '10',
-  minHp: '0',
-  maxHp: '10',
-  status: '',
-  minDate: '',
-  maxDate: '',
-  excludeSameSet: true,
-}
-
-const monthSchema = z.union([
-  z.literal(''),
-  z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/),
-])
-
-export const recommendFormSchema = z.object({
-  beatmap: z.string()
-    .refine((value) => parseBeatmapIds(value) !== null, 'Enter at least one beatmap ID or beatmap link.')
-    .refine((value) => (parseBeatmapIds(value)?.length ?? 0) <= maxBeatmaps, `Use up to ${maxBeatmaps} beatmaps.`),
-  topK: z.string().refine((value) => {
-    const number = Number(value)
-    return Number.isSafeInteger(number) && number > 0
-  }, 'Rows must be a positive whole number.'),
-  minSr: z.string(),
-  maxSr: z.string(),
-  minBpm: z.string(),
-  maxBpm: z.string(),
-  minLength: z.string(),
-  maxLength: z.string(),
-  minAr: z.string(),
-  maxAr: z.string(),
-  minCs: z.string(),
-  maxCs: z.string(),
-  minOd: z.string(),
-  maxOd: z.string(),
-  minHp: z.string(),
-  maxHp: z.string(),
-  status: z.string(),
-  minDate: monthSchema,
-  maxDate: monthSchema,
-  excludeSameSet: z.boolean(),
-})
-
-export type RecommendFormValues = z.infer<typeof recommendFormSchema>
-
-const searchString = (fallback: string) => z.preprocess(
-  (value) => value === undefined || value === null ? fallback : String(value),
-  z.string(),
-).catch(fallback)
+const monthSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional().catch(undefined)
+const numberSchema = z.number().finite().nonnegative().optional().catch(undefined)
 
 export const recommendSearchSchema = z.object({
-  beatmap: searchString(defaultFilters.beatmap),
-  topK: searchString(defaultFilters.topK),
-  minSr: searchString(defaultFilters.minSr),
-  maxSr: searchString(defaultFilters.maxSr),
-  minBpm: searchString(defaultFilters.minBpm),
-  maxBpm: searchString(defaultFilters.maxBpm),
-  minLength: searchString(defaultFilters.minLength),
-  maxLength: searchString(defaultFilters.maxLength),
-  minAr: searchString(defaultFilters.minAr),
-  maxAr: searchString(defaultFilters.maxAr),
-  minCs: searchString(defaultFilters.minCs),
-  maxCs: searchString(defaultFilters.maxCs),
-  minOd: searchString(defaultFilters.minOd),
-  maxOd: searchString(defaultFilters.maxOd),
-  minHp: searchString(defaultFilters.minHp),
-  maxHp: searchString(defaultFilters.maxHp),
-  status: z.preprocess((value) => {
-    const status = value === undefined || value === null ? defaultFilters.status : String(value)
-    return {
-      '1': 'ranked',
-      '2': 'ranked',
-      '3': 'ranked',
-      '4': 'loved',
-      '-2': 'unranked',
-      '-1': 'unranked',
-      '0': 'unranked',
-    }[status] ?? status
-  }, z.string()).catch(defaultFilters.status),
-  minDate: z.preprocess(
-    (value) => value === undefined || value === null ? defaultFilters.minDate : String(value),
-    monthSchema,
-  ).catch(defaultFilters.minDate),
-  maxDate: z.preprocess(
-    (value) => value === undefined || value === null ? defaultFilters.maxDate : String(value),
-    monthSchema,
-  ).catch(defaultFilters.maxDate),
-  excludeSameSet: z.preprocess(
-    (value) => value === undefined || value === null ? defaultFilters.excludeSameSet : value === true || value === 'true',
-    z.boolean(),
-  ).catch(defaultFilters.excludeSameSet),
+  beatmap: z.preprocess((value) => value === undefined || value === null ? '' : String(value), z.string()).catch(''),
+  ...Object.fromEntries(rangeFilters.flatMap((filter) => filter.params.map((param) => [param, numberSchema]))) as Record<RangeParam, typeof numberSchema>,
+  status: z.enum(statuses).optional().catch(undefined),
+  minDate: monthSchema,
+  maxDate: monthSchema,
 })
 
-export function buildRecommendRequest(values: RecommendFormValues) {
+export type RecommendSearch = z.infer<typeof recommendSearchSchema>
+
+export const defaultSearch: RecommendSearch = { beatmap: '' }
+
+export function clearFilters(search: RecommendSearch): RecommendSearch {
+  return { beatmap: search.beatmap }
+}
+
+export function buildRecommendRequest(search: RecommendSearch): RecommendRequest {
   const filters: RecommendFilters = {
-    min_sr: numericOrNull(values.minSr),
-    max_sr: numericOrNull(values.maxSr),
-    min_ar: numericOrNull(values.minAr),
-    max_ar: numericOrNull(values.maxAr),
-    min_cs: numericOrNull(values.minCs),
-    max_cs: numericOrNull(values.maxCs),
-    min_accuracy: numericOrNull(values.minOd),
-    max_accuracy: numericOrNull(values.maxOd),
-    min_drain: numericOrNull(values.minHp),
-    max_drain: numericOrNull(values.maxHp),
-    status: values.status || null,
-    min_date: values.minDate || null,
-    max_date: values.maxDate || null,
-    exclude_same_set: values.excludeSameSet,
+    status: search.status ?? null,
+    min_date: search.minDate ?? null,
+    max_date: search.maxDate ?? null,
+    exclude_same_set: true,
   }
-  const minBpmValue = numericOrNull(values.minBpm)
-  const maxBpmValue = numericOrNull(values.maxBpm)
-  const minLengthValue = numericOrNull(values.minLength)
-  const maxLengthValue = numericOrNull(values.maxLength)
-
-  if (minBpmValue !== null) {
-    filters.min_bpm = minBpmValue
+  for (const { params, api } of rangeFilters) {
+    filters[api[0]] = search[params[0]] ?? null
+    filters[api[1]] = search[params[1]] ?? null
   }
-  if (maxBpmValue !== null) {
-    filters.max_bpm = maxBpmValue
-  }
-  if (minLengthValue !== null) {
-    filters.min_length = minLengthValue
-  }
-  if (maxLengthValue !== null) {
-    filters.max_length = maxLengthValue
-  }
-
   return {
-    beatmap_ids: parseBeatmapIds(values.beatmap)!,
-    top_k: Number(values.topK),
+    beatmap_ids: parseBeatmapIds(search.beatmap)!,
+    top_k: topK,
     filters,
-  } satisfies RecommendRequest
-}
-
-export function normalizeBeatmapInput(value: string): string {
-  return parseBeatmapIds(value)?.join(',') ?? value.trim()
-}
-
-export function numericOrNull(value: string): number | null {
-  if (value.trim() === '') {
-    return null
   }
-
-  const number = Number(value)
-  return Number.isFinite(number) ? number : null
-}
-
-export function sliderValue(value: string, fallback: number): number {
-  const number = Number(value)
-  return Number.isFinite(number) ? number : fallback
-}
-
-export function clampSliderValue(value: string, min: number, max: number): string {
-  const number = Number(value)
-  return Math.min(max, Math.max(min, number)).toFixed(1)
 }

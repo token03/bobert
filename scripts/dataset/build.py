@@ -21,6 +21,7 @@ from core.osu import (
     RawBeatmap,
     parse_osu_file,
 )
+from core.raw import find_maps, map_id
 
 MAX_BUFFER_HITOBJECT_ROWS = 100_000
 MAX_OBJECTS_PER_MAP = 16_384
@@ -293,14 +294,9 @@ def create_dataset(
     os.makedirs(os.path.join(temp_dir, "beatmaps"))
     os.makedirs(os.path.join(temp_dir, "hitobjects"))
 
-    print("Finding all .osu files...")
-    all_files = [
-        os.path.join(root, file)
-        for root, _, files in os.walk(root_dir)
-        for file in files
-        if file.endswith(".osu")
-    ]
-    print(f"Found {len(all_files)} total .osu files.")
+    print("Finding all raw beatmaps...")
+    all_files = [str(path) for path in find_maps(root_dir)]
+    print(f"Found {len(all_files)} total raw beatmaps.")
     if sample_size and len(all_files) > sample_size:
         rng = random.Random(sample_seed)
         files_to_process = rng.sample(all_files, sample_size)
@@ -308,7 +304,7 @@ def create_dataset(
         files_to_process = all_files
     files_to_process.sort(
         key=lambda path: (
-            int(Path(path).stem) if Path(path).stem.isdecimal() else 2**63,
+            int(map_id(path)) if map_id(path).isdecimal() else 2**63,
             path,
         )
     )

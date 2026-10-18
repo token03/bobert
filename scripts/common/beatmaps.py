@@ -14,6 +14,7 @@ from core.osu import (
     OBJECT_TYPE_SPINNER,
     parse_osu_file,
 )
+from core.raw import map_id, read_map
 from scripts.common.api import beatconnect_api_token, ossapi_request
 from scripts.common.io import append_dedup_parquet
 
@@ -156,8 +157,8 @@ def beatconnect_beatmap_to_dict(beatmap: dict, beatmapset: dict) -> dict:
 
 
 def osu_file_to_dict(path: Path) -> dict:
-    content = path.read_bytes()
-    beatmap = parse_osu_file(str(path), _content=content, _beatmap_id=int(path.stem))
+    content = read_map(path)
+    beatmap = parse_osu_file(str(path), _content=content, _beatmap_id=int(map_id(path)))
     if beatmap is None or not len(beatmap.hit_objects):
         raise ValueError(f"Could not parse beatmap metadata from {path}")
 

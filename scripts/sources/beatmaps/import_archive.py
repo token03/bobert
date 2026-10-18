@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 
 import pandas as pd
 
+from core.raw import write_map
 from scripts.common.osu import get_sharded_path, is_valid_osu_file
 from scripts.common.paths import BEATMAPS_PATH, DATA_DIR
 from scripts.sources.beatmaps.metadata import fetch_missing_beatmaps
@@ -130,9 +131,7 @@ def import_archive(
                 imported += 1
                 added_modes[mode] += 1
                 if not dry_run:
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    with destination.open("xb") as target:
-                        target.write(content)
+                    write_map(destination, content)
 
             if mode == 0 and beatmap_id not in known_ids:
                 refresh_ids.add(beatmap_id)
