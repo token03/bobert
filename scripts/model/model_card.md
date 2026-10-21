@@ -8,41 +8,30 @@ tags:
 
 # BoBERT · $revision
 
-Dense osu!standard beatmap representations from `.osu` hit-object sequences.
-The encoder was pretrained on roughly 500,000 beatmaps; collection-derived adaptation
-refines the embeddings for recommendation and similarity search.
+Hit-object sequence encoders and retrieval indices for osu! modes. Each mode has its own tokenizer, encoder weights, centering statistics and optional collection-trained linear adapter.
 
-[Source and architecture](https://github.com/token03/bobert) · [Live recommender](https://bobert-web.pages.dev/)
+| Mode | Variant | Maps | Dimensions | Layers |
+|---|---|---:|---:|---:|
+$rows
 
-## Release
+The release manifest selects one model/index pair per mode. Base and adapted files use the same mode directory; adapted files have an `.a` suffix. The index records its model's SHA256 checksum. Catalogs are shared in `data/`.
 
-- Embeddings: $count beatmaps, $dimensions dimensions.
-- Encoder: $layers layers, $heads heads, $max_seq_len hit-object limit.
-- Index generated: $generated_at.
-- Adapter: $adapter.
-- Export workspace: `$commit`.
-
-## Download
-
-From the source checkout:
+Export workspace: `$commit`.
 
 ```sh
-uv run --no-default-groups --group serve fetch-run --repo $repo --revision $revision
+uv run fetch-run --repo $repo --revision $revision
 docker compose up --build api
 ```
 
-To inspect the model directly:
+From a source checkout:
 
 ```python
 import torch
 from core.model import BobertEncoder
+from core.artifacts import resolve_artifacts
 
-model, stats = BobertEncoder.from_pretrained("model.safetensors", torch.device("cpu"))
+artifacts = resolve_artifacts("runs/current", "mania")
+model = BobertEncoder.from_pretrained(artifacts.model, torch.device("cpu"))
 ```
 
-`model.safetensors` contains the encoder, adapter, normalization statistics, and model configuration.
-`embeddings.parquet` contains beatmap IDs, vectors, densities, and embedded pooling/retrieval metadata.
-The index records its model's SHA-256 checksum. Keep the two files together for online queries.
-`data/` contains the metadata and strain catalogs required by the API.
-
-See the source repository for the training pipeline, acknowledgements, limitations and evaluation tools.
+[Source, training and evaluation](https://github.com/token03/bobert)

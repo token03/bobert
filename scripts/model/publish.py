@@ -6,22 +6,25 @@ from pathlib import Path
 from string import Template
 
 from dotenv import dotenv_values
-from huggingface_hub import CommitOperationAdd, HfApi
+from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
 from core.artifacts import (
     CATALOGS,
     INDEX_NAME,
     MODEL_NAME,
+    RUN_MANIFEST,
     model_config,
     validate_catalogs,
     validate_index,
+    validate_run,
 )
+from core.modes import MODES
 from scripts.common.paths import DATA_DIR, PROJECT_ROOT, RUNS_DIR
 
 CARD_TEMPLATE = Path(__file__).with_name("model_card.md")
 
 
-def build_card(repo: str, revision: str, metadata: dict, config: dict) -> str:
+def build_card(repo: str, revision: str, rows: list[str]) -> str:
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=PROJECT_ROOT,
@@ -29,22 +32,8 @@ def build_card(repo: str, revision: str, metadata: dict, config: dict) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
-    adapter = (
-        "identity (pretrained encoder)"
-        if metadata.get("adapter") is None
-        else "collection-trained linear projection"
-    )
     return Template(CARD_TEMPLATE.read_text()).substitute(
-        repo=repo,
-        revision=revision,
-        count=f"{metadata['count']:,}",
-        dimensions=config["d_model"],
-        layers=config["n_layers"],
-        heads=config["n_heads"],
-        max_seq_len=f"{config['max_seq_len']:,}",
-        generated_at=metadata["generated_at"],
-        adapter=adapter,
-        commit=commit,
+        repo=repo, revision=revision, rows="\n".join(rows), commit=commit
     )
 
 
@@ -71,29 +60,48 @@ def main() -> int:
             "version and revision must contain only letters, numbers, dots, dashes, and underscores"
         )
     run = RUNS_DIR / args.version
-    metadata = validate_index(run / INDEX_NAME, run / MODEL_NAME)
+    artifacts = validate_run(run)
     validate_catalogs(args.data_dir)
-    config = model_config(run / MODEL_NAME)["model_args"]
-    files = {MODEL_NAME: run / MODEL_NAME, INDEX_NAME: run / INDEX_NAME}
+    files = {RUN_MANIFEST: run / RUN_MANIFEST}
+    cards = []
+    for mode, selected in artifacts.items():
+        metadata = validate_index(selected.index, selected.model)
+        config = model_config(selected.model)["model_args"]
+        for path in (selected.model, selected.index, selected.config):
+            if path.is_file():
+                files[str(path.relative_to(run))] = path
+        cards.append(
+            f"| {mode} | {selected.variant} | {metadata['count']:,} | {config['d_model']} | {config['n_layers']} |"
+        )
     files.update({f"data/{name}": args.data_dir / name for name in CATALOGS})
-    if (run / "training.yaml").is_file():
-        files["training.yaml"] = run / "training.yaml"
+    for path in (PROJECT_ROOT / "web/public").glob("search-*.bin"):
+        if path.stem.removeprefix("search-") in artifacts:
+            files[path.name] = path
     api = HfApi(token=env.get("HF_TOKEN") or None)
     api.create_repo(args.repo, repo_type="model", exist_ok=True)
     if revision in {tag.name for tag in api.list_repo_refs(args.repo).tags}:
         parser.error(f"release tag already exists: {revision}")
+    obsolete = [
+        name
+        for name in api.list_repo_files(args.repo)
+        if name not in files
+        and (
+            name in {MODEL_NAME, INDEX_NAME, "training.yaml"}
+            or name.split("/")[0] in MODES
+            or name.startswith("search-")
+        )
+    ]
     result = api.create_commit(
         args.repo,
         operations=[
+            *(CommitOperationDelete(path_in_repo=name) for name in obsolete),
             *(
                 CommitOperationAdd(path_in_repo=name, path_or_fileobj=path)
                 for name, path in files.items()
             ),
             CommitOperationAdd(
                 path_in_repo="README.md",
-                path_or_fileobj=build_card(
-                    args.repo, revision, metadata, config
-                ).encode(),
+                path_or_fileobj=build_card(args.repo, revision, cards).encode(),
             ),
         ],
         commit_message=f"Release {revision}",

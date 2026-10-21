@@ -9,10 +9,11 @@ from huggingface_hub import HfApi, snapshot_download
 
 from core.artifacts import (
     CATALOGS,
-    INDEX_NAME,
-    MODEL_NAME,
+    RUN_MANIFEST,
+    read_run,
+    resolve_artifacts,
     validate_catalogs,
-    validate_index,
+    validate_run,
 )
 from scripts.common.paths import DATA_DIR, PROJECT_ROOT, RUNS_DIR
 
@@ -56,15 +57,24 @@ def main() -> int:
         revision=info.sha,
         token=token,
         local_dir=stage,
-        allow_patterns=[
-            MODEL_NAME,
-            INDEX_NAME,
-            *(f"data/{name}" for name in CATALOGS),
-            "training.yaml",
-        ],
+        allow_patterns=[RUN_MANIFEST],
+    )
+    patterns = []
+    for mode in read_run(stage):
+        selected = resolve_artifacts(stage, mode)
+        patterns.extend(
+            str(path.relative_to(stage))
+            for path in (selected.model, selected.index, selected.config)
+        )
+    snapshot_download(
+        args.repo,
+        revision=info.sha,
+        token=token,
+        local_dir=stage,
+        allow_patterns=[*patterns, *(f"data/{name}" for name in CATALOGS)],
     )
     shutil.rmtree(stage / ".cache", ignore_errors=True)
-    validate_index(stage / INDEX_NAME, stage / MODEL_NAME)
+    validate_run(stage)
     validate_catalogs(stage / "data")
     data_dir = args.data_dir.expanduser().resolve()
     data_dir.mkdir(parents=True, exist_ok=True)

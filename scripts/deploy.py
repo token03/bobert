@@ -13,9 +13,11 @@ from huggingface_hub.errors import HfHubHTTPError
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Deploy a published BoBERT release.")
+    parser = argparse.ArgumentParser(
+        description="Deploy a published BoBERT release; the VPS downloads artifacts directly from Hugging Face."
+    )
     parser.add_argument(
-        "-v", "--version", required=True, help="Release tag, e.g. v13.2"
+        "-v", "--version", required=True, help="Published release tag, e.g. v15"
     )
     root = Path(__file__).resolve().parents[1]
     env = dotenv_values(root / ".env")
