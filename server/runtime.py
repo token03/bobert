@@ -17,21 +17,24 @@ import polars as pl
 import torch
 
 from core import retrieval
-from core.artifacts import MODEL_NAME, index_id, read_index
+from core.artifacts import (
+    RunArtifacts,
+    from_bfloat16,
+    index_id,
+    read_index,
+    to_bfloat16,
+    validate_run,
+)
 from core.model import BobertEncoder, EmbeddingTransform
+from core.modes import MODES
 
 RUN_DIR = Path(os.getenv("BOBERT_RUN_DIR", "/app/runs/current"))
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
 CACHE_DB = Path(os.getenv("BOBERT_CACHE_DB", "/app/cache/runtime.sqlite"))
-MODEL_PATH = Path(os.getenv("BOBERT_MODEL_PATH", RUN_DIR / MODEL_NAME))
-EMBEDDINGS_PATH = Path(
-    os.getenv("BOBERT_EMBEDDINGS_PATH", RUN_DIR / "embeddings.parquet")
-)
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 STRAINS_PATH = DATA_DIR / "strains.parquet"
 FILTERED_SCORE_THRESHOLD = 0.1
-FILTERED_SCORE_BATCH_SIZE = 8192
 DEFAULT_COUNTS = (15, 40, 30, 15)
 DEFAULT_ERA_STARTS = (2018, 2021, 2023)
 DEFAULT_FAVOURITE_PERCENTILE = 0.75
@@ -128,7 +131,7 @@ class SQLiteCache:
             ).fetchone()
         if row is None:
             return None
-        vector = np.frombuffer(row[0], dtype=np.float32).copy()
+        vector = from_bfloat16(np.frombuffer(row[0], dtype=np.uint16))
         if vector.shape != (self.embedding_dim,):
             return None
         return CachedEmbedding(int(beatmap_id), vector, json.loads(row[1] or "{}"))
@@ -136,7 +139,7 @@ class SQLiteCache:
     def upsert(
         self, beatmap_id: int, embedding: np.ndarray, metadata: dict[str, Any]
     ) -> None:
-        vector = np.asarray(embedding, dtype=np.float32)
+        vector = to_bfloat16(embedding)
         if vector.shape != (self.embedding_dim,):
             raise ValueError(f"invalid embedding shape: {vector.shape}")
         with self._connect() as conn:
@@ -172,27 +175,41 @@ class SQLiteCache:
             )
 
 
-class Runtime:
-    def __init__(self) -> None:
-        missing = [
-            str(path)
-            for path in (
-                BEATMAPS_PATH,
-                BEATMAPSETS_PATH,
-                STRAINS_PATH,
-                EMBEDDINGS_PATH,
-                MODEL_PATH,
+class Catalog:
+    def __init__(self):
+        strains = (
+            pl.read_parquet(
+                STRAINS_PATH, columns=["beatmap_id", "seq_len", "actual_stars"]
             )
-            if not path.exists()
-        ]
-        if missing:
-            raise RuntimeError(f"missing required data files: {missing}")
-
-        index = read_index(EMBEDDINGS_PATH, model=MODEL_PATH)
-        self.static_ids = [int(value) for value in index.ids]
-        self.static_embeddings = np.ascontiguousarray(
-            index.embeddings, dtype=np.float32
+            .filter(pl.col("actual_stars").is_not_null())
+            .sort("seq_len", descending=True)
+            .unique("beatmap_id", keep="first")
+            .sort("beatmap_id")
         )
+        self.strain_ids = strains["beatmap_id"].to_numpy()
+        self.strain_stars = strains["actual_stars"].to_numpy()
+        self.beatmaps = (
+            pl.read_parquet(BEATMAPS_PATH, columns=SEARCH_COLUMNS)
+            .join(
+                strains.select(pl.col("beatmap_id").alias("id"), "actual_stars"),
+                on="id",
+                how="left",
+            )
+            .with_columns(
+                pl.coalesce("actual_stars", "difficulty_rating").alias(
+                    "difficulty_rating"
+                )
+            )
+            .drop("actual_stars")
+        )
+
+
+class Runtime:
+    def __init__(self, artifacts: RunArtifacts, catalog: Catalog):
+        self.mode = artifacts.mode
+        index = read_index(artifacts.index, model=artifacts.model)
+        self.static_ids = [int(value) for value in index.ids]
+        self.static_embeddings = np.ascontiguousarray(index.embeddings)
         self.static_embeddings.flags.writeable = False
         self.static_penalty = np.negative(
             retrieval.density_term(
@@ -209,37 +226,14 @@ class Runtime:
             beatmap_id: index for index, beatmap_id in enumerate(self.static_ids)
         }
 
-        strains = (
-            pl.read_parquet(
-                STRAINS_PATH,
-                columns=["beatmap_id", "seq_len", "actual_stars"],
-            )
-            .filter(pl.col("actual_stars").is_not_null())
-            .sort("seq_len", descending=True)
-            .unique("beatmap_id", keep="first")
-            .sort("beatmap_id")
-        )
-        self.strain_ids = strains["beatmap_id"].to_numpy()
-        self.strain_stars = strains["actual_stars"].to_numpy()
-        beatmaps = (
-            pl.read_parquet(BEATMAPS_PATH, columns=SEARCH_COLUMNS)
-            .join(
-                strains.select(
-                    pl.col("beatmap_id").alias("id"),
-                    pl.col("actual_stars"),
-                ),
-                on="id",
-                how="left",
-            )
-            .with_columns(
-                pl.coalesce("actual_stars", "difficulty_rating").alias(
-                    "difficulty_rating"
-                )
-            )
-            .drop("actual_stars")
-        )
+        self.strain_ids = catalog.strain_ids
+        self.strain_stars = catalog.strain_stars
+        beatmaps = catalog.beatmaps.filter(pl.col("mode") == MODES[self.mode].label)
         defaults = (
-            beatmaps.filter(pl.col("status").is_in(["1", "4"]), pl.col("mode") == "osu")
+            beatmaps.filter(
+                pl.col("status").is_in(["1", "4"]),
+                pl.col("mode") == MODES[index.metadata["mode"]].label,
+            )
             .sort("difficulty_rating", descending=True)
             .unique("beatmapset_id", keep="first", maintain_order=True)
             .join(pl.DataFrame({"id": self.static_ids}), on="id", how="semi")
@@ -273,6 +267,7 @@ class Runtime:
             )
             .sort("_static_index")
             .drop("_static_index")
+            .with_columns(pl.lit(MODES[self.mode].label).alias("mode"))
         )
         self.static_id_values = np.asarray(self.static_ids, dtype=np.int64)
         self.static_set_ids = (
@@ -362,6 +357,17 @@ class Runtime:
             .to_numpy()
             .astype(np.int64, copy=False)
         )
+        self.fallback_defaults = [
+            self.public_summary(int(row["id"]), row)
+            for row in beatmaps.join(
+                pl.DataFrame({"id": self.static_ids}), on="id", how="semi"
+            )
+            .filter(pl.col("status").is_in(["1", "4", "ranked", "loved"]))
+            .sort("favourite_count", descending=True, nulls_last=True)
+            .unique("beatmapset_id", keep="first", maintain_order=True)
+            .head(500)
+            .iter_rows(named=True)
+        ]
         self.default_pools = [
             [
                 [
@@ -377,13 +383,28 @@ class Runtime:
         ]
         del beatmaps
         self.inference_semaphore = threading.Semaphore(1)
-        self.cache = SQLiteCache(CACHE_DB, self.embedding_dim, index_id(index.metadata))
-
-        device = torch.device("cpu")
-        self.model, self.vector_stats = BobertEncoder.from_pretrained(
-            MODEL_PATH, device
+        cache_path = CACHE_DB.with_name(f"{CACHE_DB.stem}-{self.mode}{CACHE_DB.suffix}")
+        self.cache = SQLiteCache(
+            cache_path, self.embedding_dim, index_id(index.metadata)
         )
-        self.model.to_inference(device)
+
+        self.model_path = artifacts.model
+        self._model = None
+
+    @property
+    def model(self) -> BobertEncoder:
+        if self._model is None:
+            device = torch.device("cpu")
+            self._model = BobertEncoder.from_pretrained(
+                self.model_path, device
+            ).to_inference(device)
+        return self._model
+
+    def validate_source(self, beatmap_id: int, metadata: dict[str, Any]) -> None:
+        if metadata_mode(metadata) != self.mode:
+            raise ValueError(
+                f"beatmap {beatmap_id} belongs to {metadata_mode(metadata)}, not {self.mode}"
+            )
 
     def default_summaries(self, seed: int | None = None) -> list[dict[str, Any]]:
         rng = random.Random(seed)
@@ -397,6 +418,18 @@ class Runtime:
                     if queue and picked < count:
                         results.append(queue.pop())
                         picked += 1
+        if len(results) < sum(DEFAULT_COUNTS):
+            used = {row["beatmapset_id"] for row in results}
+            remaining = [
+                row
+                for row in self.fallback_defaults
+                if row["beatmapset_id"] not in used
+            ]
+            results.extend(
+                rng.sample(
+                    remaining, min(len(remaining), sum(DEFAULT_COUNTS) - len(results))
+                )
+            )
         rng.shuffle(results)
         return results
 
@@ -405,9 +438,9 @@ class Runtime:
     ) -> tuple[np.ndarray, dict[str, Any]] | None:
         static_index = self.static_index.get(beatmap_id)
         if static_index is not None:
-            return self.static_embeddings[static_index], self.static_metadata.row(
-                static_index, named=True
-            )
+            return from_bfloat16(
+                self.static_embeddings[static_index]
+            ), self.static_metadata.row(static_index, named=True)
         return None
 
     def cached_embedding(
@@ -424,11 +457,10 @@ class Runtime:
     def infer_and_store(
         self, beatmap_id: int, content: bytes, metadata: dict[str, Any]
     ) -> np.ndarray:
+        self.validate_source(beatmap_id, metadata)
         with self.inference_semaphore:
-            raw = self.model.embed_osu_bytes(
-                content, self.vector_stats, beatmap_id=beatmap_id
-            )
-        transformed = self._transform(raw)
+            raw = self.model.embed_osu_bytes(content, beatmap_id=beatmap_id)
+        transformed = from_bfloat16(to_bfloat16(self._transform(raw)))
         self.cache.upsert(beatmap_id, transformed, metadata)
         return transformed
 
@@ -523,13 +555,9 @@ class Runtime:
             len(eligible_indices) <= len(self.static_ids) * FILTERED_SCORE_THRESHOLD
         )
         if score_filtered:
-            scores = np.empty(len(eligible_indices), dtype=np.float32)
-            for start in range(0, len(eligible_indices), FILTERED_SCORE_BATCH_SIZE):
-                stop = min(start + FILTERED_SCORE_BATCH_SIZE, len(eligible_indices))
-                batch_indices = eligible_indices[start:stop]
-                scores[start:stop] = (
-                    self.static_embeddings[batch_indices] @ query_embedding
-                )
+            scores = retrieval.bfloat16_scores(
+                self.static_embeddings, query_embedding, eligible_indices
+            )
             scores += self.static_penalty[eligible_indices]
             groups = self.static_set_groups[eligible_indices]
             best_scores = np.full(
@@ -541,7 +569,9 @@ class Runtime:
             np.maximum.at(best_positions, groups[winning], np.flatnonzero(winning))
             available_groups = np.flatnonzero(best_positions >= 0)
         else:
-            ranking_scores = self.static_embeddings @ query_embedding
+            ranking_scores = retrieval.bfloat16_scores(
+                self.static_embeddings, query_embedding
+            )
             ranking_scores += self.static_penalty
             ranking_scores[~eligible] = -np.inf
             best_scores = np.maximum.reduceat(
@@ -619,9 +649,59 @@ class Runtime:
         return {"beatmap": json_value(beatmap), "beatmapset": json_value(beatmapset)}
 
 
+class RuntimeRegistry:
+    def __init__(self):
+        selected = validate_run(RUN_DIR)
+        catalog = Catalog()
+        self.source_modes = catalog.beatmaps.select("id", "mode")
+        self.runtimes = {}
+        inference_semaphore = threading.Semaphore(1)
+        for mode, artifacts in selected.items():
+            self.runtimes[mode] = Runtime(artifacts, catalog)
+            self.runtimes[mode].inference_semaphore = inference_semaphore
+            catalog.beatmaps = catalog.beatmaps.filter(
+                pl.col("mode") != MODES[mode].label
+            )
+
+    def validate_sources(self, mode: str, ids: list[int]) -> None:
+        known = self.source_modes.filter(pl.col("id").is_in(ids))
+        wrong = known.filter(pl.col("mode") != MODES[mode].label)
+        if wrong.height:
+            row = wrong.row(0, named=True)
+            raise ValueError(
+                f"beatmap {row['id']} belongs to {metadata_mode(row)}, not {mode}"
+            )
+
+    def source_mode(self, beatmap_id: int) -> str | None:
+        rows = self.source_modes.filter(pl.col("id") == beatmap_id)
+        if rows.height:
+            return metadata_mode(rows.row(0, named=True))
+        for mode, runtime in self.runtimes.items():
+            if beatmap_id in runtime.static_index:
+                return mode
+            cached = runtime.cache.get(beatmap_id)
+            if cached is not None:
+                return metadata_mode(cached.metadata)
+        return None
+
+    def get(self, mode: str) -> Runtime:
+        if mode not in self.runtimes:
+            raise ValueError(f"mode {mode} is unavailable")
+        return self.runtimes[mode]
+
+
+def metadata_mode(metadata: dict[str, Any]) -> str:
+    value = metadata.get("mode")
+    for name, mode in MODES.items():
+        if value in (name, mode.label, mode.mode_int):
+            return name
+    raise ValueError("beatmap metadata has no supported mode")
+
+
 def public_summary(beatmap_id: int, metadata: dict[str, Any]) -> dict[str, Any]:
     return {
         "beatmap_id": beatmap_id,
+        "mode": metadata_mode(metadata),
         "beatmapset_id": json_value(metadata.get("beatmapset_id")),
         "artist": json_value(metadata.get("artist")),
         "title": json_value(metadata.get("title")),

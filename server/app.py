@@ -32,8 +32,15 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from core.artifacts import ModeName
 from server.osu import BeatmapUnavailableError, OsuClient
-from server.runtime import Runtime, mean_embedding, metadata_complete
+from server.runtime import (
+    Runtime,
+    RuntimeRegistry,
+    mean_embedding,
+    metadata_complete,
+    metadata_mode,
+)
 
 MAX_RECOMMEND_TOP_K = 1000
 MAX_RECOMMEND_SOURCES = 10
@@ -64,6 +71,7 @@ class RecommendFilters(BaseModel):
 
 
 class RecommendRequest(BaseModel):
+    mode: ModeName | None = None
     beatmap_ids: list[Annotated[int, Field(gt=0)]] = Field(
         min_length=1, max_length=MAX_RECOMMEND_SOURCES
     )
@@ -72,6 +80,7 @@ class RecommendRequest(BaseModel):
 
 
 class BeatmapSummary(BaseModel):
+    mode: ModeName
     beatmap_id: int
     beatmapset_id: int | None
     artist: str | None
@@ -179,7 +188,7 @@ class RequestLoggingMiddleware:
             raise
 
 
-_runtime: Runtime | None = None
+_runtime: RuntimeRegistry | None = None
 _osu: OsuClient | None = None
 _http_client: httpx.AsyncClient | None = None
 
@@ -192,7 +201,7 @@ async def lifespan(_: FastAPI):
         limits=httpx.Limits(max_keepalive_connections=50, max_connections=100),
     )
     try:
-        _runtime = await run_in_threadpool(Runtime)
+        _runtime = await run_in_threadpool(RuntimeRegistry)
         _osu = OsuClient(_http_client)
         await _osu.start()
         yield
@@ -215,22 +224,50 @@ app = FastAPI(
 app.add_middleware(RequestLoggingMiddleware)
 
 
+@app.get("/api/modes")
+def available_modes() -> dict[str, Any]:
+    return {"modes": list(_runtime.runtimes) if _runtime else []}
+
+
 @app.get("/health")
 def health() -> dict[str, bool]:
     return {"ok": True}
 
 
 @app.get("/api/recommend", response_model=DefaultRecommendResponse)
-def default_recommend(response: Response, seed: int | None = None) -> dict[str, Any]:
+def default_recommend(
+    response: Response, seed: int | None = None, mode: ModeName = "std"
+) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    results = get_runtime().default_summaries(seed)
+    results = get_runtime(mode).default_summaries(seed)
     return {"count": len(results), "results": results}
 
 
 @app.post("/api/recommend", response_model=RecommendResponse)
 async def recommend(payload: RecommendRequest) -> dict[str, Any]:
-    runtime = get_runtime()
     beatmap_ids = list(dict.fromkeys(payload.beatmap_ids))
+    inferred_metadata = {}
+    mode = payload.mode
+    if mode is None:
+        mode = await run_in_threadpool(_runtime.source_mode, beatmap_ids[0])
+        if mode is None:
+            try:
+                metadata = await get_osu().metadata(beatmap_ids[0])
+                if not metadata_complete(metadata):
+                    raise BeatmapUnavailableError(
+                        f"beatmap {beatmap_ids[0]} is unavailable"
+                    )
+                mode = metadata_mode(metadata)
+                inferred_metadata[beatmap_ids[0]] = metadata
+            except BeatmapUnavailableError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+    runtime = get_runtime(mode)
+    try:
+        _runtime.validate_sources(mode, beatmap_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     async def load_source(
         beatmap_id: int,
@@ -245,11 +282,14 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
                     status_code=404, detail=f"beatmap {beatmap_id} is unavailable"
                 )
             try:
-                metadata = await get_osu().metadata(beatmap_id)
+                metadata = inferred_metadata.get(
+                    beatmap_id
+                ) or await get_osu().metadata(beatmap_id)
                 if not metadata_complete(metadata):
                     raise BeatmapUnavailableError(
                         f"beatmap {beatmap_id} is unavailable"
                     )
+                runtime.validate_source(beatmap_id, metadata)
                 content = await get_osu().download(beatmap_id)
                 embedding = await run_in_threadpool(
                     runtime.infer_and_store,
@@ -263,16 +303,14 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
                 )
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except ValueError as exc:
-                await run_in_threadpool(
-                    runtime.cache.mark_unavailable, beatmap_id, str(exc)
-                )
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"beatmap {beatmap_id} is unavailable",
-                ) from exc
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             memory = embedding, metadata
             cache_status = "miss"
         embedding, metadata = memory
+        try:
+            runtime.validate_source(beatmap_id, metadata)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return beatmap_id, embedding, metadata, cache_status
 
     sources = await asyncio.gather(
@@ -302,8 +340,8 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
 
 
 @app.get("/api/beatmaps/{beatmap_id}")
-async def beatmap_detail(beatmap_id: int) -> dict[str, Any]:
-    detail = await run_in_threadpool(get_runtime().catalog_detail, beatmap_id)
+async def beatmap_detail(beatmap_id: int, mode: ModeName = "std") -> dict[str, Any]:
+    detail = await run_in_threadpool(get_runtime(mode).catalog_detail, beatmap_id)
     if detail is None:
         raise HTTPException(status_code=404, detail=f"beatmap {beatmap_id} not found")
     return detail
@@ -311,9 +349,9 @@ async def beatmap_detail(beatmap_id: int) -> dict[str, Any]:
 
 @app.get("/api/beatmaps/{beatmap_id}/summary", response_model=BeatmapSummary)
 async def beatmap_summary(
-    beatmap_id: int, response: Response
+    beatmap_id: int, response: Response, mode: ModeName = "std"
 ) -> dict[str, Any]:
-    runtime = get_runtime()
+    runtime = get_runtime(mode)
     memory = runtime.memory_embedding(beatmap_id)
     if memory is None:
         memory = await run_in_threadpool(runtime.cached_embedding, beatmap_id)
@@ -327,20 +365,25 @@ async def beatmap_summary(
         try:
             metadata = await get_osu().metadata(beatmap_id)
             if not metadata_complete(metadata):
-                raise BeatmapUnavailableError(
-                    f"beatmap {beatmap_id} is unavailable"
-                )
+                raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
         except (BeatmapUnavailableError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     response.headers["Cache-Control"] = "public, max-age=300"
+    try:
+        runtime.validate_source(beatmap_id, metadata)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return runtime.public_summary(beatmap_id, metadata)
 
 
-def get_runtime() -> Runtime:
+def get_runtime(mode: str = "std") -> Runtime:
     if _runtime is None:
         raise RuntimeError("runtime is not initialized")
-    return _runtime
+    try:
+        return _runtime.get(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def get_osu() -> OsuClient:
@@ -361,6 +404,8 @@ def request_client_ip(scope: dict[str, Any], raw_headers: Any) -> str:
             return value.decode(errors="replace").split(",", 1)[0].strip()
     client = scope.get("client")
     return client[0] if client else "unknown"
+
+
 if __name__ == "__main__":
     sockets = []
     for family, host in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):

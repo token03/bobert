@@ -2,7 +2,7 @@ services:
   api:
     build:
       network: host
-    mem_limit: 3.5g
+    mem_limit: 4.5g
     restart: unless-stopped
     logging:
       driver: local
