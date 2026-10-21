@@ -16,10 +16,16 @@ from rich.console import Console
 from rich.table import Table
 from sklearn.model_selection import GroupKFold
 
-from core import STRAIN_COLUMNS, retrieval
-from core.artifacts import embedding_metadata
+from core import retrieval
+from core.artifacts import (
+    embedding_metadata,
+    from_bfloat16,
+    read_embeddings,
+    resolve_artifacts,
+)
+from core.modes import MODES
+from scripts.common.collections import is_holdout_set
 from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
-from scripts.common.text import tokenize
 
 console = Console()
 
@@ -27,8 +33,6 @@ console = Console()
 BEATMAPS_EVAL_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_EVAL_PATH = DATA_DIR / "beatmapsets.parquet"
 COLLECTION_EDGES_EVAL_PATH = COLLECTIONS_DIR / "edges.parquet"
-COLLECTION_VERTICES_EVAL_PATH = COLLECTIONS_DIR / "vertices.parquet"
-COLLECTION_NGRAMS_EVAL_PATH = COLLECTIONS_DIR / "ngrams.txt"
 TOURNAMENTS_EVAL_PATH = COLLECTIONS_DIR / "tournaments.parquet"
 STRAINS_EVAL_PATH = DATA_DIR / "strains.parquet"
 
@@ -38,8 +42,6 @@ PROBE_RIDGE_ALPHA = 1e-3
 PROBE_MIN_LABEL_MAPS = 50
 MIN_PROBE_MAPS = 1000
 RATING_MAX_STARS = 20.0
-RATING_MAX_SEQ_LEN = 4096
-DIFFICULTY_COLUMNS = ["stars", *STRAIN_COLUMNS]
 MAP_ATTRIBUTE_COLUMNS = {
     "ar": "ar",
     "cs": "cs",
@@ -49,7 +51,11 @@ MAP_ATTRIBUTE_COLUMNS = {
 }
 DIFFICULTY_NEIGHBOR_K = 50
 DIFFICULTY_BATCH_SIZE = 1024
-COLLECTION_TAG_MIN_MAPS = 100
+DIFFICULTY_QUERY_SAMPLE = 100_000
+COLLECTION_MIN_SETS = 5
+COLLECTION_MAX_SETS = 300
+COLLECTION_QUERY_BATCH = 128
+COLLECTION_NDCG_K = 20
 TOURNAMENT_SLOT_MIN_MAPS = 20
 RETRIEVAL_RECALL_KS = (10, 20, 50)
 RETRIEVAL_HARD_NEGATIVE_K = 100
@@ -57,11 +63,13 @@ RETRIEVAL_HUBNESS_K = 50
 RETRIEVAL_HUBNESS_SAMPLE = 20_000
 RETRIEVAL_HUBNESS_BATCH = 2048
 CHANCE_PAIR_SAMPLES = 200_000
+PAIRED_TEST_CHUNK = 2000
 
 
 @dataclass
 class TargetData:
     name: str
+    mode: str
     path: Path
     run_dir: Path | None
     beatmap_ids: np.ndarray
@@ -85,24 +93,37 @@ EVAL_RESULTS: list[EvalResult] = []
 @dataclass
 class DifficultyData:
     ids: list[int]
-    normalized: np.ndarray
+    stars: np.ndarray
     groups: np.ndarray
 
 
-def target_path(target: str) -> Path:
+@dataclass
+class CollectionData:
+    keys: list[tuple[int, int]]
+    sizes: np.ndarray
+    set_index: np.ndarray
+    query_maps: np.ndarray
+    row_query: np.ndarray
+    row_collection: np.ndarray
+    row_weight: np.ndarray
+    row_positives: np.ndarray
+    pair_row: np.ndarray
+    pair_set: np.ndarray
+
+
+def target_path(target: str, mode: str = "std", variant: str | None = None) -> Path:
     path = resolve_path(target).resolve()
-    if path.exists():
-        return path
-    if target == "graph":
-        return DATA_DIR / "graph.parquet"
-    return RUNS_DIR / target / "embeddings.parquet"
+    return (
+        path
+        if path.is_file()
+        else resolve_artifacts(
+            path if path.is_dir() else RUNS_DIR / target, mode, variant
+        ).index
+    )
 
 
 def target_name(path: Path) -> str:
-    if path.name == "embeddings.parquet" and path.parent.parent == RUNS_DIR:
-        return path.parent.name
-    stem = path.stem
-    return stem.removeprefix("embeddings-")
+    return f"{path.parent.parent.name}/{path.parent.name}/{path.stem}"
 
 
 def load_eval_groups(path: Path) -> dict[str, list[int]]:
@@ -116,58 +137,35 @@ def load_eval_groups(path: Path) -> dict[str, list[int]]:
 
 
 def load_embeddings(
-    path: Path, *, center: bool, normalize: bool = True
+    path: Path, *, center: bool
 ) -> tuple[np.ndarray, np.ndarray, dict[int, int], np.ndarray | None]:
     if not path.exists():
         raise FileNotFoundError(f"Embeddings parquet not found: {path}")
-    df = pl.read_parquet(path)
-    if "beatmap_id" not in df.columns or "embedding" not in df.columns:
-        raise ValueError(f"Expected beatmap_id and embedding columns in {path}")
-
-    beatmap_ids = df["beatmap_id"].to_numpy().astype(np.int64, copy=False)
-    embeddings = df["embedding"].to_numpy()
-    if embeddings.dtype == object:
-        embeddings = np.stack(embeddings)
-    embeddings = embeddings.astype(np.float32, copy=False)
-    if normalize:
+    beatmap_ids, bits, densities = read_embeddings(path)
+    embeddings = from_bfloat16(bits)
+    if center:
+        embeddings -= embeddings.mean(axis=0, keepdims=True)
         embeddings /= np.maximum(
             np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
         )
-    if center:
-        embeddings -= embeddings.mean(axis=0, keepdims=True)
-        if normalize:
-            embeddings /= np.maximum(
-                np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
-            )
     id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
-    densities = (
-        df["density"].to_numpy().astype(np.float32, copy=True)
-        if "density" in df.columns
-        else None
-    )
     return beatmap_ids, embeddings, id_to_index, densities
 
 
 @cache
-def star_range_ids(min_sr: float, max_sr: float) -> np.ndarray:
-    columns = pl.read_parquet_schema(STRAINS_EVAL_PATH)
-    strains = pl.read_parquet(
-        STRAINS_EVAL_PATH,
-        columns=[
-            c for c in ("beatmap_id", "mode_int", "seq_len", "stars") if c in columns
-        ],
-    )
-    if "mode_int" in strains.columns:
-        strains = strains.filter(pl.col("mode_int") == 0)
+def native_stars(mode: str) -> pl.DataFrame:
     return (
-        strains.sort("seq_len")
-        .unique("beatmap_id", keep="last")
+        pl.read_parquet(STRAINS_EVAL_PATH, columns=["beatmap_id", "mode_int", "stars"])
         .filter(
-            pl.col("stars").is_finite() & pl.col("stars").is_between(min_sr, max_sr)
-        )["beatmap_id"]
-        .to_numpy()
-        .astype(np.int64)
+            (pl.col("mode_int") == MODES[mode].mode_int) & pl.col("stars").is_finite()
+        )
+        .select("beatmap_id", "stars")
     )
+
+
+def star_range_ids(mode: str, min_sr: float, max_sr: float) -> np.ndarray:
+    stars = native_stars(mode).filter(pl.col("stars").is_between(min_sr, max_sr))
+    return stars["beatmap_id"].to_numpy().astype(np.int64)
 
 
 def load_targets(
@@ -175,17 +173,26 @@ def load_targets(
     *,
     no_center: set[str],
     star_range: tuple[float, float] | None = None,
+    mode: str = "std",
+    variants: list[str] | None = None,
 ) -> list[TargetData]:
-    allowed = None if star_range is None else star_range_ids(*star_range)
+    entries = [
+        (target, target_path(target, mode, variant))
+        for target in targets
+        for variant in (variants or [None])
+    ]
+    paths = [path for _, path in entries]
+    modes = {embedding_metadata(path)["mode"] for path in paths}
+    if len(modes) != 1:
+        raise ValueError(f"targets mix modes: {sorted(modes)}")
+    mode = modes.pop()
+    allowed = None if star_range is None else star_range_ids(mode, *star_range)
     loaded = []
-    for target in targets:
-        path = target_path(target)
+    for target, path in entries:
         name = target_name(path)
-        run_dir = path.parent if path.parent.parent == RUNS_DIR else None
+        run_dir = path.parent
         metadata = embedding_metadata(path)
-        center = (
-            target not in no_center and name != "graph" and not metadata.get("centered")
-        )
+        center = target not in no_center and not metadata.get("centered")
         beatmap_ids, embeddings, id_to_index, densities = load_embeddings(
             path, center=False
         )
@@ -201,13 +208,14 @@ def load_targets(
             if retrieval.get("method") == "csls" and densities is not None
             else 0.0
         )
-        if name != "graph" and retrieval_lambda == 0.0:
+        if retrieval_lambda == 0.0:
             console.print(
                 f"[yellow]Warning: {name} has no CSLS density; using raw cosine.[/yellow]"
             )
         loaded.append(
             TargetData(
                 name,
+                mode,
                 path,
                 run_dir,
                 beatmap_ids,
@@ -230,28 +238,21 @@ def load_targets(
     return loaded
 
 
-def load_standard_beatmaps(columns: list[str]) -> pl.DataFrame:
-    schema = pl.read_parquet_schema(BEATMAPS_EVAL_PATH)
-    selected = [
-        column for column in ["id", "mode", "mode_int", *columns] if column in schema
-    ]
-    df = pl.read_parquet(BEATMAPS_EVAL_PATH, columns=selected)
-    if "mode_int" in df.columns:
-        df = df.filter(pl.col("mode_int") == 0)
-    elif "mode" in df.columns:
-        df = df.filter(pl.col("mode") == "osu")
-    return df.rename({"id": "beatmap_id"})
+def load_beatmaps(columns: list[str]) -> pl.DataFrame:
+    return pl.read_parquet(BEATMAPS_EVAL_PATH, columns=["id", *columns]).rename(
+        {"id": "beatmap_id"}
+    )
 
 
 def common_ids(targets: list[TargetData], ids: set[int] | None = None) -> list[int]:
     if not targets:
         return []
-    shared = set(map(int, targets[0].beatmap_ids))
+    shared = targets[0].beatmap_ids
     for target in targets[1:]:
-        shared &= set(map(int, target.beatmap_ids))
+        shared = np.intersect1d(shared, target.beatmap_ids)
     if ids is not None:
-        shared &= ids
-    return sorted(shared)
+        shared = np.intersect1d(shared, np.fromiter(ids, dtype=np.int64))
+    return np.unique(shared).tolist()
 
 
 def target_matrix(target: TargetData, ids: list[int]) -> np.ndarray:
@@ -329,13 +330,24 @@ def paired_ap_test(
     common = sorted(set(first) & set(second))
     diffs = np.array([second[query_id] - first[query_id] for query_id in common])
     observed = float(diffs.mean()) if len(diffs) else 0.0
-    generator = np.random.default_rng(PROBE_SEED)
-    null = (
-        generator.choice([-1.0, 1.0], size=(permutations, len(diffs))) * diffs
-    ).mean(axis=1)
+    device = eval_device()
+    generator = torch.Generator(device).manual_seed(PROBE_SEED)
+    values = torch.tensor(diffs, dtype=torch.float64, device=device)
+    extreme = 0
+    for start in range(0, permutations, PAIRED_TEST_CHUNK):
+        count = min(PAIRED_TEST_CHUNK, permutations - start)
+        signs = (
+            torch.randint(
+                0, 2, (count, len(diffs)), generator=generator, device=device
+            ).double()
+            * 2
+            - 1
+        )
+        null = (signs @ values).abs() / max(len(diffs), 1)
+        extreme += int((null >= abs(observed)).sum().item())
     return {
         "delta": observed,
-        "p_value": float((np.abs(null) >= abs(observed)).mean()),
+        "p_value": extreme / permutations,
         "queries": len(diffs),
         "permutations": permutations,
     }
@@ -614,9 +626,7 @@ def probe_device() -> torch.device:
 
 @cache
 def beatmapset_by_id() -> dict[int, int]:
-    beatmaps = load_standard_beatmaps(["beatmapset_id"]).select(
-        "beatmap_id", "beatmapset_id"
-    )
+    beatmaps = load_beatmaps(["beatmapset_id"])
     return dict(beatmaps.drop_nulls("beatmapset_id").iter_rows())
 
 
@@ -815,54 +825,23 @@ def multiclass_probe(
     return EvalResult(title, metrics)
 
 
-@cache
-def load_strain_rows() -> pl.DataFrame | None:
-    if not STRAINS_EVAL_PATH.exists():
-        return None
-    strains = pl.read_parquet(
-        STRAINS_EVAL_PATH, columns=["beatmap_id", "seq_len", *DIFFICULTY_COLUMNS]
-    ).filter(
-        (pl.col("seq_len") > 0)
-        & (pl.col("seq_len") <= RATING_MAX_SEQ_LEN)
-        & (pl.col("stars") > 0.0)
-        & (pl.col("stars") <= RATING_MAX_STARS)
-        & pl.all_horizontal(
-            [pl.col(column).is_finite() for column in DIFFICULTY_COLUMNS]
-        )
+def load_difficulty_data(targets: list[TargetData], mode: str) -> DifficultyData | None:
+    stars = native_stars(mode).filter(
+        (pl.col("stars") > 0.0) & (pl.col("stars") <= RATING_MAX_STARS)
     )
-    return (
-        strains.with_columns(
-            pl.col("seq_len").max().over("beatmap_id").alias("_max_len")
-        )
-        .filter(pl.col("seq_len") == pl.col("_max_len"))
-        .unique("beatmap_id", keep="last")
-        .drop("_max_len")
-    )
-
-
-def load_difficulty_data(targets: list[TargetData]) -> DifficultyData | None:
-    strains = load_strain_rows()
-    if strains is None:
-        console.print(
-            f"[yellow]Skipping difficulty eval: {STRAINS_EVAL_PATH} not found.[/yellow]"
-        )
-        return None
-    ids = common_ids(targets, set(strains["beatmap_id"].to_list()))
-    strains = strains.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
-    ids = [int(beatmap_id) for beatmap_id in strains["beatmap_id"]]
+    ids = common_ids(targets, set(stars["beatmap_id"].to_list()))
     if len(ids) < MIN_PROBE_MAPS:
         console.print(
             f"[yellow]Skipping difficulty eval: only {len(ids):,} "
-            "shared strains.[/yellow]"
+            "shared star ratings.[/yellow]"
         )
         return None
-
-    values = strains.select(DIFFICULTY_COLUMNS).cast(pl.Float32).to_numpy()
-    scale = values.std(axis=0)
-    if np.any(scale <= 1e-6):
-        raise ValueError("Difficulty attributes must have non-zero variance")
-    normalized = (values - values.mean(axis=0)) / scale
-    return DifficultyData(ids, normalized, beatmapset_groups(ids))
+    stars = stars.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
+    values = stars["stars"].cast(pl.Float32).to_numpy()
+    normalized = (values - values.mean()) / values.std()
+    return DifficultyData(
+        stars["beatmap_id"].to_list(), normalized, beatmapset_groups(ids)
+    )
 
 
 def macro_label_average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> float:
@@ -922,6 +901,8 @@ def multilabel_probe(
 
 
 def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -> None:
+    if targets[0].mode != "std":
+        return
     groups = load_eval_groups(resolve_path(args.eval))
     if not groups:
         console.print(
@@ -939,19 +920,254 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
         {name: detail for name, (_, detail) in per_target.items()},
     )
     print_eval_result(result)
-    if len(targets) == 2:
-        first, second = targets[0].name, targets[1].name
-        test = paired_ap_test(
-            {row["query_id"]: row["ap"] for row in result.detail[first]["queries"]},
-            {row["query_id"]: row["ap"] for row in result.detail[second]["queries"]},
+    print_paired_ap(targets, result, "queries", ("query_id",))
+
+
+def print_paired_ap(
+    targets: list[TargetData], result: EvalResult, rows: str, keys: tuple[str, ...]
+) -> None:
+    if len(targets) != 2:
+        return
+    first, second = targets[0].name, targets[1].name
+    test = paired_ap_test(
+        {
+            tuple(row[key] for key in keys): row["ap"]
+            for row in result.detail[first][rows]
+        },
+        {
+            tuple(row[key] for key in keys): row["ap"]
+            for row in result.detail[second][rows]
+        },
+    )
+    paired = {"first": first, "second": second, **test}
+    result.detail[first]["paired"] = paired
+    result.detail[second]["paired"] = paired
+    console.print(
+        f"[dim]Paired AP Δ ({second} − {first}): {test['delta']:+.4f}, "
+        f"p={test['p_value']:.4f} (permutation, n={test['queries']})[/dim]"
+    )
+
+
+def load_collection_data(candidate_ids: list[int]) -> CollectionData | None:
+    set_values, set_index = np.unique(
+        beatmapset_groups(candidate_ids), return_inverse=True
+    )
+    candidates = pl.DataFrame(
+        {
+            "beatmap_id": np.asarray(candidate_ids, dtype=np.int64),
+            "row": np.arange(len(candidate_ids), dtype=np.int64),
+            "set": set_index.astype(np.int64),
+        }
+    )
+    edges = (
+        pl.read_parquet(
+            COLLECTION_EDGES_EVAL_PATH,
+            columns=["collection_id", "source", "beatmap_id"],
         )
-        paired = {"first": first, "second": second, **test}
-        result.detail[first]["paired"] = paired
-        result.detail[second]["paired"] = paired
+        .join(candidates, on="beatmap_id")
+        .unique(["collection_id", "source", "beatmap_id"])
+    )
+    kept = (
+        edges.group_by("collection_id", "source")
+        .agg(pl.col("set").unique().sort())
+        .filter(
+            pl.col("set")
+            .list.len()
+            .is_between(COLLECTION_MIN_SETS, COLLECTION_MAX_SETS)
+        )
+        .sort("collection_id", "source")
+        .unique("set", keep="first", maintain_order=True)
+    )
+    edges = edges.join(
+        kept.select("collection_id", "source"),
+        on=["collection_id", "source"],
+        how="semi",
+    ).with_columns(
+        (1.0 / pl.len().over("collection_id", "source", "set")).alias("weight")
+    )
+    holdout = np.flatnonzero(is_holdout_set(set_values))
+    keys = (
+        edges.filter(pl.col("set").is_in(holdout))
+        .select("collection_id", "source")
+        .unique()
+        .sort("collection_id", "source")
+        .with_row_index("collection")
+    )
+    if keys.is_empty():
+        return None
+    edges = edges.join(keys, on=["collection_id", "source"])
+    members = edges.select("collection", "set").unique().sort("collection", "set")
+    sizes = np.bincount(members["collection"].to_numpy(), minlength=keys.height)
+    offsets = np.concatenate(([0], np.cumsum(sizes)))
+    member_sets = members["set"].to_numpy()
+
+    queries = edges.filter(pl.col("set").is_in(holdout)).sort("row", "collection")
+    query_maps, row_query = np.unique(queries["row"].to_numpy(), return_inverse=True)
+    row_collection = queries["collection"].to_numpy().astype(np.int64)
+    row_set = queries["set"].to_numpy()
+    lengths = sizes[row_collection]
+    pair_row = np.repeat(np.arange(len(row_collection)), lengths)
+    within = np.arange(len(pair_row)) - np.repeat(np.cumsum(lengths) - lengths, lengths)
+    pair_set = member_sets[offsets[row_collection][pair_row] + within]
+    keep = pair_set != row_set[pair_row]
+    return CollectionData(
+        keys=list(keys.select("collection_id", "source").iter_rows()),
+        sizes=sizes,
+        set_index=set_index.astype(np.int64),
+        query_maps=query_maps,
+        row_query=row_query.astype(np.int64),
+        row_collection=row_collection,
+        row_weight=queries["weight"].to_numpy(),
+        row_positives=lengths - 1,
+        pair_row=pair_row[keep],
+        pair_set=pair_set[keep],
+    )
+
+
+def evaluate_collection_retrieval(
+    target: TargetData, data: CollectionData, candidate_ids: list[int]
+) -> tuple[dict[str, float], dict[str, object]]:
+    device = eval_device()
+    candidates = torch.tensor(
+        target_matrix(target, candidate_ids), dtype=torch.float32, device=device
+    )
+    densities = target_densities(target, candidate_ids)
+    penalty = (
+        retrieval.density_term(
+            torch.tensor(densities, dtype=torch.float32, device=device),
+            target.retrieval_lambda,
+        )
+        if densities is not None
+        else None
+    )
+    set_index = torch.tensor(data.set_index, device=device)
+    set_count = int(data.set_index.max()) + 1
+    row_query = torch.tensor(data.row_query, device=device)
+    pair_row = torch.tensor(data.pair_row, device=device)
+    pair_set = torch.tensor(data.pair_set, device=device)
+    positives = torch.tensor(data.row_positives, dtype=torch.float32, device=device)
+    discounts = 1.0 / torch.log2(
+        torch.arange(2, COLLECTION_NDCG_K + 2, device=device, dtype=torch.float32)
+    )
+    ideal = discounts.cumsum(0)[positives.long().clamp(max=COLLECTION_NDCG_K) - 1]
+    sums = torch.zeros((len(data.row_query), 3), device=device)
+    rank_values = torch.arange(1, set_count + 1, device=device, dtype=torch.float32)
+
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        for start in range(0, len(data.query_maps), COLLECTION_QUERY_BATCH):
+            stop = min(start + COLLECTION_QUERY_BATCH, len(data.query_maps))
+            maps = torch.tensor(data.query_maps[start:stop], device=device)
+            scores = candidates[maps] @ candidates.T
+            if penalty is not None:
+                scores = scores - penalty
+            set_scores = torch.full(
+                (len(maps), set_count), -torch.inf, device=device
+            ).scatter_reduce_(1, set_index.expand(len(maps), -1), scores, "amax")
+            ranks = torch.empty_like(set_scores).scatter_(
+                1,
+                set_scores.argsort(dim=1, descending=True),
+                rank_values.expand(len(maps), -1),
+            )
+            row_lo, row_hi = np.searchsorted(data.row_query, (start, stop))
+            pair_lo, pair_hi = np.searchsorted(data.pair_row, (row_lo, row_hi))
+            rows = pair_row[pair_lo:pair_hi]
+            rank = ranks[row_query[rows] - start, pair_set[pair_lo:pair_hi]]
+            query_set = set_index[maps][row_query[rows] - start]
+            rank = rank - (ranks[row_query[rows] - start, query_set] < rank).float()
+            order = torch.argsort(rows * (set_count + 1) + rank.long())
+            rows, rank = rows[order], rank[order]
+            position = (
+                torch.arange(len(rows), device=device)
+                - torch.searchsorted(rows, rows)
+                + 1
+            )
+            sums.index_add_(
+                0,
+                rows,
+                torch.stack(
+                    (
+                        position / rank,
+                        torch.where(
+                            rank <= COLLECTION_NDCG_K,
+                            1.0 / torch.log2(rank + 1),
+                            0.0,
+                        ),
+                        (rank <= positives[rows]).float(),
+                    ),
+                    dim=1,
+                ),
+            )
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+
+    metrics = (
+        torch.stack(
+            (sums[:, 0] / positives, sums[:, 1] / ideal, sums[:, 2] / positives), dim=1
+        )
+        .cpu()
+        .numpy()
+    )
+    metrics = np.column_stack((metrics, data.row_positives / (set_count - 1)))
+    collection_count = len(data.keys)
+    weight_totals = np.bincount(
+        data.row_collection, weights=data.row_weight, minlength=collection_count
+    )
+    per_collection = np.stack(
+        [
+            np.bincount(
+                data.row_collection,
+                weights=metrics[:, column] * data.row_weight,
+                minlength=collection_count,
+            )
+            / weight_totals
+            for column in range(metrics.shape[1])
+        ],
+        axis=1,
+    )
+    query_counts = np.bincount(data.row_collection, minlength=collection_count)
+    detail_rows = [
+        {
+            "collection_id": int(collection_id),
+            "source": int(source),
+            "sets": int(data.sizes[index]),
+            "queries": int(query_counts[index]),
+            "ap": float(per_collection[index, 0]),
+        }
+        for index, (collection_id, source) in enumerate(data.keys)
+    ]
+    return {
+        "collections": float(collection_count),
+        "queries": float(len(data.row_query)),
+        "macro_ap": float(per_collection[:, 0].mean()),
+        f"macro_ndcg@{COLLECTION_NDCG_K}": float(per_collection[:, 1].mean()),
+        "macro_r_precision": float(per_collection[:, 2].mean()),
+        "chance_ap": float(per_collection[:, 3].mean()),
+    }, {"collections": detail_rows, "paired": None}
+
+
+def run_collection_retrieval(
+    targets: list[TargetData], _args: argparse.Namespace
+) -> None:
+    candidate_ids = common_ids(targets)
+    data = load_collection_data(candidate_ids)
+    if data is None:
         console.print(
-            f"[dim]Paired AP Δ ({second} − {first}): {test['delta']:+.4f}, "
-            f"p={test['p_value']:.4f} (permutation, n={test['queries']})[/dim]"
+            "[yellow]Skipping Collection Retrieval: no held-out collection maps.[/yellow]"
         )
+        return
+    per_target = {
+        target.name: evaluate_collection_retrieval(target, data, candidate_ids)
+        for target in targets
+    }
+    result = EvalResult(
+        "Collection Retrieval",
+        {name: metrics for name, (metrics, _) in per_target.items()},
+        {name: detail for name, (_, detail) in per_target.items()},
+    )
+    print_eval_result(result)
+    print_paired_ap(targets, result, "collections", ("collection_id", "source"))
 
 
 def run_categorical_probe(
@@ -975,7 +1191,7 @@ def run_categorical_probe(
 def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
     run_categorical_probe(
         targets,
-        load_standard_beatmaps(["user_id"]),
+        load_beatmaps(["user_id"]),
         "user_id",
         "Mapper Probe",
     )
@@ -984,7 +1200,7 @@ def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> Non
 def run_artist_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
     run_categorical_probe(
         targets,
-        load_standard_beatmaps(["artist"]),
+        load_beatmaps(["artist"]),
         "artist",
         "Artist Probe",
     )
@@ -996,10 +1212,9 @@ def run_genre_eval(targets: list[TargetData], _args: argparse.Namespace) -> None
             f"[yellow]Skipping Genre Probe: {BEATMAPSETS_EVAL_PATH} not found.[/yellow]"
         )
         return
-    standard_ids = set(load_standard_beatmaps([])["beatmap_id"].to_list())
     beatmaps = pl.read_parquet(
         BEATMAPSETS_EVAL_PATH, columns=["beatmap_id", "genre_id"]
-    ).filter(pl.col("beatmap_id").is_in(standard_ids))
+    )
     run_categorical_probe(targets, beatmaps, "genre_id", "Genre Probe")
 
 
@@ -1007,7 +1222,7 @@ def run_map_attribute_eval(
     targets: list[TargetData], _args: argparse.Namespace
 ) -> None:
     source_columns = list(MAP_ATTRIBUTE_COLUMNS.values())
-    beatmaps = load_standard_beatmaps(source_columns).with_columns(
+    beatmaps = load_beatmaps(source_columns).with_columns(
         (
             pl.col("submitted_date")
             .str.to_datetime("%Y-%m-%d %H:%M:%S%z", strict=False)
@@ -1053,21 +1268,25 @@ def difficulty_neighbor_metrics(
     densities: torch.Tensor | None,
     retrieval_lambda: float,
     random_pair_distance: float,
+    largest_group: int,
+    queries: torch.Tensor,
 ) -> dict[str, float]:
     total = 0.0
+    depth = DIFFICULTY_NEIGHBOR_K + largest_group
 
-    for start in range(0, len(embeddings), DIFFICULTY_BATCH_SIZE):
-        stop = min(start + DIFFICULTY_BATCH_SIZE, len(embeddings))
-        scores = embeddings[start:stop] @ embeddings.T
+    for start in range(0, len(queries), DIFFICULTY_BATCH_SIZE):
+        rows = queries[start : start + DIFFICULTY_BATCH_SIZE]
+        scores = embeddings[rows] @ embeddings.T
         if densities is not None:
             scores = scores - retrieval.density_term(densities, retrieval_lambda)
-        scores.masked_fill_(groups[start:stop, None] == groups[None, :], -torch.inf)
-        neighbors = scores.topk(DIFFICULTY_NEIGHBOR_K, dim=1).indices
-        distance = torch.abs(stars[neighbors] - stars[start:stop, None])
-        total += float(distance.mean(dim=1).sum().item())
+        neighbors = scores.topk(depth, dim=1).indices
+        other = groups[neighbors] != groups[rows, None]
+        keep = other & (other.cumsum(dim=1) <= DIFFICULTY_NEIGHBOR_K)
+        distance = torch.abs(stars[neighbors] - stars[rows, None]) * keep
+        total += float(distance.sum().item()) / DIFFICULTY_NEIGHBOR_K
 
     return {
-        f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(embeddings),
+        f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(queries),
         "random_pair_distance": random_pair_distance,
     }
 
@@ -1083,17 +1302,22 @@ def run_difficulty_neighbor_eval(
         return
 
     device = probe_device()
-    stars = torch.tensor(
-        data.normalized[:, DIFFICULTY_COLUMNS.index("stars")],
-        dtype=torch.float32,
+    stars = torch.tensor(data.stars, dtype=torch.float32, device=device)
+    groups = torch.tensor(data.groups, dtype=torch.long, device=device)
+    rng = np.random.default_rng(PROBE_SEED)
+    left = rng.integers(0, len(data.stars), CHANCE_PAIR_SAMPLES)
+    right = rng.integers(0, len(data.stars), CHANCE_PAIR_SAMPLES)
+    random_pair_distance = float(np.abs(data.stars[left] - data.stars[right]).mean())
+    queries = torch.tensor(
+        np.sort(
+            rng.choice(
+                len(data.ids),
+                min(DIFFICULTY_QUERY_SAMPLE, len(data.ids)),
+                replace=False,
+            )
+        ),
         device=device,
     )
-    groups = torch.tensor(data.groups, dtype=torch.long, device=device)
-    stars_np = data.normalized[:, DIFFICULTY_COLUMNS.index("stars")]
-    rng = np.random.default_rng(PROBE_SEED)
-    left = rng.integers(0, len(stars_np), CHANCE_PAIR_SAMPLES)
-    right = rng.integers(0, len(stars_np), CHANCE_PAIR_SAMPLES)
-    random_pair_distance = float(np.abs(stars_np[left] - stars_np[right]).mean())
     metrics = {}
     for target in targets:
         embeddings = target_matrix(target, data.ids)
@@ -1111,100 +1335,18 @@ def run_difficulty_neighbor_eval(
             densities,
             target.retrieval_lambda,
             random_pair_distance,
+            int(largest_group),
+            queries,
         )
         del embeddings
     print_eval_result(EvalResult("Difficulty Neighbors", metrics))
 
 
-def run_difficulty_evals(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    data = load_difficulty_data(targets)
+def run_difficulty_evals(targets: list[TargetData], args: argparse.Namespace) -> None:
+    data = load_difficulty_data(targets, targets[0].mode)
     if data is None:
         return
     run_difficulty_neighbor_eval(targets, data)
-
-
-def load_valid_ngrams(path: Path) -> set[str]:
-    ngrams = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            ngrams.add(line)
-    return ngrams
-
-
-def title_ngrams(title: object, valid_ngrams: set[str]) -> set[str]:
-    tokens = tokenize(title)
-    labels = {token for token in tokens if token in valid_ngrams}
-    labels.update(
-        " ".join(tokens[idx : idx + 2])
-        for idx in range(len(tokens) - 1)
-        if " ".join(tokens[idx : idx + 2]) in valid_ngrams
-    )
-    return labels
-
-
-def run_collection_ngram_eval(
-    targets: list[TargetData], _args: argparse.Namespace
-) -> None:
-    missing = [
-        path
-        for path in (
-            COLLECTION_NGRAMS_EVAL_PATH,
-            COLLECTION_VERTICES_EVAL_PATH,
-            COLLECTION_EDGES_EVAL_PATH,
-        )
-        if not path.exists()
-    ]
-    if missing:
-        console.print(
-            f"[yellow]Skipping Collection Ngram Probe: {missing[0]} not found.[/yellow]"
-        )
-        return
-    valid_ngrams = load_valid_ngrams(COLLECTION_NGRAMS_EVAL_PATH)
-    vertices = pl.read_parquet(
-        COLLECTION_VERTICES_EVAL_PATH,
-        columns=["collection_id", "source", "name"],
-    )
-    label_rows = [
-        (int(collection_id), int(source), label)
-        for collection_id, source, name in vertices.iter_rows()
-        for label in title_ngrams(name, valid_ngrams)
-    ]
-    if not label_rows:
-        console.print(
-            "[yellow]Skipping Collection Ngram Probe: no labeled collections.[/yellow]"
-        )
-        return
-    collection_labels = pl.DataFrame(
-        label_rows,
-        schema={"collection_id": pl.Int64, "source": pl.Int64, "label": pl.String},
-        orient="row",
-    )
-    standard_ids = set(load_standard_beatmaps([])["beatmap_id"].to_list())
-    ids_by_target = set(common_ids(targets, standard_ids))
-    edges = pl.read_parquet(
-        COLLECTION_EDGES_EVAL_PATH,
-        columns=["collection_id", "source", "beatmap_id"],
-    ).filter(pl.col("beatmap_id").is_in(ids_by_target))
-    beatmap_labels = (
-        edges.join(collection_labels, on=["collection_id", "source"], how="inner")
-        .select("beatmap_id", "label")
-        .unique()
-        .group_by("beatmap_id")
-        .agg(pl.col("label"))
-    )
-    labels_by_id = {
-        int(beatmap_id): set(labels)
-        for beatmap_id, labels in beatmap_labels.iter_rows()
-    }
-    result = multilabel_probe(
-        targets,
-        labels_by_id,
-        title="Collection Ngram Probe",
-        min_count=COLLECTION_TAG_MIN_MAPS,
-    )
-    if result:
-        print_eval_result(result)
 
 
 def normalize_slot_mod(value: object) -> str | None:
@@ -1230,15 +1372,16 @@ def slot_label(mod: object, map_index: object) -> str | None:
 
 
 def run_tournament_slot_eval(
-    targets: list[TargetData], _args: argparse.Namespace
+    targets: list[TargetData], args: argparse.Namespace
 ) -> None:
+    if targets[0].mode != "std":
+        return
     if not TOURNAMENTS_EVAL_PATH.exists():
         console.print(
             f"[yellow]Skipping Tournament Slot Probe: {TOURNAMENTS_EVAL_PATH} not found.[/yellow]"
         )
         return
-    standard_ids = set(load_standard_beatmaps([])["beatmap_id"].to_list())
-    ids_by_target = set(common_ids(targets, standard_ids))
+    ids_by_target = set(common_ids(targets))
     rows = pl.read_parquet(
         TOURNAMENTS_EVAL_PATH,
         columns=["beatmap_id", "mod", "map_index"],
@@ -1309,7 +1452,8 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                 "details": details,
             }
         )
-        output = target.run_dir / filename
+        suffix = ".a" if target.path.stem.endswith(".a") else ""
+        output = target.run_dir / filename.replace(".json", f"{suffix}.json")
         output.write_text(
             json.dumps(payload, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
@@ -1322,13 +1466,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Compare embedding files with retrieval and linear probe evals"
     )
     parser.add_argument(
-        "targets", nargs="+", help="Run versions or embedding paths, e.g. v7_ab graph"
+        "targets", nargs="+", help="Run names or embedding paths of one mode"
     )
+    parser.add_argument("--mode", choices=tuple(MODES), default="std")
+    parser.add_argument("--variants", nargs="+", choices=("base", "adapted"))
     parser.add_argument("--eval", default=str(DATA_DIR / "eval.csv"))
     parser.add_argument(
         "--retrieval-only",
         action="store_true",
-        help="Only run grouped retrieval",
+        help="Only run grouped and collection retrieval",
     )
     parser.add_argument(
         "--sr-range",
@@ -1336,12 +1482,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=(2.0, 14.0),
         metavar=("MIN", "MAX"),
-        help="Only evaluate standard maps whose star rating is in this range",
+        help="Only evaluate maps whose star rating is in this range",
     )
     parser.add_argument(
         "--no-sr-filter",
         action="store_true",
-        help="Evaluate all standard maps regardless of star rating",
+        help="Evaluate all maps regardless of star rating",
     )
     parser.add_argument(
         "--no-center",
@@ -1371,9 +1517,11 @@ def main() -> None:
     targets = load_targets(
         args.targets,
         no_center=args.no_center,
+        mode=args.mode,
+        variants=args.variants,
         star_range=None if args.no_sr_filter else tuple(args.sr_range),
     )
-    evals = [run_grouped_retrieval]
+    evals = [run_grouped_retrieval, run_collection_retrieval]
     if not args.retrieval_only:
         evals += [
             run_mapper_eval,
@@ -1381,12 +1529,12 @@ def main() -> None:
             run_genre_eval,
             run_map_attribute_eval,
             run_difficulty_evals,
-            run_collection_ngram_eval,
             run_tournament_slot_eval,
         ]
     for run_eval in evals:
         run_eval(targets, args)
-    save_eval_results(targets, "retrieval.json" if args.retrieval_only else "eval.json")
+    name = "retrieval" if args.retrieval_only else "eval"
+    save_eval_results(targets, f"{name}.json")
 
 
 if __name__ == "__main__":

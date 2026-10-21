@@ -5,6 +5,12 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from core.artifacts import (
+    from_bfloat16,
+    read_embeddings,
+    resolve_artifacts,
+)
+from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings
 from scripts.common.paths import (
     BEATMAPS_PATH,
     DATA_DIR,
@@ -12,7 +18,6 @@ from scripts.common.paths import (
     RUNS_DIR,
     resolve_path,
 )
-from scripts.common.mappers import MIN_MAPPER_MAPS, mapper_embeddings
 
 EMBEDDINGS_PATH = DATA_DIR / "embeddings.parquet"
 STRAINS_PATH = DATA_DIR / "strains.parquet"
@@ -192,7 +197,10 @@ def process(
         )
 
     with tqdm(total=2, desc="Loading Data") as pbar:
-        emb_df = pd.read_parquet(embeddings_path)
+        embedding_ids, embedding_bits, _ = read_embeddings(embeddings_path)
+        emb_df = pd.DataFrame(
+            {"beatmap_id": embedding_ids, "row": np.arange(len(embedding_ids))}
+        )
         pbar.update(1)
 
         meta_columns = (
@@ -230,8 +238,7 @@ def process(
     del emb_df, meta_df
 
     print(f"Preparing {'mapper ' if mapper else ''}matrix ({len(df)} items)...")
-    matrix_cpu = np.stack(df["embedding"].values).astype(np.float32)
-    matrix_cpu /= np.clip(np.linalg.norm(matrix_cpu, axis=1, keepdims=True), 1e-9, None)
+    matrix_cpu = from_bfloat16(embedding_bits[df["row"].to_numpy()])
     if center:
         print("Centering embeddings...")
         matrix_cpu -= matrix_cpu.mean(axis=0, keepdims=True)
@@ -399,6 +406,10 @@ def main() -> None:
         help="Embedding parquet with beatmap_id and embedding columns",
     )
     parser.add_argument("-v", "--version")
+    parser.add_argument(
+        "--mode", choices=("std", "taiko", "catch", "mania"), default="std"
+    )
+    parser.add_argument("--variant", choices=("base", "adapted"))
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
         "--limit", type=int, default=None, help="Optional random sample size"
@@ -444,9 +455,9 @@ def main() -> None:
         embeddings_path=(
             Path(args.embeddings)
             if args.embeddings
-            else RUNS_DIR / args.version / "embeddings.parquet"
-            if args.version
-            else EMBEDDINGS_PATH
+            else resolve_artifacts(
+                RUNS_DIR / (args.version or "current"), args.mode, args.variant
+            ).index
         ),
         output_dir=Path(args.output_dir) if args.output_dir else None,
         limit=args.limit,

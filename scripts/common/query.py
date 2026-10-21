@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 import requests
 
+from core.artifacts import from_bfloat16, read_embeddings
 from core.raw import map_id, read_map, write_map
 from scripts.common.osu import (
     API_TIERS,
@@ -49,29 +50,11 @@ def extract_beatmapset_id(raw_input: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def load_embeddings(
-    path: Path,
-    *,
-    dtype: np.dtype | type | None = np.float32,
-    normalize: bool = True,
-):
+def load_embeddings(path: Path):
     if not path.exists():
         raise FileNotFoundError(f"Embeddings parquet not found: {path}")
-
-    df = pl.read_parquet(path)
-    if "beatmap_id" not in df.columns or "embedding" not in df.columns:
-        raise ValueError(f"Expected beatmap_id and embedding columns in {path}")
-
-    beatmap_ids = df["beatmap_id"].to_numpy().astype(np.int64)
-    embeddings = df["embedding"].to_numpy()
-    if embeddings.dtype == object:
-        embeddings = np.stack(embeddings)
-    if normalize:
-        embeddings = embeddings.astype(np.float32, copy=False)
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        embeddings = embeddings / np.maximum(norms, 1e-12)
-    if dtype is not None:
-        embeddings = embeddings.astype(dtype, copy=False)
+    beatmap_ids, bits, _ = read_embeddings(path)
+    embeddings = from_bfloat16(bits)
     id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
     return beatmap_ids, embeddings, id_to_index
 
@@ -175,7 +158,6 @@ class LazyEmbedder:
         self.model_path = model_path
         self.device_name = device
         self.model = None
-        self.vector_stats = None
         self.device = None
 
     def load(self):
@@ -189,9 +171,7 @@ class LazyEmbedder:
         self.device = torch.device(
             self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        self.model, self.vector_stats = load_model(
-            find_model(self.model_path), self.device
-        )
+        self.model = load_model(find_model(self.model_path), self.device)
 
     def embed_osu(self, path: Path) -> np.ndarray:
         self.load()
@@ -199,9 +179,7 @@ class LazyEmbedder:
             beatmap_id = int(map_id(path))
         except ValueError:
             beatmap_id = None
-        return self.model.embed_osu_bytes(
-            read_map(path), self.vector_stats, beatmap_id=beatmap_id
-        )
+        return self.model.embed_osu_bytes(read_map(path), beatmap_id=beatmap_id)
 
 
 def format_number(value, decimals: int = 2):

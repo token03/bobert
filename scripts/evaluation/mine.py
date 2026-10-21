@@ -9,6 +9,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from core import retrieval
+from core.modes import MODES
 from scripts.common.mappers import mapper_ids
 from scripts.common.paths import resolve_path
 from scripts.common.query import (
@@ -29,6 +30,7 @@ from scripts.evaluation.run import (
     load_targets,
     target_densities,
     target_matrix,
+    target_path,
 )
 
 
@@ -40,10 +42,17 @@ def parse_args() -> argparse.Namespace:
         "beatmaps", nargs="*", help="Beatmap IDs or URLs; omit for interactive mode"
     )
     parser.add_argument(
-        "--source", default="compare", help="Run name or embeddings parquet"
+        "--source", default="current", help="Run name or embeddings parquet"
     )
     parser.add_argument(
-        "--disjoint", default="v13.1", help="Run name or embeddings parquet"
+        "--disjoint", default="current", help="Run name or embeddings parquet"
+    )
+    parser.add_argument("--mode", choices=MODES, default="std")
+    parser.add_argument(
+        "--source-variant", choices=("base", "adapted"), default="adapted"
+    )
+    parser.add_argument(
+        "--disjoint-variant", choices=("base", "adapted"), default="base"
     )
     parser.add_argument("--source-k", type=int, default=50, help="Source rank cutoff")
     parser.add_argument(
@@ -305,9 +314,11 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
 
 def main() -> None:
     args = parse_args()
-    targets = load_targets(
-        [args.source, args.disjoint], no_center={args.source, args.disjoint}
-    )
+    paths = [
+        str(target_path(args.source, args.mode, args.source_variant)),
+        str(target_path(args.disjoint, args.mode, args.disjoint_variant)),
+    ]
+    targets = load_targets(paths, no_center=set(paths), mode=args.mode)
     ids = np.asarray(common_ids(targets), dtype=np.int64)
     if len(ids) < 2:
         raise SystemExit("Mining requires at least two maps present in both exports")

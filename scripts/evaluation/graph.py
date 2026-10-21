@@ -4,15 +4,17 @@ import os
 import warnings
 
 import pandas as pd
+import pyarrow.parquet as pq
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from tqdm import tqdm
 
-from scripts.common.text import tokenize
-from scripts.common.collections import deduplicate_collections
+from core.artifacts import INDEX_VERSION, embedding_table
+from core.modes import MODES
+from scripts.common.collections import deduplicate_collections, is_holdout_set
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR, DATA_DIR
-
+from scripts.common.text import tokenize
 
 warnings.filterwarnings(
     "ignore",
@@ -25,7 +27,6 @@ COLLECTION_EDGES_PATH = COLLECTIONS_DIR / "edges.parquet"
 COLLECTION_VERTICES_PATH = COLLECTIONS_DIR / "vertices.parquet"
 COLLECTION_FILTER_PATH = COLLECTIONS_DIR / "collection_filter.json"
 COLLECTION_NGRAMS_PATH = COLLECTIONS_DIR / "ngrams.txt"
-GRAPH_EMBEDDINGS_PATH = DATA_DIR / "graph.parquet"
 
 MIN_MAPS_IN_COLLECTION = 16
 MIN_COLLECTIONS_PER_MAP = 4
@@ -53,7 +54,7 @@ def _centered_rows(values):
     return F.normalize(values - values.mean(dim=0, keepdim=True), dim=1)
 
 
-def load_and_process_data(source_filter=None):
+def load_and_process_data(mode, source_filter=None):
     df = pd.read_parquet(COLLECTION_EDGES_PATH)
 
     if source_filter:
@@ -81,8 +82,9 @@ def load_and_process_data(source_filter=None):
     ).rename(columns={"id": "beatmap_id", "difficulty_rating": "stars"})
 
     df = df.merge(beatmaps_df, on="beatmap_id", how="left")
-    df = df[df["mode"] == "osu"].copy()
+    df = df[df["mode"] == MODES[mode].label].copy()
     df = df.dropna(subset=["beatmapset_id", "stars"]).copy()
+    df = df[~is_holdout_set(df["beatmapset_id"])].copy()
     top_stars = df.groupby(["collection_key", "beatmapset_id"])["stars"].transform(
         "max"
     )
@@ -174,7 +176,7 @@ def ngram_collections(df):
     valid_cols = []
     for collection_key in df["collection_key"].drop_duplicates():
         tokens = tokenize(names.get(collection_key, ""))
-        title_ngrams = set((token,) for token in tokens)
+        title_ngrams = {(token,) for token in tokens}
         title_ngrams.update(tuple(tokens[i : i + 2]) for i in range(len(tokens) - 1))
         if title_ngrams & ngrams:
             valid_cols.append(collection_key)
@@ -279,14 +281,14 @@ def bpr_loss(user_emb, pos_emb, neg_emb):
     return F.softplus(neg_scores - pos_scores).mean()
 
 
-def train(source_filter=None):
+def train(mode, source_filter=None):
     if DEVICE.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
 
     print(f"--- Setting up ({DEVICE}) ---")
     df, unique_collections, unique_beatmaps, col_to_idx, bm_to_idx = (
-        load_and_process_data(source_filter)
+        load_and_process_data(mode, source_filter)
     )
     num_users = len(unique_collections)
     num_items = len(unique_beatmaps)
@@ -383,20 +385,25 @@ def train(source_filter=None):
         item_emb = F.normalize(item_emb, dim=-1)
 
     item_emb_np = _centered_rows(item_emb).cpu().numpy()
-    pd.DataFrame(
-        [
-            {"beatmap_id": beatmap_id, "embedding": item_emb_np[idx].tolist()}
-            for beatmap_id, idx in bm_to_idx.items()
-        ]
-    ).to_parquet(GRAPH_EMBEDDINGS_PATH)
-    print("Done.")
+    beatmap_ids = list(bm_to_idx)
+    table = embedding_table(
+        beatmap_ids, item_emb_np[[bm_to_idx[i] for i in beatmap_ids]], None
+    )
+    metadata = {"version": INDEX_VERSION, "mode": mode, "centered": True}
+    path = DATA_DIR / f"graph_{mode}.parquet"
+    pq.write_table(
+        table.replace_schema_metadata({b"bobert": json.dumps(metadata).encode()}),
+        path,
+    )
+    print(f"Saved {path}")
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=tuple(MODES), default="std")
     parser.add_argument("-s", "--source", type=int)
     args = parser.parse_args()
-    train(source_filter=args.source)
+    train(args.mode, source_filter=args.source)
 
 
 if __name__ == "__main__":

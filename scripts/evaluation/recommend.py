@@ -11,9 +11,12 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from core.artifacts import MODEL_NAME, read_index
-from core.model import EmbeddingTransform
 from core import retrieval
+from core.artifacts import (
+    read_index,
+    resolve_artifacts,
+)
+from core.model import EmbeddingTransform
 from scripts.common.api import ossapi_request, osu_api
 from scripts.common.beatmaps import (
     fetch_beatmap_metadata,
@@ -43,7 +46,7 @@ console = Console()
 MODE_DEFAULT = "default"
 MODE_GRAPH = "graph"
 MODE_MAPPER = "mapper"
-DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph.parquet")
+DEFAULT_GRAPH_EMBEDDINGS_PATH = Path("data/graph_std.parquet")
 DEFAULT_STRAINS_PATH = PROJECT_ROOT / "data" / "strains.parquet"
 
 
@@ -526,7 +529,7 @@ def parse_args():
     parser.add_argument(
         "--graph",
         action="store_true",
-        help="Use fixed graph embeddings from data/graph.parquet",
+        help="Use fixed graph embeddings from data/graph_std.parquet",
     )
     parser.add_argument(
         "--mapper",
@@ -536,6 +539,10 @@ def parse_args():
     parser.add_argument("--metadata", default=str(DEFAULT_METADATA_PATH))
     parser.add_argument("--beatmaps-dir", default=str(DEFAULT_BEATMAPS_DIR))
     parser.add_argument("-v", "--version")
+    parser.add_argument(
+        "--mode", choices=("std", "taiko", "catch", "mania"), default="std"
+    )
+    parser.add_argument("--variant", choices=("base", "adapted"))
     parser.add_argument("--model", help="Exported BoBERT safetensors model")
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--include-same-set", action="store_true")
@@ -553,11 +560,14 @@ def validate_args(args: argparse.Namespace):
 def resolve_embeddings_path(args: argparse.Namespace) -> Path:
     if args.embeddings:
         return resolve_path(args.embeddings)
-    if args.version:
-        return RUNS_DIR / args.version / "embeddings.parquet"
     if args.model:
-        return resolve_path(args.model).parent / "embeddings.parquet"
-    return RUNS_DIR / "current" / "embeddings.parquet"
+        path = resolve_path(args.model)
+        return path.with_name(
+            path.name.replace("model", "embeddings").replace(".safetensors", ".parquet")
+        )
+    return resolve_artifacts(
+        RUNS_DIR / (args.version or "current"), args.mode, args.variant
+    ).index
 
 
 def build_context(args: argparse.Namespace) -> QueryContext:
@@ -568,19 +578,13 @@ def build_context(args: argparse.Namespace) -> QueryContext:
     model = None
     if mode == MODE_GRAPH:
         embeddings_path = resolve_path(DEFAULT_GRAPH_EMBEDDINGS_PATH)
-        beatmap_ids, embeddings, id_to_index = load_embeddings(
-            embeddings_path, dtype=np.float32
-        )
+        beatmap_ids, embeddings, id_to_index = load_embeddings(embeddings_path)
     else:
         embeddings_path = resolve_embeddings_path(args)
-        model = (
-            find_model(args.model, args.version)
-            if args.model or args.version
-            else embeddings_path.parent / MODEL_NAME
-        )
+        model = find_model(args.model, args.version, args.mode, args.variant)
         index = read_index(embeddings_path, model=model)
         beatmap_ids = index.ids
-        embeddings = index.embeddings
+        embeddings = index.vectors()
         densities = index.densities
         id_to_index = {
             int(value): position for position, value in enumerate(beatmap_ids)
