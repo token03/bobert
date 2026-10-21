@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import type { KeyboardEvent, MouseEvent } from 'react'
 import { Slider } from '@base-ui/react/slider'
+import { Select } from '@base-ui/react/select'
+import { CaretDown, X } from '@phosphor-icons/react'
 import { useQuery } from '@tanstack/react-query'
 import type { Mode } from '../../shared/types'
 import { fetchCatalogStats } from '../search/searchClient'
@@ -18,6 +20,43 @@ type RangeFilterProps = {
   min: number | undefined
   max: number | undefined
   onValueCommit: (min: number | undefined, max: number | undefined) => void
+}
+
+export function KeyFilter({ min, max, onValueCommit }: Pick<RangeFilterProps, 'min' | 'max' | 'onValueCommit'>) {
+  const active = min !== undefined || max !== undefined
+  const display = active ? min === max ? `${min}K` : `${min ?? 1}–${max ?? 10}K` : 'Any'
+
+  return (
+    <Select.Root value={min === max ? min ?? 0 : null} onValueChange={(value) => {
+      if (value !== null) onValueCommit(value || undefined, value || undefined)
+    }}>
+      <span className={styles['range-filter-wrap']} data-active={active || undefined} data-filter="cs">
+        <Select.Trigger className={styles['range-filter-trigger']} data-active={active || undefined} aria-label={`Key count: ${display}`}>
+          <span className={styles['range-trigger-mark']} aria-hidden="true">KY</span>
+          <Select.Value className={styles['range-trigger-value']}>{display}</Select.Value>
+          {!active ? <CaretDown className={styles['range-trigger-chevron']} aria-hidden="true" /> : null}
+        </Select.Trigger>
+        {active ? (
+          <button className={styles['range-trigger-clear']} type="button" onClick={() => onValueCommit(undefined, undefined)} aria-label="Clear Key count filter">
+            <X />
+          </button>
+        ) : null}
+      </span>
+      <Select.Portal>
+        <Select.Positioner className={styles['select-positioner']} sideOffset={6} alignItemWithTrigger={false}>
+          <Select.Popup className={styles['select-popup']}>
+            <Select.List className={styles['select-list']}>
+              {Array.from({ length: 11 }, (_, keys) => (
+                <Select.Item className={styles['select-item']} key={keys} value={keys}>
+                  <Select.ItemText>{keys ? `${keys}K` : 'Any'}</Select.ItemText>
+                </Select.Item>
+              ))}
+            </Select.List>
+          </Select.Popup>
+        </Select.Positioner>
+      </Select.Portal>
+    </Select.Root>
+  )
 }
 
 const stepKeys: Record<string, number> = { ArrowRight: 1, ArrowUp: 1, PageUp: 1, ArrowLeft: -1, ArrowDown: -1, PageDown: -1 }

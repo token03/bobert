@@ -9,7 +9,7 @@ import { lookupBeatmapTitle } from '../search/searchClient'
 import { clearFilters, maxBeatmaps } from './filters'
 import type { RecommendSearch } from './filters'
 import { DateRangeFilter } from './DateRangeFilter'
-import { RangeFilter } from './RangeFilter'
+import { KeyFilter, RangeFilter } from './RangeFilter'
 import { rangeFilters } from './rangeFilters'
 import { StatusFilter } from './StatusFilter'
 import styles from './RecommendForm.module.css'
@@ -180,8 +180,10 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
         <div className={styles['search-separator']} aria-hidden="true" />
 
         <div className={styles['filter-controls']}>
-          {rangeFilters.filter((config) => config.key !== 'ar' || search.mode === 'std' || search.mode === 'catch').filter((config) => config.key !== 'cs' || search.mode !== 'taiko').map((original) => {
-            const config = original.key === 'cs' && search.mode === 'mania' ? { ...original, label: 'Key count', triggerLabel: 'KY', unit: 'K', step: 1, precision: 1 } : original
+          {rangeFilters.filter((config) => config.key !== 'ar' || search.mode === 'std' || search.mode === 'catch').filter((config) => config.key !== 'cs' || search.mode !== 'taiko').map((config) => {
+            if (config.key === 'cs' && search.mode === 'mania') {
+              return <KeyFilter key={config.key} min={search.minCs} max={search.maxCs} onValueCommit={(minCs, maxCs) => onFiltersChange({ ...search, minCs, maxCs })} />
+            }
             return (
             <RangeFilter
               key={config.key}
