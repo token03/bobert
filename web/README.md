@@ -13,7 +13,7 @@ bun run dev
 
 Open the address printed by Vite. [`vite.config.ts`](vite.config.ts) proxies `/api` to the local backend. From the repository root, `mise run dev` starts both services after dependencies and model artifacts are prepared.
 
-`bun run dev` builds the ignored `public/search-{std,taiko,catch,mania}.bin` catalogs from `data/beatmaps.parquet` and the selected indices in `runs/current/release.json`. Each mode has a separate worker-loaded catalog. Production builds use the checksum-verified artifacts pinned in `search-catalog.json`; `publish-run` includes these binaries in the model release. Build the search catalogs before publishing a new release. Mode selection is stored in the page URL, and pasted osu! mode links select their ruleset automatically.
+`bun run dev` builds the ignored `public/search-{std,taiko,catch,mania}.bin` catalogs from `data/beatmaps.parquet` and the selected indices in `runs/current/release.json`. Each mode has a separate worker-loaded catalog. Production builds use the checksum-verified GitHub release assets pinned in `search-catalog.json`. Upload the binaries to the `search-catalog-<version>` GitHub release before publishing the frontend. Mode selection is stored in the page URL, and pasted osu! mode links select their ruleset automatically.
 
 ## Commands
 
@@ -40,7 +40,7 @@ Open the address printed by Vite. [`vite.config.ts`](vite.config.ts) proxies `/a
 
 Build the frontend with `bun run build` and publish `dist/` through Cloudflare Pages with the `functions/` directory. The Pages Function forwards API requests through a service binding named `GATEWAY`.
 
-The per-mode search catalogs and their Brotli headers ship in `dist/`; Git-triggered builds need no Parquet inputs. Build the catalogs and publish the model release before triggering a production build. Each URL and SHA-256 in `search-catalog.json` must match a published catalog; a local cached file can let a build succeed before the release is available remotely.
+The per-mode search catalogs and their Brotli headers ship in `dist/`; Git-triggered builds need no Parquet inputs. Build the catalogs and upload them to GitHub Releases before triggering a production build. Each URL and SHA-256 in `search-catalog.json` must match a published catalog; a local cached file can let a build succeed before the release is available remotely. Models, embedding indices, and metadata catalogs are published separately to Hugging Face with `publish-run`.
 
 The gateway uses an `API` VPC service binding and two rate-limit bindings, `RECOMMEND_BURST` and `RECOMMEND_SUSTAINED`. Copy [`gateway/wrangler.example.jsonc`](gateway/wrangler.example.jsonc) to `gateway/wrangler.jsonc` and fill in your provisioned resource IDs. The actual deployment configuration is local and Git-ignored. The VPC service connects to the Python API through Cloudflare Tunnel.
 

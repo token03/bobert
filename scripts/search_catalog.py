@@ -322,7 +322,7 @@ def main() -> int:
     for mode in modes:
         output = build_mode(args, mode)
         manifest[mode] = {
-            "url": f"https://huggingface.co/token03/bobert/resolve/{version}/{output.name}",
+            "url": f"https://github.com/token03/bobert/releases/download/search-catalog-{version}/{output.name}",
             "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         }
     if args.mode and manifest_path.exists():

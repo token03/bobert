@@ -74,9 +74,6 @@ def main() -> int:
             f"| {mode} | {selected.variant} | {metadata['count']:,} | {config['d_model']} | {config['n_layers']} |"
         )
     files.update({f"data/{name}": args.data_dir / name for name in CATALOGS})
-    for path in (PROJECT_ROOT / "web/public").glob("search-*.bin"):
-        if path.stem.removeprefix("search-") in artifacts:
-            files[path.name] = path
     api = HfApi(token=env.get("HF_TOKEN") or None)
     api.create_repo(args.repo, repo_type="model", exist_ok=True)
     if revision in {tag.name for tag in api.list_repo_refs(args.repo).tags}:

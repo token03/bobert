@@ -1,18 +1,18 @@
 {
   "std": {
-    "url": "https://huggingface.co/token03/bobert/resolve/v15/search-std.bin",
+    "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-std.bin",
     "sha256": "30940032ba7633b20757a1b929e93096f856eb779f49678a5505ca0910e5d450"
   },
   "taiko": {
-    "url": "https://huggingface.co/token03/bobert/resolve/v15/search-taiko.bin",
+    "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-taiko.bin",
     "sha256": "e64a802f63270a08b3855839f6614fd40066a87863a7cf5a5700b0a91838a96e"
   },
   "catch": {
-    "url": "https://huggingface.co/token03/bobert/resolve/v15/search-catch.bin",
+    "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-catch.bin",
     "sha256": "a5872134ff1766d60f1bbb426683e247a4859442c5a9db34960a94c2bb184a20"
   },
   "mania": {
-    "url": "https://huggingface.co/token03/bobert/resolve/v15/search-mania.bin",
+    "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-mania.bin",
     "sha256": "2f48205c6ce98ac7eefdc571b8137aaa51317832467a153a0538cf5f46cb101e"
   }
 }

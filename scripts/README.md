@@ -110,7 +110,7 @@ uv run publish-run -v my-run --data-dir data
 uv run --no-default-groups --group serve fetch-run --revision my-run
 ```
 
-Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_REPO`. Publishing uploads the manifest, each mode’s selected model/index pair, available search binaries, and three shared catalogs in one commit and tags that commit. Existing tags cannot be overwritten. `fetch-run` resolves a tag to a commit, validates the download, then activates it atomically. Use `--version` for another local run name, `--runs-dir` for a separate runs directory, or `--data-dir` for another catalog directory. Existing run directories are preserved; shared catalogs are overwritten by design.
+Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_REPO`. Publishing uploads the manifest, each mode’s selected model/index pair, and three shared metadata catalogs in one commit and tags that commit. Existing tags cannot be overwritten. Client search binaries are uploaded separately to the `search-catalog-<version>` GitHub release; `build-search` records their URLs and checksums in `web/search-catalog.json`. `fetch-run` resolves a tag to a commit, validates the download, then activates it atomically. Use `--version` for another local run name, `--runs-dir` for a separate runs directory, or `--data-dir` for another catalog directory. Existing run directories are preserved; shared catalogs are overwritten by design.
 
 Run artifacts stay in `runs/<version>/`; catalogs live in the workspace's `data/` directory and are shared across runs.
 
