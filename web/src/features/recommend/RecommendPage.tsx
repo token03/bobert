@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Tabs } from '@base-ui/react/tabs'
-import { DiceFive, GithubLogo, MagnifyingGlass } from '@phosphor-icons/react'
-import { keepPreviousData, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ClipboardText, CursorText, DiceFive, GithubLogo, MagnifyingGlass, WarningCircle } from '@phosphor-icons/react'
+import { queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { AudioPreviewBar } from '../audio/AudioPreviewBar'
 import { useAudioPreview } from '../audio/useAudioPreview'
@@ -11,7 +11,8 @@ import { parseBeatmapIds } from '../../shared/beatmapIds'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata } from '../../shared/types'
 import { cardCoverUrl } from '../../shared/urls'
-import { buildRecommendRequest, defaultSearch } from './filters'
+import { modes, modeLabels } from '../../shared/types'
+import { buildRecommendRequest, clearFilters, defaultSearch } from './filters'
 import type { RecommendSearch } from './filters'
 import { RecommendForm } from './RecommendForm'
 import { SourceBeatmapCard } from './BeatmapCard'
@@ -41,7 +42,7 @@ function recommendationOptions(search: RecommendSearch) {
     enabled: parseBeatmapIds(search.beatmap) !== null,
     staleTime,
     retry: false,
-    placeholderData: keepPreviousData,
+    placeholderData: (previous, query) => (query?.queryKey[1] as RecommendSearch | undefined)?.mode === search.mode ? previous : undefined,
   })
 }
 
@@ -57,13 +58,12 @@ export function RecommendPage() {
   const [sourceView, setSourceView] = useState<{ beatmapId: number | null; direction: SweepDirection; animate: boolean }>({ beatmapId: null, direction: 'left', animate: false })
   const [shownSource, setShownSource] = useState<BeatmapMetadata | null>(null)
   const [leavingSource, setLeavingSource] = useState<BeatmapMetadata | null>(null)
-  const [introEntering, setIntroEntering] = useState(false)
   const audio = useAudioPreview({ onError: console.error })
   const beatmapIds = parseBeatmapIds(search.beatmap)
   const recommend = useQuery(recommendationOptions(search))
   const defaults = useQuery({
-    queryKey: ['recommendations', 'default'],
-    queryFn: ({ signal }) => fetchDefaultRecommendations(signal),
+    queryKey: ['recommendations', 'default', search.mode],
+    queryFn: ({ signal }) => fetchDefaultRecommendations(search.mode, signal),
     enabled: beatmapIds === null,
     staleTime,
   })
@@ -71,8 +71,16 @@ export function RecommendPage() {
   const sourceBeatmaps = response?.sources.map((source) => source.metadata) ?? []
   const selectedSource = sourceBeatmaps.find((beatmap) => beatmap.beatmap_id === sourceView.beatmapId) ?? sourceBeatmaps[0] ?? null
   const isLoading = recommend.isFetching || defaults.isFetching
-  const requestError = recommend.error ?? defaults.error
+  const requestError = beatmapIds === null ? defaults.error : recommend.error
   const unavailableBeatmapId = requestError instanceof UnavailableBeatmapError ? requestError.beatmapId : null
+
+  useEffect(() => {
+    const inferredMode = response?.sources[0]?.metadata.mode
+    if (!response || recommend.isPlaceholderData || !inferredMode || inferredMode === search.mode) return
+    const values = { ...search, mode: inferredMode }
+    queryClient.setQueryData(recommendationOptions(values).queryKey, response)
+    void navigate({ search: values, replace: true })
+  }, [response, recommend.isPlaceholderData, search, queryClient, navigate])
 
   useEffect(() => {
     if (requestError) {
@@ -131,7 +139,7 @@ export function RecommendPage() {
       return
     }
 
-    await navigate({ search: defaultSearch, replace: true })
+    await navigate({ search: { ...defaultSearch, mode: values.mode }, replace: true })
   }
 
   async function updateBeatmaps(values: RecommendSearch) {
@@ -206,7 +214,7 @@ export function RecommendPage() {
       return
     }
 
-    void lookupBeatmapSet(nextBeatmapId).then((setId) => {
+    void lookupBeatmapSet(nextBeatmapId, values.mode).then((setId) => {
       if (setId !== null) new Image().src = cardCoverUrl(setId)
     }).catch(() => {})
 
@@ -219,6 +227,9 @@ export function RecommendPage() {
 
   async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
     const nextValues = { ...search, beatmap: String(beatmap.beatmap_id) }
+    if (beatmap.title) {
+      queryClient.setQueryData<string | null>(['beatmap-title', search.mode, beatmap.beatmap_id], (title) => title ?? beatmap.title)
+    }
     scrollToPageTop()
     await swapSourceBeatmap(beatmap, direction, runRecommend(nextValues, 'push', false))
   }
@@ -246,6 +257,7 @@ export function RecommendPage() {
   const recommendForm = (
     <div className={styles['sticky-search-wrap']}>
       <RecommendForm
+        key={search.mode}
         search={search}
         sources={sourceBeatmaps}
         unavailableBeatmapId={unavailableBeatmapId}
@@ -304,7 +316,6 @@ export function RecommendPage() {
               sweepPhase="out"
               onSweepEnd={() => {
                 setLeavingSource(null)
-                setIntroEntering(true)
               }}
             />
           ) : !isRolling && sourceSwap && sourceBeatmap ? (
@@ -330,19 +341,71 @@ export function RecommendPage() {
               activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
               isPreviewPlaying={audio.isPlaying}
             />
-          ) : !isRolling && showSourcePlaceholder ? <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${cardStyles['source-card-placeholder']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true" /> : isRolling || beatmapIds === null ? (
-            <header
-              className={styles['intro']}
-              data-entering={introEntering || undefined}
-              onAnimationEnd={(event) => {
-                if (event.target === event.currentTarget) {
-                  setIntroEntering(false)
-                }
-              }}
-            >
-              <h1>bobert</h1>
-              <p>to find similar beatmaps, enter a beatmap id or use <span className={styles['intro-action']}><MagnifyingGlass aria-hidden="true" /> search similar</span> on a map below. have fun!</p>
+          ) : !isRolling && showSourcePlaceholder ? (
+            <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true">
+              <div className={`${cardStyles['cover-preview']} ${cardStyles['source-cover']} ${styles['loading-result-cover']}`} />
+              <div className={`${cardStyles['beatmap-card-content']} ${cardStyles['source-content']}`}>
+                <div className={`${cardStyles['source-copy']} ${styles['loading-result-copy']}`}>
+                  <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
+                  <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
+                  <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
+                </div>
+                <div className={`${cardStyles['source-meta']} ${styles['loading-result-meta']}`}>
+                  <span className={`${styles['loading-result-line']} ${styles['loading-result-creator']}`} />
+                  <span className={`${styles['loading-result-line']} ${styles['loading-result-status']}`} />
+                </div>
+                <div className={cardStyles['source-meta-separator']} />
+                <div className={cardStyles['stat-strip']}>
+                  <div className={`${cardStyles['stat-row']} ${cardStyles['stat-row-main']}`}>
+                    {Array.from({ length: 3 }, (_, stat) => (
+                      <div key={stat} className={cardStyles['stat-item']}>
+                        <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-icon']}`} />
+                        <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-main']}`} />
+                      </div>
+                    ))}
+                  </div>
+                  <div className={cardStyles['stat-side']}>
+                    <div className={cardStyles['source-stat-separator']} />
+                    <div className={`${cardStyles['stat-row']} ${cardStyles['stat-row-sub']}`}>
+                      {Array.from({ length: 4 }, (_, stat) => (
+                        <div key={stat} className={cardStyles['stat-item']}>
+                          <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-label']}`} />
+                          <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-main']}`} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : isRolling || beatmapIds === null ? (
+            <header className={styles['intro']}>
+              <div className={styles['intro-copy']}>
+                <div className={styles['intro-lead']}>
+                  <span>to find similar maps:</span>
+                </div>
+                <span className={styles['intro-steps']}>
+                  <span><span className={styles['intro-action']}><CursorText aria-hidden="true" /> search</span> for a map</span>
+                  <span><span className={styles['intro-action']}><ClipboardText aria-hidden="true" /> paste</span> a link/id anywhere</span>
+                  <span><span className={styles['intro-action']}><MagnifyingGlass aria-hidden="true" /> search similar</span> on a map below</span>
+                </span>
+                <span className={styles['intro-outro']}>have fun!</span>
+              </div>
               <div className={styles['intro-actions']}>
+                <div className={styles['mode-controls']} role="group" aria-label="Game mode">
+                  {modes.map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      aria-pressed={search.mode === mode}
+                      onClick={() => {
+                        setSourceSwap(null)
+                        setOutgoingResults(null)
+                        void navigate({ search: { ...defaultSearch, mode } })
+                      }}
+                    >{modeLabels[mode]}</button>
+                  ))}
+                </div>
                 <button
                   type="button"
                   disabled={isLoading || isRolling || !hasResults}
@@ -426,14 +489,28 @@ export function RecommendPage() {
                   </div>
                 ))}
               </div>
+            ) : requestError ? (
+              <section className={styles['empty-results']} role="alert">
+                <WarningCircle aria-hidden="true" />
+                <h2>{unavailableBeatmapId === null ? 'Couldn’t load recommendations' : 'Beatmap unavailable'}</h2>
+                <p>{unavailableBeatmapId === null ? requestError.message : `Beatmap #${unavailableBeatmapId} couldn’t be downloaded. Try another ID or link.`}</p>
+                <div className={styles['state-actions']}>
+                  <button type="button" onClick={() => { void (beatmapIds === null ? defaults.refetch() : recommend.refetch()) }}>Try again</button>
+                  <button type="button" onClick={() => { void updateBeatmaps({ ...search, beatmap: unavailableBeatmapId === null ? '' : (beatmapIds ?? []).filter((id) => id !== unavailableBeatmapId).join(',') }) }}>{unavailableBeatmapId === null ? 'Clear search' : 'Remove map'}</button>
+                </div>
+              </section>
             ) : hasResults ? (
               resultsList(resultBeatmaps)
-            ) : requestError ? (
-              <p className={styles['empty-results']} role="alert">
-                {unavailableBeatmapId === null ? 'Could not load recommendations. Please try again.' : `Beatmap #${unavailableBeatmapId} isn't available. Remove it and try again.`}
-              </p>
             ) : (response !== null || showDefaultResults) ? (
-              <p className={styles['empty-results']}>No results found</p>
+              <section className={styles['empty-results']} role="status">
+                <MagnifyingGlass aria-hidden="true" />
+                <h2>No matching beatmaps</h2>
+                <p>Try widening your filters or searching a different map.</p>
+                <div className={styles['state-actions']}>
+                  <button type="button" onClick={() => { void resetRecommendations(clearFilters(search)) }}>Clear filters</button>
+                  <button type="button" onClick={() => { void updateBeatmaps({ ...defaultSearch, mode: search.mode }) }}>Choose another map</button>
+                </div>
+              </section>
             ) : null}
           </div>
         </div>

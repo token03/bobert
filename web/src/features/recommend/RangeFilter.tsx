@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { KeyboardEvent, MouseEvent } from 'react'
 import { Slider } from '@base-ui/react/slider'
 import { useQuery } from '@tanstack/react-query'
+import type { Mode } from '../../shared/types'
 import { fetchCatalogStats } from '../search/searchClient'
 import type { CatalogHistogram } from '../search/search'
 import { FilterPopover } from './FilterPopover'
@@ -12,6 +13,7 @@ import styles from './RecommendForm.module.css'
 type Range = readonly [number, number]
 
 type RangeFilterProps = {
+  mode: Mode
   config: RangeFilterConfig
   min: number | undefined
   max: number | undefined
@@ -62,13 +64,13 @@ function binCounts(config: RangeFilterConfig, histogram: CatalogHistogram) {
   return counts
 }
 
-export function RangeFilter({ config, min, max, onValueCommit }: RangeFilterProps) {
+export function RangeFilter({ mode, config, min, max, onValueCommit }: RangeFilterProps) {
   const [open, setOpen] = useState(false)
   const externalKey = `${min}:${max}`
   const [local, setLocal] = useState<{ value: Range; key: string } | null>(null)
   const value: Range = local?.key === externalKey ? local.value : [min ?? config.min, max ?? config.max]
   const active = !isFullRange(value, config)
-  const stats = useQuery({ queryKey: ['catalog-stats'], queryFn: fetchCatalogStats, staleTime: Infinity, enabled: open })
+  const stats = useQuery({ queryKey: ['catalog-stats', mode], queryFn: () => fetchCatalogStats(mode), staleTime: Infinity, enabled: open })
 
   function preview(next: Range) {
     setLocal({ value: next, key: externalKey })

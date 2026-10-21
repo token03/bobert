@@ -2,8 +2,7 @@
   --result-card-height: calc(var(--cover-size) + 4px);
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: var(--space-xl);
-  row-gap: calc(var(--space-xl) * 1.25);
+  column-gap: var(--space-5xl);
 }
 
 @media (max-width: 760px) {
@@ -21,6 +20,5 @@
 @media (max-width: 1400px) {
   .result-list {
     grid-template-columns: 1fr;
-    row-gap: var(--space-xl);
   }
 }

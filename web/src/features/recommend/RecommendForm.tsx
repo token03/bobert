@@ -2,8 +2,8 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { Popover } from '@base-ui/react/popover'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowCounterClockwise, X, XCircle } from '@phosphor-icons/react'
-import { parseBeatmapIds } from '../../shared/beatmapIds'
-import type { BeatmapMetadata } from '../../shared/types'
+import { modeFromUrl, parseBeatmapIds } from '../../shared/beatmapIds'
+import type { BeatmapMetadata, Mode } from '../../shared/types'
 import { BeatmapSearch } from '../search/BeatmapSearch'
 import { lookupBeatmapTitle } from '../search/searchClient'
 import { clearFilters, maxBeatmaps } from './filters'
@@ -41,7 +41,8 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
     if (!pasted) {
       return null
     }
-    const ids = [...new Set([...(append ? beatmapIds : []), ...pasted])]
+    const mode = modeFromUrl(value) ?? search.mode
+    const ids = [...new Set([...(append && mode === search.mode ? beatmapIds : []), ...pasted])]
     if (ids.length > maxBeatmaps) {
       setBeatmapInputError(`Use up to ${maxBeatmaps} beatmaps.`)
       return false
@@ -54,7 +55,7 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
         tokens.scrollLeft = tokens.scrollWidth
       }
     })
-    return withBeatmaps(ids)
+    return { ...withBeatmaps(ids), mode }
   }
 
   function searchPastedBeatmaps(value: string, append: boolean) {
@@ -138,6 +139,7 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
                     <BeatmapToken
                       key={beatmapId}
                       beatmapId={beatmapId}
+                      mode={search.mode}
                       source={sources.find((source) => source.beatmap_id === beatmapId)}
                       unavailable={beatmapId === unavailableBeatmapId}
                       onRemove={() => removeBeatmaps(beatmapIds.filter((id) => id !== beatmapId))}
@@ -147,6 +149,7 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
               ) : null}
               <span className={styles['search-entry']}>
                 <BeatmapSearch
+                  mode={search.mode}
                   query={beatmapDraft}
                   hasSelection={beatmapIds.length > 0}
                   isLoading={isLoading}
@@ -177,15 +180,19 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
         <div className={styles['search-separator']} aria-hidden="true" />
 
         <div className={styles['filter-controls']}>
-          {rangeFilters.map((config) => (
+          {rangeFilters.filter((config) => config.key !== 'ar' || search.mode === 'std' || search.mode === 'catch').filter((config) => config.key !== 'cs' || search.mode !== 'taiko').map((original) => {
+            const config = original.key === 'cs' && search.mode === 'mania' ? { ...original, label: 'Key count', triggerLabel: 'KY', unit: 'K', step: 1, precision: 1 } : original
+            return (
             <RangeFilter
               key={config.key}
               config={config}
+              mode={search.mode}
               min={search[config.params[0]]}
               max={search[config.params[1]]}
               onValueCommit={(min, max) => onFiltersChange({ ...search, [config.params[0]]: min, [config.params[1]]: max })}
             />
-          ))}
+            )
+          })}
 
           <DateRangeFilter
             min={search.minDate}
@@ -206,16 +213,17 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
 }
 
 type BeatmapTokenProps = {
+  mode: Mode
   beatmapId: number
   source: BeatmapMetadata | undefined
   unavailable: boolean
   onRemove: () => void
 }
 
-function BeatmapToken({ beatmapId, source, unavailable, onRemove }: BeatmapTokenProps) {
+function BeatmapToken({ beatmapId, mode, source, unavailable, onRemove }: BeatmapTokenProps) {
   const catalog = useQuery({
-    queryKey: ['beatmap-title', beatmapId],
-    queryFn: () => lookupBeatmapTitle(beatmapId),
+    queryKey: ['beatmap-title', mode, beatmapId],
+    queryFn: () => lookupBeatmapTitle(beatmapId, mode),
     staleTime: Infinity,
     retry: false,
   })

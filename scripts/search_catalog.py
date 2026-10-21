@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import unicodedata
 from collections import defaultdict
@@ -9,10 +11,11 @@ from pathlib import Path
 import brotli
 import polars as pl
 
+from core.artifacts import read_run, resolve_artifacts
+from core.modes import MODES
 from scripts.common.paths import BEATMAPS_PATH, PROJECT_ROOT, RUNS_DIR
 
 WEB_SEARCH_PATH = PROJECT_ROOT / "web" / "public" / "search.bin"
-EMBEDDINGS_PATH = RUNS_DIR / "current" / "embeddings.parquet"
 RANKED_STATUSES = {"1", "2", "3", "ranked", "approved", "qualified"}
 LOVED_STATUSES = {"4", "loved"}
 SEARCH_TERM = re.compile(
@@ -27,7 +30,8 @@ def parse_args() -> argparse.Namespace:
         description="Build the client-side beatmap search artifact."
     )
     parser.add_argument("--catalog", default=str(BEATMAPS_PATH))
-    parser.add_argument("--embeddings", default=str(EMBEDDINGS_PATH))
+    parser.add_argument("-v", "--version", default="current")
+    parser.add_argument("--mode", choices=tuple(MODES))
     parser.add_argument("--output", default=str(WEB_SEARCH_PATH))
     parser.add_argument("--min-favourites", type=int, default=10)
     parser.add_argument(
@@ -55,39 +59,47 @@ def encode_varint(value: int) -> bytes:
     return bytes(encoded)
 
 
-def load_sets(catalog_path: str, embeddings_path: str) -> pl.DataFrame:
+def load_sets(catalog_path: str, embeddings_path: str, mode: str) -> pl.DataFrame:
     indexed = pl.scan_parquet(embeddings_path).select(pl.col("beatmap_id").alias("id"))
     beatmaps = (
         pl.scan_parquet(catalog_path)
         .join(indexed, on="id", how="semi")
-        .filter(pl.col("mode") == "osu", pl.col("deleted_at").is_null())
+        .filter(pl.col("mode") == MODES[mode].label, pl.col("deleted_at").is_null())
         .unique("id")
         .sort("difficulty_rating")
     )
-    return beatmaps.group_by("beatmapset_id", maintain_order=True).agg(
-        pl.col("status").first(),
-        pl.col("favourite_count").fill_null(0).max().alias("favourites"),
-        pl.col("submitted_date").first().cast(pl.String).str.slice(0, 4).alias("year"),
-        pl.col("artist").first(),
-        pl.col("title").first(),
-        pl.col("creator").first(),
-        pl.concat_str(
-            [pl.col("artist_unicode").first(), pl.col("title_unicode").first()],
-            separator=" ",
-            ignore_nulls=True,
-        ).alias("aliases"),
-        pl.struct(
-            pl.col("id"),
-            pl.col("version"),
-            pl.col("difficulty_rating").round(2).alias("stars"),
-            pl.col("ar"),
-            pl.col("cs"),
-            pl.col("accuracy").alias("od"),
-            pl.col("drain").alias("hp"),
-            pl.col("bpm"),
-            pl.col("total_length"),
-        ).alias("diffs"),
-    ).collect()
+    return (
+        beatmaps.group_by("beatmapset_id", maintain_order=True)
+        .agg(
+            pl.col("status").first(),
+            pl.col("favourite_count").fill_null(0).max().alias("favourites"),
+            pl.col("submitted_date")
+            .first()
+            .cast(pl.String)
+            .str.slice(0, 4)
+            .alias("year"),
+            pl.col("artist").first(),
+            pl.col("title").first(),
+            pl.col("creator").first(),
+            pl.concat_str(
+                [pl.col("artist_unicode").first(), pl.col("title_unicode").first()],
+                separator=" ",
+                ignore_nulls=True,
+            ).alias("aliases"),
+            pl.struct(
+                pl.col("id"),
+                pl.col("version"),
+                pl.col("difficulty_rating").round(2).alias("stars"),
+                pl.col("ar"),
+                pl.col("cs"),
+                pl.col("accuracy").alias("od"),
+                pl.col("drain").alias("hp"),
+                pl.col("bpm"),
+                pl.col("total_length"),
+            ).alias("diffs"),
+        )
+        .collect()
+    )
 
 
 def collect_strings(sets: list[dict]) -> tuple[list[str], dict[str, int]]:
@@ -139,7 +151,10 @@ def encode_columns(columns: list[list[int]]) -> bytes:
 
 
 def build_sections(
-    rows: list[dict], strings: list[str], string_index: dict[str, int], lookup: list[dict]
+    rows: list[dict],
+    strings: list[str],
+    string_index: dict[str, int],
+    lookup: list[dict],
 ) -> tuple[dict[str, bytes], int]:
     term_postings = collect_postings(rows)
     terms = sorted(term_postings)
@@ -234,17 +249,24 @@ def is_current(output: Path, inputs: list[Path]) -> bool:
     return all(path.stat().st_mtime <= built for path in inputs)
 
 
-def main() -> int:
-    args = parse_args()
-    output = Path(args.output)
+def build_mode(args, mode: str) -> Path:
+    artifacts = resolve_artifacts(RUNS_DIR / args.version, mode)
+    args.embeddings = str(artifacts.index)
+    output = Path(args.output).with_name(f"search-{mode}.bin")
     script = Path(__file__).resolve()
     if args.check and is_current(
-        output, [Path(args.catalog), Path(args.embeddings), script]
+        output,
+        [
+            Path(args.catalog),
+            Path(args.embeddings),
+            artifacts.run / "release.json",
+            script,
+        ],
     ):
-        return 0
+        return output
 
     sets = (
-        load_sets(args.catalog, args.embeddings)
+        load_sets(args.catalog, args.embeddings, mode)
         .filter(
             pl.col("status").is_in(list(RANKED_STATUSES | LOVED_STATUSES))
             | (pl.col("favourites") >= args.min_favourites)
@@ -252,10 +274,12 @@ def main() -> int:
         .sort("beatmapset_id")
     )
     rows = sets.to_dicts()
-    indexed = pl.DataFrame({"id": [diff["id"] for row in rows for diff in row["diffs"]]}).lazy()
+    indexed = pl.DataFrame(
+        {"id": [diff["id"] for row in rows for diff in row["diffs"]]}
+    ).lazy()
     lookup = (
         pl.scan_parquet(args.catalog)
-        .filter(pl.col("mode") == "osu", pl.col("deleted_at").is_null())
+        .filter(pl.col("mode") == MODES[mode].label, pl.col("deleted_at").is_null())
         .select("id", "beatmapset_id")
         .unique("id")
         .join(indexed, on="id", how="anti")
@@ -269,7 +293,14 @@ def main() -> int:
     sections, term_count = build_sections(rows, strings, string_index, lookup)
     diff_count = sum(len(entry["diffs"]) for entry in rows)
     lookup_count = sum(len(entry["ids"]) for entry in lookup)
-    counts = (len(strings), term_count, len(rows), diff_count, len(lookup), lookup_count)
+    counts = (
+        len(strings),
+        term_count,
+        len(rows),
+        diff_count,
+        len(lookup),
+        lookup_count,
+    )
     raw_size = write_artifact(sections, counts, output)
     compressed = output.stat().st_size
     print(
@@ -279,6 +310,28 @@ def main() -> int:
         f"{len(strings):,} strings -> {output} "
         f"({raw_size / 1e6:.1f} MB raw, {compressed / 1e6:.1f} MB brotli)"
     )
+    return output
+
+
+def main() -> int:
+    args = parse_args()
+    modes = [args.mode] if args.mode else list(read_run(RUNS_DIR / args.version))
+    manifest_path = PROJECT_ROOT / "web/search-catalog.json"
+    manifest = {}
+    version = (RUNS_DIR / args.version).resolve().name
+    for mode in modes:
+        output = build_mode(args, mode)
+        manifest[mode] = {
+            "url": f"https://huggingface.co/token03/bobert/resolve/{version}/{output.name}",
+            "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        }
+    if args.mode and manifest_path.exists():
+        previous = json.loads(manifest_path.read_text())
+        manifest = {
+            **{key: value for key, value in previous.items() if key in MODES},
+            **manifest,
+        }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     return 0
 
 

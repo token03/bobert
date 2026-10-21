@@ -4,6 +4,22 @@
  */
 
 export interface paths {
+    "/api/modes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["available_modes_api_modes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -79,6 +95,7 @@ export interface components {
     schemas: {
         /** BeatmapSummary */
         BeatmapSummary: {
+            mode: "std" | "taiko" | "catch" | "mania";
             /** Beatmap Id */
             beatmap_id: number;
             /** Beatmapset Id */
@@ -180,6 +197,7 @@ export interface components {
         };
         /** RecommendRequest */
         RecommendRequest: {
+            mode?: ("std" | "taiko" | "catch" | "mania") | null;
             /** Beatmap Ids */
             beatmap_ids: number[];
             /**
@@ -211,6 +229,7 @@ export interface components {
         };
         /** ScoredBeatmapSummary */
         ScoredBeatmapSummary: {
+            mode: "std" | "taiko" | "catch" | "mania";
             /** Beatmap Id */
             beatmap_id: number;
             /** Beatmapset Id */
@@ -280,6 +299,27 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    available_modes_api_modes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     health_health_get: {
         parameters: {
             query?: never;
@@ -306,6 +346,7 @@ export interface operations {
         parameters: {
             query?: {
                 seed?: number | null;
+                mode?: "std" | "taiko" | "catch" | "mania";
             };
             header?: never;
             path?: never;
@@ -368,7 +409,9 @@ export interface operations {
     };
     beatmap_detail_api_beatmaps__beatmap_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                mode?: "std" | "taiko" | "catch" | "mania";
+            };
             header?: never;
             path: {
                 beatmap_id: number;
@@ -401,7 +444,9 @@ export interface operations {
     };
     beatmap_summary_api_beatmaps__beatmap_id__summary_get: {
         parameters: {
-            query?: never;
+            query?: {
+                mode?: "std" | "taiko" | "catch" | "mania";
+            };
             header?: never;
             path: {
                 beatmap_id: number;

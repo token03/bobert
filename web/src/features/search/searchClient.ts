@@ -1,10 +1,12 @@
+import type { Mode } from '../../shared/types'
 import type { CatalogStats, SearchSet } from './search'
 
-export type SearchRequest =
+export type SearchRequest = { mode: Mode } & (
   | { type: 'search'; query: string }
   | { type: 'set'; beatmapId: number }
   | { type: 'title'; beatmapId: number }
   | { type: 'stats' }
+)
 type SearchReply = { id: number; result?: unknown; error?: string }
 
 let worker: Worker | null = null
@@ -37,18 +39,18 @@ function send<T>(request: SearchRequest): Promise<T> {
   })
 }
 
-export function searchBeatmaps(query: string): Promise<SearchSet[]> {
-  return send({ type: 'search', query })
+export function searchBeatmaps(query: string, mode: Mode): Promise<SearchSet[]> {
+  return send({ type: 'search', query, mode })
 }
 
-export function lookupBeatmapSet(beatmapId: number): Promise<number | null> {
-  return send({ type: 'set', beatmapId })
+export function lookupBeatmapSet(beatmapId: number, mode: Mode): Promise<number | null> {
+  return send({ type: 'set', beatmapId, mode })
 }
 
-export function lookupBeatmapTitle(beatmapId: number): Promise<string | null> {
-  return send({ type: 'title', beatmapId })
+export function lookupBeatmapTitle(beatmapId: number, mode: Mode): Promise<string | null> {
+  return send({ type: 'title', beatmapId, mode })
 }
 
-export function fetchCatalogStats(): Promise<CatalogStats> {
-  return send({ type: 'stats' })
+export function fetchCatalogStats(mode: Mode): Promise<CatalogStats> {
+  return send({ type: 'stats', mode })
 }

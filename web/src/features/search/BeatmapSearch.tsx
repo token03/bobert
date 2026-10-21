@@ -6,8 +6,10 @@ import { formatDifficultyStat, formatLength, formatNumber } from '../../shared/f
 import type { SearchSet } from './search'
 import { searchBeatmaps, startSearch } from './searchClient'
 import styles from './BeatmapSearch.module.css'
+import type { Mode } from '../../shared/types'
 
 type Props = {
+  mode: Mode
   query: string
   hasSelection: boolean
   isLoading: boolean
@@ -27,7 +29,7 @@ function median(values: number[]): number | null {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
 }
 
-export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName, spinnerClassName, onQuery, onSelect, onRemoveLast }: Props) {
+export function BeatmapSearch({ mode, query, hasSelection, isLoading, buttonClassName, spinnerClassName, onQuery, onSelect, onRemoveLast }: Props) {
   const [anchor, setAnchor] = useState<Element | null>(null)
   const [searchResult, setSearchResult] = useState<{ query: string; sets: SearchSet[]; status: string }>({ query: '', sets: [], status: '' })
   const [open, setOpen] = useState(false)
@@ -50,7 +52,7 @@ export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName,
     if (query.trim().length < 2 || parseBeatmapIds(query)) return
     let active = true
     const timer = setTimeout(() => {
-      void searchBeatmaps(query).then((results) => {
+      void searchBeatmaps(query, mode).then((results) => {
         if (!active) return
         setSearchResult({ query, sets: results, status: results.length ? '' : 'No matching beatmaps' })
       }).catch((error: Error) => {
@@ -59,7 +61,7 @@ export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName,
       })
     }, 30)
     return () => { active = false; clearTimeout(timer) }
-  }, [query])
+  }, [query, mode])
 
   const visible = query.trim().length >= 2 && !parseBeatmapIds(query)
   const searching = visible && searchResult.query !== query
@@ -198,7 +200,7 @@ export function BeatmapSearch({ query, hasSelection, isLoading, buttonClassName,
                 <Combobox.Item key={diff.id} value={`map:${diff.id}`} className={styles.item}>
                   <span className={styles.version}>{diff.version}</span>
                   <span className={styles.difficulty}>
-                    {([['AR', diff.ar], ['CS', diff.cs], ['OD', diff.od], ['HP', diff.hp]] as const).map(([label, value]) => (
+                    {([...(mode === 'std' || mode === 'catch' ? [['AR', diff.ar] as const] : []), ...(mode !== 'taiko' ? [[mode === 'mania' ? 'KY' : 'CS', diff.cs] as const] : []), ['OD', diff.od] as const, ['HP', diff.hp] as const]).map(([label, value]) => (
                       <span key={label}><span className={styles.difficultyLabel}>{label}</span>{formatDifficultyStat(value)}</span>
                     ))}
                   </span>

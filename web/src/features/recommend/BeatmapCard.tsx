@@ -1,4 +1,4 @@
-import { ArrowSquareOut, Check, Clock, Copy, Heart, Metronome, Pause, Play, MagnifyingGlass, Star } from '@phosphor-icons/react'
+import { ArrowSquareOut, Check, Clock, Copy, Metronome, Pause, Play, MagnifyingGlass, Star } from '@phosphor-icons/react'
 import { useState } from 'react'
 import type { FocusEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { displayArtist, displayTitle, formatCount, formatDate, formatDifficultyStat, formatFixedNumber, formatLength, formatMatch, formatNumber, statusLabel } from '../../shared/format'
@@ -188,30 +188,12 @@ function BeatmapCover({ className, src, lazy = false, beatmap, isActive, onPlayP
   )
 }
 
-const statusIcons: Record<string, ReactNode> = {
-  ranked: <Star weight="fill" />,
-  approved: <Star weight="fill" />,
-  qualified: <Star weight="fill" />,
-  loved: <Heart weight="fill" />,
-  graveyard: <Tombstone />,
-}
-
-function Tombstone() {
-  return (
-    <svg viewBox="0 0 256 256" fill="currentColor">
-      <path d="M48 232V96a80 80 0 0 1 160 0v136Z" />
-    </svg>
-  )
-}
-
 function StatusLabel({ beatmap, date }: { beatmap: BeatmapMetadata; date: string | null }) {
   const status = statusLabel(beatmap.status)
-  const icon = statusIcons[status]
 
   return (
-    <span className={styles['status-label']}>
-      {icon ? <span className={styles['status-icon']} data-status={status} aria-hidden="true">{icon}</span> : null}
-      <span>{status}{date ? ` ${date}` : ''}</span>
+    <span className={styles['status-label']} data-status={status}>
+      {status}{date ? ` ${date}` : ''}
     </span>
   )
 }
@@ -244,8 +226,8 @@ function BeatmapStats({ beatmap, variant, children }: BeatmapStatsProps) {
       <div className={styles['stat-side']}>
         {variant === 'source' ? <div className={styles['source-stat-separator']} aria-hidden="true" /> : null}
         <div className={`${styles['stat-row']} ${styles['stat-row-sub']}`}>
-          <Stat className={styles['stat-item']} label="AR" value={formatDifficultyStat(beatmap.ar)} />
-          <Stat className={styles['stat-item']} label="CS" value={formatDifficultyStat(beatmap.cs)} />
+          {(beatmap.mode === 'std' || beatmap.mode === 'catch') && <Stat className={styles['stat-item']} label="AR" value={formatDifficultyStat(beatmap.ar)} />}
+          {beatmap.mode !== 'taiko' && <Stat className={styles['stat-item']} label={beatmap.mode === 'mania' ? 'KY' : 'CS'} value={formatDifficultyStat(beatmap.cs)} />}
           <Stat className={styles['stat-item']} label="OD" value={formatDifficultyStat(beatmap.accuracy)} />
           <Stat className={styles['stat-item']} label="HP" value={formatDifficultyStat(beatmap.drain)} />
         </div>

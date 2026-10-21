@@ -5,7 +5,8 @@ import { tanstackRouter } from '@tanstack/router-plugin/vite'
 
 function searchArtifact(): Plugin {
   const serve = (server: ViteDevServer | PreviewServer) => {
-    server.middlewares.use('/search.bin', (_request, response, next) => {
+    server.middlewares.use((request, response, next) => {
+      if (!/^\/search-(std|taiko|catch|mania)\.bin(?:\?|$)/.test(request.url ?? '')) return next()
       response.setHeader('Content-Type', 'application/octet-stream')
       response.setHeader('Content-Encoding', 'br')
       response.setHeader('Cache-Control', 'no-cache')

@@ -21,4 +21,4 @@ dist-ssr
 *.sln
 *.sw?
 .env
-public/search.bin
+public/search*.bin

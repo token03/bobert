@@ -1,4 +1,4 @@
-@import '@fontsource-variable/onest';
+@import '@fontsource-variable/bricolage-grotesque/opsz.css';
 * {
   box-sizing: border-box;
 }
@@ -36,7 +36,7 @@ p {
 
 h1,
 h2 {
-  color: var(--heading);
+  color: var(--text);
   line-height: 1.05;
 }
 

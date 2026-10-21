@@ -12,7 +12,6 @@
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow);
   padding: 6px;
 }
 
@@ -57,7 +56,7 @@
 }
 
 .info small, .status {
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: var(--font-size-detail);
 }
 
@@ -70,13 +69,13 @@
 }
 
 .meta > span {
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: var(--font-size-detail);
   line-height: 1.35;
 }
 
 .meta small {
-  color: var(--muted-soft);
+  color: var(--text-faint);
   font-size: var(--font-size-detail);
   line-height: 1.35;
 }
@@ -84,12 +83,12 @@
 .meta [data-status='2'] { color: var(--text-status-ranked); }
 .meta [data-status='1'] { color: var(--text-status-loved); }
 
-.year { color: var(--muted-soft); }
+.year { color: var(--text-faint); }
 
 .chevron {
   width: 12px;
   flex-shrink: 0;
-  color: var(--muted-soft);
+  color: var(--text-faint);
 }
 
 .chevron[data-single='true'] { visibility: hidden; }
@@ -134,15 +133,15 @@
   min-width: 48px;
 }
 
-.stats svg { width: 13px; height: 13px; color: var(--text-stat); }
-.stars { color: var(--text-stat); font-weight: 600; }
+.stats svg { width: 13px; height: 13px; color: var(--text); }
+.stars { color: var(--text); font-weight: 600; }
 
 .difficulty {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-  color: var(--text-stat);
+  color: var(--text);
   font-size: var(--font-size-detail);
   font-variant-numeric: tabular-nums;
 }
@@ -155,7 +154,7 @@
 }
 
 .difficultyLabel {
-  color: var(--text-stat-label);
+  color: var(--text-faint);
   font-weight: var(--font-weight-semibold);
 }
 
@@ -174,11 +173,11 @@
 }
 
 .detailHeading strong, .detailHeading small { display: block; }
-.detailHeading small { color: var(--muted); }
+.detailHeading small { color: var(--text-secondary); }
 .detailHeading .tempo {
   flex: 1;
   min-width: 0;
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: var(--font-size-detail);
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -193,11 +192,11 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--muted);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 .detailHeading button:hover { background: var(--control-hover); }
-.detailHeading button:focus-visible { outline: 2px solid var(--text-stat); outline-offset: -2px; }
+.detailHeading button:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; }
 
 @media (max-width: 520px) {
   .difficulty { display: none; }
