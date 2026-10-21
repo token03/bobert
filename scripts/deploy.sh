@@ -105,7 +105,7 @@ snapshot_download(
     max_workers=4,
 )
 for name in CATALOGS:
-    (release / "data" / name).replace(Path("/app/catalogs") / name)
+    shutil.move(str(release / "data" / name), str(Path("/app/catalogs") / name))
 (release / "data").rmdir()
 shutil.rmtree(release / ".cache", ignore_errors=True)
 print(f"Downloaded {repo}@{revision}", flush=True)
