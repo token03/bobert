@@ -29,17 +29,17 @@ Paths below describe the default workspace layout. Check each command's argument
 | Dataset | `build-features` | Raw beatmaps under `data/beatmaps/` | `{std,taiko,catch,mania}_features.bin` under `data/features/` |
 | Dataset | `build-strains` | std features, raw beatmaps, config, parsecore | `data/strains.parquet` |
 | Dataset | `build-dataset` | Raw beatmaps under `data/beatmaps/` | Parsed std hit objects as parquet under `data/dataset/`, for exploration; training does not read it |
-| Model | `pretrain` | std features, strains, `configs/default.yaml` | Run config, checkpoints, exported `model.safetensors` |
+| Model | `pretrain` | Features and strains of one mode, `configs/pretrain.yaml` | Run config, checkpoints, exported `model.safetensors` |
 | Model | `export-model` | Training checkpoint and matching config | Inference `model.safetensors` |
-| Model | `embed` | Exported encoder and std features | `embeddings.parquet`, including pooling metadata and density index |
-| Model | `adapt` | Source run and collection-derived pairs | Target run with trained linear adapter |
+| Model | `embed` | Exported encoder and features of its mode | `embeddings.parquet`, including pooling metadata and density index |
+| Model | `adapt` | Source run, collections of its mode, `configs/adapt.yaml` | Target run with trained linear adapter |
 | Release | `fetch-run` | Hugging Face repository and release tag | Run under `runs/`, catalogs under `data/`; updates `runs/current` |
 | Release | `publish-run` | Run, catalogs, Hugging Face write token | Model card, artifacts, and immutable release tag |
 | Evaluation | `evaluate` | Run embeddings, catalogs, evaluation labels | Per-run evaluation JSON and terminal report |
 | Evaluation | `recommend` | Source maps / mappers and embedding index | Ranked recommendations |
 | Evaluation | `mine` | Retrieval inputs and evaluation data | Mined retrieval examples |
 | Evaluation | `umap` | Embeddings and metadata | Visualization coordinates, attributes, and neighbors |
-| Evaluation | `build-eval-graph` | Collection edges, vertices, ngrams, catalogs | Graph embeddings in `data/graph.parquet` |
+| Evaluation | `build-eval-graph` | Collection edges, vertices, ngrams, catalogs | Graph embeddings in `data/graph_{mode}.parquet` |
 | Web | `build-search` | Embedding index, beatmap catalog | `web/public/search.bin` client search artifact |
 | Evaluation | `build-eval-ngrams` | Collection vertices and edges | `data/collections/ngrams.txt` |
 | Deployment | `deploy` | Published release tag, SSH configuration | Fetches the release on the server, rebuilds the API, and swaps the run and catalogs |
@@ -80,25 +80,28 @@ On first run, `build-features` compiles `core/osu.py` with mypyc into `~/.cache/
 
 | Mode | Token | Features |
 | --- | --- | --- |
-| std | Hit object | The encoder's 28 features ([`core/features.py`](../core/features.py)) |
+| std | Hit object | Position, jump, onset timing, slider and spinner duration, slider geometry, and categorical object state ([`core/features.py`](../core/features.py)) |
 | taiko | Hit object | Onset timing, drumroll and swell duration, don/kat/drumroll/swell, big notes |
 | catch | Hit object | Horizontal position, log movement distance and direction from the previous exit, onset timing, juice stream duration, end offset and x-only curve residuals, banana duration |
 | mania | Event: a time where any note starts or any hold ends | Onset timing, key count, and a state per column (empty, tap, hold head, held, or release) for up to 10 keys. Columns are placed in 11 hand-relative slots, counted outward from the centre for each hand plus a centre slot, so a column's slot depends on its position relative to the middle rather than its index |
 
 ## Training runs
 
-After building `data/features/std_features.bin` (`build-features`) and `data/strains.parquet` (`build-strains`):
+[`core/modes.py`](../core/modes.py) declares each mode's tokenizer groups, feature gates, strain targets and loss weights, and augmentations. The tokenizer, masked-reconstruction head, losses, and normalization are generic over it, so every mode trains through the same code. After building `data/features/{mode}_features.bin` (`build-features`) and `data/strains.parquet` (`build-strains`):
 
 ```sh
-uv run pretrain --config configs/default.yaml --full -v my-run
-uv run embed -v my-run
+uv run pretrain --mode std --profile full -v my-run
+uv run embed -v my-run --mode std --variant base
+uv run adapt my-run --mode std
+uv run recommend 767311 -v v15 --mode mania
+uv run evaluate v15 --mode mania --variants base adapted
 ```
 
-`--full` trains on all selected maps without validation; `--no-validation` does the same for any other mode. Use `pretrain --help` for proxy/validation modes, batch-size overrides, and checkpoint resume. The training runner saves the resolved configuration in the run directory. Keep it with the checkpoints: exporting a checkpoint requires its matching configuration and normalization statistics.
+`--profile full` trains on all selected maps without validation; `--no-validation` does the same for the `proxy` and `validate` profiles. Other settings are overridden with `--set key=value`. The training runner saves the resolved configuration under `runs/<version>/<mode>/`. Keep it with the checkpoints: exporting a checkpoint requires its matching configuration.
 
-An export stores encoder/adapter weights and feature normalization tensors in `model.safetensors`, with model configuration and the feature schema in its header. `embeddings.parquet` carries its own corpus-centering statistics, adapter provenance, retrieval settings, and model checksum. There are no JSON sidecars. Re-embed after changing the encoder or adapter. Lightning `.ckpt` files remain training checkpoints; the inference loader accepts safetensors only.
+An export stores encoder/adapter weights and feature normalization tensors in `model.safetensors`, with model configuration and the feature schema in its header. `embeddings.parquet` stores normalized vectors as bfloat16, which every reader scores as stored, and carries its mode, corpus-centering statistics, adapter provenance, retrieval settings, and model checksum. The run-level `release.json` selects `base` or `adapted` for each available mode. Adaptation writes `model.a.safetensors`, `embeddings.a.parquet` and `training.a.yaml` alongside the base files, then selects the adapted variant. v15+ uses this layout exclusively. Re-embed after changing the encoder or adapter. Lightning `.ckpt` files remain training checkpoints; the inference loader accepts safetensors only.
 
-Use `configs/default.yaml` as the starting point for experiments. Local copies named `configs/local*.yaml` are ignored; each run saves its resolved configuration as `training.yaml`. This snapshot is also included in published releases. For older checkpoints, pass their saved configuration explicitly with `export-model --config <path>`.
+Use `configs/pretrain.yaml` and `configs/adapt.yaml` as the starting points for experiments. Local copies named `configs/local*.yaml` are ignored; each run saves its resolved configuration as `training.yaml`. This snapshot is also included in published releases. Use `--mode` with `export-model -v <version>` to select its checkpoint directory.
 
 ## Releases
 
@@ -107,10 +110,10 @@ uv run publish-run -v my-run --data-dir data
 uv run --no-default-groups --group serve fetch-run --revision my-run
 ```
 
-Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_REPO`. Publishing uploads the model, index, and three catalogs in one commit and tags that commit. Existing tags cannot be overwritten. `fetch-run` resolves a tag to a commit, validates the download, then activates it atomically. Use `--version` for another local run name, `--runs-dir` for a separate runs directory, or `--data-dir` for another catalog directory. Existing run directories are preserved; shared catalogs are overwritten by design.
+Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_REPO`. Publishing uploads the manifest, each mode’s selected model/index pair, available search binaries, and three shared catalogs in one commit and tags that commit. Existing tags cannot be overwritten. `fetch-run` resolves a tag to a commit, validates the download, then activates it atomically. Use `--version` for another local run name, `--runs-dir` for a separate runs directory, or `--data-dir` for another catalog directory. Existing run directories are preserved; shared catalogs are overwritten by design.
 
 Run artifacts stay in `runs/<version>/`; catalogs live in the workspace's `data/` directory and are shared across runs.
 
-`deploy -v <tag>` runs on the provisioned server: it pulls the code, downloads that release from Hugging Face with `curl`, rebuilds the API image, swaps the run and catalogs, and rolls back on a failed health check. It requires the release to be published first and uses `DEPLOY_SSH_TARGET` and `DEPLOY_REMOTE_ROOT`. The disposable SQLite cache is reset on every switch so container users cannot conflict over stale files. Rollback only needs the previous run directory, which is retained on the server.
+`deploy -v <tag>` runs on the provisioned server: it pulls the code, downloads that release from Hugging Face with `curl`, rebuilds the API image, swaps the run and catalogs, and rolls back on a failed health check. It requires the release to be published first and uses `DEPLOY_SSH_TARGET` and `DEPLOY_REMOTE_ROOT`. Per-mode SQLite caches are reset on every switch so container users cannot conflict over stale files. Rollback only needs the previous run directory, which is retained on the server.
 
 For service setup, see the [API guide](../server/README.md). The deployment command updates an existing host; initial provisioning happens separately.
