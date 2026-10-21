@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
+from omegaconf import DictConfig
 from torch import nn
 from tqdm import tqdm
 
@@ -33,17 +34,6 @@ class GraphIndex:
 
 
 _GRAPH: GraphIndex | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AdaptConfig:
-    epochs: int
-    batch_size: int
-    learning_rate: float
-    weight_decay: float
-    temperature: float
-    preserve_weight: float
-    seed: int
 
 
 def sample_pairs(
@@ -192,10 +182,11 @@ def unique_pair_batches(
 def train_adapter(
     embeddings: np.ndarray,
     pairs: np.ndarray,
-    config: AdaptConfig,
+    config: DictConfig,
+    seed: int,
     device: torch.device,
 ) -> EmbeddingAdapter:
-    generator = np.random.default_rng(config.seed)
+    generator = np.random.default_rng(seed)
     batches = [
         batch
         for _ in range(config.epochs)

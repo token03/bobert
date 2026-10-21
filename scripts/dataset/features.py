@@ -10,14 +10,9 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from core.dataset import (
-    MODE_NAMES,
-    RULESETS,
-    FeatureWriter,
-    encode_vector,
-    feature_path,
-)
+from core.dataset import FeatureWriter, encode_vector, feature_path
 from core.features import beatmap_frames
+from core.modes import MODE_NAMES, MODES
 from core.raw import find_maps
 from scripts.common.paths import resolve_path
 from scripts.dataset.native import compile_parser, load_parser
@@ -84,7 +79,7 @@ def process_chunk(task: tuple[list[str], tuple[int, ...], int]):
         if not beatmaps:
             continue
         mode = MODE_NAMES[mode_int]
-        ruleset = RULESETS[mode]
+        ruleset = MODES[mode]
         try:
             vectors, ids = ruleset.build(
                 *beatmap_frames(beatmaps, ruleset.columns), max_seq_len
@@ -128,7 +123,7 @@ def build_features(
         files = sorted(random.Random(sample_seed).sample(files, sample_size))
     print(f"Building {', '.join(modes)} features from {len(files):,} files.")
 
-    mode_ints = tuple(RULESETS[mode].mode_int for mode in modes)
+    mode_ints = tuple(MODES[mode].mode_int for mode in modes)
     tasks = [
         (files[start : start + CHUNK_SIZE], mode_ints, max_seq_len)
         for start in range(0, len(files), CHUNK_SIZE)
@@ -193,8 +188,8 @@ def main() -> None:
         "-m",
         "--modes",
         nargs="+",
-        choices=tuple(RULESETS),
-        default=list(RULESETS),
+        choices=tuple(MODES),
+        default=list(MODES),
     )
     parser.add_argument(
         "--max-seq-len",

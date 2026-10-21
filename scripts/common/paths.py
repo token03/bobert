@@ -35,8 +35,4 @@ def find_latest_checkpoint(runs_dir: str | Path = RUNS_DIR) -> Path | None:
 
 
 def run_name_from_checkpoint(checkpoint: Path) -> str:
-    return (
-        checkpoint.parent.parent.name
-        if checkpoint.parent.name == "checkpoints"
-        else checkpoint.stem
-    )
+    return checkpoint.parent.parent.parent.name

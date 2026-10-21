@@ -23,18 +23,16 @@ HITSOUND_FINISH = 4
 HITSOUND_CLAP = 8
 
 FEATURES = (
-    Feature("log_onset_ioi_ms", "rhythm", standardize=True),
-    Feature("onset_rhythm_cos", "rhythm"),
-    Feature("onset_rhythm_sin", "rhythm"),
-    Feature(
-        "log_drumroll_duration_ms", "rhythm", standardize=True, conditional="slider"
-    ),
-    Feature("drumroll_rhythm_cos", "rhythm", conditional="slider"),
-    Feature("drumroll_rhythm_sin", "rhythm", conditional="slider"),
-    Feature("log_swell_duration_ms", "rhythm", standardize=True, conditional="spinner"),
-    Feature("note_type", "attribute", cardinality=4),
-    Feature("is_big", "attribute", cardinality=2),
-    Feature("onset_state", "rhythm", cardinality=3),
+    Feature("log_onset_ioi_ms", standardize=True),
+    Feature("onset_rhythm_cos"),
+    Feature("onset_rhythm_sin"),
+    Feature("log_drumroll_duration_ms", standardize=True, conditional="slider"),
+    Feature("drumroll_rhythm_cos", conditional="slider"),
+    Feature("drumroll_rhythm_sin", conditional="slider"),
+    Feature("log_swell_duration_ms", standardize=True, conditional="spinner"),
+    Feature("note_type", cardinality=4),
+    Feature("is_big", cardinality=2),
+    Feature("onset_state", cardinality=3),
 )
 
 FIELD_NAMES = tuple(feature.name for feature in FEATURES)

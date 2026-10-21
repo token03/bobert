@@ -3,11 +3,9 @@ import json
 import os
 import random
 import struct
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
-from typing import NamedTuple
 
 import numpy as np
 import polars as pl
@@ -15,7 +13,7 @@ import pyarrow as pa
 import torch
 from torch.utils.data import Sampler
 
-from . import STRAIN_COLUMNS, catch, features, mania, osu, taiko
+from .modes import MODES
 
 FORMAT_VERSION = 1
 MAGIC = b"BOBFEAT1"
@@ -23,50 +21,9 @@ FOOTER = struct.Struct("<Q8s")
 CODEC = pa.Codec("zstd", compression_level=3)
 
 
-class Ruleset(NamedTuple):
-    mode_int: int
-    field_names: tuple[str, ...]
-    columns: tuple[str, ...]
-    build: Callable
-    sources: tuple[ModuleType, ...]
-
-
-RULESETS = {
-    "std": Ruleset(
-        0,
-        features.FIELD_NAMES,
-        features.HITOBJECT_COLUMNS,
-        features.build_feature_tensors,
-        (features, osu),
-    ),
-    "taiko": Ruleset(
-        1,
-        taiko.FIELD_NAMES,
-        taiko.HITOBJECT_COLUMNS,
-        taiko.build_feature_tensors,
-        (taiko, features, osu),
-    ),
-    "catch": Ruleset(
-        2,
-        catch.FIELD_NAMES,
-        catch.HITOBJECT_COLUMNS,
-        catch.build_feature_tensors,
-        (catch, features, osu),
-    ),
-    "mania": Ruleset(
-        3,
-        mania.FIELD_NAMES,
-        mania.HITOBJECT_COLUMNS,
-        mania.build_feature_tensors,
-        (mania, features, osu),
-    ),
-}
-MODE_NAMES = {ruleset.mode_int: name for name, ruleset in RULESETS.items()}
-
-
 def source_hash(mode: str) -> str:
     digest = hashlib.sha256()
-    for module in RULESETS[mode].sources:
+    for module in MODES[mode].sources:
         digest.update(Path(str(module.__file__)).read_bytes())
     return digest.hexdigest()[:16]
 
@@ -87,7 +44,7 @@ class FeatureWriter:
         self.path = Path(path)
         self.mode = mode
         self.max_seq_len = max_seq_len
-        self.field_names = RULESETS[mode].field_names
+        self.field_names = MODES[mode].field_names
         self.temporary = self.path.with_name(self.path.name + ".tmp")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.file = self.temporary.open("wb")
@@ -171,7 +128,7 @@ def read_section(path: str | Path, meta: dict, name: str) -> np.ndarray:
 
 def stored_beatmap_ids(features_dir: str | Path) -> set[int]:
     beatmap_ids = set()
-    for mode in RULESETS:
+    for mode in MODES:
         path = feature_path(features_dir, mode)
         if path.exists():
             beatmap_ids.update(
@@ -188,7 +145,7 @@ class FeatureStore:
         if mode is not None and self.mode != mode:
             raise ValueError(f"{self.path} holds {self.mode} features, not {mode}")
         self.field_names = tuple(self.meta["fields"])
-        expected = RULESETS[self.mode].field_names
+        expected = MODES[self.mode].field_names
         if self.field_names != expected:
             raise ValueError(
                 f"{self.path} fields do not match the {self.mode} feature schema; "
@@ -307,30 +264,6 @@ class LengthBucketBatchSampler(Sampler[list[int]]):
         yield from batches
 
 
-def _best_supported_strains_lf(
-    strains_lf: pl.LazyFrame, seq_len: int | None
-) -> pl.LazyFrame:
-    strains_lf = strains_lf.with_columns(
-        pl.when(pl.col("seq_len") == 0)
-        .then(pl.lit(2_147_483_647))
-        .otherwise(pl.col("seq_len"))
-        .alias("_strain_order")
-    )
-    if seq_len is not None:
-        strains_lf = strains_lf.filter(
-            (pl.col("seq_len") > 0) & (pl.col("seq_len") <= seq_len)
-        )
-
-    best_lengths = strains_lf.group_by("beatmap_id").agg(
-        pl.col("_strain_order").max().alias("_strain_order")
-    )
-    return (
-        strains_lf.join(best_lengths, on=["beatmap_id", "_strain_order"], how="inner")
-        .unique(["beatmap_id", "seq_len"], keep="first")
-        .drop("_strain_order")
-    )
-
-
 def _sample_beatmap_ids(
     beatmap_ids: list[int], sample_size: int | None, dataset_seed: int
 ) -> list[int]:
@@ -353,8 +286,9 @@ def select_beatmaps(
     min_sr: float | None = None,
     max_sr: float | None = None,
     include_strains: bool = False,
-    targets: Sequence[str] = STRAIN_COLUMNS,
 ) -> tuple[np.ndarray, np.ndarray | None]:
+    mode = MODES[store.mode]
+    targets = tuple(mode.strains)
     selected = pl.LazyFrame(
         {
             "beatmap_id": store.beatmap_ids,
@@ -369,14 +303,11 @@ def select_beatmaps(
     if include_strains or min_sr is not None or max_sr is not None:
         if strains_path is None:
             raise ValueError("strains_path is required to filter or load strains")
-        strains_lf = _best_supported_strains_lf(
-            pl.scan_parquet(Path(strains_path).expanduser()), strain_seq_len
+        strains_lf = pl.scan_parquet(Path(strains_path).expanduser()).filter(
+            pl.col("mode_int") == mode.mode_int
         )
-        mode_int = RULESETS[store.mode].mode_int
-        if "mode_int" in strains_lf.collect_schema():
-            strains_lf = strains_lf.filter(pl.col("mode_int") == mode_int)
-        elif mode_int != 0:
-            strains_lf = strains_lf.filter(pl.lit(False))
+        if strain_seq_len is not None:
+            strains_lf = strains_lf.filter(pl.col("seq_len") <= strain_seq_len)
         strains_lf = strains_lf.filter(
             pl.all_horizontal(
                 [

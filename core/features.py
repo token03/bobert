@@ -26,106 +26,63 @@ RED_ANCHOR_BIN_CARDINALITY = 4
 @dataclass(frozen=True, slots=True)
 class Feature:
     name: str
-    family: Literal["spatial", "rhythm", "attribute"]
     standardize: bool = False
     cardinality: int | None = None
     conditional: Literal["slider", "spinner"] | None = None
 
 
 FEATURES = (
-    Feature("norm_x", "spatial"),
-    Feature("norm_y", "spatial"),
-    Feature("log_jump_distance", "spatial", standardize=True),
-    Feature("jump_direction_cos", "spatial"),
-    Feature("jump_direction_sin", "spatial"),
-    Feature("log_onset_ioi_ms", "rhythm", standardize=True),
-    Feature("onset_rhythm_cos", "rhythm"),
-    Feature("onset_rhythm_sin", "rhythm"),
+    Feature("norm_x"),
+    Feature("norm_y"),
+    Feature("log_jump_distance", standardize=True),
+    Feature("jump_direction_cos"),
+    Feature("jump_direction_sin"),
+    Feature("log_onset_ioi_ms", standardize=True),
+    Feature("onset_rhythm_cos"),
+    Feature("onset_rhythm_sin"),
     Feature(
         "log_span_duration_ms",
-        "rhythm",
         standardize=True,
         conditional="slider",
     ),
-    Feature("span_rhythm_cos", "rhythm", conditional="slider"),
-    Feature("span_rhythm_sin", "rhythm", conditional="slider"),
-    Feature("log_span_length", "spatial", standardize=True, conditional="slider"),
-    Feature("log_span_end_distance", "spatial", standardize=True, conditional="slider"),
-    Feature("span_end_direction_cos", "spatial", conditional="slider"),
-    Feature("span_end_direction_sin", "spatial", conditional="slider"),
-    Feature("curve_residual_1_dx", "spatial", standardize=True, conditional="slider"),
-    Feature("curve_residual_1_dy", "spatial", standardize=True, conditional="slider"),
-    Feature("curve_residual_2_dx", "spatial", standardize=True, conditional="slider"),
-    Feature("curve_residual_2_dy", "spatial", standardize=True, conditional="slider"),
+    Feature("span_rhythm_cos", conditional="slider"),
+    Feature("span_rhythm_sin", conditional="slider"),
+    Feature("log_span_length", standardize=True, conditional="slider"),
+    Feature("log_span_end_distance", standardize=True, conditional="slider"),
+    Feature("span_end_direction_cos", conditional="slider"),
+    Feature("span_end_direction_sin", conditional="slider"),
+    Feature("curve_residual_1_dx", standardize=True, conditional="slider"),
+    Feature("curve_residual_1_dy", standardize=True, conditional="slider"),
+    Feature("curve_residual_2_dx", standardize=True, conditional="slider"),
+    Feature("curve_residual_2_dy", standardize=True, conditional="slider"),
     Feature(
         "log_spinner_duration_ms",
-        "rhythm",
         standardize=True,
         conditional="spinner",
     ),
-    Feature("spinner_rhythm_cos", "rhythm", conditional="spinner"),
-    Feature("spinner_rhythm_sin", "rhythm", conditional="spinner"),
-    Feature("object_type", "attribute", cardinality=3),
-    Feature("is_new_combo", "attribute", cardinality=2),
-    Feature("incoming_motion_valid", "spatial", cardinality=3),
+    Feature("spinner_rhythm_cos", conditional="spinner"),
+    Feature("spinner_rhythm_sin", conditional="spinner"),
+    Feature("object_type", cardinality=3),
+    Feature("is_new_combo", cardinality=2),
+    Feature("incoming_motion_valid", cardinality=3),
     Feature(
         "span_count_bin",
-        "attribute",
         cardinality=SPAN_COUNT_CARDINALITY,
         conditional="slider",
     ),
     Feature(
         "log_gray_anchor_count",
-        "attribute",
         standardize=True,
         conditional="slider",
     ),
     Feature(
         "red_anchor_bin",
-        "attribute",
         cardinality=RED_ANCHOR_BIN_CARDINALITY,
         conditional="slider",
     ),
 )
 
 FIELD_NAMES = tuple(feature.name for feature in FEATURES)
-VECTOR_DIM = len(FIELD_NAMES)
-FEATURE_INDEX = {name: index for index, name in enumerate(FIELD_NAMES)}
-FEATURES_BY_NAME = {feature.name: feature for feature in FEATURES}
-CATEGORICAL_FEATURES = tuple(
-    feature.name for feature in FEATURES if feature.cardinality is not None
-)
-CONTINUOUS_FEATURES = tuple(
-    feature.name for feature in FEATURES if feature.cardinality is None
-)
-STANDARDIZED_FEATURES = tuple(
-    feature.name for feature in FEATURES if feature.standardize
-)
-SLIDER_ONLY_FEATURES = tuple(
-    feature.name for feature in FEATURES if feature.conditional == "slider"
-)
-SPINNER_ONLY_FEATURES = tuple(
-    feature.name for feature in FEATURES if feature.conditional == "spinner"
-)
-FEATURE_INFO = {
-    "categorical": {
-        name: {
-            "index": FEATURE_INDEX[name],
-            "cardinality": FEATURES_BY_NAME[name].cardinality,
-        }
-        for name in CATEGORICAL_FEATURES
-    },
-    "continuous": {name: FEATURE_INDEX[name] for name in CONTINUOUS_FEATURES},
-    "slider": {name: FEATURE_INDEX[name] for name in SLIDER_ONLY_FEATURES},
-    "spinner": {name: FEATURE_INDEX[name] for name in SPINNER_ONLY_FEATURES},
-    "common": {
-        feature.name: FEATURE_INDEX[feature.name]
-        for feature in FEATURES
-        if feature.conditional is None
-    },
-}
-
-VectorStats = dict[str, tuple[torch.Tensor, torch.Tensor]]
 
 BEATMAPS_SCHEMA = {
     "beatmap_id": pl.Int64,
@@ -568,78 +525,3 @@ def build_feature_tensors(
     return pack_vectors(
         _apply_features(_prepare_objects(hitobjects_lf, max_seq_len)), FIELD_NAMES
     )
-
-
-def build_beatmap_tensor(
-    beatmap: RawBeatmap, max_seq_len: int | None = None
-) -> torch.Tensor:
-    if beatmap.mode != 0:
-        raise ValueError("only osu!standard beatmaps are supported")
-    vectors, _ = build_feature_tensors(
-        *beatmap_frames([beatmap], HITOBJECT_COLUMNS), max_seq_len
-    )
-    if not vectors:
-        raise ValueError("could not engineer hitobject features")
-    return vectors[0]
-
-
-def fit_stats(train_data: Sequence[torch.Tensor], epsilon: float = 1e-8) -> VectorStats:
-    object_type_index = FEATURE_INDEX["object_type"]
-    indices = torch.tensor([FEATURE_INDEX[name] for name in STANDARDIZED_FEATURES])
-    slider_indices = [
-        index
-        for index, name in enumerate(STANDARDIZED_FEATURES)
-        if FEATURES_BY_NAME[name].conditional == "slider"
-    ]
-    spinner_indices = [
-        index
-        for index, name in enumerate(STANDARDIZED_FEATURES)
-        if FEATURES_BY_NAME[name].conditional == "spinner"
-    ]
-    counts = torch.zeros(len(STANDARDIZED_FEATURES), dtype=torch.int64)
-    totals = torch.zeros(len(STANDARDIZED_FEATURES))
-    totals_sq = torch.zeros(len(STANDARDIZED_FEATURES))
-    for start in range(0, len(train_data), 256):
-        vectors = torch.cat(tuple(train_data[start : start + 256]))
-        values = vectors.index_select(1, indices).float()
-        counts += len(vectors)
-        counts[slider_indices] -= (
-            len(vectors) - (vectors[:, object_type_index] == OBJECT_TYPE_SLIDER).sum()
-        )
-        counts[spinner_indices] -= (
-            len(vectors) - (vectors[:, object_type_index] == OBJECT_TYPE_SPINNER).sum()
-        )
-        totals += values.sum(dim=0)
-        totals_sq += values.square().sum(dim=0)
-
-    stats = {}
-    for position, name in enumerate(STANDARDIZED_FEATURES):
-        count = counts[position]
-        if count == 0:
-            stats[name] = (torch.tensor(0.0), torch.tensor(epsilon))
-            continue
-
-        mean = totals[position] / count
-        variance = (
-            (totals_sq[position] - totals[position].square() / count) / (count - 1)
-            if count > 1
-            else torch.tensor(0.0)
-        )
-        stats[name] = (
-            mean,
-            torch.sqrt(variance.clamp_min(0.0)).clamp_min(epsilon),
-        )
-    return stats
-
-
-def normalize(
-    vectors: torch.Tensor, stats: VectorStats, epsilon: float = 1e-8
-) -> torch.Tensor:
-    normalized = vectors.to(dtype=torch.float32, copy=True)
-    means = torch.zeros(VECTOR_DIM, dtype=normalized.dtype, device=normalized.device)
-    divisors = torch.ones(VECTOR_DIM, dtype=normalized.dtype, device=normalized.device)
-    for name, (mean, std) in stats.items():
-        index = FEATURE_INDEX[name]
-        means[index] = mean
-        divisors[index] = std + epsilon
-    return normalized.sub_(means).div_(divisors)

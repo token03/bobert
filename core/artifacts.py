@@ -3,7 +3,7 @@ import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
@@ -13,13 +13,17 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save
 
-from .features import FEATURES, VectorStats
+from .modes import MODES
 
 MODEL_NAME = "model.safetensors"
 INDEX_NAME = "embeddings.parquet"
 CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet", "strains.parquet")
-INDEX_VERSION = 3
-MODEL_VERSION = 2
+INDEX_VERSION = 4
+MODEL_VERSION = 3
+
+ModeName = Literal["std", "taiko", "catch", "mania"]
+RUN_MANIFEST = "release.json"
+VARIANTS = ("base", "adapted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +32,18 @@ class Index:
     embeddings: np.ndarray
     densities: np.ndarray
     metadata: dict[str, Any]
+
+    def vectors(self) -> np.ndarray:
+        return from_bfloat16(self.embeddings)
+
+
+def to_bfloat16(values: np.ndarray) -> np.ndarray:
+    bits = np.ascontiguousarray(values, dtype=np.float32).view(np.uint32)
+    return ((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16).astype(np.uint16)
+
+
+def from_bfloat16(bits: np.ndarray) -> np.ndarray:
+    return np.left_shift(bits, 16, dtype=np.uint32).view(np.float32)
 
 
 def checksum(path: str | Path) -> str:
@@ -38,33 +54,24 @@ def checksum(path: str | Path) -> str:
 def model_config(path: str | Path) -> dict[str, Any]:
     with safe_open(path, framework="pt", device="cpu") as artifact:
         config = json.loads(artifact.metadata()["bobert"])
+    mode = MODES[config["model_args"]["mode"]]
     if config["version"] != MODEL_VERSION or config["features"] != [
-        asdict(f) for f in FEATURES
+        asdict(f) for f in mode.features
     ]:
         raise ValueError("unsupported model format or feature schema")
     return config
 
 
 def save_model(
-    path: str | Path,
-    state: dict[str, torch.Tensor],
-    args: dict[str, Any],
-    stats: VectorStats,
+    path: str | Path, state: dict[str, torch.Tensor], args: dict[str, Any]
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tensors = {
-        f"encoder.{key}": value.detach().cpu().contiguous()
-        for key, value in state.items()
-    }
-    for name, (mean, std) in stats.items():
-        tensors[f"normalization.{name}.mean"] = mean.detach().cpu().contiguous()
-        tensors[f"normalization.{name}.std"] = std.detach().cpu().contiguous()
+    tensors = {key: value.detach().cpu().contiguous() for key, value in state.items()}
     config = {
         "version": MODEL_VERSION,
         "model_args": args,
-        "features": [asdict(f) for f in FEATURES],
-        "normalized_features": list(stats),
+        "features": [asdict(f) for f in MODES[args["mode"]].features],
     }
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_bytes(
@@ -73,22 +80,9 @@ def save_model(
     temporary.replace(path)
 
 
-def load_model(path: str | Path) -> tuple[dict, dict, VectorStats]:
+def load_model(path: str | Path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     config = model_config(path)
-    tensors = load_file(path, device="cpu")
-    state = {
-        key.removeprefix("encoder."): value
-        for key, value in tensors.items()
-        if key.startswith("encoder.")
-    }
-    stats = {
-        name: (
-            tensors[f"normalization.{name}.mean"],
-            tensors[f"normalization.{name}.std"],
-        )
-        for name in config["normalized_features"]
-    }
-    return state, config["model_args"], stats
+    return load_file(path, device="cpu"), config["model_args"]
 
 
 def embedding_metadata(path: str | Path) -> dict[str, Any]:
@@ -105,6 +99,7 @@ def index_id(metadata: dict[str, Any]) -> str:
     identity = {
         key: metadata[key]
         for key in (
+            "version",
             "model_sha256",
             "pooling",
             "layers",
@@ -142,7 +137,7 @@ def write_index(
     try:
         for start in range(0, len(embeddings), batch_size):
             stop = min(start + batch_size, len(embeddings))
-            table = _embedding_table(
+            table = embedding_table(
                 ids[start:stop].tolist(),
                 transform(embeddings[start:stop]),
                 None if densities is None else densities[start:stop],
@@ -165,11 +160,11 @@ def write_index(
             print()
 
 
-def _embedding_table(
+def embedding_table(
     ids: list[int], embeddings: np.ndarray, densities: np.ndarray | None
 ) -> pa.Table:
-    embeddings = np.asarray(embeddings, dtype=np.float16)
-    values = pa.array(embeddings.reshape(-1), type=pa.float16())
+    embeddings = to_bfloat16(embeddings)
+    values = pa.array(embeddings.reshape(-1), type=pa.uint16())
     embedding_column = pa.FixedSizeListArray.from_arrays(values, embeddings.shape[1])
     arrays = [pa.array(ids, type=pa.int64()), embedding_column]
     names = ["beatmap_id", "embedding"]
@@ -192,8 +187,11 @@ def validate_index(path: str | Path, model: str | Path | None = None) -> dict[st
     ):
         raise ValueError("expected beatmap_id, embedding, and density columns")
     embedding_type = schema.field("embedding").type
-    if not pa.types.is_fixed_size_list(embedding_type):
-        raise ValueError("embedding column must be a fixed-size list")
+    if (
+        not pa.types.is_fixed_size_list(embedding_type)
+        or embedding_type.value_type != pa.uint16()
+    ):
+        raise ValueError("embedding column must be a fixed-size bfloat16 list")
     if metadata["count"] != count or metadata["pooling"] != "layer_centered_mean":
         raise ValueError("index metadata does not match the file")
     means = np.asarray(metadata["layer_means"], dtype=np.float32)
@@ -205,18 +203,33 @@ def validate_index(path: str | Path, model: str | Path | None = None) -> dict[st
             metadata["model_sha256"] != checksum(model)
             or args["d_model"] != embedding_type.list_size
             or sorted(args["global_attention_layers"]) != metadata["layers"]
+            or args["mode"] != metadata["mode"]
             or args.get("adapter") != metadata.get("adapter")
         ):
             raise ValueError("model and embedding index do not match")
     return metadata
 
 
+def read_embeddings(
+    path: str | Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    frame = pl.read_parquet(path)
+    bits = frame["embedding"].to_numpy()
+    if bits.dtype != np.uint16:
+        raise ValueError(f"{path} does not store bfloat16 embeddings")
+    return (
+        frame["beatmap_id"].to_numpy().astype(np.int64),
+        bits,
+        frame["density"].to_numpy().astype(np.float32)
+        if "density" in frame.columns
+        else None,
+    )
+
+
 def read_index(
     path: str | Path,
     *,
     model: str | Path | None = None,
-    normalize: bool = True,
-    dtype: type[np.floating] = np.float32,
     with_density: bool = True,
 ) -> Index:
     metadata = validate_index(path, model)
@@ -224,24 +237,11 @@ def read_index(
         names = parquet.schema_arrow.names
     if with_density and "density" not in names:
         raise ValueError("index has no retrieval densities")
-    columns = ["beatmap_id", "embedding", *(["density"] if with_density else [])]
-    frame = pl.read_parquet(path, columns=columns)
-    embeddings = frame["embedding"].to_numpy()
-    if embeddings.dtype == object:
-        embeddings = np.stack(embeddings)
-    if normalize:
-        embeddings = embeddings.astype(np.float32, copy=False)
-        embeddings /= np.maximum(
-            np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
-        )
+    ids, bits, densities = read_embeddings(path)
     return Index(
-        ids=frame["beatmap_id"].to_numpy().astype(np.int64),
-        embeddings=embeddings.astype(dtype, copy=False),
-        densities=(
-            frame["density"].to_numpy().astype(np.float32)
-            if with_density
-            else np.empty(0, dtype=np.float32)
-        ),
+        ids=ids,
+        embeddings=bits,
+        densities=densities if with_density else np.empty(0, dtype=np.float32),
         metadata=metadata,
     )
 
@@ -256,3 +256,81 @@ def validate_catalogs(path: str | Path) -> None:
         missing = required - set(pq.read_schema(Path(path) / name).names)
         if missing:
             raise ValueError(f"{name} is missing columns: {sorted(missing)}")
+
+
+@dataclass(frozen=True)
+class RunArtifacts:
+    run: Path
+    mode: str
+    variant: str
+
+    @property
+    def directory(self) -> Path:
+        return self.run / self.mode
+
+    @property
+    def suffix(self) -> str:
+        return ".a" if self.variant == "adapted" else ""
+
+    @property
+    def model(self) -> Path:
+        return self.directory / f"model{self.suffix}.safetensors"
+
+    @property
+    def index(self) -> Path:
+        return self.directory / f"embeddings{self.suffix}.parquet"
+
+    @property
+    def config(self) -> Path:
+        return self.directory / f"training{self.suffix}.yaml"
+
+
+def read_run(run: str | Path) -> dict[str, str]:
+    path = Path(run) / RUN_MANIFEST
+    payload = json.loads(path.read_text())
+    if payload.get("format") != 1:
+        raise ValueError(f"unsupported run format: {path}")
+    modes = payload.get("modes")
+    if not isinstance(modes, dict) or not modes:
+        raise ValueError(f"run must select at least one mode: {path}")
+    if any(
+        mode not in MODES or variant not in VARIANTS for mode, variant in modes.items()
+    ):
+        raise ValueError(f"invalid mode or variant in {path}")
+    return modes
+
+
+def select_mode(run: str | Path, mode: str, variant: str) -> None:
+    run = Path(run)
+    if mode not in MODES or variant not in VARIANTS:
+        raise ValueError("invalid mode or variant")
+    modes = read_run(run) if (run / RUN_MANIFEST).exists() else {}
+    modes[mode] = variant
+    run.mkdir(parents=True, exist_ok=True)
+    temporary = run / f".{RUN_MANIFEST}.tmp"
+    temporary.write_text(json.dumps({"format": 1, "modes": modes}, indent=2) + "\n")
+    temporary.replace(run / RUN_MANIFEST)
+
+
+def resolve_artifacts(
+    run: str | Path, mode: str, variant: str | None = None
+) -> RunArtifacts:
+    run = Path(run)
+    modes = read_run(run)
+    if mode not in modes:
+        raise ValueError(f"mode {mode} is unavailable in {run.name}")
+    variant = variant or modes[mode]
+    if variant not in VARIANTS:
+        raise ValueError(f"invalid variant: {variant}")
+    return RunArtifacts(run, mode, variant)
+
+
+def validate_run(run: str | Path) -> dict[str, RunArtifacts]:
+    artifacts = {}
+    for mode in read_run(run):
+        selected = resolve_artifacts(run, mode)
+        metadata = validate_index(selected.index, selected.model)
+        if metadata["mode"] != mode:
+            raise ValueError(f"mode mismatch in {selected.directory}")
+        artifacts[mode] = selected
+    return artifacts

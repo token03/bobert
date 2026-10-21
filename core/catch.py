@@ -17,29 +17,26 @@ from .features import (
 from .osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
 
 FEATURES = (
-    Feature("norm_x", "spatial"),
-    Feature("log_movement_distance", "spatial", standardize=True),
-    Feature("movement_direction", "spatial"),
-    Feature("log_onset_ioi_ms", "rhythm", standardize=True),
-    Feature("onset_rhythm_cos", "rhythm"),
-    Feature("onset_rhythm_sin", "rhythm"),
-    Feature("log_stream_duration_ms", "rhythm", standardize=True, conditional="slider"),
-    Feature("stream_rhythm_cos", "rhythm", conditional="slider"),
-    Feature("stream_rhythm_sin", "rhythm", conditional="slider"),
-    Feature("stream_end_dx", "spatial", conditional="slider"),
-    Feature("stream_residual_1_dx", "spatial", standardize=True, conditional="slider"),
-    Feature("stream_residual_2_dx", "spatial", standardize=True, conditional="slider"),
-    Feature(
-        "log_banana_duration_ms", "rhythm", standardize=True, conditional="spinner"
-    ),
-    Feature("object_type", "attribute", cardinality=3),
+    Feature("norm_x"),
+    Feature("log_movement_distance", standardize=True),
+    Feature("movement_direction"),
+    Feature("log_onset_ioi_ms", standardize=True),
+    Feature("onset_rhythm_cos"),
+    Feature("onset_rhythm_sin"),
+    Feature("log_stream_duration_ms", standardize=True, conditional="slider"),
+    Feature("stream_rhythm_cos", conditional="slider"),
+    Feature("stream_rhythm_sin", conditional="slider"),
+    Feature("stream_end_dx", conditional="slider"),
+    Feature("stream_residual_1_dx", standardize=True, conditional="slider"),
+    Feature("stream_residual_2_dx", standardize=True, conditional="slider"),
+    Feature("log_banana_duration_ms", standardize=True, conditional="spinner"),
+    Feature("object_type", cardinality=3),
     Feature(
         "span_count_bin",
-        "attribute",
         cardinality=SPAN_COUNT_CARDINALITY,
         conditional="slider",
     ),
-    Feature("incoming_state", "spatial", cardinality=3),
+    Feature("incoming_state", cardinality=3),
 )
 
 FIELD_NAMES = tuple(feature.name for feature in FEATURES)

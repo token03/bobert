@@ -1,28 +1,40 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+from types import ModuleType
 
 import torch
 
-from . import catch, mania, taiko
-from .features import Feature
-from .osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+from . import catch, features, mania, osu, taiko
+from .features import Feature, beatmap_frames
+from .osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER, RawBeatmap
 
 ONSET_FEATURES = ("log_onset_ioi_ms", "onset_rhythm_cos", "onset_rhythm_sin")
 
 
 @dataclass(frozen=True)
-class ModeSpec:
+class Mode:
+    name: str
+    mode_int: int
+    label: str
     features: tuple[Feature, ...]
+    columns: tuple[str, ...]
+    build: Callable
+    sources: tuple[ModuleType, ...]
     groups: tuple[tuple[str, ...], ...]
     right_border: tuple[str, ...]
+    strains: dict[str, float]
     gates: dict[str, tuple[str, tuple[int, ...]]] = field(default_factory=dict)
-    negate: tuple[str, ...] = ()
+    flips: tuple[tuple[str, ...], ...] = ()
     mirror: tuple[str, ...] = ()
 
     @cached_property
+    def field_names(self) -> tuple[str, ...]:
+        return tuple(feature.name for feature in self.features)
+
+    @cached_property
     def index(self) -> dict[str, int]:
-        return {feature.name: i for i, feature in enumerate(self.features)}
+        return {name: i for i, name in enumerate(self.field_names)}
 
     @cached_property
     def continuous(self) -> tuple[str, ...]:
@@ -74,14 +86,25 @@ class ModeSpec:
         return stats
 
     def augment(self, vector: torch.Tensor) -> torch.Tensor:
-        if self.negate and bool(torch.rand(()) < 0.5):
-            vector = vector.clone()
-            vector[:, [self.index[name] for name in self.negate]] *= -1
+        for names in self.flips:
+            if bool(torch.rand(()) < 0.5):
+                vector = vector.clone()
+                vector[:, [self.index[name] for name in names]] *= -1
         if self.mirror and bool(torch.rand(()) < 0.5):
             columns = [self.index[name] for name in self.mirror]
             vector = vector.clone()
             vector[:, columns] = vector[:, columns[::-1]]
         return vector
+
+    def beatmap_tensor(
+        self, beatmap: RawBeatmap, max_seq_len: int | None = None
+    ) -> torch.Tensor:
+        if beatmap.mode != self.mode_int:
+            raise ValueError(f"only {self.name} beatmaps are supported")
+        vectors, _ = self.build(*beatmap_frames([beatmap], self.columns), max_seq_len)
+        if not vectors:
+            raise ValueError("could not engineer hitobject features")
+        return vectors[0]
 
 
 def conditional_gates(
@@ -95,15 +118,85 @@ def conditional_gates(
     }
 
 
-MODE_SPECS = {
-    "taiko": ModeSpec(
+JUMP_FEATURES = ("log_jump_distance", "jump_direction_cos", "jump_direction_sin")
+
+MODES = {
+    "std": Mode(
+        name="std",
+        mode_int=0,
+        label="osu",
+        features=features.FEATURES,
+        columns=features.HITOBJECT_COLUMNS,
+        build=features.build_feature_tensors,
+        sources=(features, osu),
+        groups=(
+            ("norm_x", "norm_y"),
+            JUMP_FEATURES,
+            ONSET_FEATURES,
+            ("log_span_duration_ms", "span_rhythm_cos", "span_rhythm_sin"),
+            ("log_spinner_duration_ms", "spinner_rhythm_cos", "spinner_rhythm_sin"),
+            ("log_span_length",),
+            (
+                "log_span_end_distance",
+                "span_end_direction_cos",
+                "span_end_direction_sin",
+            ),
+            ("curve_residual_1_dx", "curve_residual_1_dy"),
+            ("curve_residual_2_dx", "curve_residual_2_dy"),
+            ("log_gray_anchor_count",),
+        ),
+        right_border=(*JUMP_FEATURES, *ONSET_FEATURES, "incoming_motion_valid"),
+        strains={
+            "aim": 1.0,
+            "speed": 1.0,
+            "slider": 0.25,
+            "snap": 0.25,
+            "flow": 0.25,
+            "agility": 0.25,
+            "tap": 0.5,
+            "rhythm": 0.5,
+        },
+        gates={
+            **conditional_gates(
+                features.FEATURES,
+                "object_type",
+                slider=OBJECT_TYPE_SLIDER,
+                spinner=OBJECT_TYPE_SPINNER,
+            ),
+            **{name: ("incoming_motion_valid", (1,)) for name in JUMP_FEATURES},
+        },
+        flips=(
+            (
+                "norm_x",
+                "jump_direction_cos",
+                "span_end_direction_cos",
+                "curve_residual_1_dx",
+                "curve_residual_2_dx",
+            ),
+            (
+                "norm_y",
+                "jump_direction_sin",
+                "span_end_direction_sin",
+                "curve_residual_1_dy",
+                "curve_residual_2_dy",
+            ),
+        ),
+    ),
+    "taiko": Mode(
+        name="taiko",
+        mode_int=1,
+        label="taiko",
         features=taiko.FEATURES,
+        columns=taiko.HITOBJECT_COLUMNS,
+        build=taiko.build_feature_tensors,
+        sources=(taiko, features, osu),
         groups=(
             ONSET_FEATURES,
             ("log_drumroll_duration_ms", "drumroll_rhythm_cos", "drumroll_rhythm_sin"),
             ("log_swell_duration_ms",),
         ),
         right_border=(*ONSET_FEATURES, "onset_state"),
+        strains={"stars": 1.0},
         gates=conditional_gates(
             taiko.FEATURES,
             "note_type",
@@ -111,8 +204,14 @@ MODE_SPECS = {
             spinner=taiko.NOTE_SWELL,
         ),
     ),
-    "catch": ModeSpec(
+    "catch": Mode(
+        name="catch",
+        mode_int=2,
+        label="fruits",
         features=catch.FEATURES,
+        columns=catch.HITOBJECT_COLUMNS,
+        build=catch.build_feature_tensors,
+        sources=(catch, features, osu),
         groups=(
             ("norm_x",),
             ("log_movement_distance", "movement_direction"),
@@ -127,6 +226,7 @@ MODE_SPECS = {
             *ONSET_FEATURES,
             "incoming_state",
         ),
+        strains={"stars": 1.0},
         gates={
             **conditional_gates(
                 catch.FEATURES,
@@ -137,18 +237,28 @@ MODE_SPECS = {
             "log_movement_distance": ("incoming_state", (1,)),
             "movement_direction": ("incoming_state", (1,)),
         },
-        negate=(
-            "norm_x",
-            "movement_direction",
-            "stream_end_dx",
-            "stream_residual_1_dx",
-            "stream_residual_2_dx",
+        flips=(
+            (
+                "norm_x",
+                "movement_direction",
+                "stream_end_dx",
+                "stream_residual_1_dx",
+                "stream_residual_2_dx",
+            ),
         ),
     ),
-    "mania": ModeSpec(
+    "mania": Mode(
+        name="mania",
+        mode_int=3,
+        label="mania",
         features=mania.FEATURES,
+        columns=mania.HITOBJECT_COLUMNS,
+        build=mania.build_feature_tensors,
+        sources=(mania, features, osu),
         groups=(ONSET_FEATURES,),
         right_border=(*ONSET_FEATURES, "onset_state"),
+        strains={"stars": 1.0},
         mirror=mania.SLOT_FIELDS,
     ),
 }
+MODE_NAMES = {mode.mode_int: name for name, mode in MODES.items()}

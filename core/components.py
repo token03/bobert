@@ -1,16 +1,12 @@
-# components.py
 from functools import lru_cache
-from typing import Any, Dict, Optional, Tuple
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from rotary_embedding_torch.rotary_embedding_torch import rotate_half
+from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from .features import FEATURE_INFO
-from .modes import ModeSpec
-from .osu import OBJECT_TYPE_CIRCLE, OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+from .modes import Mode
 
 
 class RMSNorm(nn.Module):
@@ -65,7 +61,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        rotary_freqs: Tuple[torch.Tensor, torch.Tensor],
+        rotary_freqs: tuple[torch.Tensor, torch.Tensor],
     ):
         total_tokens, _ = x.shape
 
@@ -250,9 +246,9 @@ class EncoderLayer(nn.Module):
     def forward(
         self,
         src: torch.Tensor,
-        rotary_freqs: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        cu_seqlens: torch.Tensor = None,
-        max_seqlen: int = None,
+        rotary_freqs: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: int | None = None,
     ) -> torch.Tensor:
         src2 = self.self_attn(
             self.norm1(src),
@@ -273,219 +269,17 @@ class EncoderLayer(nn.Module):
         return src
 
 
-class HitObjectFeatureTokenizer(nn.Module):
-    def __init__(self, d_feat: int, d_model: int):
+class FeatureTokenizer(nn.Module):
+    def __init__(self, mode: Mode, d_feat: int, d_model: int):
         super().__init__()
-        self.continuous = FEATURE_INFO["continuous"]
-        self.categorical = FEATURE_INFO["categorical"]
-        common_numeric = (
-            ("norm_x", "norm_y"),
-            ("log_jump_distance", "jump_direction_cos", "jump_direction_sin"),
-            ("log_onset_ioi_ms", "onset_rhythm_cos", "onset_rhythm_sin"),
-        )
-        geometry_numeric = (
-            ("log_span_length",),
-            (
-                "log_span_end_distance",
-                "span_end_direction_cos",
-                "span_end_direction_sin",
-            ),
-            ("curve_residual_1_dx", "curve_residual_1_dy"),
-            ("curve_residual_2_dx", "curve_residual_2_dy"),
-        )
-        anchor_numeric = (("log_gray_anchor_count",),)
-        numeric_indices = []
-        numeric_mask = []
-        numeric_sizes = [
-            *map(len, common_numeric),
-            3,
-            *map(len, geometry_numeric),
-            *map(len, anchor_numeric),
-        ]
-        for feature_names in common_numeric + geometry_numeric + anchor_numeric:
-            indices = [self.continuous[feature] for feature in feature_names]
-            numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
-            numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
-        self.numeric_weight = nn.Parameter(torch.zeros(len(numeric_sizes), 3, d_feat))
-        self.numeric_bias = nn.Parameter(torch.empty(len(numeric_sizes), d_feat))
-        for group, size in enumerate(numeric_sizes):
-            nn.init.xavier_uniform_(
-                self.numeric_weight[group, :size].T,
-                gain=nn.init.calculate_gain("tanh"),
-            )
-            bound = 1 / size**0.5
-            nn.init.uniform_(self.numeric_bias[group], -bound, bound)
-        self.register_buffer(
-            "numeric_indices",
-            torch.tensor(numeric_indices, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "numeric_mask", torch.tensor(numeric_mask), persistent=False
-        )
-        self.span_duration_index = self.continuous["log_span_duration_ms"]
-        self.span_rhythm_indices = (
-            self.continuous["span_rhythm_cos"],
-            self.continuous["span_rhythm_sin"],
-        )
-        self.spinner_duration_index = self.continuous["log_spinner_duration_ms"]
-        self.spinner_rhythm_indices = (
-            self.continuous["spinner_rhythm_cos"],
-            self.continuous["spinner_rhythm_sin"],
-        )
-
-        categorical_names = [
-            "is_new_combo",
-            "incoming_motion_valid",
-            "span_count_bin",
-            "red_anchor_bin",
-            "object_type",
-        ]
-        self.categorical_kinds = tuple(categorical_names)
-        categorical_indices = []
-        categorical_cardinalities = []
-        category_offsets = []
-        offset = 1
-        for name in categorical_names:
-            info = self.categorical[name]
-            categorical_indices.append(info["index"])
-            categorical_cardinalities.append(info["cardinality"])
-            category_offsets.append(offset)
-            offset += info["cardinality"]
-        self.categorical_weight = nn.Parameter(torch.empty(offset, d_feat))
-        nn.init.normal_(self.categorical_weight, std=d_feat**-0.5)
-        with torch.no_grad():
-            self.categorical_weight[0].zero_()
-        self.register_buffer(
-            "categorical_indices",
-            torch.tensor(categorical_indices, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "categorical_cardinalities",
-            torch.tensor(categorical_cardinalities, dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "category_offsets",
-            torch.tensor(category_offsets, dtype=torch.long),
-            persistent=False,
-        )
-        self.out = nn.Linear((6 + len(categorical_names)) * d_feat, d_model, bias=False)
-        self.norm = RMSNorm(d_model)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        categorical_ids = x[..., self.categorical_indices].long().clamp_min(0)
-        categorical_ids = torch.minimum(
-            categorical_ids, self.categorical_cardinalities - 1
-        )
-        object_type = categorical_ids[..., -1]
-        is_slider = object_type == OBJECT_TYPE_SLIDER
-        is_spinner = object_type == OBJECT_TYPE_SPINNER
-        incoming_valid = categorical_ids[..., 1] == 1
-        slider_scale = is_slider.to(x.dtype)
-        spinner_scale = is_spinner.to(x.dtype)
-
-        numeric_inputs = x[..., self.numeric_indices]
-        numeric_inputs = numeric_inputs * self.numeric_mask.to(dtype=x.dtype)
-        common_inputs = numeric_inputs[..., :3, :]
-        sustain_inputs = torch.stack(
-            (
-                x[..., self.span_duration_index] * slider_scale
-                + x[..., self.spinner_duration_index] * spinner_scale,
-                x[..., self.span_rhythm_indices[0]] * slider_scale
-                + x[..., self.spinner_rhythm_indices[0]] * spinner_scale,
-                x[..., self.span_rhythm_indices[1]] * slider_scale
-                + x[..., self.spinner_rhythm_indices[1]] * spinner_scale,
-            ),
-            dim=-1,
-        )
-        numeric_inputs = torch.cat(
-            (
-                common_inputs,
-                sustain_inputs.unsqueeze(-2),
-                numeric_inputs[..., 3:, :],
-            ),
-            dim=-2,
-        )
-        numeric_hidden = (numeric_inputs[..., None] * self.numeric_weight).sum(dim=-2)
-        numeric_tokens = torch.tanh(numeric_hidden + self.numeric_bias) - torch.tanh(
-            self.numeric_bias
-        )
-        numeric_active = torch.stack(
-            (
-                torch.ones_like(incoming_valid),
-                incoming_valid,
-                torch.ones_like(incoming_valid),
-                is_slider | is_spinner,
-                is_slider,
-                is_slider,
-                is_slider,
-                is_slider,
-                is_slider,
-            ),
-            dim=-1,
-        )
-        numeric_tokens = numeric_tokens * numeric_active[..., None]
-
-        categorical_lookup = categorical_ids + self.category_offsets
-        activations = []
-        for position, name in enumerate(self.categorical_kinds):
-            column = categorical_ids[..., position]
-            if name == "is_new_combo":
-                activations.append(column != 0)
-            elif name == "incoming_motion_valid":
-                activations.append(~incoming_valid)
-            elif name == "span_count_bin":
-                activations.append(is_slider)
-            elif name == "red_anchor_bin":
-                activations.append(is_slider)
-            else:
-                activations.append(object_type != OBJECT_TYPE_CIRCLE)
-        categorical_active = torch.stack(activations, dim=-1)
-        categorical_lookup = torch.where(
-            categorical_active,
-            categorical_lookup,
-            torch.zeros_like(categorical_lookup),
-        )
-        categorical_tokens = F.embedding(
-            categorical_lookup,
-            self.categorical_weight,
-            padding_idx=0,
-        )
-        sustain_token = numeric_tokens[..., 3, :]
-        geometry_tokens = torch.stack(
-            (
-                numeric_tokens[..., 4, :] + numeric_tokens[..., 5, :],
-                numeric_tokens[..., 6:, :].sum(dim=-2),
-            ),
-            dim=-2,
-        )
-        numeric_tokens = torch.cat(
-            (
-                numeric_tokens[..., :3, :],
-                sustain_token.unsqueeze(-2),
-                geometry_tokens,
-            ),
-            dim=-2,
-        )
-        features = torch.cat(
-            (numeric_tokens.flatten(-2), categorical_tokens.flatten(-2)), dim=-1
-        )
-        return self.norm(self.out(features))
-
-
-class ModeFeatureTokenizer(nn.Module):
-    def __init__(self, spec: ModeSpec, d_feat: int, d_model: int):
-        super().__init__()
-        self.spec = spec
+        self.mode = mode
         numeric_indices, numeric_mask, sizes = [], [], []
-        for group in spec.groups:
-            indices = [spec.index[name] for name in group]
+        for group in mode.groups:
+            indices = [mode.index[name] for name in group]
             numeric_indices.append(indices + [indices[0]] * (3 - len(indices)))
             numeric_mask.append([1.0] * len(indices) + [0.0] * (3 - len(indices)))
             sizes.append(len(indices))
-        self.group_names = tuple(group[0] for group in spec.groups)
+        self.group_names = tuple(group[0] for group in mode.groups)
         self.numeric_weight = nn.Parameter(torch.zeros(len(sizes), 3, d_feat))
         self.numeric_bias = nn.Parameter(torch.empty(len(sizes), d_feat))
         for group, size in enumerate(sizes):
@@ -502,12 +296,12 @@ class ModeFeatureTokenizer(nn.Module):
             "numeric_mask", torch.tensor(numeric_mask), persistent=False
         )
 
-        self.categorical_names = tuple(name for name, _ in spec.categorical)
-        cardinalities = [cardinality for _, cardinality in spec.categorical]
+        self.categorical_names = tuple(name for name, _ in mode.categorical)
+        cardinalities = [cardinality for _, cardinality in mode.categorical]
         offsets = [1 + sum(cardinalities[:i]) for i in range(len(cardinalities))]
         self.register_buffer(
             "categorical_indices",
-            torch.tensor([spec.index[name] for name in self.categorical_names]),
+            torch.tensor([mode.index[name] for name in self.categorical_names]),
             persistent=False,
         )
         self.register_buffer(
@@ -525,13 +319,17 @@ class ModeFeatureTokenizer(nn.Module):
         self.register_buffer(
             "normalization",
             torch.stack(
-                (torch.zeros(len(spec.features)), torch.ones(len(spec.features)))
+                (torch.zeros(len(mode.features)), torch.ones(len(mode.features)))
             ),
         )
         self.out = nn.Linear(
             (len(sizes) + len(cardinalities)) * d_feat, d_model, bias=False
         )
         self.norm = RMSNorm(d_model)
+
+    def normalize(self, vectors: torch.Tensor) -> torch.Tensor:
+        mean, std = self.normalization.to(vectors.device)
+        return (vectors.float() - mean) / std
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         numeric = x[..., self.numeric_indices] * self.numeric_mask.to(x.dtype)
@@ -540,12 +338,12 @@ class ModeFeatureTokenizer(nn.Module):
             self.numeric_bias
         )
         numeric_tokens = (
-            numeric_tokens * self.spec.gate_mask(x, self.group_names)[..., None]
+            numeric_tokens * self.mode.gate_mask(x, self.group_names)[..., None]
         )
         ids = x[..., self.categorical_indices].round().long().clamp_min(0)
         ids = torch.minimum(ids, self.categorical_cardinalities - 1)
         lookup = torch.where(
-            self.spec.gate_mask(x, self.categorical_names),
+            self.mode.gate_mask(x, self.categorical_names),
             ids + self.category_offsets,
             torch.zeros_like(ids),
         )
@@ -588,85 +386,13 @@ class SpanMasker(nn.Module):
 
 
 class MaskedLMHead(nn.Module):
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.groups = ("common", "slider", "spinner")
-        self.continuous_names = {
-            group: tuple(
-                name
-                for name in FEATURE_INFO[group]
-                if name in FEATURE_INFO["continuous"]
-            )
-            for group in self.groups
-        }
-        self.categorical_names = {
-            group: tuple(
-                name
-                for name in FEATURE_INFO[group]
-                if name in FEATURE_INFO["categorical"]
-            )
-            for group in self.groups
-        }
-        self.output_sizes = {
-            group: (
-                len(self.continuous_names[group]),
-                *(
-                    FEATURE_INFO["categorical"][name]["cardinality"]
-                    for name in self.categorical_names[group]
-                ),
-            )
-            for group in self.groups
-        }
-        self.flat_output_sizes = tuple(
-            size for group in self.groups for size in self.output_sizes[group]
-        )
-        self.proj = nn.Linear(d_model, sum(self.flat_output_sizes))
-
-    def forward(self, packed_output: torch.Tensor) -> Dict[str, Any]:
-        outputs = {}
-        pieces = self.proj(packed_output).split(self.flat_output_sizes, dim=-1)
-        offset = 0
-        for group in self.groups:
-            count = len(self.output_sizes[group])
-            group_pieces = pieces[offset : offset + count]
-            offset += count
-            outputs[group] = {
-                "continuous": group_pieces[0],
-                "categorical": dict(
-                    zip(self.categorical_names[group], group_pieces[1:])
-                ),
-            }
-        return outputs
-
-
-class StrainHead(nn.Module):
-    def __init__(self, d_model: int, output_size: int):
-        super().__init__()
-        self.proj = nn.Linear(d_model, output_size)
-
-    def forward(self, embedding: torch.Tensor) -> torch.Tensor:
-        return self.proj(embedding)
-
-
-class ModeMaskedLMHead(nn.Module):
-    def __init__(self, spec: ModeSpec, d_model: int):
+    def __init__(self, mode: Mode, d_model: int):
         super().__init__()
         self.sizes = (
-            len(spec.continuous),
-            *(cardinality for _, cardinality in spec.categorical),
+            len(mode.continuous),
+            *(cardinality for _, cardinality in mode.categorical),
         )
-        self.dense = nn.Linear(d_model, d_model)
-        self.norm = RMSNorm(d_model)
-        self.decoder = nn.Linear(d_model, sum(self.sizes))
+        self.proj = nn.Linear(d_model, sum(self.sizes))
 
     def forward(self, packed_output: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        hidden = self.norm(F.gelu(self.dense(packed_output)))
-        return self.decoder(hidden).split(self.sizes, dim=-1)
-
-
-class ModePretrainingHeads(nn.Module):
-    def __init__(self, spec: ModeSpec, d_model: int):
-        super().__init__()
-        self.masker = SpanMasker(d_model)
-        self.mlm_head = ModeMaskedLMHead(spec, d_model)
-        self.strain_head = StrainHead(d_model, 1)
+        return self.proj(packed_output).split(self.sizes, dim=-1)

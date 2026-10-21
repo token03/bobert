@@ -10,20 +10,15 @@ from omegaconf import DictConfig
 from rotary_embedding_torch import RotaryEmbedding
 from torch import nn
 
-from . import STRAIN_COLUMNS
 from .artifacts import load_model, save_model
 from .components import (
     EncoderLayer,
-    HitObjectFeatureTokenizer,
+    FeatureTokenizer,
     MaskedLMHead,
-    ModeFeatureTokenizer,
-    ModePretrainingHeads,
     RMSNorm,
     SpanMasker,
-    StrainHead,
 )
-from .features import VectorStats, build_beatmap_tensor, normalize
-from .modes import MODE_SPECS
+from .modes import MODES
 from .osu import parse_osu_bytes
 
 
@@ -78,6 +73,7 @@ def configure_inductor() -> None:
 class BobertEncoder(nn.Module):
     def __init__(
         self,
+        mode: str,
         d_model: int,
         n_heads: int,
         n_layers: int,
@@ -90,16 +86,17 @@ class BobertEncoder(nn.Module):
         activation_checkpointing: bool,
         feature_token_dim: int,
         use_flash: bool,
-        modes: Sequence[str],
         adapter: dict[str, Any] | None = None,
     ):
         super().__init__()
+        self.mode = MODES[mode]
         self.d_model = d_model
         self.n_heads = n_heads
         self.global_attention_layers = set(global_attention_layers)
         self.use_flash = use_flash
         self.max_seq_len = max_seq_len
         self.model_args = {
+            "mode": mode,
             "d_model": d_model,
             "n_heads": n_heads,
             "n_layers": n_layers,
@@ -111,21 +108,8 @@ class BobertEncoder(nn.Module):
             "max_seq_len": max_seq_len,
             "feature_token_dim": feature_token_dim,
             "adapter": adapter,
-            "modes": list(modes),
         }
-
-        self.feature_tokenizer = HitObjectFeatureTokenizer(
-            d_feat=feature_token_dim,
-            d_model=d_model,
-        )
-        self.mode_tokenizers = nn.ModuleDict(
-            {
-                mode: ModeFeatureTokenizer(MODE_SPECS[mode], feature_token_dim, d_model)
-                for mode in modes
-                if mode != "std"
-            }
-        )
-
+        self.tokenizer = FeatureTokenizer(self.mode, feature_token_dim, d_model)
         self.layers = nn.ModuleList(
             [
                 EncoderLayer(
@@ -144,7 +128,6 @@ class BobertEncoder(nn.Module):
         )
         self.final_norm = RMSNorm(d_model)
         self.adapter = EmbeddingAdapter(d_model)
-
         self.rotary_emb = RotaryEmbedding(
             dim=d_model // n_heads, cache_max_seq_len=max_seq_len
         )
@@ -152,39 +135,22 @@ class BobertEncoder(nn.Module):
 
     @classmethod
     def from_config(cls, config: DictConfig, *, use_flash: bool) -> Self:
-        model_config = config.model
-        data_config = config.data
-        runtime_config = config.runtime
-
         return cls(
-            d_model=model_config.d_model,
-            n_heads=model_config.n_heads,
-            n_layers=model_config.n_layers,
-            dim_feedforward=model_config.dim_feedforward,
-            dropout=model_config.dropout,
-            local_attention_window=model_config.local_attention_window,
-            local_attention_block_size=model_config.local_attention_block_size,
-            global_attention_layers=model_config.global_attention_layers,
-            max_seq_len=data_config.max_seq_len,
-            activation_checkpointing=runtime_config.activation_checkpointing,
-            feature_token_dim=model_config.feature_token_dim,
+            mode=config.data.mode,
+            max_seq_len=config.data.max_seq_len,
+            activation_checkpointing=config.runtime.activation_checkpointing,
             use_flash=use_flash,
-            modes=data_config.modes,
+            **config.model,
         )
 
     @classmethod
-    def from_pretrained(
-        cls, path: str | Path, device: torch.device
-    ) -> tuple[Self, VectorStats]:
-        state, args, vector_stats = load_model(path)
+    def from_pretrained(cls, path: str | Path, device: torch.device) -> Self:
+        state, args = load_model(path)
         model = cls(
-            **args,
-            activation_checkpointing=False,
-            use_flash=device.type == "cuda",
+            **args, activation_checkpointing=False, use_flash=device.type == "cuda"
         )
         model.load_state_dict(state, strict=True)
-        model.to(device).eval()
-        return model, vector_stats
+        return model.to(device).eval()
 
     def to_inference(self, device: torch.device) -> Self:
         if device.type == "cuda":
@@ -195,28 +161,14 @@ class BobertEncoder(nn.Module):
                 tensor.copy_(tensor.bfloat16().float())
         return model
 
-    def save_pretrained(
-        self,
-        path: str | Path,
-        vector_stats: VectorStats,
-    ) -> None:
-        save_model(path, self.state_dict(), self.model_args, vector_stats)
+    def save_pretrained(self, path: str | Path) -> None:
+        save_model(path, self.state_dict(), self.model_args)
 
-    def get_summary(self) -> dict[str, Any]:
-        total_params = sum(p.numel() for p in self.parameters())
-        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+    def parameter_count(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-        return {
-            "total_parameters": total_params,
-            "trainable_parameters": trainable_params,
-            "model_size_mb": total_params * 4 / (1024 * 1024),
-            "parameter_efficiency": trainable_params / total_params,
-        }
-
-    def embed_sequences(self, x: torch.Tensor, mode: str = "std") -> torch.Tensor:
-        if mode == "std":
-            return self.feature_tokenizer(x)
-        return self.mode_tokenizers[mode](x)
+    def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
+        return self.tokenizer(x)
 
     def compile_encoder(self, mode: str = "default") -> None:
         configure_inductor()
@@ -224,37 +176,6 @@ class BobertEncoder(nn.Module):
             self.embed_sequences, mode=mode, dynamic=False
         )
         self._encode = torch.compile(self._encode, mode=mode, dynamic=False)
-
-    def encode(
-        self,
-        packed_embeddings: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> torch.Tensor:
-        positions = torch.arange(max_seqlen, device=packed_embeddings.device)
-        torch._dynamo.mark_dynamic(packed_embeddings, 0)
-        torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
-        torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
-        return self._encode(packed_embeddings, cu_seqlens, positions)
-
-    def encode_with_layer_embeddings(
-        self,
-        packed_embeddings: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        positions = torch.arange(max_seqlen, device=packed_embeddings.device)
-        torch._dynamo.mark_dynamic(packed_embeddings, 0)
-        torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
-        torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
-        global_embeddings: list[torch.Tensor] = []
-        packed_output = self._encode(
-            packed_embeddings,
-            cu_seqlens,
-            positions,
-            global_embeddings=global_embeddings,
-        )
-        return packed_output, torch.stack(global_embeddings)
 
     def _encode(
         self,
@@ -300,21 +221,6 @@ class BobertEncoder(nn.Module):
 
         return packed_output
 
-    def encode_packed(
-        self,
-        packed_vectors: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        torch._dynamo.mark_dynamic(packed_vectors, 0)
-        packed_input = self.embed_sequences(packed_vectors)
-        packed_output = self.encode(
-            packed_input,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-        )
-        return packed_output, cu_seqlens, max_seqlen
-
     def _get_embedding(
         self,
         packed_output: torch.Tensor,
@@ -329,34 +235,28 @@ class BobertEncoder(nn.Module):
         return pooled.masked_fill(lengths[:, None] == 0, 0.0)
 
     def embed_packed(
-        self,
-        packed_vectors: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        max_seqlen: int,
-        mode: str = "std",
+        self, packed_vectors: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int
     ) -> torch.Tensor:
+        positions = torch.arange(max_seqlen, device=packed_vectors.device)
         torch._dynamo.mark_dynamic(packed_vectors, 0)
-        packed_input = self.embed_sequences(packed_vectors, mode)
-        _, embeddings = self.encode_with_layer_embeddings(
-            packed_input,
+        torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
+        torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
+        global_embeddings: list[torch.Tensor] = []
+        self._encode(
+            self.embed_sequences(packed_vectors),
             cu_seqlens,
-            max_seqlen,
+            positions,
+            global_embeddings=global_embeddings,
         )
-        return embeddings
-
-    def adapt(self, embeddings: np.ndarray) -> np.ndarray:
-        return self.adapter.transform(embeddings)
+        return torch.stack(global_embeddings)
 
     def transform(
         self, embeddings: np.ndarray, transform: EmbeddingTransform
     ) -> np.ndarray:
-        return self.adapt(transform.apply(embeddings))
+        return self.adapter.transform(transform.apply(embeddings))
 
     def embed_osu_bytes(
-        self,
-        content: bytes,
-        vector_stats: VectorStats,
-        beatmap_id: int | None = None,
+        self, content: bytes, beatmap_id: int | None = None
     ) -> np.ndarray:
         beatmap = parse_osu_bytes(
             content,
@@ -366,9 +266,8 @@ class BobertEncoder(nn.Module):
         )
         if beatmap is None:
             raise ValueError("could not parse a valid beatmap")
-
-        vectors = normalize(
-            build_beatmap_tensor(beatmap, self.max_seq_len), vector_stats
+        vectors = self.tokenizer.normalize(
+            self.mode.beatmap_tensor(beatmap, self.max_seq_len)
         )
         device = next(self.parameters()).device
         vectors = vectors.to(device=device, dtype=next(self.parameters()).dtype)
@@ -380,39 +279,17 @@ class BobertEncoder(nn.Module):
 
 
 class BobertForPretraining(nn.Module):
-    def __init__(
-        self,
-        bert_model: BobertEncoder,
-        masker: SpanMasker,
-        mlm_head: MaskedLMHead,
-        strain_head: StrainHead,
-    ):
+    def __init__(self, bert: BobertEncoder):
         super().__init__()
-        self.bert = bert_model
-        self.masker = masker
-        self.mlm_head = mlm_head
-        self.strain_head = strain_head
-        self.mode_heads = nn.ModuleDict(
-            {
-                mode: ModePretrainingHeads(tokenizer.spec, bert_model.d_model)
-                for mode, tokenizer in bert_model.mode_tokenizers.items()
-            }
-        )
+        self.bert = bert
+        self.masker = SpanMasker(bert.d_model)
+        self.mlm_head = MaskedLMHead(bert.mode, bert.d_model)
+        self.strain_head = nn.Linear(bert.d_model, len(bert.mode.strains))
 
     @classmethod
-    def from_config(
-        cls, config: DictConfig, device: torch.device
-    ) -> "BobertForPretraining":
+    def from_config(cls, config: DictConfig, device: torch.device) -> Self:
         bert = BobertEncoder.from_config(config, use_flash=device.type == "cuda")
-        return cls(
-            bert,
-            SpanMasker(bert.d_model),
-            MaskedLMHead(bert.d_model),
-            StrainHead(bert.d_model, len(STRAIN_COLUMNS)),
-        ).to(device)
-
-    def get_summary(self) -> dict[str, Any]:
-        return self.bert.get_summary()
+        return cls(bert).to(device)
 
     def forward_packed(
         self,
@@ -422,25 +299,18 @@ class BobertForPretraining(nn.Module):
         random_dst_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
         positions: torch.Tensor,
-        mode: str,
     ):
-        heads = self if mode == "std" else self.mode_heads[mode]
-        packed_targets = {"mlm": packed_vectors.index_select(0, masked_idx)}
-        packed_embed = self.bert.embed_sequences(packed_vectors, mode)
-        packed_input = heads.masker.forward_packed(
-            packed_embed,
-            mask_token_idx,
-            random_dst_idx,
+        targets = packed_vectors.index_select(0, masked_idx)
+        packed_embed = self.bert.embed_sequences(packed_vectors)
+        packed_input = self.masker.forward_packed(
+            packed_embed, mask_token_idx, random_dst_idx
         )
         global_embeddings: list[torch.Tensor] = []
         encoded = self.bert._encode(
-            packed_input,
-            cu_seqlens,
-            positions,
-            global_embeddings=global_embeddings,
+            packed_input, cu_seqlens, positions, global_embeddings=global_embeddings
         )
         predictions = {
-            "mlm": heads.mlm_head(encoded.index_select(0, masked_idx)),
-            "strain": heads.strain_head(torch.stack(global_embeddings).mean(dim=0)),
+            "mlm": self.mlm_head(encoded.index_select(0, masked_idx)),
+            "strain": self.strain_head(torch.stack(global_embeddings).mean(dim=0)),
         }
-        return predictions, packed_targets
+        return predictions, targets

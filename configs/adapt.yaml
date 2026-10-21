@@ -1,0 +1,20 @@
+seed: 42
+collections:
+  epochs: 1
+  batch_size: 1024
+  temperature: 0.03
+  learning_rate: 5e-4
+  weight_decay: 0.01
+  preserve_weight: 0.1
+  positives_per_map: 2
+  pair_seed: 123
+mined:
+  epochs: 20
+  batch_size: 1024
+  temperature: 0.03
+  learning_rate: 5e-4
+  weight_decay: 0.01
+  preserve_weight: 1.0
+  positives_per_map: 4
+  pair_seed: 123
+  blend: 0.75

@@ -30,12 +30,12 @@ SLOT_FIELDS = (
 )
 
 FEATURES = (
-    Feature("log_onset_ioi_ms", "rhythm", standardize=True),
-    Feature("onset_rhythm_cos", "rhythm"),
-    Feature("onset_rhythm_sin", "rhythm"),
-    Feature("onset_state", "rhythm", cardinality=3),
-    Feature("key_count", "attribute", cardinality=MAX_KEYS),
-    *(Feature(name, "spatial", cardinality=SLOT_STATES) for name in SLOT_FIELDS),
+    Feature("log_onset_ioi_ms", standardize=True),
+    Feature("onset_rhythm_cos"),
+    Feature("onset_rhythm_sin"),
+    Feature("onset_state", cardinality=3),
+    Feature("key_count", cardinality=MAX_KEYS),
+    *(Feature(name, cardinality=SLOT_STATES) for name in SLOT_FIELDS),
 )
 
 FIELD_NAMES = tuple(feature.name for feature in FEATURES)

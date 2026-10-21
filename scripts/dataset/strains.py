@@ -197,7 +197,7 @@ def _calculate_stars_batch_worker(
     return rows, failed
 
 
-def load_config(config_path: str = "./configs/default.yaml") -> dict:
+def load_config(config_path: str = "./configs/pretrain.yaml") -> dict:
     with open(resolve_path(config_path)) as file:
         return yaml.safe_load(file)
 
@@ -422,7 +422,7 @@ def main() -> None:
         help="Sequence length to calculate (0 uses the 4096-object maximum)",
     )
     parser.add_argument("-f", "--features", type=str, default=None)
-    parser.add_argument("-c", "--config", default="./configs/default.yaml")
+    parser.add_argument("-c", "--config", default="./configs/pretrain.yaml")
     parser.add_argument("-o", "--output", default="./data/strains.parquet")
     parser.add_argument("--raw-beatmaps", default="./data/beatmaps")
     parser.add_argument("--metadata", default="./data/beatmaps.parquet")

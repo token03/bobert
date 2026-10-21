@@ -1,15 +1,13 @@
 data:
-  features_dir: "./data/features"
-  modes: [std, taiko, catch, mania]
-  strains_path: "./data/strains.parquet"
+  mode: std
+  features_dir: ./data/features
+  strains_path: ./data/strains.parquet
   dataset_seed: 42
-
+  sample_size: null
   max_seq_len: 4096
   val_split: 0.1
-
   min_sr: 2.0
   max_sr: 14.0
-
   dataloader:
     num_workers: 2
     pin_memory: true
@@ -22,42 +20,35 @@ model:
   n_layers: 9
   dim_feedforward: 1024
   dropout: 0.1
-
   local_attention_window: 128
   local_attention_block_size: 256
   global_attention_layers: [2, 5, 8]
-
   feature_token_dim: 16
 
 runtime:
   compile_model: true
-  compile_mode: "default"
+  compile_mode: default
   activation_checkpointing: false
 
 training:
+  seed: 42
   trainer:
     epochs: 20
     batch_size: 64
+    max_tokens: 32768
     grad_accum: 2
     grad_clip: 1.0
-    precision: "bf16-mixed"
+    precision: bf16-mixed
     save_checkpoints: true
-    use_length_buckets: true
-
-  data:
-    sample_size: null
-
   optimizer:
     adamw_lr: 2e-4
     adamw_wd: 0.05
     adamw_betas: [0.9, 0.95]
     muon_lr: 0.01
     muon_wd: 0.01
-
   scheduler:
     warmup_ratio: 0.01
     min_lr_ratio: 0.005
-
   masking:
     ratio: 0.30
     mean_span_length: 2

@@ -1,12 +1,11 @@
-import random
 from functools import lru_cache, partial
 
 import numpy as np
+import polars
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader, Dataset, Sampler, random_split
+from torch.utils.data import DataLoader, Dataset, random_split
 
-from core import STRAIN_COLUMNS
 from core.dataset import (
     FeatureStore,
     FeatureView,
@@ -14,24 +13,7 @@ from core.dataset import (
     feature_path,
     select_beatmaps,
 )
-from core.features import FEATURE_INFO, fit_stats, normalize
-from core.modes import MODE_SPECS
-
-RIGHT_DELTA_FEATURES = torch.tensor(
-    [
-        FEATURE_INFO["continuous"]["log_jump_distance"],
-        FEATURE_INFO["continuous"]["jump_direction_cos"],
-        FEATURE_INFO["continuous"]["jump_direction_sin"],
-        FEATURE_INFO["continuous"]["log_onset_ioi_ms"],
-        FEATURE_INFO["continuous"]["onset_rhythm_cos"],
-        FEATURE_INFO["continuous"]["onset_rhythm_sin"],
-        FEATURE_INFO["categorical"]["incoming_motion_valid"]["index"],
-    ]
-)
-MODE_RIGHT_DELTA_FEATURES = {
-    mode: torch.tensor([spec.index[name] for name in spec.right_border])
-    for mode, spec in MODE_SPECS.items()
-}
+from core.modes import MODES, Mode
 
 
 @lru_cache(maxsize=8)
@@ -70,14 +52,13 @@ def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tenso
 
 def collate_pretrain(
     batch: list[dict],
+    mode: Mode,
     max_seq_len: int,
     masking_ratio: float,
     mean_span_length: float,
-    vector_stats,
-    mode_stats,
-    strain_stats,
+    vector_stats: torch.Tensor,
+    strain_stats: torch.Tensor,
 ):
-    mode = batch[0]["mode"]
     vectors = [item["hitobjects"] for item in batch]
     lengths = [min(int(vector.shape[0]), int(max_seq_len)) for vector in vectors]
     seqlens = torch.tensor(lengths, dtype=torch.int32)
@@ -102,26 +83,19 @@ def collate_pretrain(
     )
     right_split = torch.rand(right_border_idx.numel())
     strain = torch.tensor([item["strain"] for item in batch], dtype=torch.float32)
-    strain_targets = (strain - strain_stats[mode]["mean"]) / strain_stats[mode]["std"]
-    packed_vectors = torch.cat(
-        [vector[:length] for vector, length in zip(vectors, lengths)], dim=0
-    )
-    if mode == "std":
-        packed_vectors = normalize(packed_vectors, vector_stats)
-        right_delta_features = RIGHT_DELTA_FEATURES
-    else:
-        mean, std = mode_stats[mode]
-        packed_vectors = (packed_vectors.float() - mean) / std
-        right_delta_features = MODE_RIGHT_DELTA_FEATURES[mode]
+    mean, std = vector_stats
+    packed_vectors = (
+        torch.cat([vector[:length] for vector, length in zip(vectors, lengths)]).float()
+        - mean
+    ) / std
     return {
-        "mode": mode,
         "packed_vectors": corrupt_right_borders(
             packed_vectors,
             right_border_idx[right_split < 0.8],
             right_border_idx[(right_split >= 0.8) & (right_split < 0.9)],
-            right_delta_features,
+            torch.tensor([mode.index[name] for name in mode.right_border]),
         ),
-        "strain_targets": strain_targets,
+        "strain_targets": (strain - strain_stats[0]) / strain_stats[1],
         "masked_idx": masked_idx,
         "mask_token_idx": masked_idx[split < 0.8],
         "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
@@ -144,37 +118,10 @@ def corrupt_right_borders(
     return packed_vectors
 
 
-def prepare_vector(vec, augment, max_seq_len):
-    vec = vec[:max_seq_len]
-    if augment:
-        vec = vec.clone()
-        aug_type = int(torch.randint(0, 4, (1,)).item())
-        flip_x = aug_type in (1, 3)
-        flip_y = aug_type in (2, 3)
-        if flip_x:
-            for name, index in FEATURE_INFO["continuous"].items():
-                if (
-                    name == "norm_x"
-                    or name == "jump_direction_cos"
-                    or name == "span_end_direction_cos"
-                    or name.endswith("_dx")
-                ):
-                    vec[:, index] *= -1
-        if flip_y:
-            for name, index in FEATURE_INFO["continuous"].items():
-                if (
-                    name == "norm_y"
-                    or name == "jump_direction_sin"
-                    or name == "span_end_direction_sin"
-                    or name.endswith("_dy")
-                ):
-                    vec[:, index] *= -1
-    return vec
-
-
 class BeatmapDataset(Dataset):
     def __init__(self, store, positions, strains, max_seq_len, augment):
         self.store = store
+        self.mode = MODES[store.mode]
         self.positions = positions
         self.strains = strains
         self.max_seq_len = int(max_seq_len)
@@ -184,18 +131,10 @@ class BeatmapDataset(Dataset):
         return len(self.positions)
 
     def __getitem__(self, idx):
-        position = int(self.positions[idx])
-        vector = self.store.vector(position, self.max_seq_len)
-        if self.store.mode == "std":
-            vector = prepare_vector(vector, self.augment, self.max_seq_len)
-        elif self.augment:
-            vector = MODE_SPECS[self.store.mode].augment(vector)
-        return {
-            "mode": self.store.mode,
-            "beatmap_id": int(self.store.beatmap_ids[position]),
-            "hitobjects": vector,
-            "strain": tuple(self.strains[idx].tolist()),
-        }
+        vector = self.store.vector(int(self.positions[idx]), self.max_seq_len)
+        if self.augment:
+            vector = self.mode.augment(vector)
+        return {"hitobjects": vector, "strain": tuple(self.strains[idx].tolist())}
 
     def lengths(self):
         return np.minimum(self.store.lengths[self.positions], self.max_seq_len)
@@ -204,64 +143,37 @@ class BeatmapDataset(Dataset):
         return FeatureView(self.store, np.sort(self.positions), self.max_seq_len)
 
 
-class MixedDataset(Dataset):
-    def __init__(self, datasets: dict[str, BeatmapDataset]):
-        self.datasets = datasets
-
-    def __len__(self):
-        return sum(len(dataset) for dataset in self.datasets.values())
-
-    def __getitem__(self, key):
-        mode, idx = key
-        return self.datasets[mode][idx]
-
-
-class MixedBatchSampler(Sampler[list[tuple[str, int]]]):
-    def __init__(self, samplers: dict[str, Sampler], seed: int, shuffle: bool):
-        self.samplers = samplers
-        self.seed = int(seed)
-        self.shuffle = shuffle
-        self.epoch = 0
-
-    def __len__(self) -> int:
-        return sum(len(sampler) for sampler in self.samplers.values())
-
-    def __iter__(self):
-        batches = [
-            [(mode, index) for index in batch]
-            for mode, sampler in self.samplers.items()
-            for batch in sampler
-        ]
-        if self.shuffle:
-            random.Random(self.seed + self.epoch).shuffle(batches)
-        self.epoch += 1
-        yield from batches
-
-
-def load_data(data_config, mode, max_seq_len, sample_size):
-    path = feature_path(data_config.features_dir, mode)
-    store = FeatureStore(path, mode)
-    if store.max_seq_len is not None and store.max_seq_len < max_seq_len:
+def load_data(data_config, sample_size):
+    path = feature_path(data_config.features_dir, data_config.mode)
+    store = FeatureStore(path, data_config.mode)
+    if store.max_seq_len is not None and store.max_seq_len < data_config.max_seq_len:
         raise ValueError(
             f"{path} stores at most {store.max_seq_len} tokens "
-            f"per map; rebuild it with --max-seq-len {max_seq_len}"
+            f"per map; rebuild it with --max-seq-len {data_config.max_seq_len}"
         )
     positions, strains = select_beatmaps(
         store,
         dataset_seed=data_config.dataset_seed,
         strains_path=data_config.strains_path,
-        strain_seq_len=max_seq_len,
+        strain_seq_len=data_config.max_seq_len,
         sample_size=sample_size,
         min_sr=data_config.min_sr,
         max_sr=data_config.max_sr,
         include_strains=True,
-        targets=STRAIN_COLUMNS if mode == "std" else ("stars",),
     )
-    print(f"{mode}: selected {len(positions):,} of {len(store):,} beatmaps.")
+    print(f"Selected {len(positions):,} of {len(store):,} {store.mode} beatmaps.")
     return store, positions, strains
 
 
-def split_indices(count, val_split, seed):
+def split_indices(count, val_split, seed, groups=None):
+    if groups is not None:
+        groups = np.asarray(groups)
+        if groups.shape != (count,):
+            raise ValueError("validation groups must match the selected beatmaps")
+        unique, inverse = np.unique(groups, return_inverse=True)
+        _, val_groups = split_indices(len(unique), val_split, seed)
+        is_val = np.isin(inverse, val_groups)
+        return np.flatnonzero(~is_val), np.flatnonzero(is_val)
     val_size = int(count * val_split)
     generator = torch.Generator().manual_seed(int(seed))
     train, val = random_split(
@@ -285,101 +197,87 @@ def dataloader_kwargs(data_config):
     return kwargs
 
 
-def token_budget(datasets, batch_size):
-    lengths = np.concatenate([dataset.lengths() for dataset in datasets.values()])
-    return int(batch_size) * round(float(lengths.mean()))
-
-
-def mixed_loader(datasets, collate_fn, datamodule, train):
-    config = datamodule.config
-    samplers = {
-        mode: LengthBucketBatchSampler(
-            dataset.lengths().tolist(),
-            datamodule.batch_size,
-            max_tokens=datamodule.max_tokens,
-            seed=config.data.dataset_seed,
-            shuffle=train,
-        )
-        for mode, dataset in datasets.items()
-    }
-    return DataLoader(
-        MixedDataset(datasets),
-        batch_sampler=MixedBatchSampler(samplers, config.data.dataset_seed, train),
-        collate_fn=collate_fn,
-        **dataloader_kwargs(config.data),
-    )
-
-
-def preallocation_batch_size(max_tokens, batch_size, max_seq_len):
-    return max(1, min(int(batch_size), int(max_tokens) // int(max_seq_len)))
-
-
 class BobertDataModule(pl.LightningDataModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.batch_size = config.training.trainer.batch_size
         self.vector_stats = None
-        self.mode_stats = {}
-        self.strain_stats = {}
-
-    @property
-    def max_seq_len(self):
-        return int(self.config.data.max_seq_len)
+        self.strain_stats = None
 
     def setup(self, stage=None):
-        data_config = self.config.data
-        self.train_datasets, self.val_datasets = {}, {}
-        for mode in data_config.modes:
-            store, positions, strains = load_data(
-                data_config,
-                mode,
-                self.max_seq_len,
-                self.config.training.data.sample_size,
+        data = self.config.data
+        store, positions, strains = load_data(data, data.sample_size)
+        groups = None
+        metadata_path = data.get("validation_metadata_path")
+        if metadata_path is not None:
+            selected = polars.DataFrame({"id": store.beatmap_ids[positions]})
+            group_column = data.get("validation_group_column", "beatmapset_id")
+            metadata = polars.scan_parquet(metadata_path).select(
+                "id", polars.col(group_column).alias("_validation_group")
             )
-            train_idx, val_idx = split_indices(
-                len(positions), data_config.val_split, data_config.dataset_seed
+            grouped = selected.join(
+                metadata.collect(), on="id", how="left", maintain_order="left"
             )
-            train = BeatmapDataset(
-                store, positions[train_idx], strains[train_idx], self.max_seq_len, True
-            )
-            self.train_datasets[mode] = train
-            if len(val_idx):
-                self.val_datasets[mode] = BeatmapDataset(
-                    store, positions[val_idx], strains[val_idx], self.max_seq_len, False
-                )
-            print(f"Fitting {mode} feature normalization statistics...")
-            if mode == "std":
-                self.vector_stats = fit_stats(train.vectors())
-            else:
-                self.mode_stats[mode] = MODE_SPECS[mode].fit_stats(train.vectors())
-            strain = torch.from_numpy(strains[train_idx])
-            strain_std = strain.std(dim=0, correction=0)
-            if torch.any(strain_std <= 1e-6):
-                raise ValueError(f"{mode} strain targets must have non-zero variance")
-            self.strain_stats[mode] = {"mean": strain.mean(dim=0), "std": strain_std}
+            if grouped.height != len(positions) or grouped["_validation_group"].null_count():
+                raise ValueError("validation metadata must identify every beatmap once")
+            groups = grouped["_validation_group"].to_numpy()
+            if np.any(groups <= 0):
+                raise ValueError("validation beatmapset IDs must be positive")
+        train_idx, val_idx = split_indices(
+            len(positions), data.val_split, data.dataset_seed, groups
+        )
+        if groups is not None:
             print(
-                f"{mode} split: {len(train_idx):,} training, "
-                f"{len(val_idx):,} validation"
+                f"Grouped split: {len(np.unique(groups[train_idx])):,} training, "
+                f"{len(np.unique(groups[val_idx])):,} validation groups"
             )
-        self.max_tokens = token_budget(self.train_datasets, self.batch_size)
+        self.train_dataset = BeatmapDataset(
+            store, positions[train_idx], strains[train_idx], data.max_seq_len, True
+        )
+        self.val_dataset = BeatmapDataset(
+            store, positions[val_idx], strains[val_idx], data.max_seq_len, False
+        )
+        print("Fitting feature normalization statistics...")
+        self.vector_stats = self.train_dataset.mode.fit_stats(
+            self.train_dataset.vectors()
+        )
+        strain = torch.from_numpy(strains[train_idx])
+        strain_std = strain.std(dim=0, correction=0)
+        if torch.any(strain_std <= 1e-6):
+            raise ValueError("strain targets must have non-zero variance")
+        self.strain_stats = torch.stack((strain.mean(dim=0), strain_std))
+        print(f"Split: {len(train_idx):,} training, {len(val_idx):,} validation")
 
-    def _collate(self):
-        config = self.config.training.masking
-        return partial(
-            collate_pretrain,
-            max_seq_len=self.max_seq_len,
-            masking_ratio=config.ratio,
-            mean_span_length=config.mean_span_length,
-            vector_stats=self.vector_stats,
-            mode_stats=self.mode_stats,
-            strain_stats=self.strain_stats,
+    def _loader(self, dataset, train):
+        config = self.config
+        loader = config.data.dataloader
+        masking = config.training.masking
+        return DataLoader(
+            dataset,
+            batch_sampler=LengthBucketBatchSampler(
+                dataset.lengths().tolist(),
+                config.training.trainer.batch_size,
+                max_tokens=config.training.trainer.max_tokens,
+                seed=config.data.dataset_seed,
+                shuffle=train,
+            ),
+            collate_fn=partial(
+                collate_pretrain,
+                mode=dataset.mode,
+                max_seq_len=config.data.max_seq_len,
+                masking_ratio=masking.ratio,
+                mean_span_length=masking.mean_span_length,
+                vector_stats=self.vector_stats,
+                strain_stats=self.strain_stats,
+            ),
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+            persistent_workers=loader.persistent_workers and loader.num_workers > 0,
+            prefetch_factor=loader.prefetch_factor if loader.num_workers > 0 else None,
         )
 
     def train_dataloader(self):
-        return mixed_loader(self.train_datasets, self._collate(), self, True)
+        return self._loader(self.train_dataset, True)
 
     def val_dataloader(self):
-        if not self.val_datasets:
-            return []
-        return mixed_loader(self.val_datasets, self._collate(), self, False)
+        return self._loader(self.val_dataset, False)

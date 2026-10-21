@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from omegaconf import OmegaConf
 
+from core.artifacts import select_mode
 from core.model import BobertForPretraining
 from scripts.common.paths import RUNS_DIR, find_latest_checkpoint, resolve_path
 
@@ -15,11 +16,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint")
     parser.add_argument("--config")
     parser.add_argument("-v", "--version")
+    parser.add_argument(
+        "--mode", choices=("std", "taiko", "catch", "mania"), default="std"
+    )
     parser.add_argument("--output")
     return parser.parse_args()
 
 
-def resolve_checkpoint(path: str | None, version: str | None) -> Path:
+def resolve_checkpoint(path: str | None, version: str | None, mode: str) -> Path:
     if path:
         checkpoint = resolve_path(path)
         if not checkpoint.exists():
@@ -27,9 +31,9 @@ def resolve_checkpoint(path: str | None, version: str | None) -> Path:
         return checkpoint
 
     if version:
-        checkpoint = RUNS_DIR / version / "checkpoints" / "last.ckpt"
-        if not checkpoint.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
+        checkpoint = find_latest_checkpoint(RUNS_DIR / version / mode)
+        if checkpoint is None:
+            raise FileNotFoundError(f"No checkpoint found for {version}/{mode}")
         return checkpoint
 
     checkpoint = find_latest_checkpoint(RUNS_DIR)
@@ -40,7 +44,7 @@ def resolve_checkpoint(path: str | None, version: str | None) -> Path:
 
 def main() -> int:
     args = parse_args()
-    checkpoint_path = resolve_checkpoint(args.checkpoint, args.version)
+    checkpoint_path = resolve_checkpoint(args.checkpoint, args.version, args.mode)
     config_path = resolve_path(
         args.config or checkpoint_path.parent.parent / "training.yaml"
     )
@@ -59,7 +63,9 @@ def main() -> int:
         if key.startswith("model.")
     }
     model.load_state_dict(state, strict=True)
-    model.bert.save_pretrained(output_path, checkpoint["vector_stats"])
+    model.bert.save_pretrained(output_path)
+    if args.version and not args.output:
+        select_mode(RUNS_DIR / args.version, model.bert.mode.name, "base")
 
     print(f"Exported checkpoint: {checkpoint_path}")
     print(f"Saved model: {output_path}")

@@ -5,122 +5,34 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
-from torch import nn
-from torchmetrics import MeanAbsoluteError
-from torchmetrics.classification import MulticlassF1Score
 
-from core import STRAIN_COLUMNS
-from core.features import (
-    FEATURE_INFO,
-    FEATURES_BY_NAME,
-    VECTOR_DIM,
-)
-from core.model import configure_inductor
-from core.modes import MODE_SPECS, ModeSpec
-from core.osu import OBJECT_TYPE_SLIDER, OBJECT_TYPE_SPINNER
+from core.model import BobertForPretraining, configure_inductor
+from core.modes import Mode
 
-from .loader import BobertDataModule, preallocation_batch_size
+from .loader import BobertDataModule
 from .setup import create_optimizer, create_scheduler
 
 
-def mlm_loss(predictions: dict[str, Any], targets: torch.Tensor):
-    zero = sum(output["continuous"].sum() * 0.0 for output in predictions.values())
-    losses = {name: zero for name in ("spatial", "rhythm", "attribute")}
-    if targets.shape[0] == 0:
-        return {**losses, "total": zero}
-
-    for group, mask in mlm_group_masks(targets).items():
-        output = predictions[group]
-        continuous_names = [
-            name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
-        ]
-        if continuous_names:
-            indices = [FEATURE_INFO["continuous"][name] for name in continuous_names]
-            continuous_loss = (
-                F.smooth_l1_loss(
-                    output["continuous"],
-                    torch.stack([targets[:, index] for index in indices], dim=1),
-                    beta=0.5,
-                    reduction="none",
-                )
-                .mul(mask[:, None])
-                .sum(dim=0)
-            )
-            for index, name in enumerate(continuous_names):
-                loss_group = FEATURES_BY_NAME[name].family
-                losses[loss_group] = losses[loss_group] + continuous_loss[index]
-
-        for name, logits in output["categorical"].items():
-            info = FEATURE_INFO["categorical"][name]
-            loss_group = FEATURES_BY_NAME[name].family
-            categorical_loss = (
-                F.cross_entropy(
-                    logits,
-                    targets[:, info["index"]].long(),
-                    reduction="none",
-                )
-                .mul(mask)
-                .sum()
-            )
-            losses[loss_group] = losses[loss_group] + categorical_loss
-
-    count = targets.shape[0]
-    losses = {name: loss / count for name, loss in losses.items()}
-    return {**losses, "total": sum(losses.values())}
-
-
-def update_mlm_metrics(
-    predictions: dict[str, Any], targets: torch.Tensor, metrics: nn.ModuleDict
-) -> None:
-    for group, mask in mlm_group_masks(targets).items():
-        if not bool(torch.any(mask)):
-            continue
-        output = predictions[group]
-        for index, name in enumerate(
-            name for name in FEATURE_INFO[group] if name in FEATURE_INFO["continuous"]
-        ):
-            metrics["mae"][name].update(
-                output["continuous"][mask, index],
-                targets[mask, FEATURE_INFO["continuous"][name]],
-            )
-        for name, logits in output["categorical"].items():
-            metrics["f1"][name].update(
-                logits[mask],
-                targets[mask, FEATURE_INFO["categorical"][name]["index"]].long(),
-            )
-
-
-def mlm_group_masks(targets: torch.Tensor) -> dict[str, torch.Tensor]:
-    object_type = targets[:, FEATURE_INFO["categorical"]["object_type"]["index"]].long()
-    return {
-        "common": torch.ones_like(object_type, dtype=torch.bool),
-        "slider": object_type == OBJECT_TYPE_SLIDER,
-        "spinner": object_type == OBJECT_TYPE_SPINNER,
-    }
-
-
-def mode_mlm_loss(spec: ModeSpec, predictions, targets: torch.Tensor) -> torch.Tensor:
-    count = max(targets.shape[0], 1)
-    names = spec.continuous
+def mlm_loss(mode: Mode, predictions, targets: torch.Tensor) -> torch.Tensor:
     continuous = F.smooth_l1_loss(
         predictions[0],
-        targets[:, [spec.index[name] for name in names]],
+        targets[:, [mode.index[name] for name in mode.continuous]],
         beta=0.5,
         reduction="none",
     )
-    loss = (continuous * spec.gate_mask(targets, names)).sum()
-    active = spec.gate_mask(targets, [name for name, _ in spec.categorical])
-    for position, ((name, _), logits) in enumerate(
-        zip(spec.categorical, predictions[1:])
-    ):
+    loss = (continuous * mode.gate_mask(targets, mode.continuous)).sum()
+    names = [name for name, _ in mode.categorical]
+    active = mode.gate_mask(targets, names)
+    for position, (name, logits) in enumerate(zip(names, predictions[1:])):
         categorical = F.cross_entropy(
-            logits, targets[:, spec.index[name]].long(), reduction="none"
+            logits, targets[:, mode.index[name]].long(), reduction="none"
         )
         loss = loss + (categorical * active[:, position]).sum()
-    return loss / count
+    return loss / max(targets.shape[0], 1)
 
 
-def pretraining_step(model: nn.Module, batch: dict[str, torch.Tensor], mode: str):
+def pretraining_step(model: BobertForPretraining, batch: dict[str, torch.Tensor]):
+    mode = model.bert.mode
     predictions, targets = model.forward_packed(
         batch["packed_vectors"],
         batch["masked_idx"],
@@ -128,40 +40,19 @@ def pretraining_step(model: nn.Module, batch: dict[str, torch.Tensor], mode: str
         batch["random_dst_idx"],
         batch["cu_seqlens"],
         batch["positions"],
-        mode,
     )
-    if mode != "std":
-        mlm = mode_mlm_loss(MODE_SPECS[mode], predictions["mlm"], targets["mlm"])
-        strain = F.smooth_l1_loss(predictions["strain"], batch["strain_targets"])
-        losses = {"mlm": mlm, "strain": strain, "total": mlm + strain}
-        return losses, predictions["mlm"], targets["mlm"]
-
-    losses = mlm_loss(predictions["mlm"], targets["mlm"])
-    losses["mlm"] = losses["total"]
-    strain_losses = F.smooth_l1_loss(
+    strain_by_target = F.smooth_l1_loss(
         predictions["strain"], batch["strain_targets"], reduction="none"
     ).mean(dim=0)
-    strain_by_target = dict(zip(STRAIN_COLUMNS, strain_losses, strict=True))
-    losses["strain_aim"] = strain_by_target["aim"]
-    losses["strain_speed"] = strain_by_target["speed"]
-    losses["strain_aim_children"] = torch.stack(
-        [strain_by_target[name] for name in ("slider", "snap", "flow", "agility")]
-    ).mean()
-    losses["strain_speed_children"] = torch.stack(
-        [strain_by_target[name] for name in ("tap", "rhythm")]
-    ).mean()
-    losses["strain"] = sum(
-        losses[name]
-        for name in (
-            "strain_aim",
-            "strain_speed",
-            "strain_aim_children",
-            "strain_speed_children",
-        )
-    )
-    losses["strain_by_target"] = strain_losses
-    losses["total"] = losses["mlm"] + losses["strain"]
-    return losses, predictions["mlm"], targets["mlm"]
+    weights = torch.tensor(list(mode.strains.values()), device=strain_by_target.device)
+    mlm = mlm_loss(mode, predictions["mlm"], targets)
+    strain = (strain_by_target * weights).sum()
+    return {
+        "mlm": mlm,
+        "strain": strain,
+        "strain_by_target": strain_by_target,
+        "total": mlm + strain,
+    }
 
 
 def step_inputs(batch: dict[str, Any], max_seq_len: int) -> dict[str, torch.Tensor]:
@@ -188,7 +79,7 @@ def step_inputs(batch: dict[str, Any], max_seq_len: int) -> dict[str, torch.Tens
 class BobertModule(pl.LightningModule):
     def __init__(
         self,
-        model: nn.Module,
+        model: BobertForPretraining,
         config: DictConfig,
         datamodule: BobertDataModule,
         quiet: bool = False,
@@ -206,31 +97,11 @@ class BobertModule(pl.LightningModule):
             self.step = torch.compile(
                 pretraining_step, mode=config.runtime.compile_mode
             )
-        self.val_metrics = nn.ModuleDict(
-            {
-                "f1": nn.ModuleDict(
-                    {
-                        name: MulticlassF1Score(
-                            num_classes=info["cardinality"], average="weighted"
-                        )
-                        for name, info in FEATURE_INFO["categorical"].items()
-                    }
-                ),
-                "mae": nn.ModuleDict(
-                    {name: MeanAbsoluteError() for name in FEATURE_INFO["continuous"]}
-                ),
-            }
-        )
-
-    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        checkpoint["vector_stats"] = self.datamodule.vector_stats
 
     def configure_optimizers(self):
         optimizer = create_optimizer(self.model, self.config)
         scheduler = create_scheduler(
-            optimizer,
-            self.config,
-            int(self.trainer.estimated_stepping_batches),
+            optimizer, self.config, int(self.trainer.estimated_stepping_batches)
         )
         return {
             "optimizer": optimizer,
@@ -241,172 +112,105 @@ class BobertModule(pl.LightningModule):
             },
         }
 
-    def _shared_step(self, batch: dict[str, Any], metrics=None):
-        losses, mlm_predictions, mlm_targets = self.step(
-            self.model,
-            step_inputs(batch, self.config.data.max_seq_len),
-            batch["mode"],
-        )
-        if metrics is not None and batch["mode"] == "std":
-            update_mlm_metrics(mlm_predictions, mlm_targets, metrics)
+    def _shared_step(self, batch: dict[str, Any]):
+        losses = self.step(self.model, step_inputs(batch, self.config.data.max_seq_len))
         return losses, batch["strain_targets"].shape[0]
 
     def on_fit_start(self):
         with torch.no_grad():
-            for mode, stats in self.datamodule.mode_stats.items():
-                self.model.bert.mode_tokenizers[mode].normalization.copy_(stats)
-        if self.global_rank == 0:
-            print("Running max-length preallocation pass...")
-
+            self.model.bert.tokenizer.normalization.copy_(self.datamodule.vector_stats)
         max_seq_len = self.config.data.max_seq_len
-        warmup_batch = self._create_preallocation_batch(max_seq_len)
-        target_dtype = torch.float32
+        batch = self._preallocation_batch(max_seq_len)
         precision = str(self.trainer.precision)
-        if "bf16" in precision:
-            target_dtype = torch.bfloat16
-        elif "16" in precision:
-            target_dtype = torch.float16
-
+        dtype = (
+            torch.bfloat16
+            if "bf16" in precision
+            else torch.float16
+            if "16" in precision
+            else torch.float32
+        )
         optimizer = self.trainer.optimizers[0]
         optimizer.zero_grad(set_to_none=True)
         autocast = (
-            torch.autocast(device_type=self.device.type, dtype=target_dtype)
-            if target_dtype != torch.float32
+            torch.autocast(device_type=self.device.type, dtype=dtype)
+            if dtype != torch.float32
             else nullcontext()
         )
         with autocast:
-            losses, _ = self._shared_step(warmup_batch)
+            losses, _ = self._shared_step(batch)
         losses["total"].backward()
         optimizer.zero_grad(set_to_none=True)
-
         if self.global_rank == 0:
-            print(
-                "Preallocation complete. "
-                f"Ran B={warmup_batch['batch_size']}, L={max_seq_len} "
-                f"using {target_dtype}."
-            )
+            print(f"Preallocated B={batch['batch_size']}, L={max_seq_len} ({dtype}).")
 
-    def _create_preallocation_batch(self, max_seq_len: int) -> dict[str, Any]:
-        batch_size = preallocation_batch_size(
-            self.datamodule.max_tokens,
-            self.config.training.trainer.batch_size,
-            max_seq_len,
-        )
-        packed_vectors = torch.randn(
-            batch_size * max_seq_len,
-            VECTOR_DIM,
-            device=self.device,
-            dtype=torch.float32,
-        )
-        for info in FEATURE_INFO["categorical"].values():
-            packed_vectors[:, info["index"]] = torch.randint(
-                info["cardinality"],
-                (batch_size * max_seq_len,),
-                device=self.device,
-            ).to(packed_vectors.dtype)
-
-        masking_ratio = float(self.config.training.masking.ratio)
-        mask_count = round(max_seq_len * masking_ratio)
-        packed_mask = (
+    def _preallocation_batch(self, max_seq_len: int) -> dict[str, Any]:
+        trainer = self.config.training.trainer
+        mode = self.model.bert.mode
+        batch_size = max(1, min(trainer.batch_size, trainer.max_tokens // max_seq_len))
+        tokens = batch_size * max_seq_len
+        packed_vectors = torch.randn(tokens, len(mode.features), device=self.device)
+        for name, cardinality in mode.categorical:
+            packed_vectors[:, mode.index[name]] = torch.randint(
+                cardinality, (tokens,), device=self.device
+            ).float()
+        mask_count = round(max_seq_len * float(self.config.training.masking.ratio))
+        masked_idx = (
             (torch.arange(max_seq_len, device=self.device)[None, :] < mask_count)
             .expand(batch_size, -1)
             .reshape(-1)
+            .nonzero(as_tuple=False)
+            .flatten()
         )
-        cu_seqlens = torch.arange(
-            0,
-            (batch_size + 1) * max_seq_len,
-            max_seq_len,
-            device=self.device,
-            dtype=torch.int32,
-        )
-        masked_idx = packed_mask.nonzero(as_tuple=False).flatten()
         split = torch.rand(masked_idx.numel(), device=self.device)
         return {
-            "mode": "std",
             "packed_vectors": packed_vectors,
             "strain_targets": torch.randn(
-                batch_size,
-                len(STRAIN_COLUMNS),
-                device=self.device,
-                dtype=torch.float32,
+                batch_size, len(mode.strains), device=self.device
             ),
             "masked_idx": masked_idx,
             "mask_token_idx": masked_idx[split < 0.8],
             "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
-            "cu_seqlens": cu_seqlens,
+            "cu_seqlens": torch.arange(
+                0,
+                tokens + 1,
+                max_seq_len,
+                device=self.device,
+                dtype=torch.int32,
+            ),
             "max_seqlen": max_seq_len,
             "batch_size": batch_size,
         }
 
     def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        losses, target_count = self._shared_step(batch)
+        losses, count = self._shared_step(batch)
         optimizer = self.trainer.optimizers[0]
         self.log_dict(
             {
                 "muon_lr": optimizer.param_groups[0]["lr"],
                 "adamw_lr": optimizer.param_groups[-1]["lr"],
             },
-            batch_size=target_count,
+            batch_size=count,
         )
         if not self.quiet:
-            self.log(
-                "train_loss",
-                losses["total"],
-                prog_bar=True,
-                batch_size=target_count,
-            )
+            self.log("train_loss", losses["total"], prog_bar=True, batch_size=count)
         return losses["total"]
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
-        mode = batch["mode"]
-        losses, target_count = self._shared_step(batch, self.val_metrics)
+        losses, count = self._shared_step(batch)
+        strains = self.model.bert.mode.strains
         self.log(
-            "val_loss",
-            losses["total"],
-            prog_bar=True,
-            sync_dist=True,
-            batch_size=target_count,
+            "val_loss", losses["total"], prog_bar=True, sync_dist=True, batch_size=count
         )
-        if mode != "std":
-            self.log_dict(
-                {
-                    f"val_{mode}_loss": losses["total"],
-                    f"val_{mode}_mlm_loss": losses["mlm"],
-                    f"val_{mode}_strain_loss": losses["strain"],
-                },
-                sync_dist=True,
-                batch_size=target_count,
-            )
-            return losses["total"]
         self.log_dict(
             {
-                "val_spatial_loss": losses["spatial"],
-                "val_rhythm_loss": losses["rhythm"],
-                "val_attribute_loss": losses["attribute"],
                 "val_mlm_loss": losses["mlm"],
                 "val_strain_loss": losses["strain"],
-                "val_strain_aim_loss": losses["strain_aim"],
-                "val_strain_speed_loss": losses["strain_speed"],
-                "val_strain_aim_children_loss": losses["strain_aim_children"],
-                "val_strain_speed_children_loss": losses["strain_speed_children"],
                 **{
                     f"val_strain_{name}_loss": loss
-                    for name, loss in zip(
-                        STRAIN_COLUMNS, losses["strain_by_target"], strict=True
-                    )
+                    for name, loss in zip(strains, losses["strain_by_target"])
                 },
             },
             sync_dist=True,
-            batch_size=target_count,
-        )
-        self.log_dict(
-            {
-                f"val_{name}_{kind}": metric
-                for kind, metrics in self.val_metrics.items()
-                for name, metric in metrics.items()
-            },
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
+            batch_size=count,
         )
         return losses["total"]

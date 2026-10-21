@@ -108,7 +108,6 @@ def create_trainer(
     config: DictConfig,
     runs_dir: str | Path,
     run_name: str | None = None,
-    extra_callbacks: list[pl.Callback] | None = None,
     quiet: bool = False,
 ) -> pl.Trainer:
     trainer_config = config.training.trainer
@@ -137,7 +136,6 @@ def create_trainer(
         )
     if not quiet:
         callbacks.append(TQDMProgressBar(refresh_rate=25))
-    callbacks.extend(extra_callbacks or [])
 
     return pl.Trainer(
         max_epochs=trainer_config.epochs,
