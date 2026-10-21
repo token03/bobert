@@ -72,7 +72,7 @@ Requests accept 1–10 positive beatmap IDs and up to 1,000 results. Filters cov
 
 The hosted request path is Cloudflare Pages → Pages Function → gateway Worker → VPC service / Tunnel → API. The Worker applies burst and sustained recommendation rate limits. Local Vite development proxies directly to port 8008.
 
-[`scripts/deploy.py`](../scripts/deploy.py) checks that a release tag exists on Hugging Face, then runs its shell companion on the server. The server pulls the code, downloads all manifest-selected mode artifacts and shared catalogs, rebuilds the API image, validates the downloaded artifacts, switches `runs/current` and `data/`, waits for health, and attempts rollback on failure. It targets an already provisioned deployment. `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT`, and `CLOUDFLARE_TUNNEL_TOKEN` configure this workflow.
+[`scripts/deploy.py`](../scripts/deploy.py) checks that a release tag exists on Hugging Face, then runs its shell companion on the server. The server pulls the code, rebuilds the API image, downloads all manifest-selected mode artifacts and shared catalogs with the image's parallel Hugging Face downloader, validates the downloaded artifacts, switches `runs/current` and `data/`, waits for health, and attempts rollback on failure. It targets an already provisioned deployment. `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT`, and `CLOUDFLARE_TUNNEL_TOKEN` configure this workflow.
 
 ```sh
 uv run publish-run -v my-run

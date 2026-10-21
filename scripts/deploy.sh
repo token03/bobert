@@ -67,34 +67,50 @@ image=$(docker inspect --format '{{.Image}}' "$container")
 printf 'services:\n  api:\n    image: %s\n' "$image" > "$stage/image.yaml"
 echo 'Updating code'
 git pull --ff-only
+echo 'Building API while the current container stays online'
+"${compose[@]}" build api
 echo "Fetching $repo@$version"
 (
     umask 022
     mkdir -p "$stage/artifacts" "$stage/catalogs"
-    base="https://huggingface.co/$repo/resolve/$version"
-    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/release.json" "$base/release.json"
-    python3 - "$stage/artifacts/release.json" > "$stage/artifact-paths" <<'PYTHON'
-import json
+    "${compose[@]}" run --rm -T --no-deps --user 0 -e HF_HUB_DISABLE_PROGRESS_BARS=1 -v "$stage/artifacts:/app/release" -v "$stage/catalogs:/app/catalogs" api python - "$repo" "$version" <<'PYTHON'
+import os
+import shutil
 import sys
-manifest = json.load(open(sys.argv[1]))
-assert manifest["format"] == 1 and manifest["modes"]
-for mode, variant in manifest["modes"].items():
-    assert mode in ("std", "taiko", "catch", "mania")
-    assert variant in ("base", "adapted")
-    suffix = ".a" if variant == "adapted" else ""
-    print(f"{mode}/model{suffix}.safetensors")
-    print(f"{mode}/embeddings{suffix}.parquet")
-PYTHON
-    while IFS= read -r artifact; do
-        mkdir -p -- "$stage/artifacts/$(dirname -- "$artifact")"
-        curl -fsSL --retry 3 --retry-delay 2 -o "$stage/artifacts/$artifact" "$base/$artifact"
-    done < "$stage/artifact-paths"
-    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmaps.parquet" "$base/data/beatmaps.parquet"
-    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/beatmapsets.parquet" "$base/data/beatmapsets.parquet"
-    curl -fsSL --retry 3 --retry-delay 2 -o "$stage/catalogs/strains.parquet" "$base/data/strains.parquet"
+from pathlib import Path
+
+from huggingface_hub import HfApi, snapshot_download
+
+from core.artifacts import CATALOGS, RUN_MANIFEST, read_run, resolve_artifacts
+
+os.umask(0o022)
+repo, version = sys.argv[1:]
+revision = HfApi(token=False).model_info(repo, revision=version).sha
+release = Path("/app/release")
+snapshot_download(
+    repo, revision=revision, token=False, local_dir=release, allow_patterns=[RUN_MANIFEST]
 )
-echo 'Building API while the current container stays online'
-"${compose[@]}" build api
+paths = []
+for mode in read_run(release):
+    artifacts = resolve_artifacts(release, mode)
+    paths.extend(
+        str(path.relative_to(release)) for path in (artifacts.model, artifacts.index)
+    )
+snapshot_download(
+    repo,
+    revision=revision,
+    token=False,
+    local_dir=release,
+    allow_patterns=[*paths, *(f"data/{name}" for name in CATALOGS)],
+    max_workers=4,
+)
+for name in CATALOGS:
+    (release / "data" / name).replace(Path("/app/catalogs") / name)
+(release / "data").rmdir()
+shutil.rmtree(release / ".cache", ignore_errors=True)
+print(f"Downloaded {repo}@{revision}", flush=True)
+PYTHON
+)
 echo 'Validating release artifacts'
 "${compose[@]}" run --rm -T --no-deps -v "$stage/artifacts:/app/release:ro" -v "$stage/catalogs:/app/catalogs:ro" api python -c 'from core.artifacts import validate_catalogs, validate_run; validate_run("/app/release"); validate_catalogs("/app/catalogs")'
 mkdir "$stage/previous-catalogs"
