@@ -387,7 +387,7 @@ export function RecommendPage() {
                 <span className={styles['intro-steps']}>
                   <span><span className={styles['intro-action']}><CursorText aria-hidden="true" /> search</span> for a map</span>
                   <span><span className={styles['intro-action']}><ClipboardText aria-hidden="true" /> paste</span> a link/id anywhere</span>
-                  <span><span className={styles['intro-action']}><MagnifyingGlass aria-hidden="true" /> search similar</span> on a map below</span>
+                  <span><span className={styles['intro-action']}><MagnifyingGlass aria-hidden="true" /> click</span> on any map below</span>
                 </span>
                 <span className={styles['intro-outro']}>have fun!</span>
               </div>
