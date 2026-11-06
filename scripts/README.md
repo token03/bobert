@@ -17,6 +17,7 @@ Paths below describe the default workspace layout. Check each command's argument
 | Stage | Command | Inputs | Outputs / effect |
 | --- | --- | --- | --- |
 | Sources | `fetch-beatmaps` | Source IDs and metadata APIs | `data/beatmaps.parquet` |
+| Sources | `sync-beatmaps` | Beatmap catalog, local raw beatmaps, osu! API | Updated `data/beatmaps.parquet`; stale or new IDs in `data/redownload.txt` |
 | Sources | `download-beatmaps` | Beatmap catalog and download sources | Local `.osu.zst` files under `data/beatmaps/` |
 | Sources | `import-beatmaps` | Local tar archive of `.osu` files | Imported beatmap files |
 | Sources | `fetch-beatmapsets` | Beatmap catalog and metadata APIs | `data/beatmapsets.parquet` |
@@ -60,6 +61,13 @@ Start with [`.env.example`](../.env.example). Credentials depend on the selected
 ## Raw beatmaps
 
 Downloads, archive imports, and sharding write lossless zstd level-9 files with checksums to `data/beatmaps/{00-99}/{beatmap_id}.osu.zst`. Raw-map readers also accept existing `.osu` files. When both copies exist, discovery and ID lookups prefer the compressed copy, avoiding duplicate feature rows. Rebuild workers decompress one map at a time in memory; no full-corpus extraction is needed. Training and embedding from feature files do not read raw maps.
+
+`sync-beatmaps` keeps the catalog current through beatmapset search, 50 sets per request at the shared 1 request/s limit. It pages through sets updated or ranked since the last sync, plus every pending, WIP and qualified set. Stored unsettled maps that none of these return are looked up by ID to record their new status or deletion. New and changed maps are looked up by ID for guest difficulty owners, which search omits. Maps whose API checksum differs from the catalog are hashed locally; those whose local file also differs go to `data/redownload.txt`, along with new maps. Comparing the hash directly would flag local copies stripped of storyboard events. The first run needs `--since YYYY-MM-DD`; later runs resume from `data/.beatmap_sync.json` with one day of overlap. `--rescan ranked loved` refreshes play and favourite counts across those categories.
+
+```sh
+uv run sync-beatmaps --since 2026-09-01
+uv run download-beatmaps --ids-file data/redownload.txt --force --skip-metadata-fetch
+```
 
 To migrate an existing corpus:
 

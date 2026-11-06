@@ -7,7 +7,7 @@ import torch
 from omegaconf import OmegaConf
 
 from core.artifacts import select_mode
-from core.model import BobertForPretraining
+from core.model import BobertEncoder
 from scripts.common.paths import RUNS_DIR, find_latest_checkpoint, resolve_path
 
 
@@ -56,16 +56,16 @@ def main() -> int:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     config = OmegaConf.load(config_path)
 
-    model = BobertForPretraining.from_config(config, torch.device("cpu"))
+    model = BobertEncoder.from_config(config, use_flash=False)
     state = {
-        key.removeprefix("model."): value
+        key.removeprefix("model.bert."): value
         for key, value in checkpoint["state_dict"].items()
-        if key.startswith("model.")
+        if key.startswith("model.bert.")
     }
     model.load_state_dict(state, strict=True)
-    model.bert.save_pretrained(output_path)
+    model.save_pretrained(output_path)
     if args.version and not args.output:
-        select_mode(RUNS_DIR / args.version, model.bert.mode.name, "base")
+        select_mode(RUNS_DIR / args.version, model.mode.name, "base")
 
     print(f"Exported checkpoint: {checkpoint_path}")
     print(f"Saved model: {output_path}")

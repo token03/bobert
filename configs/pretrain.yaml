@@ -2,6 +2,7 @@ data:
   mode: std
   features_dir: ./data/features
   strains_path: ./data/strains.parquet
+  metadata_path: ./data/beatmaps.parquet
   dataset_seed: 42
   sample_size: null
   max_seq_len: 4096
@@ -11,7 +12,7 @@ data:
   dataloader:
     num_workers: 2
     pin_memory: true
-    persistent_workers: false
+    persistent_workers: true
     prefetch_factor: 2
 
 model:
@@ -49,6 +50,7 @@ training:
   scheduler:
     warmup_ratio: 0.01
     min_lr_ratio: 0.005
+  section_contrast_weight: 0.02
   masking:
     ratio: 0.30
     mean_span_length: 2

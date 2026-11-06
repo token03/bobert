@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch
+import torch.nn.functional as F
 from rich.console import Console
 from rich.table import Table
 from sklearn.model_selection import GroupKFold
@@ -39,6 +41,7 @@ STRAINS_EVAL_PATH = DATA_DIR / "strains.parquet"
 PROBE_SEED = 0
 PROBE_FOLDS = 4
 PROBE_RIDGE_ALPHA = 1e-3
+RIDGE_GRID = (0.1, 1.0, 10.0)
 PROBE_MIN_LABEL_MAPS = 50
 MIN_PROBE_MAPS = 1000
 RATING_MAX_STARS = 20.0
@@ -357,6 +360,8 @@ def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
     candidate_ids: list[int],
+    *,
+    device: torch.device | None = None,
 ) -> dict[str, float]:
     eval_ids = sorted({beatmap_id for ids in groups.values() for beatmap_id in ids})
     candidate_set = set(candidate_ids)
@@ -364,7 +369,7 @@ def evaluate_grouped_retrieval(
     candidate_indices = {
         beatmap_id: idx for idx, beatmap_id in enumerate(candidate_ids)
     }
-    device = eval_device()
+    device = device or eval_device()
     candidates = torch.tensor(
         target_matrix(target, candidate_ids), dtype=torch.float32, device=device
     )
@@ -462,14 +467,23 @@ def evaluate_grouped_retrieval(
         r_precisions.append(float(is_positive[:positive_count].mean()))
         for cutoff in RETRIEVAL_RECALL_KS:
             recalls[cutoff].append(float(is_positive[:cutoff].sum() / positive_count))
-        if len(hits):
-            average_precision = float(
-                (np.arange(1, len(hits) + 1) / hits).sum() / positive_count
+        best_rank = int(hits[0]) if len(hits) else None
+        positive_columns = torch.tensor(positive_indices, device=device)
+        positive_scores = sims[row, positive_columns]
+        columns = torch.arange(len(candidate_ids), device=device)
+        exact_ranks = 1 + (
+            (sims[row, :, None] > positive_scores[None, :])
+            | (
+                (sims[row, :, None] == positive_scores[None, :])
+                & (columns[:, None] < positive_columns[None, :])
             )
-            best_rank = int(hits[0])
-        else:
-            average_precision = 0.0
-            best_rank = None
+        ).sum(0)
+        average_precision = float(
+            (
+                torch.arange(1, positive_count + 1, device=device)
+                / exact_ranks.sort().values
+            ).mean()
+        )
         average_precisions.append(average_precision)
         for cutoff in RETRIEVAL_RECALL_KS:
             relevant = is_positive[:cutoff].astype(np.float64)
@@ -564,6 +578,7 @@ def evaluate_grouped_retrieval(
             for cutoff, values in recalls.items()
         },
         "macro_ap": weighted_mean(average_precisions, query_weights),
+        "ap_rank_depth": float(len(candidate_ids)),
         **{
             f"macro_ndcg@{cutoff}": weighted_mean(values, query_weights)
             for cutoff, values in ndcgs.items()
@@ -575,7 +590,14 @@ def evaluate_grouped_retrieval(
         f"knn_{RETRIEVAL_HUBNESS_K}_skewness": corpus_knn_skewness(
             candidates, densities_t, target.retrieval_lambda
         ),
-    }, {"groups": detail_groups, "queries": query_rows, "paired": None}
+    }, {
+        "groups": detail_groups,
+        "queries": query_rows,
+        "paired": None,
+        "population_sha256": fingerprint(
+            {"candidates": candidate_ids, "groups": groups}
+        ),
+    }
 
 
 def format_metric(value: float) -> str:
@@ -818,11 +840,31 @@ def multiclass_probe(
     folds = fold_indices(beatmapset_groups(ids), device, encoded)
     y = torch.tensor(encoded, dtype=torch.long, device=device)
     metrics = {}
+    label_groups = np.unique(
+        np.column_stack((np.asarray(encoded), beatmapset_groups(ids))), axis=0
+    )
+    sets_per_label = np.bincount(label_groups[:, 0], minlength=len(classes))
+    population = {
+        "maps": float(len(ids)),
+        "classes": float(len(classes)),
+        "beatmapsets": float(len(np.unique(beatmapset_groups(ids)))),
+        "chance_recall": 1 / len(classes),
+        "classes_with_fewer_than_four_sets": float(
+            (sets_per_label < PROBE_FOLDS).sum()
+        ),
+    }
     for target in targets:
         x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
-        metrics[target.name] = ridge_multiclass_metrics(x, y, folds, len(classes))
+        metrics[target.name] = {
+            **ridge_multiclass_metrics(x, y, folds, len(classes)),
+            **population,
+        }
         del x
-    return EvalResult(title, metrics)
+    detail = {
+        "population_sha256": fingerprint(list(zip(ids, encoded))),
+        "warning": "Class identities depend on the available population; compare only matching population fingerprints.",
+    }
+    return EvalResult(title, metrics, {target.name: detail for target in targets})
 
 
 def load_difficulty_data(targets: list[TargetData], mode: str) -> DifficultyData | None:
@@ -1109,7 +1151,13 @@ def evaluate_collection_retrieval(
         .cpu()
         .numpy()
     )
-    metrics = np.column_stack((metrics, data.row_positives / (set_count - 1)))
+    metrics = np.column_stack(
+        (
+            metrics,
+            random_average_precision(data.row_positives, set_count - 1),
+            data.row_positives / (set_count - 1),
+        )
+    )
     collection_count = len(data.keys)
     weight_totals = np.bincount(
         data.row_collection, weights=data.row_weight, minlength=collection_count
@@ -1144,6 +1192,7 @@ def evaluate_collection_retrieval(
         f"macro_ndcg@{COLLECTION_NDCG_K}": float(per_collection[:, 1].mean()),
         "macro_r_precision": float(per_collection[:, 2].mean()),
         "chance_ap": float(per_collection[:, 3].mean()),
+        "chance_r_precision": float(per_collection[:, 4].mean()),
     }, {"collections": detail_rows, "paired": None}
 
 
@@ -1166,6 +1215,22 @@ def run_collection_retrieval(
         {name: metrics for name, (metrics, _) in per_target.items()},
         {name: detail for name, (_, detail) in per_target.items()},
     )
+    for target in targets:
+        result.metrics[target.name].update(
+            maps=float(len(candidate_ids)),
+            beatmapsets=float(len(np.unique(data.set_index))),
+            collections=float(len(data.keys)),
+            queries=float(len(data.query_maps)),
+        )
+        result.detail[target.name]["population_sha256"] = fingerprint(
+            {
+                "candidates": candidate_ids,
+                "collections": data.keys,
+                "queries": data.query_maps.tolist(),
+                "positive_sets": hashlib.sha256(data.pair_set).hexdigest(),
+                "positive_rows": hashlib.sha256(data.pair_row).hexdigest(),
+            }
+        )
     print_eval_result(result)
     print_paired_ap(targets, result, "collections", ("collection_id", "source"))
 
@@ -1188,13 +1253,327 @@ def run_categorical_probe(
         print_eval_result(result)
 
 
-def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    run_categorical_probe(
-        targets,
-        load_beatmaps(["user_id"]),
-        "user_id",
-        "Mapper Probe",
+def fingerprint(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def stable_order(value: object, seed: int = 42) -> int:
+    return int.from_bytes(
+        hashlib.blake2b(f"{seed}:{value}".encode(), digest_size=8).digest(), "little"
     )
+
+
+def random_average_precision(positives, candidates: int):
+    if candidates < 1:
+        raise ValueError("Random ranking requires at least one candidate")
+    positives = np.asarray(positives, dtype=np.float64)
+    if np.any((positives < 1) | (positives > candidates)):
+        raise ValueError("Positive count must be between one and candidate count")
+    if candidates == 1:
+        return np.ones_like(positives)
+    harmonic = np.reciprocal(np.arange(1, candidates + 1, dtype=np.float64)).sum()
+    return harmonic / candidates + (positives - 1) * (candidates - harmonic) / (
+        candidates * (candidates - 1)
+    )
+
+
+def bootstrap_mean(values, *, seed: int = 42, repetitions: int = 4000) -> list[float]:
+    values = np.asarray(values, dtype=np.float64)
+    if not len(values) or not np.isfinite(values).all():
+        raise ValueError("Bootstrap values must be nonempty and finite")
+    generator = np.random.default_rng(seed)
+    samples = []
+    for _ in range(0, repetitions, 200):
+        indices = generator.integers(
+            len(values), size=(min(200, repetitions - len(samples)), len(values))
+        )
+        samples.extend(values[indices].mean(1).tolist())
+    return np.quantile(samples, (0.025, 0.975)).tolist()
+
+
+def ridge_scores(x, y, train, test, alpha: float, classes: int):
+    train_x, test_x = x[train], x[test]
+    center = train_x.mean(0)
+    train_x, test_x = train_x - center, test_x - center
+    gram = train_x.T @ train_x / len(train)
+    penalty = alpha * gram.diagonal().mean().clamp_min(1e-8)
+    gram.diagonal().add_(penalty)
+    target = F.one_hot(y[train], classes).float()
+    prior = target.mean(0)
+    cross = train_x.T @ (target - prior) / len(train)
+    weights = torch.cholesky_solve(cross, torch.linalg.cholesky(gram))
+    return test_x @ weights + prior
+
+
+def class_metrics(scores, labels, classes: int) -> dict[str, np.ndarray]:
+    predicted = scores.argmax(1)
+    true = torch.bincount(labels, minlength=classes).float()
+    selected = torch.bincount(predicted, minlength=classes).float()
+    correct = torch.bincount(labels[predicted == labels], minlength=classes).float()
+    top5 = (scores.topk(min(5, classes), dim=1).indices == labels[:, None]).any(1)
+    top5_counts = torch.bincount(labels[top5], minlength=classes).float()
+    return {
+        "macro_f1": (2 * correct / (true + selected).clamp_min(1)).cpu().numpy(),
+        "macro_recall": (correct / true.clamp_min(1)).cpu().numpy(),
+        "top5_recall": (top5_counts / true.clamp_min(1)).cpu().numpy(),
+    }
+
+
+def evaluate_mapper(
+    vectors: np.ndarray, panel: list[dict], device: torch.device
+) -> dict:
+    owners = sorted({row["mapper_id"] for row in panel})
+    groups = [row["beatmapset_id"] for row in panel]
+    if len(set(groups)) != len(groups):
+        raise ValueError("Mapper panel must contain globally distinct beatmapsets")
+    owner_index = {owner: index for index, owner in enumerate(owners)}
+    labels = torch.tensor(
+        [owner_index[row["mapper_id"]] for row in panel], device=device
+    )
+    folds = np.asarray([row["fold"] for row in panel])
+    if set(folds) != {0, 1, 2, 3}:
+        raise ValueError("Mapper panel needs four fixed folds")
+    for owner in owners:
+        counts = [
+            sum(row["mapper_id"] == owner and row["fold"] == fold for row in panel)
+            for fold in range(4)
+        ]
+        if min(counts) == 0 or len(set(counts)) != 1:
+            raise ValueError("Every mapper must have equal support in each fold")
+    x = torch.as_tensor(vectors, dtype=torch.float32, device=device)
+    classes = len(owners)
+    scores = torch.empty((len(panel), classes), device=device)
+    selected_alphas = []
+    for fold in range(4):
+        train = torch.as_tensor(np.flatnonzero(folds != fold), device=device)
+        test = torch.as_tensor(np.flatnonzero(folds == fold), device=device)
+        validation_fold = (fold + 1) % 4
+        inner_train = torch.as_tensor(
+            np.flatnonzero((folds != fold) & (folds != validation_fold)), device=device
+        )
+        inner_test = torch.as_tensor(
+            np.flatnonzero(folds == validation_fold), device=device
+        )
+        validation = []
+        for alpha in RIDGE_GRID:
+            inner = ridge_scores(x, labels, inner_train, inner_test, alpha, classes)
+            validation.append(
+                float(
+                    class_metrics(inner, labels[inner_test], classes)["macro_f1"].mean()
+                )
+            )
+        selected = RIDGE_GRID[int(np.argmax(validation))]
+        selected_alphas.append(selected)
+        scores[test] = ridge_scores(x, labels, train, test, selected, classes)
+    by_class = class_metrics(scores, labels, classes)
+    result = {
+        "metrics": {key: float(value.mean()) for key, value in by_class.items()},
+        "by_mapper": {key: value.tolist() for key, value in by_class.items()},
+        "mapper_ids": owners,
+        "population": {
+            "mappers": classes,
+            "maps": len(panel),
+            "beatmapsets": len(groups),
+            "chance_recall": 1 / classes,
+            "chance_top5": min(5, classes) / classes,
+        },
+        "selected_relative_ridge": selected_alphas,
+    }
+    unit = F.normalize(x, dim=1)
+    artists = np.asarray([row["artist"] for row in panel])
+    support_scores = {support: [] for support in (1, 5, 10)}
+    for fold in range(4):
+        test = torch.as_tensor(np.flatnonzero(folds == fold), device=device)
+        train_rows = np.flatnonzero(folds != fold)
+        by_owner = [
+            train_rows[
+                np.asarray(
+                    [owner_index[panel[index]["mapper_id"]] for index in train_rows]
+                )
+                == owner
+            ]
+            for owner in range(classes)
+        ]
+        for support, support_values in support_scores.items():
+            if min(map(len, by_owner)) < support:
+                continue
+            for draw in range(3):
+                selections = [
+                    sorted(
+                        rows,
+                        key=lambda index: stable_order(
+                            (draw, panel[index]["beatmap_id"])
+                        ),
+                    )[:support]
+                    for rows in by_owner
+                ]
+                prototypes = F.normalize(
+                    unit[torch.as_tensor(selections, device=device)].mean(1), dim=1
+                )
+                predicted = (unit[test] @ prototypes.T).argmax(1)
+                hits = torch.bincount(
+                    labels[test][predicted == labels[test]], minlength=classes
+                ).float()
+                totals = torch.bincount(labels[test], minlength=classes).float()
+                support_values.append((hits / totals).cpu().numpy())
+        candidate = torch.as_tensor(train_rows, device=device)
+        nearest = unit[test] @ unit[candidate].T
+        allowed = torch.as_tensor(
+            artists[folds == fold, None] != artists[train_rows][None, :],
+            device=device,
+        )
+        relevant = labels[test, None] == labels[candidate][None, :]
+        eligible = (relevant & allowed).sum(1)
+        nearest.masked_fill_(~allowed, -torch.inf)
+        top = nearest.topk(min(10, len(candidate)), dim=1).indices
+        retrieved = relevant.gather(1, top) & allowed.gather(1, top)
+        eligible = eligible.cpu().numpy()
+        valid = eligible > 0
+        retrieved = retrieved.cpu().numpy()
+        test_labels = labels[test].cpu().numpy()
+        if fold == 0:
+            retrieval_sums = np.zeros((classes, 3), dtype=np.float64)
+            retrieval_counts = np.zeros(classes, dtype=np.float64)
+        np.add.at(
+            retrieval_sums,
+            test_labels[valid],
+            np.column_stack(
+                (
+                    retrieved.any(1),
+                    retrieved.mean(1),
+                    retrieved.sum(1) / np.maximum(eligible, 1),
+                ),
+            )[valid],
+        )
+        retrieval_counts += np.bincount(test_labels[valid], minlength=classes)
+    for support, values in support_scores.items():
+        if values:
+            per_mapper = np.mean(values, axis=0)
+            key = f"prototype_{support}shot_accuracy"
+            result["metrics"][key] = float(per_mapper.mean())
+            result["by_mapper"][key] = per_mapper.tolist()
+    valid_classes = retrieval_counts > 0
+    retrieval_values = retrieval_sums / np.maximum(retrieval_counts[:, None], 1)
+    for index, key in enumerate(
+        (
+            "cross_artist_hit@10",
+            "cross_artist_precision@10",
+            "cross_artist_recall@10",
+        )
+    ):
+        values = retrieval_values[valid_classes, index]
+        if len(values):
+            result["metrics"][key] = float(values.mean())
+            result.setdefault("cross_artist_by_mapper", {})[key] = values.tolist()
+    result["cross_artist_mapper_ids"] = [
+        owner for owner, valid in zip(owners, valid_classes) if valid
+    ]
+    result["population"]["cross_artist_queries"] = int(retrieval_counts.sum())
+    result["confidence_intervals"] = {
+        key: bootstrap_mean(values) for key, values in result["by_mapper"].items()
+    }
+    result["confidence_intervals"].update(
+        {
+            key: bootstrap_mean(values)
+            for key, values in result.get("cross_artist_by_mapper", {}).items()
+        }
+    )
+    return result
+
+
+def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    if targets[0].mode != "std":
+        run_categorical_probe(
+            targets, load_beatmaps(["user_id"]), "user_id", "Mapper Probe"
+        )
+        return
+    panel = pl.read_parquet(DATA_DIR / "mapper_eval.parquet").to_dicts()
+    ids = [row["beatmap_id"] for row in panel]
+    results = {}
+    for target in targets:
+        frame = (
+            pl.scan_parquet(target.path)
+            .filter(pl.col("beatmap_id").is_in(ids))
+            .collect()
+        )
+        rows = {beatmap: index for index, beatmap in enumerate(frame["beatmap_id"])}
+        missing = set(ids).difference(rows)
+        if missing:
+            raise ValueError(
+                f"Mapper evaluation is missing {len(missing)} fixed maps; export the full corpus"
+            )
+        bits = frame["embedding"].to_numpy()
+        vectors = (
+            from_bfloat16(bits) if bits.dtype == np.uint16 else bits.astype(np.float32)
+        )
+        vectors = vectors[[rows[beatmap] for beatmap in ids]]
+        vectors /= np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
+        results[target.name] = evaluate_mapper(vectors, panel, probe_device())
+    print_eval_result(
+        EvalResult(
+            "Mapper Probe",
+            {name: result["metrics"] for name, result in results.items()},
+            {
+                name: {**result, "population_sha256": fingerprint(panel)}
+                for name, result in results.items()
+            },
+        )
+    )
+
+
+def run_item_item_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
+    if targets[0].mode != "std":
+        return
+    panel = pl.read_parquet(DATA_DIR / "item_item_eval.parquet").to_dicts()
+    ids = sorted(
+        {
+            beatmap
+            for row in panel
+            for beatmap in [row["query_id"], row["positive_id"], *row["negative_ids"]]
+        }
+    )
+    metrics = {}
+    for target in targets:
+        frame = (
+            pl.scan_parquet(target.path)
+            .filter(pl.col("beatmap_id").is_in(ids))
+            .collect()
+        )
+        lookup = {beatmap: index for index, beatmap in enumerate(frame["beatmap_id"])}
+        missing = set(ids).difference(lookup)
+        if missing:
+            raise ValueError(
+                f"Item-item evaluation is missing {len(missing)} fixed maps; export the full corpus"
+            )
+        bits = frame["embedding"].to_numpy()
+        vectors = (
+            from_bfloat16(bits) if bits.dtype == np.uint16 else bits.astype(np.float32)
+        )
+        vectors /= np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
+        densities = frame["density"].to_numpy() if target.retrieval_lambda else None
+        values = []
+        for row in panel:
+            query = vectors[lookup[row["query_id"]]]
+            indexes = [
+                lookup[beatmap]
+                for beatmap in [row["positive_id"], *row["negative_ids"]]
+            ]
+            scores = vectors[indexes] @ query
+            if target.retrieval_lambda:
+                scores -= 0.5 * target.retrieval_lambda * densities[indexes]
+            values.append(
+                float(
+                    np.mean((scores[0] > scores[1:]) + 0.5 * (scores[0] == scores[1:]))
+                )
+            )
+        metrics[target.name] = {
+            "matched_pair_accuracy": float(np.mean(values)),
+            "queries": float(len(panel)),
+            "chance": 0.5,
+        }
+    print_eval_result(EvalResult("Item-item Diagnostic", metrics))
 
 
 def run_artist_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
@@ -1430,11 +1809,6 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
             for result in EVAL_RESULTS
             if target.name in result.metrics
         }
-        details = {
-            result.name: result.detail[target.name]
-            for result in EVAL_RESULTS
-            if result.detail and target.name in result.detail
-        }
         payload = json_value(
             {
                 "generated_at": generated_at,
@@ -1447,9 +1821,37 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                     if target.retrieval_lambda
                     else {"method": "cosine"}
                 ),
-                "embedding_metadata": embedding_metadata(target.path),
+                "embedding_metadata": {
+                    key: value
+                    for key, value in embedding_metadata(target.path).items()
+                    if key
+                    in {
+                        "version",
+                        "mode",
+                        "model_sha256",
+                        "pooling",
+                        "layers",
+                        "generated_at",
+                        "centered",
+                    }
+                },
                 "evaluations": evaluations,
-                "details": details,
+                "diagnostics": {
+                    result.name: {
+                        key: value
+                        for key, value in result.detail[target.name].items()
+                        if key
+                        in {
+                            "population",
+                            "population_sha256",
+                            "confidence_intervals",
+                            "selected_relative_ridge",
+                            "warning",
+                        }
+                    }
+                    for result in EVAL_RESULTS
+                    if result.detail and target.name in result.detail
+                },
             }
         )
         suffix = ".a" if target.path.stem.endswith(".a") else ""
@@ -1482,7 +1884,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=(2.0, 14.0),
         metavar=("MIN", "MAX"),
-        help="Only evaluate maps whose star rating is in this range",
+        help="Star range for retrieval and diagnostics; the standard mapper set stays fixed",
     )
     parser.add_argument(
         "--no-sr-filter",
@@ -1525,6 +1927,7 @@ def main() -> None:
     if not args.retrieval_only:
         evals += [
             run_mapper_eval,
+            run_item_item_eval,
             run_artist_eval,
             run_genre_eval,
             run_map_attribute_eval,

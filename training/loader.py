@@ -36,7 +36,7 @@ def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tenso
     ends = np.cumsum(spans)
     count = min(int(np.searchsorted(ends, target)) + 1, max(1, length - target + 1))
     spans = spans[:count]
-    spans[-1] -= max(0, int(ends[count - 1]) - target)
+    spans[-1] += target - int(spans.sum())
     masked = int(spans.sum())
 
     extra_gaps = max(0, length - masked - (count - 1))
@@ -72,7 +72,6 @@ def collate_pretrain(
             for index, mask in enumerate(masks)
         ]
     )
-    split = torch.rand(masked_idx.numel())
     right_border_idx = torch.cat(
         [
             (mask[:-1] & ~mask[1:]).nonzero(as_tuple=False).flatten()
@@ -88,7 +87,7 @@ def collate_pretrain(
         torch.cat([vector[:length] for vector, length in zip(vectors, lengths)]).float()
         - mean
     ) / std
-    return {
+    output = {
         "packed_vectors": corrupt_right_borders(
             packed_vectors,
             right_border_idx[right_split < 0.8],
@@ -97,11 +96,24 @@ def collate_pretrain(
         ),
         "strain_targets": (strain - strain_stats[0]) / strain_stats[1],
         "masked_idx": masked_idx,
-        "mask_token_idx": masked_idx[split < 0.8],
-        "random_dst_idx": masked_idx[(split >= 0.8) & (split < 0.9)],
         "cu_seqlens": cu_seqlens,
         "max_seqlen": max(lengths),
+        "contrast_groups": torch.from_numpy(
+            np.stack([item["groups"] for item in batch])
+        ),
     }
+    visible = [mask.logical_not().nonzero().flatten() for mask in masks]
+    visible_lengths = torch.tensor(
+        [len(indices) for indices in visible], dtype=torch.int32
+    )
+    output["visible_idx"] = torch.cat(
+        [indices + cu_seqlens[index].long() for index, indices in enumerate(visible)]
+    )
+    output["visible_positions"] = torch.cat(visible)
+    output["visible_cu_seqlens"] = torch.nn.functional.pad(
+        visible_lengths.cumsum(0, dtype=torch.int32), (1, 0)
+    )
+    return output
 
 
 def corrupt_right_borders(
@@ -119,11 +131,12 @@ def corrupt_right_borders(
 
 
 class BeatmapDataset(Dataset):
-    def __init__(self, store, positions, strains, max_seq_len, augment):
+    def __init__(self, store, positions, strains, groups, max_seq_len, augment):
         self.store = store
         self.mode = MODES[store.mode]
         self.positions = positions
         self.strains = strains
+        self.groups = groups
         self.max_seq_len = int(max_seq_len)
         self.augment = augment
 
@@ -134,7 +147,11 @@ class BeatmapDataset(Dataset):
         vector = self.store.vector(int(self.positions[idx]), self.max_seq_len)
         if self.augment:
             vector = self.mode.augment(vector)
-        return {"hitobjects": vector, "strain": tuple(self.strains[idx].tolist())}
+        return {
+            "hitobjects": vector,
+            "strain": tuple(self.strains[idx].tolist()),
+            "groups": self.groups[idx],
+        }
 
     def lengths(self):
         return np.minimum(self.store.lengths[self.positions], self.max_seq_len)
@@ -163,6 +180,35 @@ def load_data(data_config, sample_size):
     )
     print(f"Selected {len(positions):,} of {len(store):,} {store.mode} beatmaps.")
     return store, positions, strains
+
+
+def contrast_groups(beatmap_ids, metadata_path):
+    song = polars.concat_str(
+        [
+            polars.col(name).str.to_lowercase().str.strip_chars()
+            for name in ("artist", "title")
+        ],
+        separator="|",
+    )
+    metadata = (
+        polars.scan_parquet(metadata_path)
+        .select("id", "beatmapset_id", "user_id", song.alias("song"))
+        .collect()
+    )
+    joined = polars.DataFrame({"id": beatmap_ids}).join(
+        metadata, on="id", how="left", maintain_order="left"
+    )
+    if joined.height != len(beatmap_ids):
+        raise ValueError("beatmap metadata must identify every beatmap at most once")
+    missing = -1 - np.arange(joined.height, dtype=np.int64)
+    columns = []
+    for name in ("beatmapset_id", "user_id", "song"):
+        column = joined[name]
+        _, codes = np.unique(
+            column.fill_null(column.drop_nulls().min()).to_numpy(), return_inverse=True
+        )
+        columns.append(np.where(column.is_null().to_numpy(), missing, codes))
+    return np.stack(columns, axis=1).astype(np.int64)
 
 
 def split_indices(count, val_split, seed, groups=None):
@@ -218,7 +264,10 @@ class BobertDataModule(pl.LightningDataModule):
             grouped = selected.join(
                 metadata.collect(), on="id", how="left", maintain_order="left"
             )
-            if grouped.height != len(positions) or grouped["_validation_group"].null_count():
+            if (
+                grouped.height != len(positions)
+                or grouped["_validation_group"].null_count()
+            ):
                 raise ValueError("validation metadata must identify every beatmap once")
             groups = grouped["_validation_group"].to_numpy()
             if np.any(groups <= 0):
@@ -231,11 +280,22 @@ class BobertDataModule(pl.LightningDataModule):
                 f"Grouped split: {len(np.unique(groups[train_idx])):,} training, "
                 f"{len(np.unique(groups[val_idx])):,} validation groups"
             )
+        groups = contrast_groups(store.beatmap_ids[positions], data.metadata_path)
         self.train_dataset = BeatmapDataset(
-            store, positions[train_idx], strains[train_idx], data.max_seq_len, True
+            store,
+            positions[train_idx],
+            strains[train_idx],
+            groups[train_idx],
+            data.max_seq_len,
+            True,
         )
         self.val_dataset = BeatmapDataset(
-            store, positions[val_idx], strains[val_idx], data.max_seq_len, False
+            store,
+            positions[val_idx],
+            strains[val_idx],
+            groups[val_idx],
+            data.max_seq_len,
+            False,
         )
         print("Fitting feature normalization statistics...")
         self.vector_stats = self.train_dataset.mode.fit_stats(

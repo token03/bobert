@@ -62,6 +62,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         rotary_freqs: tuple[torch.Tensor, torch.Tensor],
+        rotary_indices: torch.Tensor | None = None,
     ):
         total_tokens, _ = x.shape
 
@@ -70,22 +71,32 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         cos, sin = rotary_freqs
 
         if self.use_flash:
-            q = self.flash_rope(
-                q,
-                cos,
-                sin,
-                interleaved=True,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
-            k = self.flash_rope(
-                k,
-                cos,
-                sin,
-                interleaved=True,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-            )
+            if rotary_indices is not None:
+                selected_cos = cos[rotary_indices].repeat_interleave(2, dim=-1)[
+                    :, None, :
+                ]
+                selected_sin = sin[rotary_indices].repeat_interleave(2, dim=-1)[
+                    :, None, :
+                ]
+                q = (q * selected_cos + rotate_half(q) * selected_sin).to(q.dtype)
+                k = (k * selected_cos + rotate_half(k) * selected_sin).to(k.dtype)
+            else:
+                q = self.flash_rope(
+                    q,
+                    cos,
+                    sin,
+                    interleaved=True,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
+                k = self.flash_rope(
+                    k,
+                    cos,
+                    sin,
+                    interleaved=True,
+                    cu_seqlens=cu_seqlens,
+                    max_seqlen=max_seqlen,
+                )
 
             window_size = (
                 (-1, -1)
@@ -249,12 +260,14 @@ class EncoderLayer(nn.Module):
         rotary_freqs: tuple[torch.Tensor, torch.Tensor] | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
+        rotary_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         src2 = self.self_attn(
             self.norm1(src),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_freqs=rotary_freqs,
+            rotary_indices=rotary_indices,
         )
 
         src = src + self.dropout1(src2)
@@ -352,37 +365,6 @@ class FeatureTokenizer(nn.Module):
             (numeric_tokens.flatten(-2), categorical_tokens.flatten(-2)), dim=-1
         )
         return self.norm(self.out(features))
-
-
-class SpanMasker(nn.Module):
-    def __init__(self, d_model: int):
-        super().__init__()
-        self.mask_token_embed = nn.Parameter(torch.randn(1, 1, d_model))
-
-    def forward_packed(
-        self,
-        packed_embed: torch.Tensor,
-        mask_token_idx: torch.Tensor,
-        random_dst_idx: torch.Tensor,
-    ) -> torch.Tensor:
-        encoder_input = packed_embed.clone()
-        mask_token = self.mask_token_embed.to(packed_embed.dtype).view(1, -1)
-        encoder_input.index_copy_(
-            0,
-            mask_token_idx,
-            mask_token.expand(mask_token_idx.numel(), -1),
-        )
-        random_src_idx = torch.randint(
-            packed_embed.shape[0],
-            (random_dst_idx.numel(),),
-            device=packed_embed.device,
-        )
-        encoder_input.index_copy_(
-            0,
-            random_dst_idx,
-            packed_embed.index_select(0, random_src_idx),
-        )
-        return encoder_input
 
 
 class MaskedLMHead(nn.Module):

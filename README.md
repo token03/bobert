@@ -33,8 +33,9 @@ BoBERT is a bidirectional Transformer encoder based on [ModernBERT](https://arxi
 
 ### Pretraining
 
-- **Masked reconstruction.** The model masks 30% of the hit objects in short spans and predicts all of their features. Masking follows the 80/10/10 recipe from BERT. The features of the neighbors at the span borders are also corrupted.
+- **Masked reconstruction.** The encoder reads the unmasked 70% of hit objects. A small training decoder reconstructs masked features. Features at span borders are also corrupted.
 - **Strain regression.** A linear head predicts difficulty targets from the pooled vector. The targets are skill strains for osu!standard and star rating for the other rulesets.
+- **Section contrast.** Pooled representations from alternating eight-event sections of a map are trained to agree.
 
 ### Adaptation
 

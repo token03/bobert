@@ -17,11 +17,15 @@ data/**/*.parquet
 data/**/*.csv
 data/*.tar.gz
 data/*.db
+data/*.log
 data/col/*
 cache/*
 
 runs/
 *.pth
+*.pt
+*.ckpt
+*.safetensors
 
 visualizer/*/*.parquet
 

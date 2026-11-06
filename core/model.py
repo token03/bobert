@@ -16,7 +16,6 @@ from .components import (
     FeatureTokenizer,
     MaskedLMHead,
     RMSNorm,
-    SpanMasker,
 )
 from .modes import MODES
 from .osu import parse_osu_bytes
@@ -177,49 +176,79 @@ class BobertEncoder(nn.Module):
         )
         self._encode = torch.compile(self._encode, mode=mode, dynamic=False)
 
+    def _rotary_freqs(self, packed_output, cu_seqlens, positions, rotary_indices=None):
+        all_freqs = self.rotary_emb(positions, seq_len=positions.shape[0])
+        if self.use_flash:
+            return all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin()
+        total_tokens = packed_output.shape[0]
+        if rotary_indices is not None:
+            freqs = all_freqs[rotary_indices].unsqueeze(1)
+        elif cu_seqlens.numel() == 2:
+            freqs = all_freqs[:total_tokens].unsqueeze(1)
+        else:
+            token_idx = torch.arange(total_tokens, device=packed_output.device)
+            batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
+            pos = token_idx - cu_seqlens[batch_ids]
+            freqs = all_freqs[pos].view(total_tokens, 1, self.d_model // self.n_heads)
+        return freqs.cos(), freqs.sin()
+
     def _encode(
         self,
         packed_embeddings: torch.Tensor,
         cu_seqlens: torch.Tensor,
         positions: torch.Tensor,
         global_embeddings: list[torch.Tensor] | None = None,
+        rotary_indices: torch.Tensor | None = None,
+        section_embeddings: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         packed_output = packed_embeddings
-        max_seqlen = positions.shape[0]
-        all_freqs = self.rotary_emb(
-            positions,
-            seq_len=max_seqlen,
+        rotary_freqs = self._rotary_freqs(
+            packed_output, cu_seqlens, positions, rotary_indices
         )
-        if self.use_flash:
-            rotary_freqs = (all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin())
-        else:
-            total_tokens = packed_embeddings.shape[0]
-            if cu_seqlens.numel() == 2:
-                freqs = all_freqs[:total_tokens].unsqueeze(1)
-            else:
-                token_idx = torch.arange(total_tokens, device=packed_embeddings.device)
-                batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
-                pos = token_idx - cu_seqlens[batch_ids]
-                freqs = all_freqs[pos].view(
-                    total_tokens, 1, self.d_model // self.n_heads
-                )
-            rotary_freqs = (freqs.cos(), freqs.sin())
-
         for i, layer in enumerate(self.layers):
             packed_output = layer(
                 packed_output,
                 rotary_freqs=rotary_freqs,
                 cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
+                max_seqlen=positions.shape[0],
+                rotary_indices=rotary_indices,
             )
             if global_embeddings is not None and i in self.global_attention_layers:
-                global_embeddings.append(
-                    self._get_embedding(self.final_norm(packed_output), cu_seqlens)
-                )
-
+                normalized = self.final_norm(packed_output)
+                global_embeddings.append(self._get_embedding(normalized, cu_seqlens))
+                if section_embeddings is not None:
+                    section_embeddings.append(
+                        self._get_section_embeddings(
+                            normalized, cu_seqlens, rotary_indices
+                        )
+                    )
         packed_output = self.final_norm(packed_output)
-
         return packed_output
+
+    def _get_section_embeddings(self, values, cumulative, event_positions=None):
+        lengths = (cumulative[1:] - cumulative[:-1]).long()
+        if event_positions is None:
+            indices = torch.arange(len(values), device=values.device)
+            starts = cumulative[torch.bucketize(indices, cumulative[1:], right=True)]
+            event_positions = indices - starts
+        first = (event_positions // 8 % 2 == 0).float()
+        first_sum = torch.segment_reduce(
+            values.float() * first[:, None], "sum", lengths=lengths, unsafe=True
+        )
+        first_count = torch.segment_reduce(first, "sum", lengths=lengths, unsafe=True)
+        second_sum = torch.segment_reduce(
+            values.float() * (1 - first[:, None]),
+            "sum",
+            lengths=lengths,
+            unsafe=True,
+        )
+        second_count = lengths - first_count
+        return torch.stack(
+            (
+                first_sum / first_count[:, None].clamp_min(1),
+                second_sum / second_count[:, None].clamp_min(1),
+            )
+        )
 
     def _get_embedding(
         self,
@@ -279,38 +308,94 @@ class BobertEncoder(nn.Module):
 
 
 class BobertForPretraining(nn.Module):
-    def __init__(self, bert: BobertEncoder):
+    def __init__(self, bert: BobertEncoder, section_contrast_weight: float = 0.02):
         super().__init__()
+        if bert.n_heads % 2:
+            raise ValueError("Pretraining requires even attention heads")
+        if section_contrast_weight < 0:
+            raise ValueError("Section contrast weight must be nonnegative")
         self.bert = bert
-        self.masker = SpanMasker(bert.d_model)
-        self.mlm_head = MaskedLMHead(bert.mode, bert.d_model)
+        self.section_contrast_weight = section_contrast_weight
+        width = bert.d_model // 2
+        self.decoder_projection = nn.Linear(bert.d_model, width, bias=False)
+        self.decoder_mask = nn.Parameter(torch.randn(1, width) * 0.02)
+        self.decoder = nn.ModuleList(
+            [
+                EncoderLayer(
+                    width,
+                    bert.n_heads // 2,
+                    bert.model_args["dim_feedforward"] // 2,
+                    0.0,
+                    is_global=False,
+                    local_window_size=32,
+                    activation_checkpointing=False,
+                    use_flash=bert.use_flash,
+                )
+                for _ in range(2)
+            ]
+        )
+        self.decoder_norm = RMSNorm(width)
+        self.mlm_head = MaskedLMHead(bert.mode, width)
         self.strain_head = nn.Linear(bert.d_model, len(bert.mode.strains))
 
     @classmethod
     def from_config(cls, config: DictConfig, device: torch.device) -> Self:
+        if not 0 <= config.training.masking.ratio < 1:
+            raise ValueError("Masking ratio must be between zero and one")
         bert = BobertEncoder.from_config(config, use_flash=device.type == "cuda")
-        return cls(bert).to(device)
+        return cls(
+            bert,
+            section_contrast_weight=float(
+                config.training.get("section_contrast_weight", 0.02)
+            ),
+        ).to(device)
 
     def forward_packed(
         self,
         packed_vectors: torch.Tensor,
         masked_idx: torch.Tensor,
-        mask_token_idx: torch.Tensor,
-        random_dst_idx: torch.Tensor,
         cu_seqlens: torch.Tensor,
         positions: torch.Tensor,
+        visible_idx: torch.Tensor,
+        visible_positions: torch.Tensor,
+        visible_cu_seqlens: torch.Tensor,
+        contrast_groups: torch.Tensor,
     ):
-        targets = packed_vectors.index_select(0, masked_idx)
-        packed_embed = self.bert.embed_sequences(packed_vectors)
-        packed_input = self.masker.forward_packed(
-            packed_embed, mask_token_idx, random_dst_idx
-        )
-        global_embeddings: list[torch.Tensor] = []
+        global_embeddings = []
+        sections = []
         encoded = self.bert._encode(
-            packed_input, cu_seqlens, positions, global_embeddings=global_embeddings
+            self.bert.embed_sequences(packed_vectors[visible_idx]),
+            visible_cu_seqlens,
+            positions,
+            global_embeddings=global_embeddings,
+            rotary_indices=visible_positions,
+            section_embeddings=sections,
         )
-        predictions = {
-            "mlm": self.mlm_head(encoded.index_select(0, masked_idx)),
-            "strain": self.strain_head(torch.stack(global_embeddings).mean(dim=0)),
-        }
-        return predictions, targets
+        full = (
+            self.decoder_mask.to(encoded.dtype).expand(len(packed_vectors), -1).clone()
+        )
+        full = full.index_copy(0, visible_idx, self.decoder_projection(encoded))
+        freqs = self.bert._rotary_freqs(full, cu_seqlens, positions)
+        for layer in self.decoder:
+            full = layer(
+                full,
+                rotary_freqs=freqs,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=positions.shape[0],
+            )
+        first, second = torch.stack(sections).mean(0).unbind(0)
+        first = F.normalize(first - first.mean(0).detach(), dim=-1)
+        second = F.normalize(second - second.mean(0).detach(), dim=-1)
+        logits = (first @ second.T).float() / 0.1
+        related = (contrast_groups[:, None] == contrast_groups[None]).any(-1)
+        related &= ~torch.eye(len(first), dtype=torch.bool, device=first.device)
+        logits = logits.masked_fill(related, float("-inf"))
+        labels = torch.arange(len(first), device=first.device)
+        contrast = (
+            F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)
+        ) * 0.5
+        return {
+            "mlm": self.mlm_head(self.decoder_norm(full[masked_idx])),
+            "strain": self.strain_head(torch.stack(global_embeddings).mean(0)),
+            "contrast": contrast,
+        }, packed_vectors[masked_idx]
