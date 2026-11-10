@@ -94,7 +94,8 @@ paths = []
 for mode in read_run(release):
     artifacts = resolve_artifacts(release, mode)
     paths.extend(
-        str(path.relative_to(release)) for path in (artifacts.model, artifacts.index)
+        str(path.relative_to(release))
+        for path in (artifacts.model, artifacts.index, artifacts.labels)
     )
 snapshot_download(
     repo,

@@ -684,6 +684,17 @@
   background: var(--separator);
 }
 
+.source-label {
+  padding: 2px var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--row);
+  color: var(--text);
+  font-size: var(--font-size-caption);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
 .source-meta {
   display: grid;
   align-content: center;

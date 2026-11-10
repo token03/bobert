@@ -1,18 +1,18 @@
 {
   "std": {
     "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-std.bin",
-    "sha256": "4f5d75488f63faf1713d9dccdcb26bdb35c5cec6a22722cedc1f88d079162c1a"
+    "sha256": "0584965e831b99da910a99be5c6bd765822fbdfb965cff5451705a5916160e3b"
   },
   "taiko": {
     "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-taiko.bin",
-    "sha256": "e64a802f63270a08b3855839f6614fd40066a87863a7cf5a5700b0a91838a96e"
+    "sha256": "53aeb5f4a18a8ca5c6449b311f344cb8c680ca287d5bd2c06faff53b4efad803"
   },
   "catch": {
     "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-catch.bin",
-    "sha256": "a5872134ff1766d60f1bbb426683e247a4859442c5a9db34960a94c2bb184a20"
+    "sha256": "7afc1ee70710d709dcc0148f7cf5d96a2c449fafa5067ad4b3f68526538456f0"
   },
   "mania": {
     "url": "https://github.com/token03/bobert/releases/download/search-catalog-v15/search-mania.bin",
-    "sha256": "2f48205c6ce98ac7eefdc571b8137aaa51317832467a153a0538cf5f46cb101e"
+    "sha256": "76d7b20335032ab1e2d02c1d04336623bae6785bf9b91d8233de55d02348d57a"
   }
 }

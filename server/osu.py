@@ -82,11 +82,7 @@ class OsuClient:
                 self._metadata_tasks.pop(beatmap_id, None)
 
     async def _fetch_metadata(self, beatmap_id: int) -> dict[str, Any]:
-        response = await self._metadata_response(beatmap_id)
-        if response.status_code == 401:
-            response = await self._metadata_response(beatmap_id, force=True)
-        response.raise_for_status()
-        data = response.json()
+        data = await self._get("beatmaps", [("ids[]", int(beatmap_id))])
         beatmaps = data.get("beatmaps", []) if isinstance(data, dict) else []
         if not beatmaps:
             raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
@@ -95,12 +91,31 @@ class OsuClient:
             raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
         return metadata
 
-    async def _metadata_response(
-        self, beatmap_id: int, force: bool = False
+    async def user_plays(
+        self, user_id: int, kind: str, ruleset: str, limit: int
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        user, scores = await asyncio.gather(
+            self._get(f"users/{int(user_id)}/{ruleset}", {"key": "id"}),
+            self._get(
+                f"users/{int(user_id)}/scores/{kind}",
+                {"mode": ruleset, "limit": limit},
+            ),
+        )
+        return parse_player(user), [parse_play(score) for score in scores]
+
+    async def _get(self, path: str, params: Any) -> Any:
+        response = await self._request(path, params)
+        if response.status_code == 401:
+            response = await self._request(path, params, force=True)
+        response.raise_for_status()
+        return response.json()
+
+    async def _request(
+        self, path: str, params: Any, force: bool = False
     ) -> httpx.Response:
         return await self.client.get(
-            "https://osu.ppy.sh/api/v2/beatmaps",
-            params=[("ids[]", int(beatmap_id))],
+            f"https://osu.ppy.sh/api/v2/{path}",
+            params=params,
             headers={
                 "Authorization": f"Bearer {await self._access_token(force)}",
                 "x-api-version": OSU_API_VERSION,
@@ -148,6 +163,27 @@ def parse_beatmap_metadata(beatmap: dict[str, Any]) -> dict[str, Any]:
     if owners:
         metadata["owners"] = " ".join(str(owner["id"]) for owner in owners)
     return metadata
+
+
+def parse_player(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "user_id": user["id"],
+        "username": user["username"],
+        "avatar_url": user.get("avatar_url"),
+    }
+
+
+def parse_play(score: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "beatmap_id": score["beatmap_id"],
+        "pp": score.get("pp"),
+        "accuracy": score["accuracy"],
+        "rank": score["rank"],
+        "mods": [
+            mod["acronym"] for mod in score.get("mods", []) if mod["acronym"] != "CL"
+        ],
+        "ended_at": score["ended_at"],
+    }
 
 
 def json_data(value: Any) -> Any:

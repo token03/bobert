@@ -34,6 +34,7 @@ Paths below describe the default workspace layout. Check each command's argument
 | Model | `export-model` | Training checkpoint and matching config | Inference `model.safetensors` |
 | Model | `embed` | Exported encoder and features of its mode | `embeddings.parquet`, including pooling metadata and density index |
 | Model | `adapt` | Source run, collections of its mode, `configs/adapt.yaml` | Target run with trained linear adapter |
+| Model | `build-labels` | Selected std model, index and features, collection names, tournament DT slots (GPU) | `labels.safetensors`: DT/HT embedding translators and the collection-word classifier that names play clusters; published with the run when present |
 | Release | `fetch-run` | Hugging Face repository and release tag | Run under `runs/`, catalogs under `data/`; updates `runs/current` |
 | Release | `publish-run` | Run, catalogs, Hugging Face write token | Model card, artifacts, and immutable release tag |
 | Evaluation | `evaluate` | Run embeddings, catalogs, evaluation labels | Per-run evaluation JSON and terminal report |

@@ -28,22 +28,28 @@ import uvicorn
 
 torch.set_num_threads(THREAD_COUNT)
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from core.artifacts import ModeName
+from core.modes import MODES
 from server.osu import BeatmapUnavailableError, OsuClient
 from server.runtime import (
     Runtime,
     RuntimeRegistry,
+    group_embeddings,
     mean_embedding,
+    merge_named,
     metadata_complete,
     metadata_mode,
+    mods_name,
+    play_speed,
 )
 
 MAX_RECOMMEND_TOP_K = 1000
-MAX_RECOMMEND_SOURCES = 10
+MAX_RECOMMEND_SOURCES = 100
+MAX_PLAYS = 100
 
 
 log = logging.getLogger("uvicorn.error")
@@ -117,6 +123,7 @@ class DefaultRecommendResponse(BaseModel):
 class RecommendSource(BaseModel):
     beatmap_id: int
     cache: Literal["hit", "miss"]
+    label: str | None
     metadata: BeatmapSummary
 
 
@@ -124,6 +131,47 @@ class RecommendResponse(BaseModel):
     sources: list[RecommendSource]
     count: int
     results: list[ScoredBeatmapSummary]
+
+
+class Player(BaseModel):
+    user_id: int
+    username: str
+    avatar_url: str | None
+
+
+class Play(BaseModel):
+    beatmap_id: int
+    pp: float | None
+    accuracy: float
+    rank: str
+    mods: list[str]
+    ended_at: str
+
+
+class PlaysResponse(BaseModel):
+    user: Player
+    plays: list[Play]
+
+
+class GroupPlay(BaseModel):
+    beatmap_id: int = Field(gt=0)
+    mods: list[Annotated[str, Field(max_length=4)]] = Field(max_length=16)
+
+
+class GroupRequest(BaseModel):
+    mode: ModeName
+    plays: list[GroupPlay] = Field(min_length=1, max_length=MAX_PLAYS)
+
+
+class PlayGroup(BaseModel):
+    label: str | None
+    beatmap_ids: list[int]
+
+
+class GroupResponse(BaseModel):
+    groups: list[PlayGroup]
+    sources: list[BeatmapSummary]
+    missing: list[int]
 
 
 class RequestLoggingMiddleware:
@@ -330,12 +378,83 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
             {
                 "beatmap_id": beatmap_id,
                 "cache": cache_status,
+                "label": runtime.labels.name(source_embedding[None], "normal")
+                if runtime.labels
+                else None,
                 "metadata": runtime.public_summary(beatmap_id, metadata),
             }
-            for beatmap_id, _, metadata, cache_status in sources
+            for beatmap_id, source_embedding, metadata, cache_status in sources
         ],
         "count": len(results),
         "results": results,
+    }
+
+
+@app.get("/api/users/{user_id}/plays", response_model=PlaysResponse)
+async def user_plays(
+    user_id: Annotated[int, Path(gt=0)],
+    kind: Literal["best", "recent"] = "best",
+    mode: ModeName = "std",
+    limit: Annotated[int, Query(ge=1, le=MAX_PLAYS)] = 50,
+) -> dict[str, Any]:
+    try:
+        user, plays = await get_osu().user_plays(
+            user_id, kind, MODES[mode].label, limit
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404, detail=f"user {user_id} not found"
+            ) from exc
+        raise
+    return {"user": user, "plays": plays}
+
+
+@app.post("/api/beatmaps/groups", response_model=GroupResponse)
+async def group_beatmaps(payload: GroupRequest) -> dict[str, Any]:
+    runtime = get_runtime(payload.mode)
+    found: dict[int, tuple[np.ndarray, dict[str, Any]]] = {}
+    missing: list[int] = []
+    by_speed: dict[str, list[int]] = {}
+    play_mods: dict[tuple[str, int], list[str]] = {}
+    for play in payload.plays:
+        beatmap_id = play.beatmap_id
+        if beatmap_id not in found and beatmap_id not in missing:
+            memory = runtime.memory_embedding(beatmap_id) or await run_in_threadpool(
+                runtime.cached_embedding, beatmap_id
+            )
+            if memory is None:
+                missing.append(beatmap_id)
+            else:
+                found[beatmap_id] = memory
+        speed = play_speed(play.mods)
+        if beatmap_id in found and (speed, beatmap_id) not in play_mods:
+            by_speed.setdefault(speed, []).append(beatmap_id)
+            play_mods[speed, beatmap_id] = play.mods
+    clusters = [
+        (speed, [ids[member] for member in members])
+        for speed, ids in by_speed.items()
+        for members in group_embeddings(np.stack([found[i][0] for i in ids]))
+    ]
+    labels = runtime.labels
+
+    def name(speed: str, ids: list[int]) -> str:
+        mods = mods_name([play_mods[speed, i] for i in ids])
+        return f"{mods} {labels.name(np.stack([found[i][0] for i in ids]), speed)}"
+
+    groups: list[tuple[str | None, list[int]]] = (
+        merge_named([(name(speed, ids), ids) for speed, ids in clusters])
+        if labels
+        else [(None, ids) for _, ids in clusters]
+    )
+    groups.sort(key=lambda group: len(group[1]), reverse=True)
+    return {
+        "groups": [{"label": label, "beatmap_ids": ids} for label, ids in groups],
+        "sources": [
+            runtime.public_summary(beatmap_id, metadata)
+            for beatmap_id, (_, metadata) in found.items()
+        ],
+        "missing": missing,
     }
 
 

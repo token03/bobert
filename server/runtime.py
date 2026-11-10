@@ -6,6 +6,7 @@ import random
 import sqlite3
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isnan
@@ -18,11 +19,13 @@ import torch
 
 from core import retrieval
 from core.artifacts import (
+    Labels,
     RunArtifacts,
     from_bfloat16,
     index_id,
     read_index,
     to_bfloat16,
+    unit_rows,
     validate_run,
 )
 from core.model import BobertEncoder, EmbeddingTransform
@@ -39,6 +42,13 @@ DEFAULT_COUNTS = (15, 40, 30, 15)
 DEFAULT_ERA_STARTS = (2018, 2021, 2023)
 DEFAULT_FAVOURITE_PERCENTILE = 0.75
 DEFAULT_MIN_FAVOURITES = 150
+MAX_GROUPS = 6
+PLAYS_PER_GROUP = 12
+MIN_GROUP_SIZE = 3
+GROUP_ITERATIONS = 30
+SPEED_MODS = {"DT": "fast", "NC": "fast", "HT": "slow", "DC": "slow"}
+NAMED_MODS = ("EZ", "HT", "HD", "HR", "DT", "FL")
+MOD_ALIASES = {"NC": "DT", "DC": "HT"}
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 STATUS_GROUPS = {
     "ranked": {"1", "2", "3", "ranked", "approved", "qualified"},
@@ -89,6 +99,53 @@ def mean_embedding(embeddings: list[np.ndarray]) -> np.ndarray:
     if not np.isfinite(combined).all() or not np.isfinite(norm) or norm <= 1e-12:
         raise ValueError("combined embedding is invalid")
     return np.asarray(combined / norm, dtype=np.float32)
+
+
+def group_embeddings(embeddings: np.ndarray) -> list[list[int]]:
+    vectors = unit_rows(np.asarray(embeddings, dtype=np.float32))
+    count = min(MAX_GROUPS, max(1, len(vectors) // PLAYS_PER_GROUP))
+    centroids = vectors[[int(np.argmax(vectors @ vectors.mean(axis=0)))]]
+    while len(centroids) < count:
+        farthest = int(np.argmin((vectors @ centroids.T).max(axis=1)))
+        centroids = np.vstack([centroids, vectors[farthest]])
+    for _ in range(GROUP_ITERATIONS):
+        labels = np.argmax(vectors @ centroids.T, axis=1)
+        sizes = np.bincount(labels, minlength=len(centroids))
+        if len(centroids) > 1 and sizes.min() < MIN_GROUP_SIZE:
+            centroids = np.delete(centroids, int(sizes.argmin()), axis=0)
+            continue
+        centroids = unit_rows(
+            np.stack(
+                [
+                    vectors[labels == group].mean(axis=0)
+                    for group in range(len(centroids))
+                ]
+            )
+        )
+    labels = np.argmax(vectors @ centroids.T, axis=1)
+    groups = [
+        np.flatnonzero(labels == group).tolist() for group in range(len(centroids))
+    ]
+    return sorted((group for group in groups if group), key=len, reverse=True)
+
+
+def play_speed(mods: list[str]) -> str:
+    return next((SPEED_MODS[mod] for mod in mods if mod in SPEED_MODS), "normal")
+
+
+def mods_name(plays: list[list[str]]) -> str:
+    counts = Counter(
+        mod for mods in plays for mod in {MOD_ALIASES.get(mod, mod) for mod in mods}
+    )
+    shared = [mod for mod in NAMED_MODS if 2 * counts[mod] >= len(plays)]
+    return "".join(shared).lower() or "nm"
+
+
+def merge_named(groups: list[tuple[str, list[int]]]) -> list[tuple[str, list[int]]]:
+    merged: dict[str, list[int]] = {}
+    for name, ids in groups:
+        merged.setdefault(name, []).extend(ids)
+    return list(merged.items())
 
 
 class SQLiteCache:
@@ -208,6 +265,11 @@ class Runtime:
     def __init__(self, artifacts: RunArtifacts, catalog: Catalog):
         self.mode = artifacts.mode
         index = read_index(artifacts.index, model=artifacts.model)
+        self.labels = (
+            Labels(artifacts.labels, index.metadata)
+            if artifacts.labels.exists()
+            else None
+        )
         self.static_ids = [int(value) for value in index.ids]
         self.static_embeddings = np.ascontiguousarray(index.embeddings)
         self.static_embeddings.flags.writeable = False

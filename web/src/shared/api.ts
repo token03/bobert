@@ -38,3 +38,29 @@ export async function fetchDefaultRecommendations(mode: Mode, signal?: AbortSign
 
   return data
 }
+
+export type PlayKind = 'best' | 'recent'
+
+export async function fetchPlays(userId: number, kind: PlayKind, mode: Mode, signal?: AbortSignal): Promise<Schemas['PlaysResponse']> {
+  const { data, error, response } = await client.GET('/api/users/{user_id}/plays', {
+    signal,
+    params: { path: { user_id: userId }, query: { kind, mode, limit: 100 } },
+  })
+  if (!data) {
+    throw new Error(response.status === 404 ? `User ${userId} not found` : String((error as { detail?: unknown } | undefined)?.detail ?? `Request failed with ${response.status}`))
+  }
+
+  return data
+}
+
+export async function groupPlays(mode: Mode, plays: Schemas['GroupPlay'][], signal?: AbortSignal): Promise<Schemas['GroupResponse']> {
+  const { data, response } = await client.POST('/api/beatmaps/groups', {
+    body: { mode, plays },
+    signal,
+  })
+  if (!data) {
+    throw new Error(`Request failed with ${response.status}`)
+  }
+
+  return data
+}

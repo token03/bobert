@@ -67,7 +67,7 @@ def main() -> int:
     for mode, selected in artifacts.items():
         metadata = validate_index(selected.index, selected.model)
         config = model_config(selected.model)["model_args"]
-        for path in (selected.model, selected.index, selected.config):
+        for path in (selected.model, selected.index, selected.config, selected.labels):
             if path.is_file():
                 files[str(path.relative_to(run))] = path
         cards.append(

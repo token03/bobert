@@ -11,6 +11,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** Available Modes */
         get: operations["available_modes_api_modes_get"];
         put?: never;
         post?: never;
@@ -49,6 +50,40 @@ export interface paths {
         put?: never;
         /** Recommend */
         post: operations["recommend_api_recommend_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/plays": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** User Plays */
+        get: operations["user_plays_api_users__user_id__plays_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/beatmaps/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Group Beatmaps */
+        post: operations["group_beatmaps_api_beatmaps_groups_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -95,6 +130,10 @@ export interface components {
     schemas: {
         /** BeatmapSummary */
         BeatmapSummary: {
+            /**
+             * Mode
+             * @enum {string}
+             */
             mode: "std" | "taiko" | "catch" | "mania";
             /** Beatmap Id */
             beatmap_id: number;
@@ -148,10 +187,73 @@ export interface components {
             /** Results */
             results: components["schemas"]["BeatmapSummary"][];
         };
+        /** GroupPlay */
+        GroupPlay: {
+            /** Beatmap Id */
+            beatmap_id: number;
+            /** Mods */
+            mods: string[];
+        };
+        /** GroupRequest */
+        GroupRequest: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "std" | "taiko" | "catch" | "mania";
+            /** Plays */
+            plays: components["schemas"]["GroupPlay"][];
+        };
+        /** GroupResponse */
+        GroupResponse: {
+            /** Groups */
+            groups: components["schemas"]["PlayGroup"][];
+            /** Sources */
+            sources: components["schemas"]["BeatmapSummary"][];
+            /** Missing */
+            missing: number[];
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** Play */
+        Play: {
+            /** Beatmap Id */
+            beatmap_id: number;
+            /** Pp */
+            pp: number | null;
+            /** Accuracy */
+            accuracy: number;
+            /** Rank */
+            rank: string;
+            /** Mods */
+            mods: string[];
+            /** Ended At */
+            ended_at: string;
+        };
+        /** PlayGroup */
+        PlayGroup: {
+            /** Label */
+            label: string | null;
+            /** Beatmap Ids */
+            beatmap_ids: number[];
+        };
+        /** Player */
+        Player: {
+            /** User Id */
+            user_id: number;
+            /** Username */
+            username: string;
+            /** Avatar Url */
+            avatar_url: string | null;
+        };
+        /** PlaysResponse */
+        PlaysResponse: {
+            user: components["schemas"]["Player"];
+            /** Plays */
+            plays: components["schemas"]["Play"][];
         };
         /** RecommendFilters */
         RecommendFilters: {
@@ -197,6 +299,7 @@ export interface components {
         };
         /** RecommendRequest */
         RecommendRequest: {
+            /** Mode */
             mode?: ("std" | "taiko" | "catch" | "mania") | null;
             /** Beatmap Ids */
             beatmap_ids: number[];
@@ -225,10 +328,16 @@ export interface components {
              * @enum {string}
              */
             cache: "hit" | "miss";
+            /** Label */
+            label: string | null;
             metadata: components["schemas"]["BeatmapSummary"];
         };
         /** ScoredBeatmapSummary */
         ScoredBeatmapSummary: {
+            /**
+             * Mode
+             * @enum {string}
+             */
             mode: "std" | "taiko" | "catch" | "mania";
             /** Beatmap Id */
             beatmap_id: number;
@@ -308,6 +417,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
+            /** @description Successful Response */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -394,6 +504,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RecommendResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    user_plays_api_users__user_id__plays_get: {
+        parameters: {
+            query?: {
+                kind?: "best" | "recent";
+                mode?: "std" | "taiko" | "catch" | "mania";
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                user_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlaysResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    group_beatmaps_api_beatmaps_groups_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupResponse"];
                 };
             };
             /** @description Validation Error */

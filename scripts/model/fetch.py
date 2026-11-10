@@ -64,7 +64,12 @@ def main() -> int:
         selected = resolve_artifacts(stage, mode)
         patterns.extend(
             str(path.relative_to(stage))
-            for path in (selected.model, selected.index, selected.config)
+            for path in (
+                selected.model,
+                selected.index,
+                selected.config,
+                selected.labels,
+            )
         )
     snapshot_download(
         args.repo,

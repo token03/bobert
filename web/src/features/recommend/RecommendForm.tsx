@@ -26,7 +26,6 @@ type RecommendFormProps = {
 }
 
 export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading, onFiltersChange, onBeatmapsChange, onSubmit, onReset }: RecommendFormProps) {
-  const [resetAnimation, setResetAnimation] = useState(0)
   const [beatmapDraft, setBeatmapDraft] = useState('')
   const [beatmapInputError, setBeatmapInputError] = useState<string | null>(null)
   const beatmapTokensRef = useRef<HTMLSpanElement>(null)
@@ -89,7 +88,6 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
   }
 
   function resetForm() {
-    setResetAnimation((animation) => animation + 1)
     setBeatmapDraft('')
     setBeatmapInputError(null)
     onReset(clearFilters(search))
@@ -179,38 +177,60 @@ export function RecommendForm({ search, sources, unavailableBeatmapId, isLoading
 
         <div className={styles['search-separator']} aria-hidden="true" />
 
-        <div className={styles['filter-controls']}>
-          {rangeFilters.filter((config) => config.key !== 'ar' || search.mode === 'std' || search.mode === 'catch').filter((config) => config.key !== 'cs' || search.mode !== 'taiko').map((config) => {
-            if (config.key === 'cs' && search.mode === 'mania') {
-              return <KeyFilter key={config.key} min={search.minCs} max={search.maxCs} onValueCommit={(minCs, maxCs) => onFiltersChange({ ...search, minCs, maxCs })} />
-            }
-            return (
-            <RangeFilter
-              key={config.key}
-              config={config}
-              mode={search.mode}
-              min={search[config.params[0]]}
-              max={search[config.params[1]]}
-              onValueCommit={(min, max) => onFiltersChange({ ...search, [config.params[0]]: min, [config.params[1]]: max })}
-            />
-            )
-          })}
-
-          <DateRangeFilter
-            min={search.minDate}
-            max={search.maxDate}
-            onValueCommit={(minDate, maxDate) => onFiltersChange({ ...search, minDate, maxDate })}
-          />
-
-          <StatusFilter value={search.status} onValueCommit={(status) => onFiltersChange({ ...search, status })} />
-
-          <button className={styles['ghost-button']} data-filter="reset" type="button" onClick={resetForm}>
-            <ArrowCounterClockwise key={resetAnimation} data-reset-animate={resetAnimation > 0 || undefined} />
-            <span className={styles['sr-only']}>Reset</span>
-          </button>
-        </div>
+        <FilterControls search={search} onFiltersChange={onFiltersChange} onReset={resetForm} />
       </div>
     </form>
+  )
+}
+
+type FilterControlsProps = {
+  search: RecommendSearch
+  onFiltersChange: (search: RecommendSearch) => void
+  onReset: () => void
+}
+
+export function FilterControls({ search, onFiltersChange, onReset }: FilterControlsProps) {
+  const [resetAnimation, setResetAnimation] = useState(0)
+
+  return (
+    <div className={styles['filter-controls']}>
+      {rangeFilters.filter((config) => config.key !== 'ar' || search.mode === 'std' || search.mode === 'catch').filter((config) => config.key !== 'cs' || search.mode !== 'taiko').map((config) => {
+        if (config.key === 'cs' && search.mode === 'mania') {
+          return <KeyFilter key={config.key} min={search.minCs} max={search.maxCs} onValueCommit={(minCs, maxCs) => onFiltersChange({ ...search, minCs, maxCs })} />
+        }
+        return (
+        <RangeFilter
+          key={config.key}
+          config={config}
+          mode={search.mode}
+          min={search[config.params[0]]}
+          max={search[config.params[1]]}
+          onValueCommit={(min, max) => onFiltersChange({ ...search, [config.params[0]]: min, [config.params[1]]: max })}
+        />
+        )
+      })}
+
+      <DateRangeFilter
+        min={search.minDate}
+        max={search.maxDate}
+        onValueCommit={(minDate, maxDate) => onFiltersChange({ ...search, minDate, maxDate })}
+      />
+
+      <StatusFilter value={search.status} onValueCommit={(status) => onFiltersChange({ ...search, status })} />
+
+      <button
+        className={styles['ghost-button']}
+        data-filter="reset"
+        type="button"
+        onClick={() => {
+          setResetAnimation((animation) => animation + 1)
+          onReset()
+        }}
+      >
+        <ArrowCounterClockwise key={resetAnimation} data-reset-animate={resetAnimation > 0 || undefined} />
+        <span className={styles['sr-only']}>Reset</span>
+      </button>
+    </div>
   )
 }
 

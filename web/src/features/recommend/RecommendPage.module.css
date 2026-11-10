@@ -319,92 +319,6 @@
 .source-tab:focus-visible {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
-.loading-result-list {
-  pointer-events: none;
-  animation: loading-list-in 220ms ease-out;
-}
-
-@keyframes loading-list-in {
-  from {
-    opacity: 0;
-  }
-}
-
-.loading-result-card {
-  content-visibility: auto;
-}
-
-.loading-result-cover {
-  background: var(--surface-strong);
-  animation: loading-pulse 1.6s ease-in-out calc(var(--i, 0) * -220ms) infinite alternate;
-}
-
-.loading-result-copy {
-  display: grid;
-  gap: var(--space-md);
-}
-
-.loading-result-meta {
-  min-width: 94px;
-}
-
-.loading-result-line,
-.loading-result-stat {
-  display: block;
-  border-radius: var(--radius-pill);
-  background: var(--skeleton);
-  animation: loading-pulse 1.6s ease-in-out calc(var(--i, 0) * -220ms) infinite alternate;
-}
-
-.loading-result-line {
-  height: var(--space-lg);
-}
-
-.loading-result-title {
-  width: min(72%, 300px);
-  height: var(--space-xl);
-}
-
-.loading-result-artist {
-  width: min(48%, 190px);
-}
-
-.loading-result-version {
-  width: min(34%, 130px);
-  background: var(--skeleton-soft);
-}
-
-.loading-result-creator {
-  width: 88px;
-}
-
-.loading-result-status {
-  width: 60px;
-  background: var(--skeleton-soft);
-}
-
-.loading-result-stat-icon {
-  width: 12px;
-  height: 12px;
-  background: var(--skeleton-soft);
-}
-
-.loading-result-stat-main {
-  width: 5ch;
-  height: var(--space-2xl);
-}
-
-.loading-result-stat-label {
-  width: 2ch;
-  height: var(--space-lg);
-  background: var(--skeleton-soft);
-}
-
-.loading-result-stat-sub {
-  width: 3ch;
-  height: var(--space-xl);
-}
-
 .result-list-wrap {
   position: relative;
 }
@@ -417,12 +331,6 @@
 @keyframes results-out {
   to {
     opacity: 0;
-  }
-}
-
-@keyframes loading-pulse {
-  to {
-    opacity: 0.55;
   }
 }
 
@@ -498,12 +406,5 @@
 
   .source-tab::after {
     transition: none;
-  }
-
-  .loading-result-cover,
-  .loading-result-line,
-  .loading-result-stat,
-  .loading-result-list {
-    animation: none;
   }
 }

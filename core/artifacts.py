@@ -11,6 +11,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from safetensors import safe_open
+from safetensors.numpy import load_file as load_numpy_file
+from safetensors.numpy import save_file as save_numpy_file
 from safetensors.torch import load_file, save
 
 from .modes import MODES
@@ -258,6 +260,92 @@ def validate_catalogs(path: str | Path) -> None:
             raise ValueError(f"{name} is missing columns: {sorted(missing)}")
 
 
+LABELS_FORMAT = 3
+LABELS_METADATA_KEY = "bobert_labels"
+
+
+def unit_rows(vectors: np.ndarray) -> np.ndarray:
+    return vectors / np.linalg.norm(vectors, axis=-1, keepdims=True)
+
+
+@dataclass(frozen=True)
+class Translator:
+    weight: np.ndarray
+    bias: np.ndarray
+
+    def apply(self, embeddings: np.ndarray) -> np.ndarray:
+        return unit_rows(embeddings @ self.weight + self.bias)
+
+
+def save_labels(
+    path: str | Path,
+    names: list[str],
+    qualifiers: list[str],
+    weights: np.ndarray,
+    bias: np.ndarray,
+    center: np.ndarray,
+    translators: dict[str, Translator],
+    index_metadata: dict,
+) -> None:
+    metadata = {
+        "format": LABELS_FORMAT,
+        "index_id": index_id(index_metadata),
+        "names": names,
+        "qualifiers": qualifiers,
+        "speeds": sorted(translators),
+    }
+    tensors = {
+        "weights": weights,
+        "bias": bias,
+        "center": center,
+        **{f"{speed}.weight": t.weight for speed, t in translators.items()},
+        **{f"{speed}.bias": t.bias for speed, t in translators.items()},
+    }
+    save_numpy_file(
+        {
+            name: np.ascontiguousarray(value, dtype=np.float32)
+            for name, value in tensors.items()
+        },
+        str(path),
+        metadata={LABELS_METADATA_KEY: json.dumps(metadata)},
+    )
+    Path(path).chmod(0o644)
+
+
+class Labels:
+    def __init__(self, path: str | Path, index_metadata: dict):
+        with safe_open(str(path), framework="np") as artifact:
+            metadata = json.loads(artifact.metadata()[LABELS_METADATA_KEY])
+        if metadata["format"] != LABELS_FORMAT:
+            raise ValueError(f"unsupported labels format: {path}")
+        if metadata["index_id"] != index_id(index_metadata):
+            raise ValueError(f"labels were built for different embeddings: {path}")
+        tensors = load_numpy_file(str(path))
+        self.names: list[str] = metadata["names"]
+        self.qualifiers = np.isin(self.names, metadata["qualifiers"])
+        self.weights = tensors["weights"]
+        self.bias = tensors["bias"]
+        self.center = tensors["center"]
+        self.translators = {
+            speed: Translator(tensors[f"{speed}.weight"], tensors[f"{speed}.bias"])
+            for speed in metadata["speeds"]
+        }
+        if self.weights.shape != (self.center.shape[0], len(self.names)):
+            raise ValueError(f"labels tensors do not match their names: {path}")
+
+    def name(self, embeddings: np.ndarray, speed: str) -> str:
+        played = unit_rows(np.asarray(embeddings, dtype=np.float32))
+        if speed in self.translators:
+            played = self.translators[speed].apply(played)
+        offset = unit_rows(played.mean(axis=0) - self.center)
+        scores = offset @ self.weights + self.bias
+        best = int(np.argmax(scores))
+        if not self.qualifiers[best]:
+            return self.names[best]
+        word = int(np.argmax(np.where(self.qualifiers, -np.inf, scores)))
+        return f"{self.names[word]} {self.names[best]}"
+
+
 @dataclass(frozen=True)
 class RunArtifacts:
     run: Path
@@ -283,6 +371,10 @@ class RunArtifacts:
     @property
     def config(self) -> Path:
         return self.directory / f"training{self.suffix}.yaml"
+
+    @property
+    def labels(self) -> Path:
+        return self.directory / f"labels{self.suffix}.safetensors"
 
 
 def read_run(run: str | Path) -> dict[str, str]:
@@ -332,5 +424,7 @@ def validate_run(run: str | Path) -> dict[str, RunArtifacts]:
         metadata = validate_index(selected.index, selected.model)
         if metadata["mode"] != mode:
             raise ValueError(f"mode mismatch in {selected.directory}")
+        if selected.labels.exists():
+            Labels(selected.labels, metadata)
         artifacts[mode] = selected
     return artifacts

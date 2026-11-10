@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
 import { Tabs } from '@base-ui/react/tabs'
 import { ClipboardText, CursorText, DiceFive, GithubLogo, MagnifyingGlass, WarningCircle } from '@phosphor-icons/react'
 import { queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -17,7 +16,7 @@ import type { RecommendSearch } from './filters'
 import { RecommendForm } from './RecommendForm'
 import { SourceBeatmapCard } from './BeatmapCard'
 import type { SweepDirection } from './BeatmapCard'
-import { ResultsList } from './ResultsList'
+import { LoadingResultsList, ResultsList } from './ResultsList'
 import { lookupBeatmapSet } from '../search/searchClient'
 import cardStyles from './BeatmapCard.module.css'
 import listStyles from './ResultsList.module.css'
@@ -32,13 +31,12 @@ type SourceSwap = {
   requestDone: boolean
 }
 
-const loadingCards = Array.from({ length: 100 }, (_, index) => index)
 const staleTime = 5 * 60_000
 
 function recommendationOptions(search: RecommendSearch) {
   return queryOptions({
     queryKey: ['recommendations', search] as const,
-    queryFn: ({ signal }) => recommendBeatmaps(buildRecommendRequest(search), signal),
+    queryFn: ({ signal }) => recommendBeatmaps(buildRecommendRequest(search, parseBeatmapIds(search.beatmap)!), signal),
     enabled: parseBeatmapIds(search.beatmap) !== null,
     staleTime,
     retry: false,
@@ -69,6 +67,7 @@ export function RecommendPage() {
   })
   const response = beatmapIds === null ? null : recommend.data ?? null
   const sourceBeatmaps = response?.sources.map((source) => source.metadata) ?? []
+  const sourceLabels = new Map(response?.sources.map((source) => [source.beatmap_id, source.label]))
   const selectedSource = sourceBeatmaps.find((beatmap) => beatmap.beatmap_id === sourceView.beatmapId) ?? sourceBeatmaps[0] ?? null
   const isLoading = recommend.isFetching || defaults.isFetching
   const requestError = beatmapIds === null ? defaults.error : recommend.error
@@ -308,6 +307,7 @@ export function RecommendPage() {
           {leavingSource && beatmapIds === null ? (
             <SourceBeatmapCard
               beatmap={leavingSource}
+              label={sourceLabels.get(leavingSource.beatmap_id)}
               onCopy={copyBeatmapId}
               onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
               activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
@@ -321,6 +321,7 @@ export function RecommendPage() {
           ) : !isRolling && sourceSwap && sourceBeatmap ? (
             <SourceBeatmapCard
               beatmap={sourceBeatmap}
+              label={sourceLabels.get(sourceBeatmap.beatmap_id)}
               onCopy={copyBeatmapId}
               onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
               activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
@@ -333,6 +334,7 @@ export function RecommendPage() {
             <SourceBeatmapPager
               beatmaps={sourceBeatmaps}
               beatmap={sourceBeatmap}
+              label={sourceLabels.get(sourceBeatmap.beatmap_id)}
               direction={sourceView.direction}
               animate={sourceView.animate}
               onSelect={(beatmapId, direction) => setSourceView({ beatmapId, direction, animate: true })}
@@ -343,24 +345,24 @@ export function RecommendPage() {
             />
           ) : !isRolling && showSourcePlaceholder ? (
             <div className={`${cardStyles['beatmap-card']} ${cardStyles['source-card']} ${styles['source-card-placeholder']}`} data-card-variant="source" aria-hidden="true">
-              <div className={`${cardStyles['cover-preview']} ${cardStyles['source-cover']} ${styles['loading-result-cover']}`} />
+              <div className={`${cardStyles['cover-preview']} ${cardStyles['source-cover']} ${listStyles['loading-result-cover']}`} />
               <div className={`${cardStyles['beatmap-card-content']} ${cardStyles['source-content']}`}>
-                <div className={`${cardStyles['source-copy']} ${styles['loading-result-copy']}`}>
-                  <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
-                  <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
-                  <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
+                <div className={`${cardStyles['source-copy']} ${listStyles['loading-result-copy']}`}>
+                  <span className={`${listStyles['loading-result-line']} ${listStyles['loading-result-title']}`} />
+                  <span className={`${listStyles['loading-result-line']} ${listStyles['loading-result-artist']}`} />
+                  <span className={`${listStyles['loading-result-line']} ${listStyles['loading-result-version']}`} />
                 </div>
-                <div className={`${cardStyles['source-meta']} ${styles['loading-result-meta']}`}>
-                  <span className={`${styles['loading-result-line']} ${styles['loading-result-creator']}`} />
-                  <span className={`${styles['loading-result-line']} ${styles['loading-result-status']}`} />
+                <div className={`${cardStyles['source-meta']} ${listStyles['loading-result-meta']}`}>
+                  <span className={`${listStyles['loading-result-line']} ${listStyles['loading-result-creator']}`} />
+                  <span className={`${listStyles['loading-result-line']} ${listStyles['loading-result-status']}`} />
                 </div>
                 <div className={cardStyles['source-meta-separator']} />
                 <div className={cardStyles['stat-strip']}>
                   <div className={`${cardStyles['stat-row']} ${cardStyles['stat-row-main']}`}>
                     {Array.from({ length: 3 }, (_, stat) => (
                       <div key={stat} className={cardStyles['stat-item']}>
-                        <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-icon']}`} />
-                        <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-main']}`} />
+                        <span className={`${listStyles['loading-result-stat']} ${listStyles['loading-result-stat-icon']}`} />
+                        <span className={`${listStyles['loading-result-stat']} ${listStyles['loading-result-stat-main']}`} />
                       </div>
                     ))}
                   </div>
@@ -369,8 +371,8 @@ export function RecommendPage() {
                     <div className={`${cardStyles['stat-row']} ${cardStyles['stat-row-sub']}`}>
                       {Array.from({ length: 4 }, (_, stat) => (
                         <div key={stat} className={cardStyles['stat-item']}>
-                          <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-label']}`} />
-                          <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-main']}`} />
+                          <span className={`${listStyles['loading-result-stat']} ${listStyles['loading-result-stat-label']}`} />
+                          <span className={`${listStyles['loading-result-stat']} ${listStyles['loading-result-stat-main']}`} />
                         </div>
                       ))}
                     </div>
@@ -446,49 +448,7 @@ export function RecommendPage() {
             {outgoingResults ? (
               resultsList(outgoingResults)
             ) : showLoadingRecommendations ? (
-              <div className={`${listStyles['result-list']} ${styles['loading-result-list']}`} role="status" aria-label="Loading recommendations">
-                {loadingCards.map((index) => (
-                  <div className={`${cardStyles['beatmap-card']} ${cardStyles['beatmap-card-result']} ${cardStyles['beatmap-row']} ${styles['loading-result-card']}`} key={index} style={{ '--i': index } as CSSProperties} aria-hidden="true">
-                    <div className={`${cardStyles['cover-preview']} ${styles['loading-result-cover']}`} />
-                    <div className={`${cardStyles['beatmap-card-content']} ${cardStyles['map-content']}`}>
-                      <div className={cardStyles['map-main']}>
-                        <div className={cardStyles['result-summary']}>
-                          <div className={`${cardStyles['result-copy']} ${styles['loading-result-copy']}`}>
-                            <span className={`${styles['loading-result-line']} ${styles['loading-result-title']}`} />
-                            <span className={`${styles['loading-result-line']} ${styles['loading-result-artist']}`} />
-                            <span className={`${styles['loading-result-line']} ${styles['loading-result-version']}`} />
-                          </div>
-                          <div className={`${cardStyles['result-meta']} ${styles['loading-result-meta']}`}>
-                            <span className={`${styles['loading-result-line']} ${styles['loading-result-creator']}`} />
-                            <span className={`${styles['loading-result-line']} ${styles['loading-result-status']}`} />
-                          </div>
-                        </div>
-                      </div>
-                      <div className={cardStyles['stat-strip']}>
-                        <div className={cardStyles['result-stat-separator']} aria-hidden="true" />
-                        <div className={`${cardStyles['stat-row']} ${cardStyles['stat-row-main']}`}>
-                          {Array.from({ length: 3 }, (_, stat) => (
-                            <div key={stat} className={cardStyles['stat-item']}>
-                              <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-icon']}`} />
-                              <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-main']}`} />
-                            </div>
-                          ))}
-                        </div>
-                        <div className={cardStyles['stat-side']}>
-                          <div className={`${cardStyles['stat-row']} ${cardStyles['stat-row-sub']}`}>
-                            {Array.from({ length: 4 }, (_, stat) => (
-                              <div key={stat} className={cardStyles['stat-item']}>
-                                <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-label']}`} />
-                                <span className={`${styles['loading-result-stat']} ${styles['loading-result-stat-sub']}`} />
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <LoadingResultsList />
             ) : requestError ? (
               <section className={styles['empty-results']} role="alert">
                 <WarningCircle aria-hidden="true" />
@@ -546,6 +506,7 @@ type SourceBeatmapPagerProps = {
   beatmaps: BeatmapMetadata[]
   beatmap: BeatmapMetadata
   direction: SweepDirection
+  label?: string | null
   animate: boolean
   onSelect: (beatmapId: number, direction: SweepDirection) => void
   onCopy: (beatmapId: number) => Promise<void>
@@ -554,11 +515,12 @@ type SourceBeatmapPagerProps = {
   isPreviewPlaying: boolean
 }
 
-function SourceBeatmapPager({ beatmaps, beatmap, direction, animate, onSelect, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: SourceBeatmapPagerProps) {
+function SourceBeatmapPager({ beatmaps, beatmap, label, direction, animate, onSelect, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: SourceBeatmapPagerProps) {
   const card = (
     <SourceBeatmapCard
       key={beatmap.beatmap_id}
       beatmap={beatmap}
+      label={label}
       onCopy={onCopy}
       onPlayPreview={onPlayPreview}
       activePreviewSetId={activePreviewSetId}
