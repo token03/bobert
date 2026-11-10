@@ -411,7 +411,7 @@ async def user_plays(
 
 
 @app.post("/api/beatmaps/groups", response_model=GroupResponse)
-async def group_beatmaps(payload: GroupRequest) -> dict[str, Any]:
+def group_beatmaps(payload: GroupRequest) -> dict[str, Any]:
     runtime = get_runtime(payload.mode)
     found: dict[int, tuple[np.ndarray, dict[str, Any]]] = {}
     missing: list[int] = []
@@ -420,8 +420,8 @@ async def group_beatmaps(payload: GroupRequest) -> dict[str, Any]:
     for play in payload.plays:
         beatmap_id = play.beatmap_id
         if beatmap_id not in found and beatmap_id not in missing:
-            memory = runtime.memory_embedding(beatmap_id) or await run_in_threadpool(
-                runtime.cached_embedding, beatmap_id
+            memory = runtime.memory_embedding(beatmap_id) or runtime.cached_embedding(
+                beatmap_id
             )
             if memory is None:
                 missing.append(beatmap_id)

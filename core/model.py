@@ -178,7 +178,7 @@ class BobertEncoder(nn.Module):
 
     def _rotary_freqs(self, packed_output, cu_seqlens, positions, rotary_indices=None):
         all_freqs = self.rotary_emb(positions, seq_len=positions.shape[0])
-        if self.use_flash:
+        if self.use_flash and rotary_indices is None:
             return all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin()
         total_tokens = packed_output.shape[0]
         if rotary_indices is not None:
@@ -211,7 +211,7 @@ class BobertEncoder(nn.Module):
                 rotary_freqs=rotary_freqs,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=positions.shape[0],
-                rotary_indices=rotary_indices,
+                packed_rotary=rotary_indices is not None,
             )
             if global_embeddings is not None and i in self.global_attention_layers:
                 normalized = self.final_norm(packed_output)

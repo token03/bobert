@@ -27,7 +27,7 @@ def span_length_distribution(mean_span_length: float) -> tuple[np.ndarray, np.nd
 def span_mask(length: int, ratio: float, mean_span_length: float) -> torch.Tensor:
     length = int(length)
     mask = np.zeros(length, dtype=bool)
-    target = round(length * float(ratio))
+    target = min(round(length * float(ratio)), length - 1)
     if target <= 0:
         return torch.from_numpy(mask)
 
@@ -204,9 +204,7 @@ def contrast_groups(beatmap_ids, metadata_path):
     columns = []
     for name in ("beatmapset_id", "user_id", "song"):
         column = joined[name]
-        _, codes = np.unique(
-            column.fill_null(column.drop_nulls().min()).to_numpy(), return_inverse=True
-        )
+        codes = column.rank("dense").fill_null(0).to_numpy()
         columns.append(np.where(column.is_null().to_numpy(), missing, codes))
     return np.stack(columns, axis=1).astype(np.int64)
 
@@ -228,19 +226,6 @@ def split_indices(count, val_split, seed, groups=None):
     return np.asarray(train.indices, dtype=np.int64), np.asarray(
         val.indices, dtype=np.int64
     )
-
-
-def dataloader_kwargs(data_config):
-    num_workers = int(data_config.dataloader.num_workers)
-    kwargs = {
-        "num_workers": num_workers,
-        "pin_memory": bool(data_config.dataloader.pin_memory),
-        "persistent_workers": bool(data_config.dataloader.persistent_workers)
-        and num_workers > 0,
-    }
-    if num_workers > 0:
-        kwargs["prefetch_factor"] = int(data_config.dataloader.prefetch_factor)
-    return kwargs
 
 
 class BobertDataModule(pl.LightningDataModule):

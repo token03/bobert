@@ -44,7 +44,6 @@ export function PlaysPage({ kind, userId, search }: PlaysPageProps) {
   for (const play of plays.data?.plays ?? []) {
     if (!playsById.has(play.beatmap_id)) playsById.set(play.beatmap_id, play)
   }
-  const playIds = [...playsById.keys()]
   const groupedPlays = (plays.data?.plays ?? []).map(({ beatmap_id, mods }) => ({ beatmap_id, mods }))
   const grouping = useQuery({
     queryKey: ['groups', mode, groupedPlays],
@@ -69,6 +68,7 @@ export function PlaysPage({ kind, userId, search }: PlaysPageProps) {
     placeholderData: (previous) => previous,
   })
   const playedSets = new Set([...sources.values()].map((beatmap) => beatmap.beatmapset_id))
+  playedSets.delete(null)
   const results = (recommendations.data?.results ?? []).filter((beatmap) => !playedSets.has(beatmap.beatmapset_id))
   const error = plays.error ?? grouping.error
   const user = plays.data?.user
@@ -147,14 +147,20 @@ export function PlaysPage({ kind, userId, search }: PlaysPageProps) {
             <h2>Couldn’t load plays</h2>
             <p>{error.message}</p>
             <div className={pageStyles['state-actions']}>
-              <button type="button" onClick={() => { void plays.refetch() }}>Try again</button>
+              <button type="button" onClick={() => { void (plays.error ? plays.refetch() : grouping.refetch()) }}>Try again</button>
             </div>
           </section>
-        ) : plays.data && playIds.length === 0 ? (
+        ) : plays.data && playsById.size === 0 ? (
           <section className={pageStyles['empty-results']} role="status">
             <ClockCounterClockwise aria-hidden="true" />
             <h2>No {kind === 'best' ? 'top' : 'recent'} plays</h2>
             <p>{kind === 'recent' ? 'osu! keeps recent plays for 24 hours. Play a few maps and refresh.' : `No ${modeLabels[mode]} plays yet.`}</p>
+          </section>
+        ) : grouping.data && groups.length === 0 ? (
+          <section className={pageStyles['empty-results']} role="status">
+            <MagnifyingGlass aria-hidden="true" />
+            <h2>No indexed plays yet</h2>
+            <p>These plays aren’t in the recommendation index yet. Try another game mode or player.</p>
           </section>
         ) : (
           <>
@@ -162,7 +168,7 @@ export function PlaysPage({ kind, userId, search }: PlaysPageProps) {
               <div className={styles['group-tabs']} role="group" aria-label="Play groups">
                 {groups.length ? groups.map(({ ids, name }, index) => (
                   <button
-                    key={ids[0]}
+                    key={index}
                     type="button"
                     className={styles['group-tab']}
                     aria-pressed={index === groupIndex}

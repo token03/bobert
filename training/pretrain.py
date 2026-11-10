@@ -49,15 +49,13 @@ def pretraining_step(model: BobertForPretraining, batch: dict[str, Any]):
     weights = torch.tensor(list(mode.strains.values()), device=strain_by_target.device)
     mlm = mlm_loss(mode, predictions["mlm"], targets)
     strain = (strain_by_target * weights).sum()
-    losses = {
+    return {
         "mlm": mlm,
         "strain": strain,
         "strain_by_target": strain_by_target,
-        "total": mlm + strain,
+        "contrast": predictions["contrast"],
+        "total": mlm + strain + model.section_contrast_weight * predictions["contrast"],
     }
-    losses["contrast"] = predictions["contrast"]
-    losses["total"] += model.section_contrast_weight * predictions["contrast"]
-    return losses
 
 
 def step_inputs(batch: dict[str, Any], max_seq_len: int) -> dict[str, Any]:
@@ -161,7 +159,10 @@ class BobertModule(pl.LightningModule):
             packed_vectors[:, mode.index[name]] = torch.randint(
                 cardinality, (tokens,), device=self.device
             ).float()
-        mask_count = round(max_seq_len * float(self.config.training.masking.ratio))
+        mask_count = min(
+            round(max_seq_len * float(self.config.training.masking.ratio)),
+            max_seq_len - 1,
+        )
         masked_idx = (
             (torch.arange(max_seq_len, device=self.device)[None, :] < mask_count)
             .expand(batch_size, -1)

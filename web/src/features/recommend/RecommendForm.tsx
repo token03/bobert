@@ -194,19 +194,21 @@ export function FilterControls({ search, onFiltersChange, onReset }: FilterContr
 
   return (
     <div className={styles['filter-controls']}>
-      {rangeFilters.filter((config) => config.key !== 'ar' || search.mode === 'std' || search.mode === 'catch').filter((config) => config.key !== 'cs' || search.mode !== 'taiko').map((config) => {
+      {rangeFilters.map((config) => {
+        if (config.key === 'ar' && search.mode !== 'std' && search.mode !== 'catch') return null
+        if (config.key === 'cs' && search.mode === 'taiko') return null
         if (config.key === 'cs' && search.mode === 'mania') {
           return <KeyFilter key={config.key} min={search.minCs} max={search.maxCs} onValueCommit={(minCs, maxCs) => onFiltersChange({ ...search, minCs, maxCs })} />
         }
         return (
-        <RangeFilter
-          key={config.key}
-          config={config}
-          mode={search.mode}
-          min={search[config.params[0]]}
-          max={search[config.params[1]]}
-          onValueCommit={(min, max) => onFiltersChange({ ...search, [config.params[0]]: min, [config.params[1]]: max })}
-        />
+          <RangeFilter
+            key={config.key}
+            config={config}
+            mode={search.mode}
+            min={search[config.params[0]]}
+            max={search[config.params[1]]}
+            onValueCommit={(min, max) => onFiltersChange({ ...search, [config.params[0]]: min, [config.params[1]]: max })}
+          />
         )
       })}
 

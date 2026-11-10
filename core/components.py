@@ -62,7 +62,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         rotary_freqs: tuple[torch.Tensor, torch.Tensor],
-        rotary_indices: torch.Tensor | None = None,
+        packed_rotary: bool = False,
     ):
         total_tokens, _ = x.shape
 
@@ -70,34 +70,28 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         q, k, v = qkv.unbind(dim=1)
         cos, sin = rotary_freqs
 
-        if self.use_flash:
-            if rotary_indices is not None:
-                selected_cos = cos[rotary_indices].repeat_interleave(2, dim=-1)[
-                    :, None, :
-                ]
-                selected_sin = sin[rotary_indices].repeat_interleave(2, dim=-1)[
-                    :, None, :
-                ]
-                q = (q * selected_cos + rotate_half(q) * selected_sin).to(q.dtype)
-                k = (k * selected_cos + rotate_half(k) * selected_sin).to(k.dtype)
-            else:
-                q = self.flash_rope(
-                    q,
-                    cos,
-                    sin,
-                    interleaved=True,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
-                k = self.flash_rope(
-                    k,
-                    cos,
-                    sin,
-                    interleaved=True,
-                    cu_seqlens=cu_seqlens,
-                    max_seqlen=max_seqlen,
-                )
+        if not self.use_flash or packed_rotary:
+            q = (q * cos + rotate_half(q) * sin).to(q.dtype)
+            k = (k * cos + rotate_half(k) * sin).to(k.dtype)
+        else:
+            q = self.flash_rope(
+                q,
+                cos,
+                sin,
+                interleaved=True,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
+            k = self.flash_rope(
+                k,
+                cos,
+                sin,
+                interleaved=True,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
 
+        if self.use_flash:
             window_size = (
                 (-1, -1)
                 if self.is_global
@@ -117,8 +111,6 @@ class MultiHeadAttentionWithRoPE(nn.Module):
                 window_size=window_size,
             )
         else:
-            q = (q * cos + rotate_half(q) * sin).to(q.dtype)
-            k = (k * cos + rotate_half(k) * sin).to(k.dtype)
             out = self._forward_torch(q, k, v, cu_seqlens)
         return self.wo(out.view(total_tokens, self.d_model))
 
@@ -260,14 +252,14 @@ class EncoderLayer(nn.Module):
         rotary_freqs: tuple[torch.Tensor, torch.Tensor] | None = None,
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: int | None = None,
-        rotary_indices: torch.Tensor | None = None,
+        packed_rotary: bool = False,
     ) -> torch.Tensor:
         src2 = self.self_attn(
             self.norm1(src),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_freqs=rotary_freqs,
-            rotary_indices=rotary_indices,
+            packed_rotary=packed_rotary,
         )
 
         src = src + self.dropout1(src2)

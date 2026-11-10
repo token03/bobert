@@ -265,7 +265,7 @@ LABELS_METADATA_KEY = "bobert_labels"
 
 
 def unit_rows(vectors: np.ndarray) -> np.ndarray:
-    return vectors / np.linalg.norm(vectors, axis=-1, keepdims=True)
+    return vectors / np.maximum(np.linalg.norm(vectors, axis=-1, keepdims=True), 1e-12)
 
 
 @dataclass(frozen=True)

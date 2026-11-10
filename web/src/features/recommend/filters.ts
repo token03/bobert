@@ -5,7 +5,7 @@ import { rangeFilters } from './rangeFilters'
 import type { RangeParam } from './rangeFilters'
 
 export const maxBeatmaps = 10
-export const defaultTopK = 100
+export const topK = 100
 export const statuses = ['ranked', 'loved', 'unranked'] as const
 
 const monthSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional().catch(undefined)
@@ -28,7 +28,7 @@ export function clearFilters(search: RecommendSearch): RecommendSearch {
   return { beatmap: search.beatmap, mode: search.mode }
 }
 
-export function buildRecommendRequest(search: RecommendSearch, beatmapIds: number[], topK = defaultTopK): RecommendRequest {
+export function buildRecommendRequest(search: RecommendSearch, beatmapIds: number[]): RecommendRequest {
   const filters: RecommendFilters = {
     status: search.status ?? null,
     min_date: search.minDate ?? null,

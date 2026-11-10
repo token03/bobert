@@ -108,12 +108,16 @@ def group_embeddings(embeddings: np.ndarray) -> list[list[int]]:
     while len(centroids) < count:
         farthest = int(np.argmin((vectors @ centroids.T).max(axis=1)))
         centroids = np.vstack([centroids, vectors[farthest]])
+    previous = None
     for _ in range(GROUP_ITERATIONS):
         labels = np.argmax(vectors @ centroids.T, axis=1)
         sizes = np.bincount(labels, minlength=len(centroids))
         if len(centroids) > 1 and sizes.min() < MIN_GROUP_SIZE:
             centroids = np.delete(centroids, int(sizes.argmin()), axis=0)
             continue
+        if np.array_equal(labels, previous):
+            break
+        previous = labels
         centroids = unit_rows(
             np.stack(
                 [
