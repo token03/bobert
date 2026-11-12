@@ -10,14 +10,14 @@
   ],
   "ratelimits": [
     {
-      "name": "RECOMMEND_BURST",
+      "name": "API_BURST",
       "namespace_id": "YOUR_BURST_NAMESPACE_ID",
-      "simple": { "limit": 20, "period": 10 }
+      "simple": { "limit": 10, "period": 10 }
     },
     {
-      "name": "RECOMMEND_SUSTAINED",
+      "name": "API_SUSTAINED",
       "namespace_id": "YOUR_SUSTAINED_NAMESPACE_ID",
-      "simple": { "limit": 90, "period": 60 }
+      "simple": { "limit": 40, "period": 60 }
     }
   ]
 }

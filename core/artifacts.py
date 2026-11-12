@@ -1,9 +1,8 @@
 import hashlib
 import json
-from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -17,26 +16,11 @@ from safetensors.torch import load_file, save
 
 from .modes import MODES
 
-MODEL_NAME = "model.safetensors"
-INDEX_NAME = "embeddings.parquet"
+MODEL_VERSION = 4
+INDEX_VERSION = 5
 CATALOGS = ("beatmaps.parquet", "beatmapsets.parquet", "strains.parquet")
-INDEX_VERSION = 4
-MODEL_VERSION = 3
-
-ModeName = Literal["std", "taiko", "catch", "mania"]
-RUN_MANIFEST = "release.json"
-VARIANTS = ("base", "adapted")
-
-
-@dataclass(frozen=True, slots=True)
-class Index:
-    ids: np.ndarray
-    embeddings: np.ndarray
-    densities: np.ndarray
-    metadata: dict[str, Any]
-
-    def vectors(self) -> np.ndarray:
-        return from_bfloat16(self.embeddings)
+METADATA_KEY = b"bobert"
+LABELS_KEY = "bobert_labels"
 
 
 def to_bfloat16(values: np.ndarray) -> np.ndarray:
@@ -48,9 +32,21 @@ def from_bfloat16(bits: np.ndarray) -> np.ndarray:
     return np.left_shift(bits, 16, dtype=np.uint32).view(np.float32)
 
 
+def unit_rows(vectors: np.ndarray) -> np.ndarray:
+    return vectors / np.maximum(np.linalg.norm(vectors, axis=-1, keepdims=True), 1e-12)
+
+
 def checksum(path: str | Path) -> str:
     with Path(path).open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def replace_atomically(path: Path, write) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    write(temporary)
+    temporary.chmod(0o644)
+    temporary.replace(path)
 
 
 def model_config(path: str | Path) -> dict[str, Any]:
@@ -60,26 +56,21 @@ def model_config(path: str | Path) -> dict[str, Any]:
     if config["version"] != MODEL_VERSION or config["features"] != [
         asdict(f) for f in mode.features
     ]:
-        raise ValueError("unsupported model format or feature schema")
+        raise ValueError(f"unsupported model format or feature schema: {path}")
     return config
 
 
 def save_model(
     path: str | Path, state: dict[str, torch.Tensor], args: dict[str, Any]
 ) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     tensors = {key: value.detach().cpu().contiguous() for key, value in state.items()}
     config = {
         "version": MODEL_VERSION,
         "model_args": args,
         "features": [asdict(f) for f in MODES[args["mode"]].features],
     }
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_bytes(
-        save(tensors, metadata={"bobert": json.dumps(config, allow_nan=False)})
-    )
-    temporary.replace(path)
+    payload = save(tensors, metadata={"bobert": json.dumps(config, allow_nan=False)})
+    replace_atomically(Path(path), lambda temporary: temporary.write_bytes(payload))
 
 
 def load_model(path: str | Path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
@@ -87,165 +78,194 @@ def load_model(path: str | Path) -> tuple[dict[str, torch.Tensor], dict[str, Any
     return load_file(path, device="cpu"), config["model_args"]
 
 
-def embedding_metadata(path: str | Path) -> dict[str, Any]:
-    raw = (pq.read_schema(path).metadata or {}).get(b"bobert")
-    if raw is None:
-        return {}
-    metadata = json.loads(raw)
-    if metadata["version"] != INDEX_VERSION:
-        raise ValueError("unsupported embedding format")
-    return metadata
+@dataclass(frozen=True)
+class RunArtifacts:
+    run: Path
+    mode: str
+
+    @property
+    def directory(self) -> Path:
+        return self.run / self.mode
+
+    @property
+    def model(self) -> Path:
+        return self.directory / "model.safetensors"
+
+    @property
+    def config(self) -> Path:
+        return self.directory / "training.yaml"
+
+    @property
+    def embeddings(self) -> Path:
+        return self.directory / "embeddings"
+
+    @property
+    def densities(self) -> Path:
+        return self.directory / "densities.parquet"
+
+    @property
+    def labels(self) -> Path:
+        return self.directory / "labels.safetensors"
+
+    @property
+    def search(self) -> Path:
+        return self.directory / "search.bin"
+
+    def shards(self) -> list[Path]:
+        return sorted(self.embeddings.glob("*.parquet"))
 
 
-def index_id(metadata: dict[str, Any]) -> str:
-    identity = {
-        key: metadata[key]
-        for key in (
-            "version",
-            "model_sha256",
-            "pooling",
-            "layers",
-            "layer_means",
-            "retrieval",
-        )
+def run_modes(run: str | Path) -> dict[str, RunArtifacts]:
+    run = Path(run)
+    modes = {mode: RunArtifacts(run, mode) for mode in MODES}
+    modes = {
+        mode: artifacts for mode, artifacts in modes.items() if artifacts.model.exists()
     }
-    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    if not modes:
+        raise FileNotFoundError(f"no models in {run}")
+    return modes
 
 
-def write_index(
-    path: str | Path,
-    ids: np.ndarray,
-    embeddings: np.ndarray,
-    transform: Callable[[np.ndarray], np.ndarray],
-    metadata: dict[str, Any],
-    model: str | Path,
-    batch_size: int,
-    densities: np.ndarray | None = None,
-    quiet: bool = False,
-) -> None:
-    path = Path(path)
-    schema_metadata = {
-        b"bobert": json.dumps(
-            {
-                **metadata,
-                "version": INDEX_VERSION,
-                "count": len(ids),
-                "model_sha256": checksum(model),
-            },
-            allow_nan=False,
-        ).encode()
-    }
-    writer = None
-    try:
-        for start in range(0, len(embeddings), batch_size):
-            stop = min(start + batch_size, len(embeddings))
-            table = embedding_table(
-                ids[start:stop].tolist(),
-                transform(embeddings[start:stop]),
-                None if densities is None else densities[start:stop],
+def run_artifacts(run: str | Path, mode: str) -> RunArtifacts:
+    artifacts = RunArtifacts(Path(run), mode)
+    if not artifacts.model.exists():
+        raise FileNotFoundError(f"no {mode} model in {run}")
+    return artifacts
+
+
+@dataclass(frozen=True, slots=True)
+class Index:
+    ids: np.ndarray
+    embeddings: np.ndarray
+    densities: np.ndarray | None
+    model_sha256: str
+
+    def vectors(self) -> np.ndarray:
+        return from_bfloat16(self.embeddings)
+
+    def rows(self, ids: np.ndarray) -> np.ndarray:
+        order = np.argsort(self.ids)
+        rows = order[
+            np.searchsorted(self.ids, ids, sorter=order).clip(max=len(order) - 1)
+        ]
+        if not np.array_equal(self.ids[rows], ids):
+            raise ValueError("index is missing requested beatmaps")
+        return rows
+
+
+def shard_table(ids: np.ndarray, embeddings: np.ndarray) -> pa.Table:
+    bits = to_bfloat16(embeddings)
+    values = pa.array(bits.reshape(-1), type=pa.uint16())
+    return pa.table(
+        {
+            "beatmap_id": pa.array(ids, type=pa.int64()),
+            "embedding": pa.FixedSizeListArray.from_arrays(values, bits.shape[1]),
+        }
+    )
+
+
+def write_shard(
+    artifacts: RunArtifacts, ids: np.ndarray, embeddings: np.ndarray
+) -> Path:
+    table = shard_table(ids, embeddings).replace_schema_metadata(
+        {
+            METADATA_KEY: json.dumps(
+                {"version": INDEX_VERSION, "model_sha256": checksum(artifacts.model)}
             )
-            if writer is None:
-                writer = pq.ParquetWriter(
-                    path, table.schema.with_metadata(schema_metadata)
-                )
-            writer.write_table(table)
-            if not quiet:
-                print(
-                    f"\rWrote {stop:,}/{len(embeddings):,} embeddings",
-                    end="",
-                    flush=True,
-                )
-    finally:
-        if writer is not None:
-            writer.close()
-        if not quiet:
-            print()
+        }
+    )
+    path = artifacts.embeddings / f"{len(artifacts.shards()):03d}.parquet"
+    replace_atomically(path, lambda temporary: pq.write_table(table, temporary))
+    return path
 
 
-def embedding_table(
-    ids: list[int], embeddings: np.ndarray, densities: np.ndarray | None
-) -> pa.Table:
-    embeddings = to_bfloat16(embeddings)
-    values = pa.array(embeddings.reshape(-1), type=pa.uint16())
-    embedding_column = pa.FixedSizeListArray.from_arrays(values, embeddings.shape[1])
-    arrays = [pa.array(ids, type=pa.int64()), embedding_column]
-    names = ["beatmap_id", "embedding"]
-    if densities is not None:
-        arrays.append(pa.array(densities, type=pa.float32()))
-        names.append("density")
-    return pa.Table.from_arrays(arrays, names=names)
+def index_ids(artifacts: RunArtifacts) -> tuple[list[Path], list[np.ndarray], str]:
+    model_sha256 = checksum(artifacts.model)
+    expected = {"version": INDEX_VERSION, "model_sha256": model_sha256}
+    shards = artifacts.shards()
+    if not shards:
+        raise FileNotFoundError(f"no embeddings in {artifacts.embeddings}")
+    for shard in shards:
+        if json.loads(pq.read_schema(shard).metadata[METADATA_KEY]) != expected:
+            raise ValueError(f"{shard} was not embedded by {artifacts.model}")
+    ids = [
+        pl.read_parquet(shard, columns=["beatmap_id"])["beatmap_id"].to_numpy()
+        for shard in shards
+    ]
+    return shards, ids, model_sha256
 
 
-def validate_index(path: str | Path, model: str | Path | None = None) -> dict[str, Any]:
-    metadata = embedding_metadata(path)
-    if not metadata:
-        raise ValueError("index has no embedded metadata")
-    with pq.ParquetFile(path) as parquet:
-        schema = parquet.schema_arrow
-        count = parquet.metadata.num_rows
-    if schema.names not in (
-        ["beatmap_id", "embedding"],
-        ["beatmap_id", "embedding", "density"],
-    ):
-        raise ValueError("expected beatmap_id, embedding, and density columns")
-    embedding_type = schema.field("embedding").type
-    if (
-        not pa.types.is_fixed_size_list(embedding_type)
-        or embedding_type.value_type != pa.uint16()
-    ):
-        raise ValueError("embedding column must be a fixed-size bfloat16 list")
-    if metadata["count"] != count or metadata["pooling"] != "layer_centered_mean":
-        raise ValueError("index metadata does not match the file")
-    means = np.asarray(metadata["layer_means"], dtype=np.float32)
-    if means.shape != (len(metadata["layers"]), embedding_type.list_size):
-        raise ValueError("invalid layer centering statistics")
-    if model is not None:
-        args = model_config(model)["model_args"]
-        if (
-            metadata["model_sha256"] != checksum(model)
-            or args["d_model"] != embedding_type.list_size
-            or sorted(args["global_attention_layers"]) != metadata["layers"]
-            or args["mode"] != metadata["mode"]
-            or args.get("adapter") != metadata.get("adapter")
-        ):
-            raise ValueError("model and embedding index do not match")
-    return metadata
+def shard_embeddings(path: Path) -> np.ndarray:
+    return pl.read_parquet(path, columns=["embedding"])["embedding"].to_numpy()
 
 
-def read_embeddings(
-    path: str | Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    frame = pl.read_parquet(path)
-    bits = frame["embedding"].to_numpy()
-    if bits.dtype != np.uint16:
-        raise ValueError(f"{path} does not store bfloat16 embeddings")
-    return (
-        frame["beatmap_id"].to_numpy().astype(np.int64),
-        bits,
-        frame["density"].to_numpy().astype(np.float32)
-        if "density" in frame.columns
-        else None,
+def latest_rows(shard_ids: list[np.ndarray]) -> np.ndarray:
+    stacked = np.concatenate(shard_ids)
+    _, latest = np.unique(stacked[::-1], return_index=True)
+    keep = np.zeros(len(stacked), dtype=bool)
+    keep[len(stacked) - 1 - latest] = True
+    return keep
+
+
+def read_index(artifacts: RunArtifacts, with_densities: bool = True) -> Index:
+    shards, shard_ids, model_sha256 = index_ids(artifacts)
+    keep = latest_rows(shard_ids)
+    ids = np.concatenate(shard_ids)[keep]
+    if len(shards) == 1 and keep.all():
+        embeddings = shard_embeddings(shards[0])
+    else:
+        embeddings = None
+        offsets = np.cumsum([0, *(len(ids) for ids in shard_ids)])
+        row = 0
+        for shard, start, stop in zip(shards, offsets[:-1], offsets[1:], strict=True):
+            mask = keep[start:stop]
+            count = int(mask.sum())
+            if not count:
+                continue
+            bits = shard_embeddings(shard)
+            if embeddings is None:
+                embeddings = np.empty((len(ids), bits.shape[1]), dtype=np.uint16)
+            np.compress(mask, bits, axis=0, out=embeddings[row : row + count])
+            row += count
+    densities = None
+    if with_densities:
+        frame = pl.read_parquet(artifacts.densities)
+        if not np.array_equal(frame["beatmap_id"].to_numpy(), ids):
+            raise ValueError(f"{artifacts.densities} does not match the embeddings")
+        densities = frame["density"].to_numpy().astype(np.float32)
+    return Index(ids, embeddings, densities, model_sha256)
+
+
+def write_densities(
+    artifacts: RunArtifacts, ids: np.ndarray, densities: np.ndarray
+) -> None:
+    table = pa.table(
+        {
+            "beatmap_id": pa.array(ids, type=pa.int64()),
+            "density": pa.array(densities, type=pa.float32()),
+        }
+    )
+    replace_atomically(
+        artifacts.densities, lambda temporary: pq.write_table(table, temporary)
     )
 
 
-def read_index(
-    path: str | Path,
-    *,
-    model: str | Path | None = None,
-    with_density: bool = True,
-) -> Index:
-    metadata = validate_index(path, model)
-    with pq.ParquetFile(path) as parquet:
-        names = parquet.schema_arrow.names
-    if with_density and "density" not in names:
-        raise ValueError("index has no retrieval densities")
-    ids, bits, densities = read_embeddings(path)
-    return Index(
-        ids=ids,
-        embeddings=bits,
-        densities=densities if with_density else np.empty(0, dtype=np.float32),
-        metadata=metadata,
-    )
+def validate_run(run: str | Path) -> dict[str, RunArtifacts]:
+    modes = run_modes(run)
+    for mode, artifacts in modes.items():
+        config = model_config(artifacts.model)
+        if config["model_args"]["mode"] != mode:
+            raise ValueError(f"mode mismatch in {artifacts.directory}")
+        _, shard_ids, model_sha256 = index_ids(artifacts)
+        ids = np.concatenate(shard_ids)[latest_rows(shard_ids)]
+        density_ids = pl.read_parquet(artifacts.densities, columns=["beatmap_id"])
+        if not np.array_equal(density_ids["beatmap_id"].to_numpy(), ids):
+            raise ValueError(f"{artifacts.densities} does not match the embeddings")
+        if artifacts.labels.exists():
+            read_labels(artifacts.labels, model_sha256)
+        if not artifacts.search.exists():
+            raise FileNotFoundError(f"{artifacts.search} is missing; run build-search")
+    return modes
 
 
 def validate_catalogs(path: str | Path) -> None:
@@ -260,171 +280,38 @@ def validate_catalogs(path: str | Path) -> None:
             raise ValueError(f"{name} is missing columns: {sorted(missing)}")
 
 
-LABELS_FORMAT = 3
-LABELS_METADATA_KEY = "bobert_labels"
-
-
-def unit_rows(vectors: np.ndarray) -> np.ndarray:
-    return vectors / np.maximum(np.linalg.norm(vectors, axis=-1, keepdims=True), 1e-12)
-
-
 @dataclass(frozen=True)
-class Translator:
+class Labels:
+    names: list[str]
     weight: np.ndarray
     bias: np.ndarray
 
-    def apply(self, embeddings: np.ndarray) -> np.ndarray:
-        return unit_rows(embeddings @ self.weight + self.bias)
+    def name(self, embeddings: np.ndarray) -> str:
+        scores = unit_rows(embeddings.mean(axis=0)) @ self.weight + self.bias
+        return self.names[int(np.argmax(scores))]
 
 
-def save_labels(
-    path: str | Path,
-    names: list[str],
-    qualifiers: list[str],
-    weights: np.ndarray,
-    bias: np.ndarray,
-    center: np.ndarray,
-    translators: dict[str, Translator],
-    index_metadata: dict,
-) -> None:
-    metadata = {
-        "format": LABELS_FORMAT,
-        "index_id": index_id(index_metadata),
-        "names": names,
-        "qualifiers": qualifiers,
-        "speeds": sorted(translators),
-    }
+def save_labels(path: str | Path, labels: Labels, model_sha256: str) -> None:
     tensors = {
-        "weights": weights,
-        "bias": bias,
-        "center": center,
-        **{f"{speed}.weight": t.weight for speed, t in translators.items()},
-        **{f"{speed}.bias": t.bias for speed, t in translators.items()},
+        "weight": np.ascontiguousarray(labels.weight, np.float32),
+        "bias": np.ascontiguousarray(labels.bias, np.float32),
     }
-    save_numpy_file(
-        {
-            name: np.ascontiguousarray(value, dtype=np.float32)
-            for name, value in tensors.items()
-        },
-        str(path),
-        metadata={LABELS_METADATA_KEY: json.dumps(metadata)},
+    metadata = {
+        LABELS_KEY: json.dumps({"model_sha256": model_sha256, "names": labels.names})
+    }
+    replace_atomically(
+        Path(path),
+        lambda temporary: save_numpy_file(tensors, str(temporary), metadata=metadata),
     )
-    Path(path).chmod(0o644)
 
 
-class Labels:
-    def __init__(self, path: str | Path, index_metadata: dict):
-        with safe_open(str(path), framework="np") as artifact:
-            metadata = json.loads(artifact.metadata()[LABELS_METADATA_KEY])
-        if metadata["format"] != LABELS_FORMAT:
-            raise ValueError(f"unsupported labels format: {path}")
-        if metadata["index_id"] != index_id(index_metadata):
-            raise ValueError(f"labels were built for different embeddings: {path}")
-        tensors = load_numpy_file(str(path))
-        self.names: list[str] = metadata["names"]
-        self.qualifiers = np.isin(self.names, metadata["qualifiers"])
-        self.weights = tensors["weights"]
-        self.bias = tensors["bias"]
-        self.center = tensors["center"]
-        self.translators = {
-            speed: Translator(tensors[f"{speed}.weight"], tensors[f"{speed}.bias"])
-            for speed in metadata["speeds"]
-        }
-        if self.weights.shape != (self.center.shape[0], len(self.names)):
-            raise ValueError(f"labels tensors do not match their names: {path}")
-
-    def name(self, embeddings: np.ndarray, speed: str) -> str:
-        played = unit_rows(np.asarray(embeddings, dtype=np.float32))
-        if speed in self.translators:
-            played = self.translators[speed].apply(played)
-        offset = unit_rows(played.mean(axis=0) - self.center)
-        scores = offset @ self.weights + self.bias
-        best = int(np.argmax(scores))
-        if not self.qualifiers[best]:
-            return self.names[best]
-        word = int(np.argmax(np.where(self.qualifiers, -np.inf, scores)))
-        return f"{self.names[word]} {self.names[best]}"
-
-
-@dataclass(frozen=True)
-class RunArtifacts:
-    run: Path
-    mode: str
-    variant: str
-
-    @property
-    def directory(self) -> Path:
-        return self.run / self.mode
-
-    @property
-    def suffix(self) -> str:
-        return ".a" if self.variant == "adapted" else ""
-
-    @property
-    def model(self) -> Path:
-        return self.directory / f"model{self.suffix}.safetensors"
-
-    @property
-    def index(self) -> Path:
-        return self.directory / f"embeddings{self.suffix}.parquet"
-
-    @property
-    def config(self) -> Path:
-        return self.directory / f"training{self.suffix}.yaml"
-
-    @property
-    def labels(self) -> Path:
-        return self.directory / f"labels{self.suffix}.safetensors"
-
-
-def read_run(run: str | Path) -> dict[str, str]:
-    path = Path(run) / RUN_MANIFEST
-    payload = json.loads(path.read_text())
-    if payload.get("format") != 1:
-        raise ValueError(f"unsupported run format: {path}")
-    modes = payload.get("modes")
-    if not isinstance(modes, dict) or not modes:
-        raise ValueError(f"run must select at least one mode: {path}")
-    if any(
-        mode not in MODES or variant not in VARIANTS for mode, variant in modes.items()
-    ):
-        raise ValueError(f"invalid mode or variant in {path}")
-    return modes
-
-
-def select_mode(run: str | Path, mode: str, variant: str) -> None:
-    run = Path(run)
-    if mode not in MODES or variant not in VARIANTS:
-        raise ValueError("invalid mode or variant")
-    modes = read_run(run) if (run / RUN_MANIFEST).exists() else {}
-    modes[mode] = variant
-    run.mkdir(parents=True, exist_ok=True)
-    temporary = run / f".{RUN_MANIFEST}.tmp"
-    temporary.write_text(json.dumps({"format": 1, "modes": modes}, indent=2) + "\n")
-    temporary.replace(run / RUN_MANIFEST)
-
-
-def resolve_artifacts(
-    run: str | Path, mode: str, variant: str | None = None
-) -> RunArtifacts:
-    run = Path(run)
-    modes = read_run(run)
-    if mode not in modes:
-        raise ValueError(f"mode {mode} is unavailable in {run.name}")
-    variant = variant or modes[mode]
-    if variant not in VARIANTS:
-        raise ValueError(f"invalid variant: {variant}")
-    return RunArtifacts(run, mode, variant)
-
-
-def validate_run(run: str | Path) -> dict[str, RunArtifacts]:
-    artifacts = {}
-    for mode in read_run(run):
-        selected = resolve_artifacts(run, mode)
-        metadata = validate_index(selected.index, selected.model)
-        if metadata["mode"] != mode:
-            raise ValueError(f"mode mismatch in {selected.directory}")
-        if selected.labels.exists():
-            Labels(selected.labels, metadata)
-        artifacts[mode] = selected
-    return artifacts
+def read_labels(path: str | Path, model_sha256: str) -> Labels:
+    with safe_open(str(path), framework="np") as artifact:
+        metadata = json.loads(artifact.metadata()[LABELS_KEY])
+    if metadata["model_sha256"] != model_sha256:
+        raise ValueError(f"labels were built for a different model: {path}")
+    tensors = load_numpy_file(str(path))
+    labels = Labels(metadata["names"], tensors["weight"], tensors["bias"])
+    if labels.weight.shape[1] != len(labels.names):
+        raise ValueError(f"labels tensors do not match their names: {path}")
+    return labels

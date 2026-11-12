@@ -1,26 +1,18 @@
 from __future__ import annotations
 
 import re
-import time
+from collections.abc import Mapping
 from math import isnan
 from pathlib import Path
 
 import numpy as np
 import polars as pl
-import requests
+from rich.markup import escape
 
-from core.artifacts import from_bfloat16, read_embeddings
-from core.raw import map_id, read_map, write_map
-from scripts.common.osu import (
-    API_TIERS,
-    DOWNLOAD_HEADERS,
-    get_sharded_path,
-    is_valid_osu_file,
-)
-from scripts.common.paths import PROJECT_ROOT
+from scripts.common.paths import DATA_DIR
 
-DEFAULT_METADATA_PATH = PROJECT_ROOT / "data" / "beatmaps.parquet"
-DEFAULT_BEATMAPS_DIR = PROJECT_ROOT / "data" / "beatmaps"
+DEFAULT_METADATA_PATH = DATA_DIR / "beatmaps.parquet"
+STRAINS_PATH = DATA_DIR / "strains.parquet"
 
 
 def extract_beatmap_id(raw_input: str) -> int:
@@ -45,44 +37,26 @@ def extract_beatmap_id(raw_input: str) -> int:
     raise ValueError(f"could not find a beatmap id in: {raw_input}")
 
 
-def extract_beatmapset_id(raw_input: str) -> int | None:
-    match = re.search(r"beatmapsets/(\d+)", raw_input.strip())
-    return int(match.group(1)) if match else None
-
-
-def load_embeddings(path: Path):
-    if not path.exists():
-        raise FileNotFoundError(f"Embeddings parquet not found: {path}")
-    beatmap_ids, bits, _ = read_embeddings(path)
-    embeddings = from_bfloat16(bits)
-    id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
-    return beatmap_ids, embeddings, id_to_index
-
-
 def load_metadata(path: Path) -> pl.DataFrame:
-    if not path.exists():
-        return pl.DataFrame()
-
-    wanted = [
-        "id",
-        "beatmapset_id",
-        "user_id",
-        "owners",
-        "artist",
-        "title",
-        "creator",
-        "version",
-        "status",
-        "ranked",
-        "difficulty_rating",
-        "bpm",
-        "total_length",
-        "hit_length",
-    ]
-    try:
-        return pl.read_parquet(path, columns=wanted)
-    except Exception:
-        return pl.read_parquet(path)
+    return pl.read_parquet(
+        path,
+        columns=[
+            "id",
+            "beatmapset_id",
+            "user_id",
+            "owners",
+            "artist",
+            "title",
+            "creator",
+            "version",
+            "status",
+            "ranked",
+            "difficulty_rating",
+            "bpm",
+            "total_length",
+            "hit_length",
+        ],
+    )
 
 
 def metadata_by_id(metadata_df: pl.DataFrame) -> dict[int, dict]:
@@ -94,6 +68,32 @@ def metadata_by_id(metadata_df: pl.DataFrame) -> dict[int, dict]:
     }
 
 
+def apply_strain_stars(metadata_lookup: dict[int, dict]) -> None:
+    strains = (
+        pl.read_parquet(STRAINS_PATH, columns=["beatmap_id", "seq_len", "stars"])
+        .sort("seq_len", descending=True)
+        .unique("beatmap_id", keep="first")
+    )
+    for row in strains.iter_rows(named=True):
+        metadata = metadata_lookup.get(int(row["beatmap_id"]))
+        if metadata is not None:
+            metadata["difficulty_rating"] = row["stars"]
+
+
+def mapper_ids(row: Mapping[str, object] | None) -> set[int]:
+    row = row or {}
+    owners_value = row.get("owners")
+    if isinstance(owners_value, (float, np.floating)) and np.isnan(owners_value):
+        owners_value = None
+    owners = str(owners_value or "").split()
+    if owners:
+        return {int(owner) for owner in owners}
+    user_id = row.get("user_id")
+    if isinstance(user_id, (float, np.floating)) and np.isnan(user_id):
+        return set()
+    return {int(user_id)} if user_id is not None else set()
+
+
 def clean_value(value, default="?"):
     if value is None:
         return default
@@ -102,84 +102,9 @@ def clean_value(value, default="?"):
     return value
 
 
-def get_query_set_id(
-    beatmap_id: int,
-    raw_input: str,
-    metadata_lookup: dict[int, dict],
-) -> int | None:
-    from_url = extract_beatmapset_id(raw_input)
-    if from_url is not None:
-        return from_url
-
-    row = metadata_lookup.get(beatmap_id)
-    if row:
-        value = clean_value(row.get("beatmapset_id"), None)
-        if value is not None:
-            return int(value)
-    return None
-
-
-def sharded_osu_path(beatmap_id: int, beatmaps_dir: Path) -> Path:
-    return Path(get_sharded_path(str(beatmap_id), str(beatmaps_dir)))
-
-
-def ensure_osu_file(beatmap_id: int, beatmaps_dir: Path, allow_download: bool) -> Path:
-    path = sharded_osu_path(beatmap_id, beatmaps_dir)
-    if path.exists():
-        content = read_map(path)
-        if is_valid_osu_file(content):
-            return path
-
-    if not allow_download:
-        raise FileNotFoundError(f"No valid .osu file found at {path}")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    errors = []
-    for tier in API_TIERS:
-        time.sleep(float(tier.get("delay", 0.0)))
-        url = tier["url"].format(id=beatmap_id)
-        try:
-            response = requests.get(url, headers=DOWNLOAD_HEADERS, timeout=15)
-            if response.status_code == 200 and is_valid_osu_file(response.content):
-                return write_map(path, response.content)
-            errors.append(f"{tier['name']}: HTTP {response.status_code}")
-        except requests.exceptions.RequestException as exc:
-            errors.append(f"{tier['name']}: {exc}")
-
-    raise RuntimeError(f"Failed to download {beatmap_id}: {'; '.join(errors)}")
-
-
-class LazyEmbedder:
-    def __init__(
-        self,
-        model_path: Path,
-        device: str | None = None,
-    ):
-        self.model_path = model_path
-        self.device_name = device
-        self.model = None
-        self.device = None
-
-    def load(self):
-        import torch
-
-        from scripts.model.embed import find_model, load_model
-
-        if self.model is not None:
-            return
-
-        self.device = torch.device(
-            self.device_name or ("cuda" if torch.cuda.is_available() else "cpu")
-        )
-        self.model = load_model(find_model(self.model_path), self.device)
-
-    def embed_osu(self, path: Path) -> np.ndarray:
-        self.load()
-        try:
-            beatmap_id = int(map_id(path))
-        except ValueError:
-            beatmap_id = None
-        return self.model.embed_osu_bytes(read_map(path), beatmap_id=beatmap_id)
+def metadata_set_id(row: dict | None) -> int | None:
+    value = clean_value((row or {}).get("beatmapset_id"), None)
+    return int(value) if value is not None else None
 
 
 def format_number(value, decimals: int = 2):
@@ -188,7 +113,7 @@ def format_number(value, decimals: int = 2):
         return "?"
     number = float(value)
     if abs(number - round(number)) < 1e-6:
-        return str(int(round(number)))
+        return str(round(number))
     return f"{number:.{decimals}f}"
 
 
@@ -196,7 +121,7 @@ def format_length(value):
     value = clean_value(value, None)
     if value is None:
         return "?"
-    seconds = int(round(float(value)))
+    seconds = round(float(value))
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
@@ -220,22 +145,6 @@ def beatmap_table_values(beatmap_id: int, row: dict | None):
     return str(beatmap_id), title, creator, version, stars, bpm, length
 
 
-def beatmap_table_values_missing(row: dict | None) -> bool:
-    if row is None:
-        return True
-    return any(
-        clean_value(value, None) is None
-        for value in (
-            row.get("title"),
-            row.get("creator"),
-            row.get("version"),
-            row.get("difficulty_rating"),
-            row.get("bpm"),
-            clean_value(row.get("total_length"), row.get("hit_length")),
-        )
-    )
-
-
 def beatmap_map_style(row: dict | None) -> str:
     status = str(clean_value((row or {}).get("status"), "")).lower()
     ranked = str(clean_value((row or {}).get("ranked"), "")).lower()
@@ -245,3 +154,23 @@ def beatmap_map_style(row: dict | None) -> str:
     if "loved" in values or "4" in values:
         return "bright_magenta"
     return "grey70"
+
+
+def map_cells(
+    beatmap_id: int, row: dict | None, query_mapper_ids: set[int] | None = None
+):
+    bid, title, creator, version, stars, bpm, length = beatmap_table_values(
+        beatmap_id, row
+    )
+    style = beatmap_map_style(row)
+    return [
+        f"[link=https://osu.ppy.sh/b/{bid}]{bid}[/link]",
+        stars,
+        f"[{style}]{escape(title)}[/{style}]",
+        f"[bright_magenta]{escape(creator)}[/bright_magenta]"
+        if query_mapper_ids and mapper_ids(row) & query_mapper_ids
+        else escape(creator),
+        escape(version),
+        bpm,
+        length,
+    ]

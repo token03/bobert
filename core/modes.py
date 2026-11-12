@@ -2,6 +2,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from types import ModuleType
+from typing import Literal
 
 import torch
 
@@ -120,6 +121,7 @@ def conditional_gates(
 
 JUMP_FEATURES = ("log_jump_distance", "jump_direction_cos", "jump_direction_sin")
 
+ModeName = Literal["std", "taiko", "catch", "mania"]
 MODES = {
     "std": Mode(
         name="std",

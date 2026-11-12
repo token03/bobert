@@ -86,3 +86,7 @@ def append_dedup_parquet(
         )
 
     atomic_parquet(new_df, path)
+
+
+def read_ids(path: str | Path) -> list[int]:
+    return [int(line) for line in Path(path).read_text().split()]

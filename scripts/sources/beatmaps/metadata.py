@@ -1,6 +1,4 @@
-import argparse
 import signal
-from pathlib import Path
 
 import pandas as pd
 from rich import print
@@ -226,35 +224,3 @@ def fetch_missing_beatmaps(
         print(f"[bold green]Done! Total records: {len(beatmaps_df)}[/bold green]")
 
     return beatmaps_df
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Fetch beatmap metadata from osu!")
-    parser.add_argument(
-        "--ids-file", type=Path, help="Fetch missing IDs from a newline-delimited file"
-    )
-    parser.add_argument(
-        "--retry-failed", action="store_true", help="Retry cached metadata failures"
-    )
-    for status in ("wip", "pending", "qualified", "graveyard"):
-        parser.add_argument(
-            f"--{status}", action="store_true", help=f"fetch {status} beatmaps"
-        )
-    args = parser.parse_args()
-    if args.ids_file and not args.ids_file.is_file():
-        parser.error(f"IDs file not found: {args.ids_file}")
-    statuses = [
-        status
-        for status in ("wip", "pending", "qualified", "graveyard")
-        if getattr(args, status)
-    ]
-    ids = (
-        {int(line) for line in args.ids_file.read_text().splitlines() if line.strip()}
-        if args.ids_file
-        else None
-    )
-    fetch_missing_beatmaps(ids=ids, statuses=statuses, retry_failed=args.retry_failed)
-
-
-if __name__ == "__main__":
-    main()

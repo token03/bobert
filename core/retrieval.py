@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch
 
-from . import artifacts
+from .artifacts import RunArtifacts, read_index, write_densities
 
 DENSITY_K = 500
 LAMBDA = 0.6
@@ -78,34 +78,9 @@ def compute_densities(
     ).astype(np.float32)
 
 
-def index_retrieval(
-    path: str,
-    model: str,
-    device_name: str | None = None,
-    batch_size: int = 1024,
-    quiet: bool = False,
+def index_densities(
+    artifacts: RunArtifacts, device_name: str | None = None, batch_size: int = 1024
 ) -> None:
-    index = artifacts.read_index(path, with_density=False)
-    if not quiet:
-        print(f"Indexing retrieval for {len(index.embeddings):,} embeddings")
+    index = read_index(artifacts, with_densities=False)
     densities = compute_densities(index.vectors(), device_name, batch_size)
-    metadata = {
-        **index.metadata,
-        "retrieval": {
-            "method": "csls",
-            "density_k": DENSITY_K,
-            "lambda": LAMBDA,
-            "density_power": DENSITY_POWER,
-        },
-    }
-    artifacts.write_index(
-        path,
-        index.ids,
-        index.embeddings,
-        artifacts.from_bfloat16,
-        metadata,
-        model=model,
-        batch_size=batch_size,
-        densities=densities,
-        quiet=True,
-    )
+    write_densities(artifacts, index.ids, densities)

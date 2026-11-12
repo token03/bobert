@@ -242,25 +242,16 @@
   cursor: default;
 }
 
+.avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  object-fit: cover;
+}
+
 .intro-actions svg {
   width: 16px;
   height: 16px;
-}
-
-.pick-dice[data-rolling='true'] {
-  animation: dice-roll 480ms ease-in-out;
-}
-
-@keyframes dice-roll {
-  35% {
-    transform: translateY(-5px) rotate(140deg);
-  }
-  75% {
-    transform: translateY(1px) rotate(290deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
 }
 
 .source-panel {
@@ -396,10 +387,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pick-dice[data-rolling='true'] {
-    animation-duration: 1ms;
-  }
-
   .results-exiting {
     animation-duration: 1ms;
   }

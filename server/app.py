@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
-import socket
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -28,28 +29,28 @@ import uvicorn
 
 torch.set_num_threads(THREAD_COUNT)
 
-from fastapi import FastAPI, HTTPException, Path, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from core.artifacts import ModeName
-from core.modes import MODES
+from core.modes import MODES, ModeName
+from server import auth
 from server.osu import BeatmapUnavailableError, OsuClient
+from server.plays import group_plays
 from server.runtime import (
     Runtime,
     RuntimeRegistry,
-    group_embeddings,
     mean_embedding,
-    merge_named,
     metadata_complete,
     metadata_mode,
-    mods_name,
-    play_speed,
 )
 
 MAX_RECOMMEND_TOP_K = 1000
 MAX_RECOMMEND_SOURCES = 100
 MAX_PLAYS = 100
+MAX_UNINDEXED_SOURCES = 5
+MODE_BY_LABEL = {mode.label: name for name, mode in MODES.items()}
 
 
 log = logging.getLogger("uvicorn.error")
@@ -83,6 +84,7 @@ class RecommendRequest(BaseModel):
     )
     top_k: int = Field(default=20, ge=1, le=MAX_RECOMMEND_TOP_K)
     filters: RecommendFilters = Field(default_factory=RecommendFilters)
+    distinct: bool = False
 
 
 class BeatmapSummary(BaseModel):
@@ -123,7 +125,6 @@ class DefaultRecommendResponse(BaseModel):
 class RecommendSource(BaseModel):
     beatmap_id: int
     cache: Literal["hit", "miss"]
-    label: str | None
     metadata: BeatmapSummary
 
 
@@ -133,10 +134,16 @@ class RecommendResponse(BaseModel):
     results: list[ScoredBeatmapSummary]
 
 
-class Player(BaseModel):
+class PlayerProfile(BaseModel):
     user_id: int
     username: str
     avatar_url: str | None
+    mode: ModeName
+
+
+class Session(BaseModel):
+    user_id: int
+    username: str
 
 
 class Play(BaseModel):
@@ -149,7 +156,6 @@ class Play(BaseModel):
 
 
 class PlaysResponse(BaseModel):
-    user: Player
     plays: list[Play]
 
 
@@ -164,7 +170,7 @@ class GroupRequest(BaseModel):
 
 
 class PlayGroup(BaseModel):
-    label: str | None
+    label: str
     beatmap_ids: list[int]
 
 
@@ -187,6 +193,11 @@ class RequestLoggingMiddleware:
             errors="replace"
         )
         client_ip = request_client_ip(scope, headers)
+        cookie = headers.get(b"cookie")
+        session = auth.cookie_session(
+            cookie.decode(errors="replace") if cookie else None
+        )
+        user = f"{session['user_id']}:{session['username']}" if session else "-"
         start = time.perf_counter()
         status = 500
         logged = False
@@ -201,6 +212,8 @@ class RequestLoggingMiddleware:
                 response_headers.append(
                     (b"x-process-time-ms", f"{elapsed:.2f}".encode())
                 )
+                if session:
+                    response_headers.append((b"x-bobert-user", user.encode()))
                 message["headers"] = response_headers
             await send(message)
             if (
@@ -212,9 +225,10 @@ class RequestLoggingMiddleware:
                 elapsed = (time.perf_counter() - start) * 1000
                 if not (scope["path"] == "/health" and status < 400):
                     log.info(
-                        "request_id=%s client_ip=%s method=%s path=%s status=%d elapsed_ms=%.2f",
+                        "request_id=%s client_ip=%s user=%s method=%s path=%s status=%d elapsed_ms=%.2f",
                         request_id,
                         client_ip,
+                        user,
                         scope["method"],
                         scope["path"],
                         status,
@@ -226,9 +240,10 @@ class RequestLoggingMiddleware:
         except Exception:
             elapsed = (time.perf_counter() - start) * 1000
             log.exception(
-                "uncaught request exception request_id=%s client_ip=%s method=%s path=%s status=500 elapsed_ms=%.2f",
+                "uncaught request exception request_id=%s client_ip=%s user=%s method=%s path=%s status=500 elapsed_ms=%.2f",
                 request_id,
                 client_ip,
+                user,
                 scope["method"],
                 scope["path"],
                 elapsed,
@@ -282,6 +297,83 @@ def health() -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.get("/api/auth/login")
+def login(
+    next: Annotated[str, Query(pattern=r"^/([^/\\].*)?$")] = "/",
+) -> RedirectResponse:
+    state = secrets.token_urlsafe(16)
+    response = RedirectResponse(get_osu().authorize_url(state), status_code=302)
+    response.set_cookie(
+        auth.STATE_COOKIE,
+        auth.sign({"state": state, "next": next}, auth.STATE_SECONDS),
+        max_age=auth.STATE_SECONDS,
+        path="/api/auth",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/api/auth/callback")
+async def login_callback(request: Request, code: str, state: str) -> RedirectResponse:
+    pending = auth.verify(request.cookies.get(auth.STATE_COOKIE))
+    if pending is None or not hmac.compare_digest(pending["state"], state):
+        raise HTTPException(status_code=400, detail="login expired; try again")
+    user = await get_osu().identify(code)
+    session = {"user_id": user["user_id"], "username": user["username"]}
+    log.info("login user=%s:%s", session["user_id"], session["username"])
+    response = RedirectResponse(pending["next"], status_code=302)
+    response.delete_cookie(auth.STATE_COOKIE, path="/api/auth")
+    response.set_cookie(
+        auth.SESSION_COOKIE,
+        auth.sign(session, auth.SESSION_SECONDS),
+        max_age=auth.SESSION_SECONDS,
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(response: Response) -> None:
+    response.delete_cookie(auth.SESSION_COOKIE)
+
+
+def require_session(request: Request, response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    session = auth.verify(request.cookies.get(auth.SESSION_COOKIE))
+    if session is None:
+        raise HTTPException(status_code=401, detail="not logged in")
+    return session
+
+
+@app.get("/api/me", response_model=Session)
+def me(session: Annotated[dict[str, Any], Depends(require_session)]) -> dict[str, Any]:
+    return session
+
+
+@app.get("/api/me/groups", response_model=GroupResponse)
+async def my_groups(
+    session: Annotated[dict[str, Any], Depends(require_session)],
+    mode: ModeName = "std",
+) -> dict[str, Any]:
+    plays = await get_osu().top_plays(session["user_id"], MODES[mode].label, MAX_PLAYS)
+    return await run_in_threadpool(
+        play_groups, mode, [(play["beatmap_id"], play["mods"]) for play in plays]
+    )
+
+
+@app.get("/api/search/{mode}")
+def search_catalog(mode: ModeName) -> FileResponse:
+    return FileResponse(
+        get_runtime(mode).artifacts.search,
+        media_type="application/octet-stream",
+        headers={"Content-Encoding": "br", "Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/api/recommend", response_model=DefaultRecommendResponse)
 def default_recommend(
     response: Response, seed: int | None = None, mode: ModeName = "std"
@@ -316,6 +408,12 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
         _runtime.validate_sources(mode, beatmap_ids)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    unindexed = await run_in_threadpool(runtime.unindexed, beatmap_ids)
+    if len(unindexed) > MAX_UNINDEXED_SOURCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"at most {MAX_UNINDEXED_SOURCES} unindexed beatmaps per request",
+        )
 
     async def load_source(
         beatmap_id: int,
@@ -372,82 +470,78 @@ async def recommend(payload: RecommendRequest) -> dict[str, Any]:
         [source[2] for source in sources],
         payload.top_k,
         payload.filters,
+        payload.distinct,
     )
     return {
         "sources": [
             {
                 "beatmap_id": beatmap_id,
                 "cache": cache_status,
-                "label": runtime.labels.name(source_embedding[None], "normal")
-                if runtime.labels
-                else None,
                 "metadata": runtime.public_summary(beatmap_id, metadata),
             }
-            for beatmap_id, source_embedding, metadata, cache_status in sources
+            for beatmap_id, _, metadata, cache_status in sources
         ],
         "count": len(results),
         "results": results,
     }
 
 
-@app.get("/api/users/{user_id}/plays", response_model=PlaysResponse)
-async def user_plays(
-    user_id: Annotated[int, Path(gt=0)],
-    kind: Literal["best", "recent"] = "best",
-    mode: ModeName = "std",
-    limit: Annotated[int, Query(ge=1, le=MAX_PLAYS)] = 50,
+@app.get("/api/players/{username}", response_model=PlayerProfile)
+async def player_profile(
+    username: Annotated[str, Path(pattern=r"^[\w \[\]-]{2,15}$")],
 ) -> dict[str, Any]:
     try:
-        user, plays = await get_osu().user_plays(
-            user_id, kind, MODES[mode].label, limit
-        )
+        user = await get_osu().player(username)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404, detail=f"user {username} not found"
+            ) from exc
+        raise
+    return {**user, "mode": MODE_BY_LABEL[user["playmode"]]}
+
+
+@app.get("/api/users/{user_id}/top", response_model=PlaysResponse)
+async def top_plays(
+    user_id: Annotated[int, Path(gt=0)],
+    mode: ModeName = "std",
+    limit: Annotated[int, Query(ge=1, le=MAX_PLAYS)] = MAX_PLAYS,
+) -> dict[str, Any]:
+    try:
+        plays = await get_osu().top_plays(user_id, MODES[mode].label, limit)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(
                 status_code=404, detail=f"user {user_id} not found"
             ) from exc
         raise
-    return {"user": user, "plays": plays}
+    return {"plays": plays}
 
 
 @app.post("/api/beatmaps/groups", response_model=GroupResponse)
 def group_beatmaps(payload: GroupRequest) -> dict[str, Any]:
-    runtime = get_runtime(payload.mode)
+    return play_groups(
+        payload.mode, [(play.beatmap_id, play.mods) for play in payload.plays]
+    )
+
+
+def play_groups(mode: str, plays: list[tuple[int, list[str]]]) -> dict[str, Any]:
+    runtime = get_runtime(mode)
     found: dict[int, tuple[np.ndarray, dict[str, Any]]] = {}
     missing: list[int] = []
-    by_speed: dict[str, list[int]] = {}
-    play_mods: dict[tuple[str, int], list[str]] = {}
-    for play in payload.plays:
-        beatmap_id = play.beatmap_id
-        if beatmap_id not in found and beatmap_id not in missing:
-            memory = runtime.memory_embedding(beatmap_id) or runtime.cached_embedding(
-                beatmap_id
-            )
-            if memory is None:
-                missing.append(beatmap_id)
-            else:
-                found[beatmap_id] = memory
-        speed = play_speed(play.mods)
-        if beatmap_id in found and (speed, beatmap_id) not in play_mods:
-            by_speed.setdefault(speed, []).append(beatmap_id)
-            play_mods[speed, beatmap_id] = play.mods
-    clusters = [
-        (speed, [ids[member] for member in members])
-        for speed, ids in by_speed.items()
-        for members in group_embeddings(np.stack([found[i][0] for i in ids]))
-    ]
-    labels = runtime.labels
-
-    def name(speed: str, ids: list[int]) -> str:
-        mods = mods_name([play_mods[speed, i] for i in ids])
-        return f"{mods} {labels.name(np.stack([found[i][0] for i in ids]), speed)}"
-
-    groups: list[tuple[str | None, list[int]]] = (
-        merge_named([(name(speed, ids), ids) for speed, ids in clusters])
-        if labels
-        else [(None, ids) for _, ids in clusters]
+    for beatmap_id in dict.fromkeys(beatmap_id for beatmap_id, _ in plays):
+        memory = runtime.memory_embedding(beatmap_id) or runtime.cached_embedding(
+            beatmap_id
+        )
+        if memory is None:
+            missing.append(beatmap_id)
+        else:
+            found[beatmap_id] = memory
+    groups = group_plays(
+        [(beatmap_id, mods) for beatmap_id, mods in plays if beatmap_id in found],
+        {beatmap_id: embedding for beatmap_id, (embedding, _) in found.items()},
+        runtime.labels,
     )
-    groups.sort(key=lambda group: len(group[1]), reverse=True)
     return {
         "groups": [{"label": label, "beatmap_ids": ids} for label, ids in groups],
         "sources": [
@@ -456,44 +550,6 @@ def group_beatmaps(payload: GroupRequest) -> dict[str, Any]:
         ],
         "missing": missing,
     }
-
-
-@app.get("/api/beatmaps/{beatmap_id}")
-async def beatmap_detail(beatmap_id: int, mode: ModeName = "std") -> dict[str, Any]:
-    detail = await run_in_threadpool(get_runtime(mode).catalog_detail, beatmap_id)
-    if detail is None:
-        raise HTTPException(status_code=404, detail=f"beatmap {beatmap_id} not found")
-    return detail
-
-
-@app.get("/api/beatmaps/{beatmap_id}/summary", response_model=BeatmapSummary)
-async def beatmap_summary(
-    beatmap_id: int, response: Response, mode: ModeName = "std"
-) -> dict[str, Any]:
-    runtime = get_runtime(mode)
-    memory = runtime.memory_embedding(beatmap_id)
-    if memory is None:
-        memory = await run_in_threadpool(runtime.cached_embedding, beatmap_id)
-    if memory is not None:
-        metadata = memory[1]
-    else:
-        if await run_in_threadpool(runtime.cache.is_unavailable, beatmap_id):
-            raise HTTPException(
-                status_code=404, detail=f"beatmap {beatmap_id} is unavailable"
-            )
-        try:
-            metadata = await get_osu().metadata(beatmap_id)
-            if not metadata_complete(metadata):
-                raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
-        except (BeatmapUnavailableError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    response.headers["Cache-Control"] = "public, max-age=300"
-    try:
-        runtime.validate_source(beatmap_id, metadata)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return runtime.public_summary(beatmap_id, metadata)
 
 
 def get_runtime(mode: str = "std") -> Runtime:
@@ -526,14 +582,4 @@ def request_client_ip(scope: dict[str, Any], raw_headers: Any) -> str:
 
 
 if __name__ == "__main__":
-    sockets = []
-    for family, host in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
-        sock = socket.socket(family)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if family == socket.AF_INET6:
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        sock.bind((host, 8000))
-        sock.setblocking(False)
-        sockets.append(sock)
-    config = uvicorn.Config(app, workers=1, proxy_headers=True, access_log=False)
-    asyncio.run(uvicorn.Server(config).serve(sockets=sockets))
+    uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=True, access_log=False)

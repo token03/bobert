@@ -1,5 +1,6 @@
 services:
   api:
+    image: bobert
     build:
       context: .
     ports:
@@ -14,6 +15,8 @@ services:
       BOBERT_CACHE_DB: /app/cache/runtime.sqlite
       OSU_CLIENT_ID: ${OSU_CLIENT_ID}
       OSU_CLIENT_SECRET: ${OSU_CLIENT_SECRET}
+      OSU_REDIRECT_URI: ${OSU_REDIRECT_URI}
+      SESSION_SECRET: ${SESSION_SECRET}
       OMP_NUM_THREADS: "2"
       OPENBLAS_NUM_THREADS: "2"
       MKL_NUM_THREADS: "2"
@@ -25,6 +28,21 @@ services:
       timeout: 5s
       retries: 6
       start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  bot:
+    image: bobert
+    command: ["python", "-m", "server.bot"]
+    environment:
+      BOBERT_API_URL: http://api:8000
+      OSU_IRC_USERNAME: ${OSU_IRC_USERNAME}
+      OSU_IRC_PASSWORD: ${OSU_IRC_PASSWORD}
+    depends_on:
+      api:
+        condition: service_healthy
     security_opt:
       - no-new-privileges:true
     cap_drop:

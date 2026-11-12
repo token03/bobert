@@ -713,7 +713,7 @@
 
 .range-histogram {
   position: relative;
-  height: 34px;
+  height: 26px;
   margin-bottom: calc(var(--space-xs) * -1);
 }
 
@@ -741,11 +741,11 @@
 }
 
 .range-bin[data-in-range] span {
-  background: var(--accent-muted);
+  background: var(--text-secondary);
 }
 
 .range-bin[data-in-range]:hover span {
-  background: var(--accent);
+  background: var(--text);
 }
 
 .range-slider-control {
@@ -773,7 +773,7 @@
 }
 
 .range-slider[data-active] .range-slider-indicator {
-  background: var(--accent-muted);
+  background: var(--text-secondary);
 }
 
 .range-slider-thumb {

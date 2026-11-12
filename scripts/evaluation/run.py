@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
-import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import cache
@@ -20,10 +18,11 @@ from sklearn.model_selection import GroupKFold
 
 from core import retrieval
 from core.artifacts import (
-    embedding_metadata,
+    Index,
+    RunArtifacts,
     from_bfloat16,
-    read_embeddings,
-    resolve_artifacts,
+    read_index,
+    run_artifacts,
 )
 from core.modes import MODES
 from scripts.common.collections import is_holdout_set
@@ -35,7 +34,6 @@ console = Console()
 BEATMAPS_EVAL_PATH = DATA_DIR / "beatmaps.parquet"
 BEATMAPSETS_EVAL_PATH = DATA_DIR / "beatmapsets.parquet"
 COLLECTION_EDGES_EVAL_PATH = COLLECTIONS_DIR / "edges.parquet"
-TOURNAMENTS_EVAL_PATH = COLLECTIONS_DIR / "tournaments.parquet"
 STRAINS_EVAL_PATH = DATA_DIR / "strains.parquet"
 
 PROBE_SEED = 0
@@ -59,7 +57,6 @@ COLLECTION_MIN_SETS = 5
 COLLECTION_MAX_SETS = 300
 COLLECTION_QUERY_BATCH = 128
 COLLECTION_NDCG_K = 20
-TOURNAMENT_SLOT_MIN_MAPS = 20
 RETRIEVAL_RECALL_KS = (10, 20, 50)
 RETRIEVAL_HARD_NEGATIVE_K = 100
 RETRIEVAL_HUBNESS_K = 50
@@ -73,14 +70,16 @@ PAIRED_TEST_CHUNK = 2000
 class TargetData:
     name: str
     mode: str
-    path: Path
-    run_dir: Path | None
+    artifacts: RunArtifacts
+    index: Index
     beatmap_ids: np.ndarray
     embeddings: np.ndarray
     id_to_index: dict[int, int]
-    centered: bool
-    densities: np.ndarray | None
-    retrieval_lambda: float
+    densities: np.ndarray
+
+    def index_vectors(self, ids: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        rows = self.index.rows(np.asarray(ids))
+        return from_bfloat16(self.index.embeddings[rows]), self.index.densities[rows]
 
 
 @dataclass
@@ -114,21 +113,6 @@ class CollectionData:
     pair_set: np.ndarray
 
 
-def target_path(target: str, mode: str = "std", variant: str | None = None) -> Path:
-    path = resolve_path(target).resolve()
-    return (
-        path
-        if path.is_file()
-        else resolve_artifacts(
-            path if path.is_dir() else RUNS_DIR / target, mode, variant
-        ).index
-    )
-
-
-def target_name(path: Path) -> str:
-    return f"{path.parent.parent.name}/{path.parent.name}/{path.stem}"
-
-
 def load_eval_groups(path: Path) -> dict[str, list[int]]:
     df = pl.read_csv(path)
     if "group_id" not in df.columns or "beatmap_id" not in df.columns:
@@ -137,22 +121,6 @@ def load_eval_groups(path: Path) -> dict[str, list[int]]:
     for row in df.select("group_id", "beatmap_id").iter_rows(named=True):
         groups.setdefault(str(row["group_id"]), []).append(int(row["beatmap_id"]))
     return {group: ids for group, ids in groups.items() if len(set(ids)) >= 2}
-
-
-def load_embeddings(
-    path: Path, *, center: bool
-) -> tuple[np.ndarray, np.ndarray, dict[int, int], np.ndarray | None]:
-    if not path.exists():
-        raise FileNotFoundError(f"Embeddings parquet not found: {path}")
-    beatmap_ids, bits, densities = read_embeddings(path)
-    embeddings = from_bfloat16(bits)
-    if center:
-        embeddings -= embeddings.mean(axis=0, keepdims=True)
-        embeddings /= np.maximum(
-            np.linalg.norm(embeddings, axis=1, keepdims=True), 1e-12
-        )
-    id_to_index = {int(beatmap_id): idx for idx, beatmap_id in enumerate(beatmap_ids)}
-    return beatmap_ids, embeddings, id_to_index, densities
 
 
 @cache
@@ -174,70 +142,29 @@ def star_range_ids(mode: str, min_sr: float, max_sr: float) -> np.ndarray:
 def load_targets(
     targets: list[str],
     *,
-    no_center: set[str],
     star_range: tuple[float, float] | None = None,
     mode: str = "std",
-    variants: list[str] | None = None,
 ) -> list[TargetData]:
-    entries = [
-        (target, target_path(target, mode, variant))
-        for target in targets
-        for variant in (variants or [None])
-    ]
-    paths = [path for _, path in entries]
-    modes = {embedding_metadata(path)["mode"] for path in paths}
-    if len(modes) != 1:
-        raise ValueError(f"targets mix modes: {sorted(modes)}")
-    mode = modes.pop()
     allowed = None if star_range is None else star_range_ids(mode, *star_range)
     loaded = []
-    for target, path in entries:
-        name = target_name(path)
-        run_dir = path.parent
-        metadata = embedding_metadata(path)
-        center = target not in no_center and not metadata.get("centered")
-        beatmap_ids, embeddings, id_to_index, densities = load_embeddings(
-            path, center=False
-        )
-        if allowed is not None:
-            keep = np.isin(beatmap_ids, allowed)
-            beatmap_ids = beatmap_ids[keep]
-            embeddings = embeddings[keep]
-            densities = None if densities is None else densities[keep]
-            id_to_index = {int(bid): idx for idx, bid in enumerate(beatmap_ids)}
-        retrieval = metadata.get("retrieval", {})
-        retrieval_lambda = (
-            float(retrieval.get("lambda", 0.0))
-            if retrieval.get("method") == "csls" and densities is not None
-            else 0.0
-        )
-        if retrieval_lambda == 0.0:
-            console.print(
-                f"[yellow]Warning: {name} has no CSLS density; using raw cosine.[/yellow]"
-            )
+    for target in targets:
+        path = resolve_path(target)
+        artifacts = run_artifacts(path if path.is_dir() else RUNS_DIR / target, mode)
+        index = read_index(artifacts)
+        keep = slice(None) if allowed is None else np.isin(index.ids, allowed)
+        beatmap_ids = index.ids[keep]
         loaded.append(
             TargetData(
-                name,
+                f"{artifacts.run.name}/{mode}",
                 mode,
-                path,
-                run_dir,
+                artifacts,
+                index,
                 beatmap_ids,
-                embeddings,
-                id_to_index,
-                center,
-                densities,
-                retrieval_lambda,
+                index.vectors()[keep],
+                {int(beatmap_id): row for row, beatmap_id in enumerate(beatmap_ids)},
+                index.densities[keep],
             )
         )
-    shared_ids = common_ids(loaded)
-    for target in loaded:
-        if target.centered:
-            target.embeddings -= target_matrix(target, shared_ids).mean(
-                axis=0, keepdims=True
-            )
-            target.embeddings /= np.maximum(
-                np.linalg.norm(target.embeddings, axis=1, keepdims=True), 1e-12
-            )
     return loaded
 
 
@@ -296,7 +223,6 @@ def eval_device() -> torch.device:
 def corpus_knn_skewness(
     candidates: torch.Tensor,
     densities: torch.Tensor | None,
-    retrieval_lambda: float,
 ) -> float:
     device = candidates.device
     sample_size = min(
@@ -317,7 +243,7 @@ def corpus_knn_skewness(
         )
         scores = cast[rows] @ cast.T
         if densities is not None:
-            scores = scores - retrieval.density_term(densities, retrieval_lambda)
+            scores = scores - retrieval.density_term(densities)
         scores[torch.arange(len(rows), device=device), rows] = -torch.inf
         neighbors = scores.topk(RETRIEVAL_HUBNESS_K, dim=1).indices
         counts += torch.bincount(
@@ -409,7 +335,7 @@ def evaluate_grouped_retrieval(
     finally:
         torch.backends.cuda.matmul.allow_tf32 = tf32
     if densities_t is not None:
-        sims = sims - retrieval.density_term(densities_t, target.retrieval_lambda)
+        sims = sims - retrieval.density_term(densities_t)
     sims[torch.arange(len(query_ids), device=device), query_indices] = -torch.inf
     query_sets = set_ids[query_indices.cpu().numpy()]
     columns_by_set = {
@@ -588,7 +514,7 @@ def evaluate_grouped_retrieval(
         else float("nan"),
         "bottom20_local_margin": bottom20_mean(local_margins),
         f"knn_{RETRIEVAL_HUBNESS_K}_skewness": corpus_knn_skewness(
-            candidates, densities_t, target.retrieval_lambda
+            candidates, densities_t
         ),
     }, {
         "groups": detail_groups,
@@ -886,62 +812,6 @@ def load_difficulty_data(targets: list[TargetData], mode: str) -> DifficultyData
     )
 
 
-def macro_label_average_precision(y_true: torch.Tensor, scores: torch.Tensor) -> float:
-    order = scores.argsort(dim=0, descending=True)
-    sorted_true = torch.gather(y_true, dim=0, index=order)
-    precision = (
-        sorted_true.cumsum(dim=0)
-        / torch.arange(1, y_true.shape[0] + 1, device=y_true.device)[:, None]
-    )
-    positives = y_true.sum(dim=0).clamp_min(1)
-    ap = (precision * sorted_true).sum(dim=0) / positives
-    return float(ap.mean().item())
-
-
-def multilabel_probe(
-    targets: list[TargetData],
-    labels_by_id: dict[int, set[str]],
-    *,
-    title: str,
-    min_count: int,
-) -> EvalResult | None:
-    counts: dict[str, int] = {}
-    for labels in labels_by_id.values():
-        for label in labels:
-            counts[label] = counts.get(label, 0) + 1
-    kept_labels = {label for label, count in counts.items() if count >= min_count}
-    rows = [
-        (beatmap_id, sorted(labels & kept_labels))
-        for beatmap_id, labels in labels_by_id.items()
-    ]
-    rows = [(beatmap_id, labels) for beatmap_id, labels in rows if labels]
-    ids = [beatmap_id for beatmap_id, _labels in rows]
-    label_sets = [labels for _beatmap_id, labels in rows]
-    if len(kept_labels) < 2 or len(ids) < 100:
-        console.print(
-            f"[yellow]Skipping {title}: insufficient labels after filtering.[/yellow]"
-        )
-        return None
-
-    device = probe_device()
-    classes = sorted(kept_labels)
-    label_to_idx = {label: idx for idx, label in enumerate(classes)}
-    y_cpu = torch.zeros((len(ids), len(classes)), dtype=torch.float32)
-    for row_idx, labels in enumerate(label_sets):
-        y_cpu[row_idx, [label_to_idx[label] for label in labels]] = 1.0
-    y = y_cpu.to(device)
-    folds = fold_indices(beatmapset_groups(ids), device)
-    metrics = {}
-    for target in targets:
-        x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
-        scores = ridge_oof(x, y, folds)
-        metrics[target.name] = {
-            "macro_label_ap": macro_label_average_precision(y, scores)
-        }
-        del x, scores
-    return EvalResult(title, metrics)
-
-
 def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -> None:
     if targets[0].mode != "std":
         return
@@ -1076,8 +946,7 @@ def evaluate_collection_retrieval(
     densities = target_densities(target, candidate_ids)
     penalty = (
         retrieval.density_term(
-            torch.tensor(densities, dtype=torch.float32, device=device),
-            target.retrieval_lambda,
+            torch.tensor(densities, dtype=torch.float32, device=device)
         )
         if densities is not None
         else None
@@ -1493,23 +1362,7 @@ def run_mapper_eval(targets: list[TargetData], _args: argparse.Namespace) -> Non
     ids = [row["beatmap_id"] for row in panel]
     results = {}
     for target in targets:
-        frame = (
-            pl.scan_parquet(target.path)
-            .filter(pl.col("beatmap_id").is_in(ids))
-            .collect()
-        )
-        rows = {beatmap: index for index, beatmap in enumerate(frame["beatmap_id"])}
-        missing = set(ids).difference(rows)
-        if missing:
-            raise ValueError(
-                f"Mapper evaluation is missing {len(missing)} fixed maps; export the full corpus"
-            )
-        bits = frame["embedding"].to_numpy()
-        vectors = (
-            from_bfloat16(bits) if bits.dtype == np.uint16 else bits.astype(np.float32)
-        )
-        vectors = vectors[[rows[beatmap] for beatmap in ids]]
-        vectors /= np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
+        vectors, _ = target.index_vectors(ids)
         results[target.name] = evaluate_mapper(vectors, panel, probe_device())
     print_eval_result(
         EvalResult(
@@ -1536,23 +1389,8 @@ def run_item_item_eval(targets: list[TargetData], _args: argparse.Namespace) -> 
     )
     metrics = {}
     for target in targets:
-        frame = (
-            pl.scan_parquet(target.path)
-            .filter(pl.col("beatmap_id").is_in(ids))
-            .collect()
-        )
-        lookup = {beatmap: index for index, beatmap in enumerate(frame["beatmap_id"])}
-        missing = set(ids).difference(lookup)
-        if missing:
-            raise ValueError(
-                f"Item-item evaluation is missing {len(missing)} fixed maps; export the full corpus"
-            )
-        bits = frame["embedding"].to_numpy()
-        vectors = (
-            from_bfloat16(bits) if bits.dtype == np.uint16 else bits.astype(np.float32)
-        )
-        vectors /= np.maximum(np.linalg.norm(vectors, axis=1, keepdims=True), 1e-12)
-        densities = frame["density"].to_numpy() if target.retrieval_lambda else None
+        vectors, densities = target.index_vectors(ids)
+        lookup = {beatmap: index for index, beatmap in enumerate(ids)}
         values = []
         for row in panel:
             query = vectors[lookup[row["query_id"]]]
@@ -1560,9 +1398,9 @@ def run_item_item_eval(targets: list[TargetData], _args: argparse.Namespace) -> 
                 lookup[beatmap]
                 for beatmap in [row["positive_id"], *row["negative_ids"]]
             ]
-            scores = vectors[indexes] @ query
-            if target.retrieval_lambda:
-                scores -= 0.5 * target.retrieval_lambda * densities[indexes]
+            scores = vectors[indexes] @ query - retrieval.density_term(
+                densities[indexes]
+            )
             values.append(
                 float(
                     np.mean((scores[0] > scores[1:]) + 0.5 * (scores[0] == scores[1:]))
@@ -1645,7 +1483,6 @@ def difficulty_neighbor_metrics(
     stars: torch.Tensor,
     groups: torch.Tensor,
     densities: torch.Tensor | None,
-    retrieval_lambda: float,
     random_pair_distance: float,
     largest_group: int,
     queries: torch.Tensor,
@@ -1657,7 +1494,7 @@ def difficulty_neighbor_metrics(
         rows = queries[start : start + DIFFICULTY_BATCH_SIZE]
         scores = embeddings[rows] @ embeddings.T
         if densities is not None:
-            scores = scores - retrieval.density_term(densities, retrieval_lambda)
+            scores = scores - retrieval.density_term(densities)
         neighbors = scores.topk(depth, dim=1).indices
         other = groups[neighbors] != groups[rows, None]
         keep = other & (other.cumsum(dim=1) <= DIFFICULTY_NEIGHBOR_K)
@@ -1712,7 +1549,6 @@ def run_difficulty_neighbor_eval(
             stars,
             groups,
             densities,
-            target.retrieval_lambda,
             random_pair_distance,
             int(largest_group),
             queries,
@@ -1726,59 +1562,6 @@ def run_difficulty_evals(targets: list[TargetData], args: argparse.Namespace) ->
     if data is None:
         return
     run_difficulty_neighbor_eval(targets, data)
-
-
-def normalize_slot_mod(value: object) -> str | None:
-    mod = re.sub(r"[^A-Za-z0-9]+", "", str(value or "")).upper()
-    mod = mod.removeprefix("OSU")
-    if not mod:
-        return None
-    aliases = {"NOMOD": "NM", "NOMODS": "NM", "N": "NM", "HDHR": "HDHR"}
-    return aliases.get(mod, mod)
-
-
-def slot_label(mod: object, map_index: object) -> str | None:
-    normalized = normalize_slot_mod(mod)
-    if normalized is None:
-        return None
-    try:
-        index = int(map_index)
-    except (TypeError, ValueError):
-        return None
-    if index < 0:
-        return None
-    return f"{normalized}{index + 1}"
-
-
-def run_tournament_slot_eval(
-    targets: list[TargetData], args: argparse.Namespace
-) -> None:
-    if targets[0].mode != "std":
-        return
-    if not TOURNAMENTS_EVAL_PATH.exists():
-        console.print(
-            f"[yellow]Skipping Tournament Slot Probe: {TOURNAMENTS_EVAL_PATH} not found.[/yellow]"
-        )
-        return
-    ids_by_target = set(common_ids(targets))
-    rows = pl.read_parquet(
-        TOURNAMENTS_EVAL_PATH,
-        columns=["beatmap_id", "mod", "map_index"],
-    ).drop_nulls(["beatmap_id", "mod", "map_index"])
-    rows = rows.filter(pl.col("beatmap_id").is_in(ids_by_target)).unique()
-    labels_by_id: dict[int, set[str]] = {}
-    for beatmap_id, mod, map_index in rows.iter_rows():
-        label = slot_label(mod, map_index)
-        if label:
-            labels_by_id.setdefault(int(beatmap_id), set()).add(label)
-    result = multilabel_probe(
-        targets,
-        labels_by_id,
-        title="Tournament Slot Probe",
-        min_count=TOURNAMENT_SLOT_MIN_MAPS,
-    )
-    if result:
-        print_eval_result(result)
 
 
 def print_eval_result(result: EvalResult) -> None:
@@ -1802,8 +1585,6 @@ def json_value(value):
 def save_eval_results(targets: list[TargetData], filename: str = "eval.json") -> None:
     generated_at = datetime.now(UTC).isoformat()
     for target in targets:
-        if target.run_dir is None:
-            continue
         evaluations = {
             result.name: result.metrics[target.name]
             for result in EVAL_RESULTS
@@ -1814,27 +1595,7 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                 "generated_at": generated_at,
                 "target": target.name,
                 "targets": [item.name for item in targets],
-                "embeddings": str(target.path),
-                "centered": target.centered,
-                "retrieval": (
-                    {"method": "csls", "lambda": target.retrieval_lambda}
-                    if target.retrieval_lambda
-                    else {"method": "cosine"}
-                ),
-                "embedding_metadata": {
-                    key: value
-                    for key, value in embedding_metadata(target.path).items()
-                    if key
-                    in {
-                        "version",
-                        "mode",
-                        "model_sha256",
-                        "pooling",
-                        "layers",
-                        "generated_at",
-                        "centered",
-                    }
-                },
+                "model_sha256": target.index.model_sha256,
                 "evaluations": evaluations,
                 "diagnostics": {
                     result.name: {
@@ -1854,8 +1615,7 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                 },
             }
         )
-        suffix = ".a" if target.path.stem.endswith(".a") else ""
-        output = target.run_dir / filename.replace(".json", f"{suffix}.json")
+        output = target.artifacts.directory / filename
         output.write_text(
             json.dumps(payload, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
@@ -1867,11 +1627,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare embedding files with retrieval and linear probe evals"
     )
-    parser.add_argument(
-        "targets", nargs="+", help="Run names or embedding paths of one mode"
-    )
+    parser.add_argument("targets", nargs="+", help="Run names or run directories")
     parser.add_argument("--mode", choices=tuple(MODES), default="std")
-    parser.add_argument("--variants", nargs="+", choices=("base", "adapted"))
     parser.add_argument("--eval", default=str(DATA_DIR / "eval.csv"))
     parser.add_argument(
         "--retrieval-only",
@@ -1891,26 +1648,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Evaluate all maps regardless of star rating",
     )
-    parser.add_argument(
-        "--no-center",
-        action="store_true",
-        help="Only L2-normalize the preceding target",
-    )
-    argv = list(sys.argv[1:] if argv is None else argv)
-    no_center = set()
-    for index in range(len(argv) - 1, -1, -1):
-        if argv[index] != "--no-center":
-            continue
-        if index == 0 or argv[index - 1].startswith("-"):
-            parser.error("--no-center must follow a target")
-        no_center.add(argv[index - 1])
-        del argv[index]
-    args = parser.parse_args(argv)
-    invalid = no_center.difference(args.targets)
-    if invalid:
-        parser.error("--no-center must immediately follow a target")
-    args.no_center = no_center
-    return args
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -1918,9 +1656,7 @@ def main() -> None:
     EVAL_RESULTS.clear()
     targets = load_targets(
         args.targets,
-        no_center=args.no_center,
         mode=args.mode,
-        variants=args.variants,
         star_range=None if args.no_sr_filter else tuple(args.sr_range),
     )
     evals = [run_grouped_retrieval, run_collection_retrieval]
@@ -1932,7 +1668,6 @@ def main() -> None:
             run_genre_eval,
             run_map_attribute_eval,
             run_difficulty_evals,
-            run_tournament_slot_eval,
         ]
     for run_eval in evals:
         run_eval(targets, args)

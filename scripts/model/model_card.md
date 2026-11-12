@@ -8,30 +8,25 @@ tags:
 
 # BoBERT · $revision
 
-Hit-object sequence encoders and retrieval indices for osu! modes. Each mode has its own tokenizer, encoder weights, centering statistics and optional collection-trained linear adapter.
+Hit-object sequence encoders and retrieval indices for osu! modes. Each mode has its own tokenizer, encoder, layer-centering statistics and collection-trained linear adapter, all in `model.safetensors`.
 
-| Mode | Variant | Maps | Dimensions | Layers |
-|---|---|---:|---:|---:|
+| Mode | Maps | Dimensions | Layers |
+|---|---:|---:|---:|
 $rows
 
-The release manifest selects one model/index pair per mode. Base and adapted files use the same mode directory; adapted files have an `.a` suffix. The index records its model's SHA256 checksum. Catalogs are shared in `data/`.
+`<mode>/embeddings/` holds append-only bfloat16 shards; a later shard replaces earlier rows of the same beatmap. Each shard records the checksum of the model that embedded it. `densities.parquet` holds the retrieval density of every indexed map, and `search.bin` the client search catalog. Metadata catalogs are in `data/`.
 
 Export workspace: `$commit`.
-
-```sh
-uv run fetch-run --repo $repo --revision $revision
-docker compose up --build api
-```
 
 From a source checkout:
 
 ```python
 import torch
 from core.model import BobertEncoder
-from core.artifacts import resolve_artifacts
 
-artifacts = resolve_artifacts("runs/current", "mania")
-model = BobertEncoder.from_pretrained(artifacts.model, torch.device("cpu"))
+model = BobertEncoder.from_pretrained(
+    "runs/current/mania/model.safetensors", torch.device("cpu")
+)
 ```
 
 [Source, training and evaluation](https://github.com/token03/bobert)

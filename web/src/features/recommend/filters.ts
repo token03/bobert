@@ -18,14 +18,15 @@ export const recommendSearchSchema = z.object({
   status: z.enum(statuses).optional().catch(undefined),
   minDate: monthSchema,
   maxDate: monthSchema,
+  group: z.number().int().nonnegative().catch(0),
 })
 
 export type RecommendSearch = z.infer<typeof recommendSearchSchema>
 
-export const defaultSearch: RecommendSearch = { beatmap: '', mode: 'std' }
+export const defaultSearch: RecommendSearch = { beatmap: '', mode: 'std', group: 0 }
 
 export function clearFilters(search: RecommendSearch): RecommendSearch {
-  return { beatmap: search.beatmap, mode: search.mode }
+  return { beatmap: search.beatmap, mode: search.mode, group: search.group }
 }
 
 export function buildRecommendRequest(search: RecommendSearch, beatmapIds: number[]): RecommendRequest {
@@ -44,5 +45,6 @@ export function buildRecommendRequest(search: RecommendSearch, beatmapIds: numbe
     beatmap_ids: beatmapIds,
     top_k: topK,
     filters,
+    distinct: false,
   }
 }

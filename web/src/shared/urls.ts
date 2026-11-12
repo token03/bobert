@@ -19,3 +19,7 @@ export function cardCoverUrl(beatmapsetId: number): string {
 export function userUrl(userId: number): string {
   return `https://osu.ppy.sh/users/${userId}`
 }
+
+export function avatarUrl(userId: number): string {
+  return `https://a.ppy.sh/${userId}`
+}

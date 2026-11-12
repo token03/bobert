@@ -5,11 +5,13 @@ import os
 import time
 from enum import Enum
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
 OSU_API_VERSION = "20241024"
 TOKEN_REFRESH_SKEW_SECONDS = 300
+REQUEST_INTERVAL_SECONDS = 1.0
 
 
 class BeatmapUnavailableError(ValueError):
@@ -18,18 +20,60 @@ class BeatmapUnavailableError(ValueError):
 
 class OsuClient:
     def __init__(self, client: httpx.AsyncClient):
-        client_id = os.getenv("OSU_CLIENT_ID") or os.getenv("client_id")
-        client_secret = os.getenv("OSU_CLIENT_SECRET") or os.getenv("client_secret")
-        if not client_id or not client_secret:
-            raise RuntimeError("osu API credentials are required")
         self.client = client
-        self.client_id = int(client_id)
-        self.client_secret = client_secret
+        self.client_id = int(os.environ["OSU_CLIENT_ID"])
+        self.client_secret = os.environ["OSU_CLIENT_SECRET"]
+        self.redirect_uri = os.environ["OSU_REDIRECT_URI"]
+        if not self.client_secret or not self.redirect_uri:
+            raise RuntimeError("OSU_CLIENT_SECRET and OSU_REDIRECT_URI are required")
         self._token: str | None = None
         self._expires_at = 0.0
         self._token_lock = asyncio.Lock()
+        self._pace_lock = asyncio.Lock()
+        self._next_request = 0.0
         self._metadata: dict[int, dict[str, Any]] = {}
         self._metadata_tasks: dict[int, asyncio.Task[dict[str, Any]]] = {}
+
+    async def _pace(self) -> None:
+        async with self._pace_lock:
+            await asyncio.sleep(self._next_request - time.monotonic())
+            self._next_request = time.monotonic() + REQUEST_INTERVAL_SECONDS
+
+    def authorize_url(self, state: str) -> str:
+        query = urlencode(
+            {
+                "client_id": self.client_id,
+                "redirect_uri": self.redirect_uri,
+                "response_type": "code",
+                "scope": "identify",
+                "state": state,
+            }
+        )
+        return f"https://osu.ppy.sh/oauth/authorize?{query}"
+
+    async def identify(self, code: str) -> dict[str, Any]:
+        await self._pace()
+        response = await self.client.post(
+            "https://osu.ppy.sh/oauth/token",
+            json={
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": self.redirect_uri,
+            },
+        )
+        response.raise_for_status()
+        await self._pace()
+        response = await self.client.get(
+            "https://osu.ppy.sh/api/v2/me",
+            headers={
+                "Authorization": f"Bearer {response.json()['access_token']}",
+                "x-api-version": OSU_API_VERSION,
+            },
+        )
+        response.raise_for_status()
+        return parse_player(response.json())
 
     async def start(self) -> None:
         await self._access_token()
@@ -48,6 +92,7 @@ class OsuClient:
                 and self._expires_at > time.time() + TOKEN_REFRESH_SKEW_SECONDS
             ):
                 return self._token
+            await self._pace()
             response = await self.client.post(
                 "https://osu.ppy.sh/oauth/token",
                 json={
@@ -91,17 +136,17 @@ class OsuClient:
             raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
         return metadata
 
-    async def user_plays(
-        self, user_id: int, kind: str, ruleset: str, limit: int
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        user, scores = await asyncio.gather(
-            self._get(f"users/{int(user_id)}/{ruleset}", {"key": "id"}),
-            self._get(
-                f"users/{int(user_id)}/scores/{kind}",
-                {"mode": ruleset, "limit": limit},
-            ),
+    async def top_plays(
+        self, user_id: int, ruleset: str, limit: int
+    ) -> list[dict[str, Any]]:
+        scores = await self._get(
+            f"users/{int(user_id)}/scores/best", {"mode": ruleset, "limit": limit}
         )
-        return parse_player(user), [parse_play(score) for score in scores]
+        return [parse_play(score) for score in scores]
+
+    async def player(self, username: str) -> dict[str, Any]:
+        user = await self._get(f"users/@{username}", {})
+        return {**parse_player(user), "playmode": user["playmode"]}
 
     async def _get(self, path: str, params: Any) -> Any:
         response = await self._request(path, params)
@@ -113,16 +158,19 @@ class OsuClient:
     async def _request(
         self, path: str, params: Any, force: bool = False
     ) -> httpx.Response:
+        token = await self._access_token(force)
+        await self._pace()
         return await self.client.get(
             f"https://osu.ppy.sh/api/v2/{path}",
             params=params,
             headers={
-                "Authorization": f"Bearer {await self._access_token(force)}",
+                "Authorization": f"Bearer {token}",
                 "x-api-version": OSU_API_VERSION,
             },
         )
 
     async def download(self, beatmap_id: int) -> bytes:
+        await self._pace()
         response = await self.client.get(
             f"https://osu.ppy.sh/osu/{int(beatmap_id)}",
             headers={

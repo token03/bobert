@@ -26,42 +26,14 @@ export type RangeFilterConfig = {
   overflowMin?: boolean
   overflowMax?: boolean
   ticks: readonly number[]
-  bins: readonly number[]
-  binLabels?: readonly string[]
+  binWidth: number
   formatValue: (value: number) => string
   formatTick: (value: number) => string
   parseValue: (text: string) => number | null
   formatAriaValue: (value: number, overflow: Overflow) => string
-  toSliderValue: (value: number) => number
-  fromSliderValue: (position: number) => number
 }
 
-function piecewiseScale(knots: ReadonlyArray<readonly [number, number]>) {
-  const segment = (value: number, from: 0 | 1) => {
-    let index = 1
-    while (index < knots.length - 1 && value > knots[index][from]) index++
-    return [knots[index - 1], knots[index]] as const
-  }
-  return {
-    toSliderValue: (value: number) => {
-      const [[v0, p0], [v1, p1]] = segment(value, 0)
-      const position = p0 + (p1 - p0) * (value - v0) / (v1 - v0)
-      return sliderResolution * Math.min(1, Math.max(0, position))
-    },
-    fromSliderValue: (slider: number) => {
-      const position = slider / sliderResolution
-      const [[v0, p0], [v1, p1]] = segment(position, 1)
-      return v0 + (v1 - v0) * (position - p0) / (p1 - p0)
-    },
-  }
-}
-
-const lengthMax = 20 * 60
-const lengthScale = Math.log1p(lengthMax / 60)
-
-function range(from: number, to: number, step: number) {
-  return Array.from({ length: Math.round((to - from) / step) + 1 }, (_, index) => from + index * step)
-}
+const lengthMax = 10 * 60
 
 function parseNumber(text: string) {
   const number = Number.parseFloat(text.replace(/[^\d.]/g, ''))
@@ -109,12 +81,11 @@ export const rangeFilters: readonly RangeFilterConfig[] = [
     precision: 0.01,
     overflowMax: true,
     ticks: [0, 3, 6, 9, 12],
-    bins: range(0, 12, 1),
+    binWidth: 1,
     formatValue: formatDecimal,
     formatTick: String,
     parseValue: parseNumber,
     formatAriaValue: ariaValue('stars', formatDecimal),
-    ...piecewiseScale([[0, 0], [3, 0.16], [9, 0.88], [12, 1]]),
   },
   {
     key: 'ar',
@@ -129,13 +100,12 @@ export const rangeFilters: readonly RangeFilterConfig[] = [
     step: 0.1,
     largeStep: 0.5,
     precision: 0.1,
-    ticks: [0, 7, 8, 9, 10],
-    bins: [...range(0, 7, 1), ...range(7.5, 10, 0.5)],
+    ticks: [0, 2, 4, 6, 8, 10],
+    binWidth: 1,
     formatValue: (value) => value.toFixed(1),
     formatTick: String,
     parseValue: parseNumber,
     formatAriaValue: ariaValue('approach rate', (value) => value.toFixed(1)),
-    ...piecewiseScale([[0, 0], [7, 0.2], [8, 0.36], [10, 1]]),
   },
   {
     key: 'cs',
@@ -150,13 +120,12 @@ export const rangeFilters: readonly RangeFilterConfig[] = [
     step: 0.1,
     largeStep: 0.5,
     precision: 0.1,
-    ticks: [0, 3, 4, 5, 10],
-    bins: [0, 1, 2, ...range(2.5, 6, 0.5), 7, 8, 10],
+    ticks: [0, 2, 4, 6, 8, 10],
+    binWidth: 1,
     formatValue: (value) => value.toFixed(1),
     formatTick: String,
     parseValue: parseNumber,
     formatAriaValue: ariaValue('circle size', (value) => value.toFixed(1)),
-    ...piecewiseScale([[0, 0], [2, 0.08], [3, 0.2], [5, 0.8], [7, 0.93], [10, 1]]),
   },
   {
     key: 'bpm',
@@ -173,13 +142,12 @@ export const rangeFilters: readonly RangeFilterConfig[] = [
     precision: 1,
     overflowMin: true,
     overflowMax: true,
-    ticks: [150, 200, 250],
-    bins: [60, 80, ...range(100, 260, 10), 280, 300, 320],
+    ticks: [100, 150, 200, 250, 300],
+    binWidth: 20,
     formatValue: (value) => String(Math.round(value)),
     formatTick: String,
     parseValue: parseNumber,
     formatAriaValue: ariaValue('beats per minute', (value) => String(Math.round(value))),
-    ...piecewiseScale([[60, 0], [100, 0.1], [260, 0.9], [320, 1]]),
   },
   {
     key: 'length',
@@ -195,14 +163,11 @@ export const rangeFilters: readonly RangeFilterConfig[] = [
     largeStep: 30,
     precision: 1,
     overflowMax: true,
-    ticks: [60, 180, 300, 600],
-    bins: [0, 60, 120, 300, lengthMax],
-    binLabels: ['Ringtone', 'TV size', 'Full', 'Marathon'],
+    ticks: [0, 120, 300, 600],
+    binWidth: 60,
     formatValue: formatDuration,
     formatTick: formatDuration,
     parseValue: parseDuration,
     formatAriaValue: formatDurationAria,
-    toSliderValue: (value) => sliderResolution * Math.log1p(value / 60) / lengthScale,
-    fromSliderValue: (position) => 60 * Math.expm1(position / sliderResolution * lengthScale),
   },
 ]

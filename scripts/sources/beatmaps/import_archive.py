@@ -1,7 +1,9 @@
 import argparse
 import hashlib
 import tarfile
+import urllib.request
 from collections import Counter
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 import pandas as pd
@@ -35,8 +37,21 @@ def read_file_metadata(content: bytes) -> tuple[int, int | None]:
     return mode, beatmap_id
 
 
+@contextmanager
+def open_archive(source: str):
+    if source.startswith(("http://", "https://")):
+        with (
+            urllib.request.urlopen(source) as response,
+            tarfile.open(fileobj=response, mode="r|*") as archive,
+        ):
+            yield archive
+    else:
+        with tarfile.open(source, "r|*") as archive:
+            yield archive
+
+
 def import_archive(
-    archive_path: Path,
+    source: str,
     output_dir: Path,
     *,
     dry_run: bool = False,
@@ -62,7 +77,7 @@ def import_archive(
     missing_ids = duplicate_ids = checksum_mismatches = 0
     files = 0
 
-    with tarfile.open(archive_path, "r|*") as archive:
+    with open_archive(source) as archive:
         for member in archive:
             if not member.isfile():
                 continue
@@ -133,7 +148,7 @@ def import_archive(
                 if not dry_run:
                     write_map(destination, content)
 
-            if mode == 0 and beatmap_id not in known_ids:
+            if beatmap_id not in known_ids:
                 refresh_ids.add(beatmap_id)
 
     print(f"Archive files: {files:,}; unique resolved IDs: {len(seen):,}")
@@ -143,7 +158,7 @@ def import_archive(
     print(f"Already present: {existing:,}")
     print(f"Invalid: {invalid:,}; duplicate IDs: {duplicate_ids:,}")
     print(f"Missing IDs: {missing_ids:,}; checksum mismatches: {checksum_mismatches:,}")
-    print(f"Standard maps missing catalog metadata: {len(refresh_ids):,}")
+    print(f"Maps missing catalog metadata: {len(refresh_ids):,}")
 
     if missing_ids_file is not None and not dry_run:
         missing_ids_file.parent.mkdir(parents=True, exist_ok=True)
@@ -157,11 +172,10 @@ def import_archive(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Import a monthly osu! beatmap archive"
+        description="Import an osu! beatmap archive such as "
+        "https://data.ppy.sh/2026_11_05_osu_files.tar.bz2, streamed without unpacking"
     )
-    parser.add_argument(
-        "archive", type=Path, help="Path to a tar archive of .osu files"
-    )
+    parser.add_argument("archive", help="Path or URL of a tar archive of .osu files")
     parser.add_argument(
         "--output-dir", type=Path, default=BEATMAPS_DIR, help="Sharded output directory"
     )
@@ -169,7 +183,7 @@ def main():
     parser.add_argument(
         "--skip-metadata-refresh",
         action="store_true",
-        help="Import files without refreshing standard-mode metadata",
+        help="Import files without fetching metadata for maps missing from the catalog",
     )
     parser.add_argument(
         "--retry-failed",
@@ -179,13 +193,9 @@ def main():
     parser.add_argument(
         "--missing-ids-file",
         type=Path,
-        help="Write IDs of standard maps without existing metadata",
+        help="Write IDs of maps without existing metadata",
     )
     args = parser.parse_args()
-
-    if not args.archive.is_file():
-        raise SystemExit(f"Archive not found: {args.archive}")
-
     import_archive(
         args.archive,
         args.output_dir,

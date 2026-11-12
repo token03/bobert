@@ -6,14 +6,22 @@ import random
 import signal
 import time
 from collections import Counter
+from collections.abc import Collection
 from pathlib import Path
 
 from tqdm import tqdm
 
-from core.dataset import FeatureWriter, encode_vector, feature_path
+from core.dataset import (
+    FeatureStore,
+    FeatureWriter,
+    encode_vector,
+    feature_path,
+    stored_beatmap_ids,
+)
 from core.features import beatmap_frames
 from core.modes import MODE_NAMES, MODES
-from core.raw import find_maps
+from core.raw import find_maps, map_id
+from scripts.common.io import read_ids
 from scripts.common.paths import resolve_path
 from scripts.dataset.native import compile_parser, load_parser
 
@@ -107,6 +115,25 @@ def find_beatmap_files(root_dir: str | Path) -> list[str]:
     return [str(path) for path in find_maps(root_dir)]
 
 
+def copy_unchanged(
+    path: Path, writer: FeatureWriter, max_seq_len: int, refresh: set[int]
+) -> None:
+    store = FeatureStore(path, writer.mode)
+    if store.max_seq_len != max_seq_len:
+        raise ValueError(
+            f"{path} stores {store.max_seq_len} tokens per map, not {max_seq_len}"
+        )
+    offsets = store.block_offsets
+    for position, beatmap_id in enumerate(store.beatmap_ids.tolist()):
+        if beatmap_id not in refresh:
+            writer.append(
+                beatmap_id,
+                store.object_counts[position],
+                store.lengths[position],
+                store.blocks[offsets[position] : offsets[position + 1]].tobytes(),
+            )
+
+
 def build_features(
     beatmaps_dir: Path,
     output_dir: Path,
@@ -116,11 +143,16 @@ def build_features(
     sample_size: int | None = None,
     sample_seed: int = 42,
     compiled: bool = True,
+    refresh: Collection[int] | None = None,
 ) -> dict[str, dict]:
     print(f"Finding raw beatmaps under {beatmaps_dir}...")
     files = find_beatmap_files(beatmaps_dir)
     if sample_size and len(files) > sample_size:
         files = sorted(random.Random(sample_seed).sample(files, sample_size))
+    if refresh is not None:
+        refresh = set(refresh)
+        stored = stored_beatmap_ids(output_dir) - refresh
+        files = [path for path in files if int(map_id(path)) not in stored]
     print(f"Building {', '.join(modes)} features from {len(files):,} files.")
 
     mode_ints = tuple(MODES[mode].mode_int for mode in modes)
@@ -132,6 +164,9 @@ def build_features(
         mode: FeatureWriter(feature_path(output_dir, mode), mode, max_seq_len)
         for mode in modes
     }
+    if refresh is not None:
+        for mode, writer in writers.items():
+            copy_unchanged(feature_path(output_dir, mode), writer, max_seq_len, refresh)
     native_dir = compile_parser() if compiled else None
     counts = Counter()
     failure_path = output_dir / "failures.jsonl"
@@ -206,6 +241,12 @@ def main() -> None:
     )
     parser.add_argument("--sample-seed", type=int, default=42)
     parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Keep stored maps and parse only new ones and those in --refresh",
+    )
+    parser.add_argument("--refresh", help="File of beatmap IDs to parse again")
+    parser.add_argument(
         "--no-compile",
         dest="compiled",
         action="store_false",
@@ -234,6 +275,7 @@ def main() -> None:
         args.sample_size,
         args.sample_seed,
         args.compiled,
+        read_ids(args.refresh) if args.refresh else [] if args.update else None,
     )
 
 

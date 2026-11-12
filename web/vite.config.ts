@@ -1,29 +1,11 @@
-import { defineConfig, type Plugin, type PreviewServer, type ViteDevServer } from 'vite'
+import { defineConfig } from 'vite'
 import babel from '@rolldown/plugin-babel'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import { tanstackRouter } from '@tanstack/router-plugin/vite'
 
-function searchArtifact(): Plugin {
-  const serve = (server: ViteDevServer | PreviewServer) => {
-    server.middlewares.use((request, response, next) => {
-      if (!/^\/search-(std|taiko|catch|mania)\.bin(?:\?|$)/.test(request.url ?? '')) return next()
-      response.setHeader('Content-Type', 'application/octet-stream')
-      response.setHeader('Content-Encoding', 'br')
-      response.setHeader('Cache-Control', 'no-cache')
-      next()
-    })
-  }
-  return {
-    name: 'search-artifact',
-    configureServer: serve,
-    configurePreviewServer: serve,
-  }
-}
-
 export default defineConfig({
   worker: { format: 'es' },
   plugins: [
-    searchArtifact(),
     tanstackRouter({
       target: 'react',
       autoCodeSplitting: true,

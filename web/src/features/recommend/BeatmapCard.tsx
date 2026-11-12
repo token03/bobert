@@ -18,7 +18,6 @@ type CardProps = {
 }
 
 type SourceBeatmapCardProps = CardProps & {
-  label?: string | null
   sweepDirection?: SweepDirection
   sweepPhase?: 'in' | 'out'
   onSweepEnd?: () => void
@@ -59,7 +58,7 @@ function useCardLink(beatmap: BeatmapMetadata) {
   }
 }
 
-export function SourceBeatmapCard({ beatmap, label, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying, sweepDirection, sweepPhase, onSweepEnd }: SourceBeatmapCardProps) {
+export function SourceBeatmapCard({ beatmap, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying, sweepDirection, sweepPhase, onSweepEnd }: SourceBeatmapCardProps) {
   const { copied, setCopied, linkProps } = useCardLink(beatmap)
 
   return (
@@ -88,7 +87,6 @@ export function SourceBeatmapCard({ beatmap, label, onCopy, onPlayPreview, activ
         <BeatmapSummary className={styles['source-copy']} beatmap={beatmap} />
 
         <div className={styles['source-meta']}>
-          {label ? <span className={styles['source-label']}>{label}</span> : null}
           <CreatorLink beatmap={beatmap} />
           <StatusLabel beatmap={beatmap} date={beatmap.ranked_date ? formatDate(beatmap.ranked_date) : null} />
         </div>

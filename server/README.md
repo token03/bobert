@@ -1,84 +1,58 @@
 # BoBERT API
 
-FastAPI service for recommendations, metadata lookup, and embedding previously unindexed query maps. The retrieval runtime uses NumPy, Polars, and one lazily loaded CPU PyTorch encoder per mode. Each mode keeps its own index, centering transform, vector width and cache identity. Catalogs are loaded once at startup.
-
-## Run
-
-From the repository root, prepare the artifacts below and configure osu! OAuth credentials in `.env` using [`.env.example`](../.env.example):
+FastAPI service for recommendations, osu! login and embedding maps missing from the index. It loads one index per mode at startup and one CPU encoder per mode on first use.
 
 ```sh
 docker compose up --build api
 curl http://127.0.0.1:8008/health
 ```
 
-Compose exposes container port 8000 on host loopback port 8008. The default `compose.yaml` contains only the API; `compose.prod.yaml` adds the production tunnel and host-specific settings.
+`compose.yaml` runs the API and the chat bot from one image; `compose.prod.yaml` adds the tunnel and memory limits.
 
-For a direct Python launch, install with `uv sync --no-default-groups --group serve`, set the path variables below to local paths, and run `uv run --no-default-groups --group serve python -m server.app`. Default runtime paths are container paths under `/app`.
-
-## Artifact contract
+## Files
 
 | File | Role |
 | --- | --- |
-| `data/beatmaps.parquet` | Beatmap metadata and search/filter columns |
-| `data/beatmapsets.parquet` | Beatmapset metadata |
-| `data/strains.parquet` | Difficulty and strain catalog |
-| `runs/current/{mode}/model[.a].safetensors` | Encoder and adapter weights, normalization tensors, model configuration and mode in the header |
-| `runs/current/{mode}/embeddings[.a].parquet` | IDs, vectors, densities; pooling and retrieval settings in file metadata |
-
-`runs/current/release.json` must contain `{"format":1,"modes":{"std":"adapted","taiko":"adapted","catch":"adapted","mania":"adapted"}}`. A run may select a subset of modes. Every selected mode needs its matching model and index; flat legacy runs are not supported.
-
-Use artifacts from the same export. The runtime reads both files through [`core/artifacts.py`](../core/artifacts.py) and checks the model checksum recorded in the index. Missing or mismatched artifacts prevent startup.
-
-Compose mounts `data/` and `runs/` read-only and uses a named Docker volume for the writable SQLite cache. The image runs as a non-root user. `runs/current` selects the active multimode release; the catalogs in `data/` are shared. Separate per-mode SQLite caches hold online embeddings, metadata, and unavailable beatmaps; it is local runtime state.
+| [`app.py`](app.py) | Routes |
+| [`runtime.py`](runtime.py) | Indexes, search and the SQLite cache of online embeddings |
+| [`osu.py`](osu.py) | osu! API client; all requests share one queue at 1 per second |
+| [`auth.py`](auth.py) | Signed session cookie |
+| [`plays.py`](plays.py), [`mods.py`](mods.py) | Grouping top plays by mods and style |
+| [`bot.py`](bot.py) | Bancho IRC bot |
+| [`release.py`](release.py) | Downloads changed files of a release during deploy |
 
 ## Configuration
 
-| Variable | Default / requirement |
+| Variable | Role |
 | --- | --- |
-| `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` | Required osu! OAuth credentials |
-| `BOBERT_DATA_DIR` | `/app/data` |
-| `BOBERT_RUN_DIR` | `/app/runs/current` |
-| `BOBERT_CACHE_DB` | `/app/cache/runtime.sqlite` (filename stem; mode suffix added) |
-| `TORCH_NUM_THREADS` | `2`; application caps threads at two and available CPU count |
-
-Compose explicitly passes its configured environment to the container. For custom paths, edit the service environment and mounts together.
-
-The production memory limit is 4.5 GiB for four indexes and lazily loaded encoders. Provision enough host RAM for that limit plus the OS and tunnel. Online inference is serialized across modes to bound peak memory.
+| `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` | osu! OAuth application |
+| `OSU_REDIRECT_URI` | `https://<site>/api/auth/callback` |
+| `SESSION_SECRET` | Signs session cookies |
+| `BOBERT_DATA_DIR`, `BOBERT_RUN_DIR`, `BOBERT_CACHE_DB` | Paths, default under `/app` |
+| `OSU_IRC_USERNAME`, `OSU_IRC_PASSWORD` | Bot account |
 
 ## Endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/health` | Service health |
-| GET | `/api/modes` | Loaded rulesets |
-| GET | `/api/recommend` | Default recommendation list |
-| POST | `/api/recommend` | Recommendations from source beatmaps in one mode |
-| GET | `/api/beatmaps/{beatmap_id}` | Beatmap metadata |
-| GET | `/api/beatmaps/{beatmap_id}/summary` | Normalized summary |
-| GET | `/api/docs` | Interactive Swagger UI |
-| GET | `/api/openapi.json` | OpenAPI schema |
+| GET | `/api/auth/login`, `/api/auth/callback` | osu! login |
+| POST | `/api/auth/logout` | Clears the session |
+| GET | `/api/me` | Logged-in player |
+| GET | `/api/me/groups` | Logged-in player's grouped top plays |
+| GET | `/api/search/{mode}` | Client search catalog |
+| GET | `/api/recommend` | Default list |
+| POST | `/api/recommend` | Recommendations from source maps; at most 5 not yet embedded |
+| GET | `/api/players/{username}`, `/api/users/{id}/top` | Bot only |
+| POST | `/api/beatmaps/groups` | Bot only |
 
-```sh
-curl http://127.0.0.1:8008/api/recommend \
-  -H 'Content-Type: application/json' \
-  -d '{"beatmap_ids":[75],"top_k":20,"filters":{"min_sr":3,"max_sr":7}}'
-```
+The full schema is at `/api/docs`.
 
-GET recommendations and summary/detail routes accept `?mode=std|taiko|catch|mania`. POST recommendations infer the mode from the first source when `mode` is omitted; catalog and cached maps resolve locally, and unknown IDs use osu! metadata. An explicit `mode` restricts the query to that ruleset. All sources must share one mode; mixed-mode queries return 422 without poisoning the unavailable-map cache. Responses include the canonical mode.
+Login is stateless: the callback reads the player once and stores the ID and name in an HMAC-signed cookie.
 
-Requests accept 1–10 positive beatmap IDs and up to 1,000 results. Filters cover difficulty, object attributes, tempo, length, status, and dates; consult the API documentation for the full schema. Responses include source metadata, cache status, and scored results.
+## Bot
 
-## Hosted deployment
+`/np` returns maps like the current one. `!r` returns maps like one of the sender's top-play groups, optionally filtered by mods (`!r dt`).
 
-The hosted request path is Cloudflare Pages → Pages Function → gateway Worker → VPC service / Tunnel → API. The Worker applies burst and sustained recommendation rate limits. Local Vite development proxies directly to port 8008.
+## Hosting
 
-[`scripts/deploy.py`](../scripts/deploy.py) checks that a release tag exists on Hugging Face, then runs its shell companion on the server. The server pulls the code, rebuilds the API image, downloads all manifest-selected mode artifacts and shared catalogs with the image's parallel Hugging Face downloader, validates the downloaded artifacts, switches `runs/current` and `data/`, waits for health, and attempts rollback on failure. It targets an already provisioned deployment. `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT`, and `CLOUDFLARE_TUNNEL_TOKEN` configure this workflow.
-
-```sh
-uv run publish-run -v my-run
-uv run deploy -v my-run
-```
-
-Run both commands from your local checkout. `publish-run` uploads the release to Hugging Face. `deploy` connects to the VPS over SSH and runs the downloads there; models, embeddings, and catalogs go directly from Hugging Face to the VPS. No SCP or local `fetch-run` step is needed. The configured SSH target and remote root are sufficient for the existing provisioned host; public releases need no Hugging Face token on the VPS.
-
-Publishing is required first; deployments consume the released tag. The production overlay retains the IPv6-only tunnel routing used by the hosted instance. Adjust it for your network. Catalogs are swapped with the release, so rollback restores the complete artifact set.
+Requests go Cloudflare Pages → gateway Worker → Tunnel → API. `uv run deploy -v <tag>` pulls the code on the server, downloads the changed release files, switches `runs/current`, and rolls back if the API does not become healthy.

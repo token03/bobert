@@ -41,6 +41,8 @@ BoBERT is a bidirectional Transformer encoder based on [ModernBERT](https://arxi
 
 A linear adapter transforms the pretrained vector. The adapter starts as the identity. Contrastive training on pairs of maps that share collections then updates it. If a file of mined pairs is available, a second phase trains on these pairs.
 
+The pooling statistics and the adapter are stored in the model, so a map's vector depends only on the model and the map. New maps can be embedded and appended to an index without changing existing vectors.
+
 ## Limitations
 
 - The model reads hit objects only. It does not read AR, CS, OD or HP, so the vectors do not include these settings.
@@ -51,80 +53,43 @@ A linear adapter transforms the pretrained vector. The adapter starts as the ide
 
 ## Run locally
 
-The API runs on CPU in Docker. The frontend uses Bun. In local development, Vite connects directly to the API.
-
-### Get the artifacts
-
-Download a model release, the embedding index and the metadata catalogs from [Hugging Face](https://huggingface.co/token03/bobert):
+Download a release from [Hugging Face](https://huggingface.co/token03/bobert):
 
 ```sh
-uv run --no-default-groups --group serve fetch-run --revision v15
+uvx --from huggingface_hub hf download token03/bobert --revision v16 --local-dir runs/v16
+mv runs/v16/data/* data/ && ln -sfn v16 runs/current
 ```
-
-This command uses the CPU dependencies. It puts the run files in `runs/` and the catalogs in `data/`:
 
 ```text
-data/
-  beatmaps.parquet
-  beatmapsets.parquet
-  strains.parquet
-runs/
-  current -> <run>
-  v15/
-    release.json
-    std/
-      model.safetensors
-      embeddings.parquet
-      model.a.safetensors
-      embeddings.a.parquet
-      training.yaml
-    taiko/
-    catch/
-    mania/
+data/                  beatmaps, beatmapsets and strains catalogs
+runs/current -> v16/
+  {std,taiko,catch,mania}/
+    model.safetensors
+    embeddings/*.parquet
+    densities.parquet
+    labels.safetensors
+    search.bin
+    training.yaml
 ```
 
-All runs use the same catalogs. Each ruleset folder contains the base files and the collection-adapted (`.a`) files. `release.json` selects the variant that the server uses for each ruleset. A published release contains only the selected files. Releases v15 and later use this format.
-
-### Start the API and the frontend
-
-Copy [`.env.example`](.env.example) to `.env`. Set `OSU_CLIENT_ID` and `OSU_CLIENT_SECRET` from an [osu! OAuth application](https://osu.ppy.sh/home/account/edit). Then, from the repository root:
+Copy [`.env.example`](.env.example) to `.env` and fill in the osu! OAuth values and `SESSION_SECRET`. Install the frontend with `bun install` in `web/`, then start the API and Vite together:
 
 ```sh
-docker compose up --build api
+mise run dev
 ```
-
-The API is at `http://127.0.0.1:8008`. The interactive documentation is at `/api/docs`. For configuration and endpoints, refer to the [server guide](server/README.md).
-
-From `web/`:
-
-```sh
-bun install
-bun run dev
-```
-
-Open the address that Vite shows. After you install the frontend dependencies, `mise run dev` starts both services from the repository root. For more information, refer to [web development](web/README.md).
-
-For the existing VPS, run `uv run publish-run -v v15`, then `uv run deploy -v v15` from your local checkout when ready to deploy. The VPS downloads the published artifacts directly from Hugging Face, so no SCP step is needed. See the [hosted deployment guide](server/README.md#hosted-deployment) for configuration and rollback behavior.
 
 ## Training
 
-The Python environment targets **Linux x86-64, Python 3.12, PyTorch 2.11 and CUDA 12.8**, with a pinned FlashAttention wheel. Install it with [uv](https://docs.astral.sh/uv/):
+The training environment targets Linux x86-64, Python 3.12, PyTorch 2.11 and CUDA 12.8:
 
 ```sh
 uv sync --frozen
-uv run pretrain --help
+uv run pretrain --mode std --profile full -v my-run-base
+uv run embed my-run-base --mode std
+uv run adapt my-run-base my-run --mode std
 ```
 
-Build the features (`build-features`) and the strain targets (`build-strains`). Then train and embed a named run:
-
-```sh
-uv run pretrain --mode std --profile full -v my-run
-uv run embed -v my-run --mode std --variant base
-```
-
-`pretrain` saves the run configuration and exports `model.safetensors`. `export-model` exports existing checkpoints. `adapt` trains the adapter. `evaluate`, `mine` and `umap` are for retrieval analysis. The [scripts guide](scripts/README.md) lists the inputs and outputs of each command.
-
-`uv sync` installs the default CUDA training group. For CPU serving and release downloads, use `uv sync --no-default-groups --group serve`. `uv.lock` contains both environments.
+The [scripts guide](scripts/README.md) covers every command, including updates and releases.
 
 ## Repository guide
 

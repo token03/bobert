@@ -1,21 +1,19 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import re
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
 import brotli
+import numpy as np
 import polars as pl
 
-from core.artifacts import read_run, resolve_artifacts
+from core.artifacts import RunArtifacts, index_ids, run_modes
 from core.modes import MODES
-from scripts.common.paths import BEATMAPS_PATH, PROJECT_ROOT, RUNS_DIR
+from scripts.common.paths import BEATMAPS_PATH, RUNS_DIR
 
-WEB_SEARCH_PATH = PROJECT_ROOT / "web" / "public" / "search.bin"
 RANKED_STATUSES = {"1", "2", "3", "ranked", "approved", "qualified"}
 LOVED_STATUSES = {"4", "loved"}
 SEARCH_TERM = re.compile(
@@ -27,18 +25,11 @@ SECTION_NAMES = ("sets", "diffs", "strings", "terms", "postings", "lookup")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the client-side beatmap search artifact."
+        description="Build each mode's client-side beatmap search artifact."
     )
+    parser.add_argument("version", nargs="?", default="current")
     parser.add_argument("--catalog", default=str(BEATMAPS_PATH))
-    parser.add_argument("-v", "--version", default="current")
-    parser.add_argument("--mode", choices=tuple(MODES))
-    parser.add_argument("--output", default=str(WEB_SEARCH_PATH))
     parser.add_argument("--min-favourites", type=int, default=10)
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Skip the build when the output is newer than every input.",
-    )
     return parser.parse_args()
 
 
@@ -59,8 +50,9 @@ def encode_varint(value: int) -> bytes:
     return bytes(encoded)
 
 
-def load_sets(catalog_path: str, embeddings_path: str, mode: str) -> pl.DataFrame:
-    indexed = pl.scan_parquet(embeddings_path).select(pl.col("beatmap_id").alias("id"))
+def load_sets(catalog_path: str, artifacts: RunArtifacts) -> pl.DataFrame:
+    mode = artifacts.mode
+    indexed = pl.LazyFrame({"id": np.concatenate(index_ids(artifacts)[1])})
     beatmaps = (
         pl.scan_parquet(catalog_path)
         .join(indexed, on="id", how="semi")
@@ -242,31 +234,11 @@ def write_artifact(
     return len(payload)
 
 
-def is_current(output: Path, inputs: list[Path]) -> bool:
-    if not output.exists():
-        return False
-    built = output.stat().st_mtime
-    return all(path.stat().st_mtime <= built for path in inputs)
-
-
-def build_mode(args, mode: str) -> Path:
-    artifacts = resolve_artifacts(RUNS_DIR / args.version, mode)
-    args.embeddings = str(artifacts.index)
-    output = Path(args.output).with_name(f"search-{mode}.bin")
-    script = Path(__file__).resolve()
-    if args.check and is_current(
-        output,
-        [
-            Path(args.catalog),
-            Path(args.embeddings),
-            artifacts.run / "release.json",
-            script,
-        ],
-    ):
-        return output
-
+def build_mode(args, artifacts: RunArtifacts) -> None:
+    mode = artifacts.mode
+    output = artifacts.search
     sets = (
-        load_sets(args.catalog, args.embeddings, mode)
+        load_sets(args.catalog, artifacts)
         .filter(
             pl.col("status").is_in(list(RANKED_STATUSES | LOVED_STATUSES))
             | (pl.col("favourites") >= args.min_favourites)
@@ -310,28 +282,12 @@ def build_mode(args, mode: str) -> Path:
         f"{len(strings):,} strings -> {output} "
         f"({raw_size / 1e6:.1f} MB raw, {compressed / 1e6:.1f} MB brotli)"
     )
-    return output
 
 
 def main() -> int:
     args = parse_args()
-    modes = [args.mode] if args.mode else list(read_run(RUNS_DIR / args.version))
-    manifest_path = PROJECT_ROOT / "web/search-catalog.json"
-    manifest = {}
-    version = (RUNS_DIR / args.version).resolve().name
-    for mode in modes:
-        output = build_mode(args, mode)
-        manifest[mode] = {
-            "url": f"https://github.com/token03/bobert/releases/download/search-catalog-{version}/{output.name}",
-            "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-        }
-    if args.mode and manifest_path.exists():
-        previous = json.loads(manifest_path.read_text())
-        manifest = {
-            **{key: value for key, value in previous.items() if key in MODES},
-            **manifest,
-        }
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    for artifacts in run_modes(RUNS_DIR / args.version).values():
+        build_mode(args, artifacts)
     return 0
 
 

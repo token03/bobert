@@ -2,7 +2,6 @@ import argparse
 import hashlib
 import re
 import shutil
-from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -12,17 +11,20 @@ from omegaconf import DictConfig, OmegaConf
 
 from core.artifacts import (
     RunArtifacts,
+    model_config,
     read_index,
-    resolve_artifacts,
-    select_mode,
-    validate_index,
-    write_index,
+    run_artifacts,
+    write_shard,
 )
 from core.model import BobertEncoder
-from core.retrieval import index_retrieval
+from core.retrieval import index_densities
 from scripts.common.collections import is_holdout_set, mode_collections
 from scripts.common.paths import DATA_DIR, PROJECT_ROOT, RUNS_DIR, resolve_path
-from training.adapt import calibrate_adapter, sample_pairs, train_adapter
+from training.adapt import (
+    calibrate_adapter,
+    sample_pairs,
+    train_adapter,
+)
 
 EXPORT_FLUSH_SIZE = 100_000
 INDEX_BATCH_SIZE = 1024
@@ -31,10 +33,12 @@ RUN_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Adapt a run's embeddings contrastively on its mode's collections, "
-        "then on mined pairs when <source>/mined.csv exists"
+        description="Adapt a source run's embeddings contrastively on its mode's "
+        "collections, then on mined pairs when <source>/<mode>/mined.csv exists, "
+        "and write the adapted model and index as a new run"
     )
-    parser.add_argument("version")
+    parser.add_argument("source")
+    parser.add_argument("target")
     parser.add_argument(
         "--mode", choices=("std", "taiko", "catch", "mania"), required=True
     )
@@ -123,20 +127,18 @@ def train_phase(
 
 def main() -> int:
     args = parse_args()
-    if not re.fullmatch(RUN_NAME_PATTERN, args.version):
-        raise ValueError(f"Invalid run name: {args.version}")
+    if not re.fullmatch(RUN_NAME_PATTERN, args.target):
+        raise ValueError(f"Invalid run name: {args.target}")
     config = OmegaConf.load(args.config)
-    base = resolve_artifacts(RUNS_DIR / args.version, args.mode, "base")
-    target = RunArtifacts(base.run, args.mode, "adapted")
-    source_dir = base.directory
-    if target.model.exists() or target.index.exists():
-        raise FileExistsError(f"Adapted artifacts already exist in {target.directory}")
-    mined_csv = resolve_path(args.mined_csv) if args.mined_csv else None
-    if mined_csv is None and (source_dir / "mined.csv").exists():
-        mined_csv = source_dir / "mined.csv"
-    source_metadata = validate_index(base.index, base.model)
-    if source_metadata.get("adapter") is not None:
+    source = run_artifacts(RUNS_DIR / args.source, args.mode)
+    target = RunArtifacts(RUNS_DIR / args.target, args.mode)
+    if target.model.exists():
+        raise FileExistsError(f"{target.directory} already has a model")
+    if model_config(source.model)["model_args"]["adapter"] is not None:
         raise ValueError("source run is already adapted")
+    mined_csv = resolve_path(args.mined_csv) if args.mined_csv else None
+    if mined_csv is None and (source.directory / "mined.csv").exists():
+        mined_csv = source.directory / "mined.csv"
     device = torch.device(
         args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -145,18 +147,16 @@ def main() -> int:
         torch.set_float32_matmul_precision("high")
     torch.manual_seed(config.seed)
 
-    source = read_index(base.index, with_density=False)
-    embeddings = source.vectors()
-    id_to_index = {
-        int(beatmap_id): index for index, beatmap_id in enumerate(source.ids)
-    }
-    collections = load_collections(id_to_index, source_metadata["mode"])
+    index = read_index(source, with_densities=False)
+    embeddings = index.vectors()
+    id_to_index = {int(beatmap_id): row for row, beatmap_id in enumerate(index.ids)}
+    collections = load_collections(id_to_index, args.mode)
     adapter = train_phase(
         embeddings, collections, config.collections, config.seed, device
     )
     adapter_metadata = {
         "type": "linear",
-        "source": f"{args.version}/{args.mode}/base",
+        "source": f"{args.source}/{args.mode}",
         "config": OmegaConf.to_container(config.collections),
         "seed": config.seed,
         "calibration": calibrate_adapter(adapter, embeddings, config.seed),
@@ -180,34 +180,20 @@ def main() -> int:
             **stats,
             "config": OmegaConf.to_container(config.mined),
         }
-    metadata = {
-        **source_metadata,
-        "generated_at": datetime.now(UTC).isoformat(),
-        "adapter": adapter_metadata,
-    }
-    metadata.pop("retrieval", None)
-    model = BobertEncoder.from_pretrained(base.model, torch.device("cpu"))
-    with torch.no_grad():
-        model.adapter.proj.weight.copy_(adapter.proj.weight.detach().cpu())
+    adapter = adapter.cpu()
+
+    model = BobertEncoder.from_pretrained(source.model, torch.device("cpu"))
+    model.adapter = adapter
     model.model_args["adapter"] = adapter_metadata
     model.save_pretrained(target.model)
-    shutil.copy2(base.config, target.config)
-    write_index(
-        target.index,
-        source.ids,
-        embeddings,
-        adapter.transform,
-        metadata,
-        model=target.model,
-        batch_size=EXPORT_FLUSH_SIZE,
-    )
-    index_retrieval(
-        str(target.index),
-        str(target.model),
-        args.device,
-        INDEX_BATCH_SIZE,
-    )
-    select_mode(base.run, args.mode, "adapted")
+    shutil.copy2(source.config, target.config)
+    adapted = np.empty_like(embeddings)
+    for start in range(0, len(embeddings), EXPORT_FLUSH_SIZE):
+        stop = start + EXPORT_FLUSH_SIZE
+        adapted[start:stop] = adapter.transform(embeddings[start:stop])
+    write_shard(target, index.ids, adapted)
+    del adapted
+    index_densities(target, args.device, INDEX_BATCH_SIZE)
     print(f"Saved adapted artifacts to {target.directory}")
     return 0
 

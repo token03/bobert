@@ -1,5 +1,4 @@
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
@@ -21,34 +20,10 @@ from .modes import MODES
 from .osu import parse_osu_bytes
 
 
-@dataclass(frozen=True, slots=True)
-class EmbeddingTransform:
-    means: np.ndarray
-
-    def __post_init__(self) -> None:
-        means = np.asarray(self.means, dtype=np.float32)
-        if means.ndim != 2:
-            raise ValueError("layer means must be a two-dimensional array")
-        object.__setattr__(self, "means", means)
-
-    def apply(self, embeddings: np.ndarray) -> np.ndarray:
-        values = np.asarray(embeddings, dtype=np.float32)
-        single = values.ndim == 2
-        values = np.array(values[None] if single else values, copy=True)
-        if values.ndim != 3 or values.shape[1:] != self.means.shape:
-            raise ValueError("layer embeddings do not match fitted layer means")
-        values /= np.maximum(np.linalg.norm(values, axis=-1, keepdims=True), 1e-12)
-        values -= self.means
-        values /= np.maximum(np.linalg.norm(values, axis=-1, keepdims=True), 1e-12)
-        pooled = values.mean(axis=1)
-        pooled /= np.maximum(np.linalg.norm(pooled, axis=-1, keepdims=True), 1e-12)
-        return pooled[0] if single else pooled
-
-
 class EmbeddingAdapter(nn.Module):
-    def __init__(self, d_model: int):
+    def __init__(self, dim: int):
         super().__init__()
-        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.proj = nn.Linear(dim, dim, bias=False)
         nn.init.eye_(self.proj.weight)
 
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
@@ -126,6 +101,9 @@ class BobertEncoder(nn.Module):
             ]
         )
         self.final_norm = RMSNorm(d_model)
+        self.register_buffer(
+            "layer_means", torch.zeros(len(self.global_attention_layers), d_model)
+        )
         self.adapter = EmbeddingAdapter(d_model)
         self.rotary_emb = RotaryEmbedding(
             dim=d_model // n_heads, cache_max_seq_len=max_seq_len
@@ -152,9 +130,12 @@ class BobertEncoder(nn.Module):
         return model.to(device).eval()
 
     def to_inference(self, device: torch.device) -> Self:
-        if device.type == "cuda":
-            return self.to(device=device, dtype=torch.bfloat16).eval()
         model = self.to(device=device, dtype=torch.float32).eval()
+        if device.type == "cuda":
+            for child in model.children():
+                if child is not model.adapter:
+                    child.to(torch.bfloat16)
+            return model
         with torch.no_grad():
             for tensor in (model.rotary_emb.freqs, model.rotary_emb.cached_freqs):
                 tensor.copy_(tensor.bfloat16().float())
@@ -279,10 +260,15 @@ class BobertEncoder(nn.Module):
         )
         return torch.stack(global_embeddings)
 
-    def transform(
-        self, embeddings: np.ndarray, transform: EmbeddingTransform
-    ) -> np.ndarray:
-        return self.adapter.transform(transform.apply(embeddings))
+    def pool(self, layers: torch.Tensor) -> torch.Tensor:
+        layers = F.normalize(layers.float(), dim=-1)
+        layers = F.normalize(layers - self.layer_means[:, None], dim=-1)
+        return self.adapter(F.normalize(layers.mean(0), dim=-1))
+
+    def embed(
+        self, packed_vectors: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int
+    ) -> torch.Tensor:
+        return self.pool(self.embed_packed(packed_vectors, cu_seqlens, max_seqlen))
 
     def embed_osu_bytes(
         self, content: bytes, beatmap_id: int | None = None
@@ -303,8 +289,8 @@ class BobertEncoder(nn.Module):
         length = vectors.shape[0]
         cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device=device)
         with torch.inference_mode():
-            embeddings = self.embed_packed(vectors, cu_seqlens, length)
-        return embeddings[:, 0].float().cpu().numpy().astype(np.float32)
+            embedding = self.embed(vectors, cu_seqlens, length)
+        return embedding[0].cpu().numpy()
 
 
 class BobertForPretraining(nn.Module):

@@ -6,7 +6,6 @@ import random
 import sqlite3
 import threading
 import time
-from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isnan
@@ -19,36 +18,28 @@ import torch
 
 from core import retrieval
 from core.artifacts import (
-    Labels,
     RunArtifacts,
     from_bfloat16,
-    index_id,
     read_index,
+    read_labels,
     to_bfloat16,
-    unit_rows,
     validate_run,
 )
-from core.model import BobertEncoder, EmbeddingTransform
+from core.model import BobertEncoder
 from core.modes import MODES
 
 RUN_DIR = Path(os.getenv("BOBERT_RUN_DIR", "/app/runs/current"))
 DATA_DIR = Path(os.getenv("BOBERT_DATA_DIR", "/app/data"))
 CACHE_DB = Path(os.getenv("BOBERT_CACHE_DB", "/app/cache/runtime.sqlite"))
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
-BEATMAPSETS_PATH = DATA_DIR / "beatmapsets.parquet"
 STRAINS_PATH = DATA_DIR / "strains.parquet"
 FILTERED_SCORE_THRESHOLD = 0.1
+COPY_SIMILARITY = 0.95
+COPY_CANDIDATES = 50
 DEFAULT_COUNTS = (15, 40, 30, 15)
 DEFAULT_ERA_STARTS = (2018, 2021, 2023)
 DEFAULT_FAVOURITE_PERCENTILE = 0.75
 DEFAULT_MIN_FAVOURITES = 150
-MAX_GROUPS = 6
-PLAYS_PER_GROUP = 12
-MIN_GROUP_SIZE = 3
-GROUP_ITERATIONS = 30
-SPEED_MODS = {"DT": "fast", "NC": "fast", "HT": "slow", "DC": "slow"}
-NAMED_MODS = ("EZ", "HT", "HD", "HR", "DT", "FL")
-MOD_ALIASES = {"NC": "DT", "DC": "HT"}
 RANKED_STATUS_VALUES = {"1", "2", "3", "4", "ranked", "approved", "qualified", "loved"}
 STATUS_GROUPS = {
     "ranked": {"1", "2", "3", "ranked", "approved", "qualified"},
@@ -99,57 +90,6 @@ def mean_embedding(embeddings: list[np.ndarray]) -> np.ndarray:
     if not np.isfinite(combined).all() or not np.isfinite(norm) or norm <= 1e-12:
         raise ValueError("combined embedding is invalid")
     return np.asarray(combined / norm, dtype=np.float32)
-
-
-def group_embeddings(embeddings: np.ndarray) -> list[list[int]]:
-    vectors = unit_rows(np.asarray(embeddings, dtype=np.float32))
-    count = min(MAX_GROUPS, max(1, len(vectors) // PLAYS_PER_GROUP))
-    centroids = vectors[[int(np.argmax(vectors @ vectors.mean(axis=0)))]]
-    while len(centroids) < count:
-        farthest = int(np.argmin((vectors @ centroids.T).max(axis=1)))
-        centroids = np.vstack([centroids, vectors[farthest]])
-    previous = None
-    for _ in range(GROUP_ITERATIONS):
-        labels = np.argmax(vectors @ centroids.T, axis=1)
-        sizes = np.bincount(labels, minlength=len(centroids))
-        if len(centroids) > 1 and sizes.min() < MIN_GROUP_SIZE:
-            centroids = np.delete(centroids, int(sizes.argmin()), axis=0)
-            continue
-        if np.array_equal(labels, previous):
-            break
-        previous = labels
-        centroids = unit_rows(
-            np.stack(
-                [
-                    vectors[labels == group].mean(axis=0)
-                    for group in range(len(centroids))
-                ]
-            )
-        )
-    labels = np.argmax(vectors @ centroids.T, axis=1)
-    groups = [
-        np.flatnonzero(labels == group).tolist() for group in range(len(centroids))
-    ]
-    return sorted((group for group in groups if group), key=len, reverse=True)
-
-
-def play_speed(mods: list[str]) -> str:
-    return next((SPEED_MODS[mod] for mod in mods if mod in SPEED_MODS), "normal")
-
-
-def mods_name(plays: list[list[str]]) -> str:
-    counts = Counter(
-        mod for mods in plays for mod in {MOD_ALIASES.get(mod, mod) for mod in mods}
-    )
-    shared = [mod for mod in NAMED_MODS if 2 * counts[mod] >= len(plays)]
-    return "".join(shared).lower() or "nm"
-
-
-def merge_named(groups: list[tuple[str, list[int]]]) -> list[tuple[str, list[int]]]:
-    merged: dict[str, list[int]] = {}
-    for name, ids in groups:
-        merged.setdefault(name, []).extend(ids)
-    return list(merged.items())
 
 
 class SQLiteCache:
@@ -268,9 +208,9 @@ class Catalog:
 class Runtime:
     def __init__(self, artifacts: RunArtifacts, catalog: Catalog):
         self.mode = artifacts.mode
-        index = read_index(artifacts.index, model=artifacts.model)
+        index = read_index(artifacts)
         self.labels = (
-            Labels(artifacts.labels, index.metadata)
+            read_labels(artifacts.labels, index.model_sha256)
             if artifacts.labels.exists()
             else None
         )
@@ -278,15 +218,9 @@ class Runtime:
         self.static_embeddings = np.ascontiguousarray(index.embeddings)
         self.static_embeddings.flags.writeable = False
         self.static_penalty = np.negative(
-            retrieval.density_term(
-                index.densities, float(index.metadata["retrieval"]["lambda"])
-            ),
-            dtype=np.float32,
+            retrieval.density_term(index.densities), dtype=np.float32
         )
         self.static_penalty.flags.writeable = False
-        self.transform = EmbeddingTransform(
-            np.asarray(index.metadata["layer_means"], dtype=np.float32)
-        )
         self.embedding_dim = self.static_embeddings.shape[1]
         self.static_index = {
             beatmap_id: index for index, beatmap_id in enumerate(self.static_ids)
@@ -298,7 +232,7 @@ class Runtime:
         defaults = (
             beatmaps.filter(
                 pl.col("status").is_in(["1", "4"]),
-                pl.col("mode") == MODES[index.metadata["mode"]].label,
+                pl.col("mode") == MODES[self.mode].label,
             )
             .sort("difficulty_rating", descending=True)
             .unique("beatmapset_id", keep="first", maintain_order=True)
@@ -450,11 +384,9 @@ class Runtime:
         del beatmaps
         self.inference_semaphore = threading.Semaphore(1)
         cache_path = CACHE_DB.with_name(f"{CACHE_DB.stem}-{self.mode}{CACHE_DB.suffix}")
-        self.cache = SQLiteCache(
-            cache_path, self.embedding_dim, index_id(index.metadata)
-        )
+        self.cache = SQLiteCache(cache_path, self.embedding_dim, index.model_sha256)
 
-        self.model_path = artifacts.model
+        self.artifacts = artifacts
         self._model = None
 
     @property
@@ -462,7 +394,7 @@ class Runtime:
         if self._model is None:
             device = torch.device("cpu")
             self._model = BobertEncoder.from_pretrained(
-                self.model_path, device
+                self.artifacts.model, device
             ).to_inference(device)
         return self._model
 
@@ -509,6 +441,14 @@ class Runtime:
             ), self.static_metadata.row(static_index, named=True)
         return None
 
+    def unindexed(self, beatmap_ids: list[int]) -> list[int]:
+        return [
+            beatmap_id
+            for beatmap_id in beatmap_ids
+            if beatmap_id not in self.static_index
+            and self.cache.get(beatmap_id) is None
+        ]
+
     def cached_embedding(
         self, beatmap_id: int
     ) -> tuple[np.ndarray, dict[str, Any]] | None:
@@ -526,30 +466,11 @@ class Runtime:
         self.validate_source(beatmap_id, metadata)
         with self.inference_semaphore:
             raw = self.model.embed_osu_bytes(content, beatmap_id=beatmap_id)
-        transformed = from_bfloat16(to_bfloat16(self._transform(raw)))
-        self.cache.upsert(beatmap_id, transformed, metadata)
-        return transformed
-
-    def _transform(self, vector: np.ndarray) -> np.ndarray:
-        vector = np.asarray(vector, dtype=np.float32)
-        if vector.shape != self.transform.means.shape:
-            raise ValueError(f"invalid embedding shape: {vector.shape}")
-        transformed = self.model.transform(vector, self.transform)
-        if (
-            transformed.shape != (self.embedding_dim,)
-            or not np.isfinite(transformed).all()
-        ):
-            raise ValueError("embedding transform returned an invalid vector")
-        return transformed
-
-    def summary(self, beatmap_id: int) -> dict[str, Any]:
-        static_index = self.static_index.get(beatmap_id)
-        if static_index is not None:
-            metadata = self.static_metadata.row(static_index, named=True)
-        else:
-            cached = self.cache.get(beatmap_id)
-            metadata = cached.metadata if cached is not None else {}
-        return self.public_summary(beatmap_id, metadata)
+        if not np.isfinite(raw).all():
+            raise ValueError(f"beatmap {beatmap_id} produced an invalid embedding")
+        embedding = from_bfloat16(to_bfloat16(raw))
+        self.cache.upsert(beatmap_id, embedding, metadata)
+        return embedding
 
     def star_rating(self, beatmap_id: int) -> float | None:
         index = int(np.searchsorted(self.strain_ids, beatmap_id))
@@ -573,6 +494,7 @@ class Runtime:
         source_metadata: list[dict[str, Any]],
         top_k: int,
         filters: Any,
+        distinct: bool,
     ) -> list[dict[str, Any]]:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
@@ -584,6 +506,7 @@ class Runtime:
         min_month = month_start_us(filters.min_date)
         max_month = month_end_exclusive_us(filters.max_date)
         eligible = ~np.isin(self.static_id_values, source_ids)
+        eligible &= self.static_set_ids != -1
         if filters.exclude_same_set and source_set_ids:
             eligible &= ~np.isin(self.static_set_ids, source_set_ids)
         for column, minimum, maximum in (
@@ -644,7 +567,8 @@ class Runtime:
                 ranking_scores[self.static_set_order], self.static_set_starts
             )
             available_groups = np.flatnonzero(np.isfinite(best_scores))
-        result_count = min(top_k, len(available_groups))
+        candidate_count = top_k + COPY_CANDIDATES if distinct else top_k
+        result_count = min(candidate_count, len(available_groups))
         if result_count < len(available_groups):
             selected = np.argpartition(best_scores[available_groups], -result_count)[
                 -result_count:
@@ -673,6 +597,12 @@ class Runtime:
                 tied = np.flatnonzero(group_scores == best_scores[group])
                 selected_indices.append(group_indices[tied[-1]])
             selected_scores = ranking_scores[selected_indices]
+        selected_indices = np.asarray(selected_indices)
+        selected_scores = np.asarray(selected_scores)
+        if distinct:
+            kept = self.distinct(query_embedding, selected_indices, top_k)
+            selected_indices = selected_indices[kept]
+            selected_scores = selected_scores[kept]
 
         results = []
         for index, score in zip(selected_indices, selected_scores):
@@ -684,35 +614,22 @@ class Runtime:
             results.append(result)
         return results
 
-    def catalog_detail(self, beatmap_id: int) -> dict[str, Any] | None:
-        beatmap_rows = (
-            pl.scan_parquet(BEATMAPS_PATH)
-            .filter(pl.col("id") == beatmap_id)
-            .limit(1)
-            .collect()
-        )
-        beatmap = beatmap_rows.row(0, named=True) if beatmap_rows.height else None
-        if beatmap is None:
-            cached = self.cache.get(beatmap_id)
-            if cached is None:
-                return None
-            beatmap = {"id": beatmap_id, **cached.metadata}
-        stars = self.star_rating(beatmap_id)
-        if stars is not None:
-            beatmap["difficulty_rating"] = stars
-        beatmapset_id = metadata_set_id(beatmap)
-        beatmapsets = pl.scan_parquet(BEATMAPSETS_PATH)
-        set_rows = (
-            beatmapsets.filter(pl.col("beatmap_id") == beatmap_id).limit(1).collect()
-        )
-        if not set_rows.height and beatmapset_id is not None:
-            set_rows = (
-                beatmapsets.filter(pl.col("beatmapset_id") == beatmapset_id)
-                .limit(1)
-                .collect()
-            )
-        beatmapset = set_rows.row(0, named=True) if set_rows.height else None
-        return {"beatmap": json_value(beatmap), "beatmapset": json_value(beatmapset)}
+    def distinct(
+        self, query_embedding: np.ndarray, indices: np.ndarray, top_k: int
+    ) -> list[int]:
+        embeddings = from_bfloat16(self.static_embeddings[indices])
+        copies_query = embeddings @ query_embedding >= COPY_SIMILARITY
+        ranked = self.static_status_groups["ranked"][indices]
+        kept: list[int] = []
+        for position in sorted(range(len(indices)), key=lambda i: not ranked[i]):
+            if copies_query[position]:
+                continue
+            if kept and (embeddings[kept] @ embeddings[position]).max() >= (
+                COPY_SIMILARITY
+            ):
+                continue
+            kept.append(position)
+        return sorted(kept)[:top_k]
 
 
 class RuntimeRegistry:

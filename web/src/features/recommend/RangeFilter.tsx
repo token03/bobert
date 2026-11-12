@@ -88,16 +88,28 @@ function formatRange(value: Range, config: RangeFilterConfig) {
   return `${config.formatValue(min)}–${config.formatValue(max)}`
 }
 
-function sliderPercent(value: number, config: RangeFilterConfig) {
-  return `${config.toSliderValue(value) / sliderResolution * 100}%`
+function toSlider(value: number, config: RangeFilterConfig) {
+  return sliderResolution * (clamp(value, config) - config.min) / (config.max - config.min)
 }
 
-function binCounts(config: RangeFilterConfig, histogram: CatalogHistogram) {
-  const counts = new Array<number>(config.bins.length - 1).fill(0)
+function fromSlider(position: number, config: RangeFilterConfig) {
+  return config.min + position / sliderResolution * (config.max - config.min)
+}
+
+function sliderPercent(value: number, config: RangeFilterConfig) {
+  return `${toSlider(value, config) / sliderResolution * 100}%`
+}
+
+function binEdges(config: RangeFilterConfig) {
+  return Array.from({ length: Math.round((config.max - config.min) / config.binWidth) + 1 }, (_, index) => config.min + index * config.binWidth)
+}
+
+function binCounts(edges: number[], histogram: CatalogHistogram) {
+  const counts = new Array<number>(edges.length - 1).fill(0)
   let bin = 0
   histogram.counts.forEach((count, bucket) => {
     const value = bucket * histogram.resolution + 1e-9
-    while (bin < counts.length - 1 && value >= config.bins[bin + 1]) bin++
+    while (bin < counts.length - 1 && value >= edges[bin + 1]) bin++
     counts[bin] += count
   })
   return counts
@@ -123,7 +135,7 @@ export function RangeFilter({ mode, config, min, max, onValueCommit }: RangeFilt
   }
 
   function snap(position: number) {
-    return clamp(roundTo(config.fromSliderValue(position), config.step), config)
+    return clamp(roundTo(fromSlider(position, config), config.step), config)
   }
 
   function stepThumb(event: KeyboardEvent<HTMLInputElement>, index: 0 | 1) {
@@ -174,7 +186,7 @@ export function RangeFilter({ mode, config, min, max, onValueCommit }: RangeFilt
         <Slider.Root
           className={styles['range-slider']}
           data-active={active || undefined}
-          value={value.map(config.toSliderValue)}
+          value={value.map((bound) => toSlider(bound, config))}
           min={0}
           max={sliderResolution}
           step={1}
@@ -270,10 +282,11 @@ type HistogramProps = {
 }
 
 function Histogram({ config, histogram, value, active, onSelect }: HistogramProps) {
-  const counts = histogram ? binCounts(config, histogram) : null
+  const edges = binEdges(config)
+  const counts = histogram ? binCounts(edges, histogram) : null
   const total = counts ? counts.reduce((sum, count) => sum + count, 0) : 0
   const peak = counts ? Math.max(1, ...counts) : 1
-  const last = config.bins.length - 2
+  const last = edges.length - 2
   const [min, max] = value
 
   function select(event: MouseEvent<HTMLButtonElement>, low: number, high: number) {
@@ -288,12 +301,12 @@ function Histogram({ config, histogram, value, active, onSelect }: HistogramProp
 
   return (
     <div className={styles['range-histogram']} data-ready={counts !== null || undefined}>
-      {config.bins.slice(0, -1).map((low, index) => {
-        const high = index === last ? config.max : config.bins[index + 1]
+      {edges.slice(0, -1).map((low, index) => {
+        const high = edges[index + 1]
         const inRange = active && (min === max ? low <= min && (min < high || index === last) : low < max && high > min)
         const count = counts?.[index] ?? 0
         const range = `${config.formatTick(low)}–${config.formatTick(high)}${index === last && config.overflowMax ? '+' : ''}`
-        const name = config.binLabels ? `${config.binLabels[index]} (${range})` : `${range}${config.unit ? ` ${config.unit}` : ''}`
+        const name = `${range}${config.unit ? ` ${config.unit}` : ''}`
         const share = total ? `${(count / total * 100).toFixed(count / total < 0.01 ? 1 : 0)}%` : ''
         return (
           <button

@@ -7,7 +7,7 @@ const catalogs = new Map<string, Promise<SearchCorpus>>()
 function loadCorpus(mode: string): Promise<SearchCorpus> {
   let catalog = catalogs.get(mode)
   if (!catalog) {
-    catalog = fetch(`/search-${mode}.bin`).then(async (response) => {
+    catalog = fetch(`/api/search/${mode}`).then(async (response) => {
       if (!response.ok) throw new Error('Missing search artifact')
       return decodeCorpus(await response.arrayBuffer())
     })

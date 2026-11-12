@@ -1,7 +1,6 @@
 import argparse
-from datetime import UTC, datetime
+from collections.abc import Collection
 from functools import partial
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -10,18 +9,22 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from core.artifacts import (
-    resolve_artifacts,
-    write_index,
+    RunArtifacts,
+    index_ids,
+    load_model,
+    run_artifacts,
+    save_model,
+    write_shard,
 )
-from core.dataset import (
-    FeatureStore,
-    LengthBucketBatchSampler,
-    feature_path,
-    select_beatmaps,
-)
-from core.model import BobertEncoder, EmbeddingTransform
-from core.retrieval import index_retrieval
+from core.dataset import FeatureStore, LengthBucketBatchSampler, feature_path
+from core.model import BobertEncoder
+from core.retrieval import index_densities
+from scripts.common.io import read_ids
 from scripts.common.paths import PROJECT_ROOT, RUNS_DIR, resolve_path
+
+CALIBRATION_MAPS = 100_000
+SEED = 42
+DEVICE = torch.device("cuda")
 
 
 class ExportDataset(Dataset):
@@ -54,186 +57,119 @@ def collate_export(batch, model: BobertEncoder):
     )
 
 
-def find_model(
-    path: str | Path | None = None,
-    version: str | None = None,
-    mode: str = "std",
-    variant: str | None = None,
-) -> Path:
-    model_path = (
-        resolve_path(path)
-        if path
-        else resolve_artifacts(RUNS_DIR / (version or "current"), mode, variant).model
-    )
-    if not model_path.is_file():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-    return model_path
+def load_encoder(artifacts: RunArtifacts) -> BobertEncoder:
+    model = BobertEncoder.from_pretrained(artifacts.model, DEVICE).to_inference(DEVICE)
+    model.compile_encoder()
+    return model
 
 
-def load_model(model_path: Path, device: torch.device, quiet: bool = False):
-    model = BobertEncoder.from_pretrained(model_path, device)
-    if not quiet:
-        print(f"Loaded {model.mode.name} model: {model_path}")
-    return model.to_inference(device)
-
-
-def export_embeddings(
-    config_path: Path,
-    model_path: Path,
-    output_path: Path,
-    limit: int | None,
-    min_sr: float | None,
-    batch_size: int,
-    flush_size: int,
-    seed: int,
-    device_name: str | None,
-    density_batch_size: int,
-    quiet: bool = False,
+def batches(
+    model: BobertEncoder, store: FeatureStore, positions: np.ndarray, batch_size: int
 ):
-    config = OmegaConf.load(config_path)
-    device = torch.device(
-        device_name or ("cuda" if torch.cuda.is_available() else "cpu")
-    )
-    model = load_model(model_path, device, quiet)
-    mode = model.mode.name
-    max_seq_len = model.max_seq_len
-    features = resolve_path(feature_path(config.data.features_dir, mode))
-    store = FeatureStore(features, mode)
-    positions, _ = select_beatmaps(
-        store,
-        dataset_seed=seed,
-        strains_path=resolve_path(config.data.strains_path),
-        strain_seq_len=max_seq_len,
-        sample_size=limit,
-        min_sr=min_sr,
-    )
-    if not quiet:
-        print(f"Embedding {len(positions):,} beatmaps from {features}")
-    with torch.inference_mode():
-        model.rotary_emb(torch.arange(max_seq_len, device=device), seq_len=max_seq_len)
-    if device.type == "cuda" and config.runtime.compile_model:
-        model.compile_encoder(mode=config.runtime.compile_mode)
-
-    layer_count = len(model.global_attention_layers)
-    model_dtype = next(model.parameters()).dtype
-    layer_total = np.zeros((layer_count, model.d_model), dtype=np.float64)
-    layer_embeddings = np.empty(
-        (len(positions), layer_count, model.d_model), dtype=np.float16
-    )
-    embedded_ids = np.empty(len(positions), dtype=np.int64)
-    lengths = np.minimum(store.lengths[positions], max_seq_len)
+    lengths = np.minimum(store.lengths[positions], model.max_seq_len)
     loader = DataLoader(
-        ExportDataset(store, positions, max_seq_len),
+        ExportDataset(store, positions, model.max_seq_len),
         batch_sampler=LengthBucketBatchSampler(
             lengths.tolist(),
             batch_size=None,
             max_tokens=batch_size * round(float(lengths.mean())),
-            seed=seed,
+            seed=SEED,
             shuffle=False,
         ),
-        pin_memory=device.type == "cuda",
+        pin_memory=True,
         collate_fn=partial(collate_export, model=model),
     )
-    saved = 0
+    dtype = next(model.parameters()).dtype
     with torch.inference_mode():
         for beatmap_ids, vectors, cu_seqlens, max_seqlen in tqdm(
-            loader, desc="Embedding", disable=quiet
+            loader, desc="Embedding"
         ):
-            embeddings = model.embed_packed(
-                vectors.to(device=device, dtype=model_dtype, non_blocking=True),
-                cu_seqlens.to(device, non_blocking=True),
-                max_seqlen,
+            yield (
+                beatmap_ids.numpy(),
+                (
+                    vectors.to(device=DEVICE, dtype=dtype, non_blocking=True),
+                    cu_seqlens.to(DEVICE, non_blocking=True),
+                    max_seqlen,
+                ),
             )
-            stored = embeddings.permute(1, 0, 2).half().cpu().numpy()
-            stop = saved + len(stored)
-            layer_embeddings[saved:stop] = stored
-            embedded_ids[saved:stop] = beatmap_ids.numpy()
-            normalized = stored.astype(np.float32)
-            normalized /= np.maximum(
-                np.linalg.norm(normalized, axis=-1, keepdims=True), 1e-12
-            )
-            layer_total += normalized.sum(axis=0, dtype=np.float64)
-            saved = stop
-    if saved == 0:
-        raise RuntimeError("No beatmaps loaded for export")
 
-    transform = EmbeddingTransform((layer_total / saved).astype(np.float32))
-    metadata = {
-        "generated_at": datetime.now(UTC).isoformat(),
-        "mode": mode,
-        "dataset": features.name,
-        "min_sr": min_sr,
-        "limit": limit,
-        "seed": seed,
-        "pooling": "layer_centered_mean",
-        "centered": True,
-        "layers": sorted(model.global_attention_layers),
-        "layer_means": transform.means.tolist(),
-        "adapter": model.model_args.get("adapter"),
-    }
-    write_index(
-        output_path,
-        embedded_ids[:saved],
-        layer_embeddings[:saved],
-        lambda values: model.transform(values, transform),
-        metadata,
-        model=model_path,
-        batch_size=flush_size,
-        quiet=quiet,
+
+def calibrate(artifacts: RunArtifacts, store: FeatureStore, batch_size: int) -> None:
+    model = load_encoder(artifacts)
+    positions = np.random.default_rng(SEED).choice(
+        len(store), min(CALIBRATION_MAPS, len(store)), replace=False
     )
-    del layer_embeddings
-    index_retrieval(
-        str(output_path), str(model_path), device_name, density_batch_size, quiet
+    total = torch.zeros_like(model.layer_means, dtype=torch.float64)
+    for _, inputs in batches(model, store, np.sort(positions), batch_size):
+        layers = torch.nn.functional.normalize(
+            model.embed_packed(*inputs).float(), dim=-1
+        )
+        total += layers.sum(dim=1, dtype=torch.float64)
+    state, args = load_model(artifacts.model)
+    state["layer_means"] = (total / len(positions)).float()
+    save_model(artifacts.model, state, args)
+    print(f"Calibrated layer means on {len(positions):,} maps")
+
+
+def embed(
+    artifacts: RunArtifacts, refresh: Collection[int] = (), batch_size: int = 64
+) -> int:
+    config = OmegaConf.load(PROJECT_ROOT / "configs/pretrain.yaml")
+    store = FeatureStore(
+        resolve_path(feature_path(config.data.features_dir, artifacts.mode)),
+        artifacts.mode,
     )
-    if not quiet:
-        print(f"Saved {saved:,} embeddings to {output_path}")
+    state, _ = load_model(artifacts.model)
+    if not state["layer_means"].any():
+        calibrate(artifacts, store, batch_size)
+    embedded = (
+        np.concatenate(index_ids(artifacts)[1])
+        if artifacts.shards()
+        else np.empty(0, dtype=np.int64)
+    )
+    pending = ~np.isin(store.beatmap_ids, embedded) | np.isin(
+        store.beatmap_ids, np.fromiter(refresh, dtype=np.int64)
+    )
+    positions = np.flatnonzero(pending)
+    if not len(positions):
+        print(f"{artifacts.directory} is up to date")
+        return 0
+    model = load_encoder(artifacts)
+    ids = np.empty(len(positions), dtype=np.int64)
+    vectors = np.empty((len(positions), model.d_model), np.float32)
+    saved = 0
+    for beatmap_ids, inputs in batches(model, store, positions, batch_size):
+        stop = saved + len(beatmap_ids)
+        ids[saved:stop] = beatmap_ids
+        vectors[saved:stop] = model.embed(*inputs).cpu().numpy()
+        saved = stop
+    del model
+    torch.cuda.empty_cache()
+    shard = write_shard(artifacts, ids, vectors)
+    del vectors
+    index_densities(artifacts, DEVICE.type)
+    print(f"Wrote {saved:,} embeddings to {shard}")
+    return saved
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export BoBERT embeddings")
-    parser.add_argument("--config", default=str(PROJECT_ROOT / "configs/pretrain.yaml"))
-    parser.add_argument("-v", "--version")
+    parser = argparse.ArgumentParser(
+        description="Embed the maps of a mode that its run has not embedded yet"
+    )
+    parser.add_argument("version")
     parser.add_argument(
         "--mode", choices=("std", "taiko", "catch", "mania"), default="std"
     )
-    parser.add_argument("--variant", choices=("base", "adapted"))
-    parser.add_argument("--model", help="Exported BoBERT safetensors model")
-    parser.add_argument("--output")
-    parser.add_argument("--limit", type=int, help="Random sample size, e.g. 50000")
-    parser.add_argument("--min-sr", type=float)
+    parser.add_argument("--refresh", help="File of beatmap IDs to embed again")
     parser.add_argument(
         "--batch-size",
         type=int,
         default=64,
         help="Target batch size at the mean sequence length",
     )
-    parser.add_argument("--flush-size", type=int, default=100000)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", choices=("cpu", "cuda"))
-    parser.add_argument("--density-batch-size", type=int, default=1024)
-    parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
-    model_path = find_model(args.model, args.version, args.mode, args.variant)
-    export_embeddings(
-        config_path=resolve_path(args.config),
-        model_path=model_path,
-        output_path=resolve_path(
-            args.output
-            or model_path.with_name(
-                model_path.name.replace("model", "embeddings").replace(
-                    ".safetensors", ".parquet"
-                )
-            )
-        ),
-        limit=args.limit,
-        min_sr=args.min_sr,
-        batch_size=args.batch_size,
-        flush_size=args.flush_size,
-        seed=args.seed,
-        device_name=args.device,
-        density_batch_size=args.density_batch_size,
-        quiet=args.quiet,
-    )
+    refresh = read_ids(resolve_path(args.refresh)) if args.refresh else []
+    embed(run_artifacts(RUNS_DIR / args.version, args.mode), refresh, args.batch_size)
 
 
 if __name__ == "__main__":

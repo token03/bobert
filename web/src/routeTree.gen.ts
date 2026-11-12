@@ -11,8 +11,6 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as RecommendationsRouteImport } from './routes/recommendations'
-import { Route as RecentUserIdRouteImport } from './routes/recent.$userId'
-import { Route as TopUserIdRouteImport } from './routes/top.$userId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -24,49 +22,31 @@ const RecommendationsRoute = RecommendationsRouteImport.update({
   path: '/recommendations',
   getParentRoute: () => rootRouteImport,
 } as any)
-const RecentUserIdRoute = RecentUserIdRouteImport.update({
-  id: '/recent/$userId',
-  path: '/recent/$userId',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const TopUserIdRoute = TopUserIdRouteImport.update({
-  id: '/top/$userId',
-  path: '/top/$userId',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/recommendations': typeof RecommendationsRoute
-  '/recent/$userId': typeof RecentUserIdRoute
-  '/top/$userId': typeof TopUserIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/recommendations': typeof RecommendationsRoute
-  '/recent/$userId': typeof RecentUserIdRoute
-  '/top/$userId': typeof TopUserIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/recommendations': typeof RecommendationsRoute
-  '/recent/$userId': typeof RecentUserIdRoute
-  '/top/$userId': typeof TopUserIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/recommendations' | '/recent/$userId' | '/top/$userId'
+  fullPaths: '/' | '/recommendations'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/recommendations' | '/recent/$userId' | '/top/$userId'
-  id: '__root__' | '/' | '/recommendations' | '/recent/$userId' | '/top/$userId'
+  to: '/' | '/recommendations'
+  id: '__root__' | '/' | '/recommendations'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   RecommendationsRoute: typeof RecommendationsRoute
-  RecentUserIdRoute: typeof RecentUserIdRoute
-  TopUserIdRoute: typeof TopUserIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -85,28 +65,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RecommendationsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/recent/$userId': {
-      id: '/recent/$userId'
-      path: '/recent/$userId'
-      fullPath: '/recent/$userId'
-      preLoaderRoute: typeof RecentUserIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/top/$userId': {
-      id: '/top/$userId'
-      path: '/top/$userId'
-      fullPath: '/top/$userId'
-      preLoaderRoute: typeof TopUserIdRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   RecommendationsRoute: RecommendationsRoute,
-  RecentUserIdRoute: RecentUserIdRoute,
-  TopUserIdRoute: TopUserIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

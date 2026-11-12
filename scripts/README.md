@@ -1,128 +1,70 @@
-# Pipeline and development tools
+# Pipeline
 
-Run commands from the repository root with `uv run <command>`. Install the development environment with `uv sync --frozen`; its current target is Linux x86-64, Python 3.12, and CUDA 12.8. Most commands expose `--help`; some acquisition tools are interactive.
+Run commands from the repository root with `uv run <command>`. Each has `--help`.
 
 ```text
-sources → features + strain targets → pretrain → embed → recommend / evaluate
-                                             ↓
-collection data → adaptation pairs → adapt → embed
+sources → features + strains → pretrain → embed → adapt → labels + search → publish → deploy
+                                                   ↑
+                               collection data ────┘
 ```
 
-`core/` implements the encoder and features; `training/` implements learning objectives and data loading. These scripts connect them to files, external sources, and command-line workflows. Shared acquisition, query, and path helpers live in `common/`.
+## Commands
 
-## Command map
-
-Paths below describe the default workspace layout. Check each command's arguments for output overrides and source selection.
-
-| Stage | Command | Inputs | Outputs / effect |
-| --- | --- | --- | --- |
-| Sources | `fetch-beatmaps` | Source IDs and metadata APIs | `data/beatmaps.parquet` |
-| Sources | `sync-beatmaps` | Beatmap catalog, local raw beatmaps, osu! API | Updated `data/beatmaps.parquet`; stale or new IDs in `data/redownload.txt` |
-| Sources | `download-beatmaps` | Beatmap catalog and download sources | Local `.osu.zst` files under `data/beatmaps/` |
-| Sources | `import-beatmaps` | Local tar archive of `.osu` files | Imported beatmap files |
-| Sources | `fetch-beatmapsets` | Beatmap catalog and metadata APIs | `data/beatmapsets.parquet` |
-| Sources | `fetch-mapper` | Mapper selection and osu! API | Updates beatmap catalog and fetch progress |
-| Sources | `shard-beatmaps` | Local beatmap files | Beatmap archive shards |
-| Sources | `compress-beatmaps` | Existing `.osu` files | Verified `.osu.zst` copies; optional verified removal of originals |
-| Collections | `fetch-collection-vertices` | Collection sources | `data/collections/vertices.parquet` |
-| Collections | `fetch-collection-edges` | Collection vertices and source access | `data/collections/edges.parquet` |
-| Collections | `fetch-tournaments` | osu!collector tournament API | `data/collections/tournaments.parquet` |
-| Dataset | `build-features` | Raw beatmaps under `data/beatmaps/` | `{std,taiko,catch,mania}_features.bin` under `data/features/` |
-| Dataset | `build-strains` | std features, raw beatmaps, config, parsecore | `data/strains.parquet` |
-| Dataset | `build-dataset` | Raw beatmaps under `data/beatmaps/` | Parsed std hit objects as parquet under `data/dataset/`, for exploration; training does not read it |
-| Model | `pretrain` | Features and strains of one mode, `configs/pretrain.yaml` | Run config, checkpoints, exported `model.safetensors` |
-| Model | `export-model` | Training checkpoint and matching config | Inference `model.safetensors` |
-| Model | `embed` | Exported encoder and features of its mode | `embeddings.parquet`, including pooling metadata and density index |
-| Model | `adapt` | Source run, collections of its mode, `configs/adapt.yaml` | Target run with trained linear adapter |
-| Model | `build-labels` | Selected std model, index and features, collection names, tournament DT slots (GPU) | `labels.safetensors`: DT/HT embedding translators and the collection-word classifier that names play clusters; published with the run when present |
-| Release | `fetch-run` | Hugging Face repository and release tag | Run under `runs/`, catalogs under `data/`; updates `runs/current` |
-| Release | `publish-run` | Run, catalogs, Hugging Face write token | Model card, artifacts, and immutable release tag |
-| Evaluation | `evaluate` | Run embeddings, catalogs, evaluation labels | Per-run evaluation JSON and terminal report |
-| Evaluation | `recommend` | Source maps / mappers and embedding index | Ranked recommendations |
-| Evaluation | `mine` | Retrieval inputs and evaluation data | Mined retrieval examples |
-| Evaluation | `umap` | Embeddings and metadata | Visualization coordinates, attributes, and neighbors |
-| Evaluation | `build-eval-graph` | Collection edges, vertices, ngrams, catalogs | Graph embeddings in `data/graph_{mode}.parquet` |
-| Web | `build-search` | Embedding index, beatmap catalog | `web/public/search.bin` client search artifact |
-| Evaluation | `build-eval-ngrams` | Collection vertices and edges | `data/collections/ngrams.txt` |
-| Deployment | `deploy` | Published release tag, SSH configuration | Fetches the release on the server, rebuilds the API, and swaps the run and catalogs |
+| Stage | Command | Output |
+| --- | --- | --- |
+| Update | `update` | Runs sync, import, download, features, strains, embed and search for a run |
+| Sources | `sync-beatmaps` | `data/beatmaps.parquet`; new or changed IDs in `data/redownload.txt` |
+| Sources | `import-beatmaps` | Raw maps from a local or streamed `.tar` archive |
+| Sources | `download-beatmaps` | Raw maps under `data/beatmaps/` |
+| Sources | `fetch-beatmapsets` | `data/beatmapsets.parquet` |
+| Collections | `fetch-collection-vertices`, `fetch-collection-edges` | `data/collections/` |
+| Dataset | `build-features` | `data/features/{mode}_features.bin` |
+| Dataset | `build-strains` | `data/strains.parquet` |
+| Model | `pretrain` | A run with `model.safetensors` and `training.yaml` |
+| Model | `embed` | A new shard of the maps the run lacks, and densities |
+| Model | `adapt` | A new run with the adapted model and index |
+| Model | `build-labels` | `labels.safetensors`, which names play groups (std) |
+| Release | `build-search` | `search.bin` per mode |
+| Release | `publish` | Hugging Face commit and immutable tag |
+| Release | `deploy` | Server switched to a published tag |
+| Evaluation | `evaluate` | Retrieval report for one or more runs |
+| Evaluation | `mine` | Neighbours one run finds and another misses; `mined.csv` for `adapt` |
 
 ## Credentials
 
-Start with [`.env.example`](../.env.example). Credentials depend on the selected source; local feature building and training do not require network credentials once inputs are available.
-
-| Commands / source | Environment |
+| Commands | `.env` |
 | --- | --- |
-| osu! metadata acquisition, mapper fetching, online recommendation queries | `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` |
-| Beatconnect acquisition routes | `BEATCONNECT_API_TOKEN` |
-| Collection-edge acquisition | Source-specific cookies: `osu_session`, `osu_stats_session`, `session_data`, `xsrf_token` |
+| osu! metadata | `OSU_CLIENT_ID`, `OSU_CLIENT_SECRET` |
+| Beatconnect downloads | `BEATCONNECT_API_TOKEN` |
+| Collection edges | `osu_session`, `osu_stats_session`, `session_data`, `xsrf_token` |
+| `publish` | `HF_TOKEN` with write access |
 | `deploy` | `DEPLOY_SSH_TARGET`, `DEPLOY_REMOTE_ROOT` |
-| Hosted Compose tunnel | `CLOUDFLARE_TUNNEL_TOKEN` |
-| `publish-run` | `HF_TOKEN` (write access); project `.env` takes precedence over the shell |
 
-## Raw beatmaps
+## Data
 
-Downloads, archive imports, and sharding write lossless zstd level-9 files with checksums to `data/beatmaps/{00-99}/{beatmap_id}.osu.zst`. Raw-map readers also accept existing `.osu` files. When both copies exist, discovery and ID lookups prefer the compressed copy, avoiding duplicate feature rows. Rebuild workers decompress one map at a time in memory; no full-corpus extraction is needed. Training and embedding from feature files do not read raw maps.
-
-`sync-beatmaps` keeps the catalog current through beatmapset search, 50 sets per request at the shared 1 request/s limit. It pages through sets updated or ranked since the last sync, plus every pending, WIP and qualified set. Stored unsettled maps that none of these return are looked up by ID to record their new status or deletion. New and changed maps are looked up by ID for guest difficulty owners, which search omits. Maps whose API checksum differs from the catalog are hashed locally; those whose local file also differs go to `data/redownload.txt`, along with new maps. Comparing the hash directly would flag local copies stripped of storyboard events. The first run needs `--since YYYY-MM-DD`; later runs resume from `data/.beatmap_sync.json` with one day of overlap. `--rescan ranked loved` refreshes play and favourite counts across those categories.
-
-```sh
-uv run sync-beatmaps --since 2026-09-01
-uv run download-beatmaps --ids-file data/redownload.txt --force --skip-metadata-fetch
-```
-
-To migrate an existing corpus:
-
-```sh
-uv run compress-beatmaps
-uv run compress-beatmaps --verify-only --remove-originals
-```
-
-The first command retains all originals and verifies every compressed file byte-for-byte. It is resumable and refuses to overwrite a compressed copy that differs from its original. Run a sample feature build before the second command. Removal only starts after the entire corpus passes verification, and each original is verified again immediately before deletion. Do not run downloads, imports, or sharding against the corpus during migration.
-
-## Feature files
-
-`build-features` parses every raw beatmap once and writes one file per mode to `data/features/`. Each map's float16 feature rows, capped at `--max-seq-len`, are stored as one zstd block, followed by an index of beatmap IDs, block offsets, token counts, and parsed object counts. Training and `embed` memory-map the file and decompress maps as they are read, so RAM use does not grow with the corpus. Filters such as star rating, sampling, and the validation split are applied at load time, so changing them needs no rebuild.
-
-Each file also records its feature names and a hash of the feature code. Loading fails if the names differ from the current schema and warns if only the hash differs. Rebuild after changing features. Parse timeouts and errors are logged to `data/features/failures.jsonl`.
-
-On first run, `build-features` compiles `core/osu.py` with mypyc into `~/.cache/bobert/native/`, keyed by the source hash, and falls back to pure Python if compilation fails. Output is the same either way. `--no-compile` skips compilation.
+Raw maps are stored as `data/beatmaps/{00-99}/{id}.osu.zst`. `build-features` writes one memory-mapped file per mode with one zstd block per map. Filters and the validation split apply at load time, so only feature changes need a rebuild. `--update` parses only new maps.
 
 | Mode | Token | Features |
 | --- | --- | --- |
-| std | Hit object | Position, jump, onset timing, slider and spinner duration, slider geometry, and categorical object state ([`core/features.py`](../core/features.py)) |
-| taiko | Hit object | Onset timing, drumroll and swell duration, don/kat/drumroll/swell, big notes |
-| catch | Hit object | Horizontal position, log movement distance and direction from the previous exit, onset timing, juice stream duration, end offset and x-only curve residuals, banana duration |
-| mania | Event: a time where any note starts or any hold ends | Onset timing, key count, and a state per column (empty, tap, hold head, held, or release) for up to 10 keys. Columns are placed in 11 hand-relative slots, counted outward from the centre for each hand plus a centre slot, so a column's slot depends on its position relative to the middle rather than its index |
+| std | Hit object | Position, jump, timing, slider and spinner shape ([`core/features.py`](../core/features.py)) |
+| taiko | Hit object | Timing, note type, big notes, drumroll and swell length |
+| catch | Hit object | Position, movement, timing, juice stream and banana shape |
+| mania | Time where a note starts or a hold ends | Timing, key count, and the state of each column in hand-relative slots |
 
-## Training runs
+[`core/modes.py`](../core/modes.py) declares each mode's feature groups, strain targets and loss weights.
 
-[`core/modes.py`](../core/modes.py) declares each mode's tokenizer groups, feature gates, strain targets and loss weights, and augmentations. The tokenizer, masked-reconstruction head, losses, and normalization are generic over it, so every mode trains through the same code. After building `data/features/{mode}_features.bin` (`build-features`) and `data/strains.parquet` (`build-strains`):
+## Runs
 
-```sh
-uv run pretrain --mode std --profile full -v my-run
-uv run embed -v my-run --mode std --variant base
-uv run adapt my-run --mode std
-uv run recommend 767311 -v v15 --mode mania
-uv run evaluate v15 --mode mania --variants base adapted
-```
+`model.safetensors` holds the encoder, pooling means, adapter and normalization, with its config in the header. The first `embed` computes the pooling means. After that, a map's vector depends only on the model and the map, so `embed` appends a shard for missing maps only. A later shard replaces earlier rows of the same map.
 
-`--profile full` trains on all selected maps without validation; `--no-validation` does the same for the `proxy` and `validate` profiles. Other settings are overridden with `--set key=value`. The training runner saves the resolved configuration under `runs/<version>/<mode>/`. Keep it with the checkpoints: exporting a checkpoint requires its matching configuration.
+Start experiments from `configs/pretrain.yaml` and `configs/adapt.yaml`; `configs/local*.yaml` is ignored by Git.
 
-An export stores encoder/adapter weights and feature normalization tensors in `model.safetensors`, with model configuration and the feature schema in its header. `embeddings.parquet` stores normalized vectors as bfloat16, which every reader scores as stored, and carries its mode, corpus-centering statistics, adapter provenance, retrieval settings, and model checksum. The run-level `release.json` selects `base` or `adapted` for each available mode. Adaptation writes `model.a.safetensors`, `embeddings.a.parquet` and `training.a.yaml` alongside the base files, then selects the adapted variant. v15+ uses this layout exclusively. Re-embed after changing the encoder or adapter. Lightning `.ckpt` files remain training checkpoints; the inference loader accepts safetensors only.
-
-Use `configs/pretrain.yaml` and `configs/adapt.yaml` as the starting points for experiments. Local copies named `configs/local*.yaml` are ignored; each run saves its resolved configuration as `training.yaml`. This snapshot is also included in published releases. Use `--mode` with `export-model -v <version>` to select its checkpoint directory.
-
-## Releases
+## Updates and releases
 
 ```sh
-uv run publish-run -v my-run --data-dir data
-uv run --no-default-groups --group serve fetch-run --revision my-run
+uv run update v16 --archive https://data.ppy.sh/2026_11_05_osu_files.tar.bz2
+uv run publish v16 --tag v16.1
+uv run deploy -v v16.1
 ```
 
-Both commands default to `token03/bobert`; override with `--repo` or `BOBERT_HF_REPO`. Publishing uploads the manifest, each mode’s selected model/index pair, and three shared metadata catalogs in one commit and tags that commit. Existing tags cannot be overwritten. Client search binaries are uploaded separately to the `search-catalog-<version>` GitHub release; `build-search` records their URLs and checksums in `web/search-catalog.json`. `fetch-run` resolves a tag to a commit, validates the download, then activates it atomically. Use `--version` for another local run name, `--runs-dir` for a separate runs directory, or `--data-dir` for another catalog directory. Existing run directories are preserved; shared catalogs are overwritten by design.
-
-Run artifacts stay in `runs/<version>/`; catalogs live in the workspace's `data/` directory and are shared across runs.
-
-`deploy -v <tag>` runs on the provisioned server: it pulls the code, rebuilds the API image, downloads that release with the image's parallel Hugging Face downloader, swaps the run and catalogs, and rolls back on a failed health check. It requires the release to be published first and uses `DEPLOY_SSH_TARGET` and `DEPLOY_REMOTE_ROOT`. Per-mode SQLite caches are reset on every switch so container users cannot conflict over stale files. Rollback only needs the previous run directory, which is retained on the server.
-
-For service setup, see the [API guide](../server/README.md). The deployment command updates an existing host; initial provisioning happens separately.
+Hugging Face and the server transfer only changed files. Tags are immutable, so each deploy needs a new one.

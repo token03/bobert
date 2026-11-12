@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from core.artifacts import RunArtifacts, select_mode
+from core.artifacts import RunArtifacts
 from core.model import BobertForPretraining
 from core.modes import MODES
 from scripts.common.paths import (
@@ -96,7 +96,7 @@ def main() -> int:
     args = parse_args()
     config = load_config(args)
     resume_checkpoint = resolve_resume_checkpoint(args, config.data.mode)
-    artifacts = RunArtifacts(RUNS_DIR / args.version, config.data.mode, "base")
+    artifacts = RunArtifacts(RUNS_DIR / args.version, config.data.mode)
     if artifacts.model.exists() and resume_checkpoint is None:
         raise FileExistsError(f"Model already exists: {artifacts.model}")
     pl.seed_everything(config.training.seed, workers=True)
@@ -137,10 +137,8 @@ def main() -> int:
         ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
     )
 
-    model_path = run_dir / "model.safetensors"
-    model.bert.save_pretrained(model_path)
-    select_mode(RUNS_DIR / run_name, config.data.mode, "base")
-    print(f"Exported model: {model_path}")
+    model.bert.save_pretrained(artifacts.model)
+    print(f"Exported model: {artifacts.model}")
 
     print("\nBoBERT pretraining completed!")
     return 0

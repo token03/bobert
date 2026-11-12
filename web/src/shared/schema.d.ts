@@ -38,6 +38,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Login */
+        get: operations["login_api_auth_login_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Login Callback */
+        get: operations["login_callback_api_auth_callback_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Logout */
+        post: operations["logout_api_auth_logout_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Me */
+        get: operations["me_api_me_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/me/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** My Groups */
+        get: operations["my_groups_api_me_groups_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search/{mode}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search Catalog */
+        get: operations["search_catalog_api_search__mode__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/recommend": {
         parameters: {
             query?: never;
@@ -56,15 +158,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/users/{user_id}/plays": {
+    "/api/players/{username}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** User Plays */
-        get: operations["user_plays_api_users__user_id__plays_get"];
+        /** Player Profile */
+        get: operations["player_profile_api_players__username__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/top": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Top Plays */
+        get: operations["top_plays_api_users__user_id__top_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -84,40 +203,6 @@ export interface paths {
         put?: never;
         /** Group Beatmaps */
         post: operations["group_beatmaps_api_beatmaps_groups_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/beatmaps/{beatmap_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Beatmap Detail */
-        get: operations["beatmap_detail_api_beatmaps__beatmap_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/beatmaps/{beatmap_id}/summary": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Beatmap Summary */
-        get: operations["beatmap_summary_api_beatmaps__beatmap_id__summary_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -236,22 +321,26 @@ export interface components {
         /** PlayGroup */
         PlayGroup: {
             /** Label */
-            label: string | null;
+            label: string;
             /** Beatmap Ids */
             beatmap_ids: number[];
         };
-        /** Player */
-        Player: {
+        /** PlayerProfile */
+        PlayerProfile: {
             /** User Id */
             user_id: number;
             /** Username */
             username: string;
             /** Avatar Url */
             avatar_url: string | null;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "std" | "taiko" | "catch" | "mania";
         };
         /** PlaysResponse */
         PlaysResponse: {
-            user: components["schemas"]["Player"];
             /** Plays */
             plays: components["schemas"]["Play"][];
         };
@@ -309,6 +398,11 @@ export interface components {
              */
             top_k: number;
             filters?: components["schemas"]["RecommendFilters"];
+            /**
+             * Distinct
+             * @default false
+             */
+            distinct: boolean;
         };
         /** RecommendResponse */
         RecommendResponse: {
@@ -328,8 +422,6 @@ export interface components {
              * @enum {string}
              */
             cache: "hit" | "miss";
-            /** Label */
-            label: string | null;
             metadata: components["schemas"]["BeatmapSummary"];
         };
         /** ScoredBeatmapSummary */
@@ -385,6 +477,13 @@ export interface components {
             url: string;
             /** Score */
             score: number;
+        };
+        /** Session */
+        Session: {
+            /** User Id */
+            user_id: number;
+            /** Username */
+            username: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -448,6 +547,169 @@ export interface operations {
                     "application/json": {
                         [key: string]: boolean;
                     };
+                };
+            };
+        };
+    };
+    login_api_auth_login_get: {
+        parameters: {
+            query?: {
+                next?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    login_callback_api_auth_callback_get: {
+        parameters: {
+            query: {
+                code: string;
+                state: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    logout_api_auth_logout_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    me_api_me_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+        };
+    };
+    my_groups_api_me_groups_get: {
+        parameters: {
+            query?: {
+                mode?: "std" | "taiko" | "catch" | "mania";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_catalog_api_search__mode__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                mode: "std" | "taiko" | "catch" | "mania";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -517,10 +779,40 @@ export interface operations {
             };
         };
     };
-    user_plays_api_users__user_id__plays_get: {
+    player_profile_api_players__username__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                username: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlayerProfile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    top_plays_api_users__user_id__top_get: {
         parameters: {
             query?: {
-                kind?: "best" | "recent";
                 mode?: "std" | "taiko" | "catch" | "mania";
                 limit?: number;
             };
@@ -572,74 +864,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    beatmap_detail_api_beatmaps__beatmap_id__get: {
-        parameters: {
-            query?: {
-                mode?: "std" | "taiko" | "catch" | "mania";
-            };
-            header?: never;
-            path: {
-                beatmap_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    beatmap_summary_api_beatmaps__beatmap_id__summary_get: {
-        parameters: {
-            query?: {
-                mode?: "std" | "taiko" | "catch" | "mania";
-            };
-            header?: never;
-            path: {
-                beatmap_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BeatmapSummary"];
                 };
             };
             /** @description Validation Error */

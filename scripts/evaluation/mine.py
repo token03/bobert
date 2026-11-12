@@ -10,18 +10,16 @@ from rich.table import Table
 
 from core import retrieval
 from core.modes import MODES
-from scripts.common.mappers import mapper_ids
 from scripts.common.paths import resolve_path
 from scripts.common.query import (
     DEFAULT_METADATA_PATH,
+    STRAINS_PATH,
+    apply_strain_stars,
     extract_beatmap_id,
     load_metadata,
-    metadata_by_id,
-)
-from scripts.evaluation.recommend import (
-    DEFAULT_STRAINS_PATH,
-    apply_strain_stars,
     map_cells,
+    mapper_ids,
+    metadata_by_id,
     metadata_set_id,
 )
 from scripts.evaluation.run import (
@@ -30,7 +28,6 @@ from scripts.evaluation.run import (
     load_targets,
     target_densities,
     target_matrix,
-    target_path,
 )
 
 
@@ -41,19 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "beatmaps", nargs="*", help="Beatmap IDs or URLs; omit for interactive mode"
     )
-    parser.add_argument(
-        "--source", default="current", help="Run name or embeddings parquet"
-    )
-    parser.add_argument(
-        "--disjoint", default="current", help="Run name or embeddings parquet"
-    )
+    parser.add_argument("--source", default="current", help="Run name")
+    parser.add_argument("--disjoint", required=True, help="Run name")
     parser.add_argument("--mode", choices=MODES, default="std")
-    parser.add_argument(
-        "--source-variant", choices=("base", "adapted"), default="adapted"
-    )
-    parser.add_argument(
-        "--disjoint-variant", choices=("base", "adapted"), default="base"
-    )
     parser.add_argument("--source-k", type=int, default=50, help="Source rank cutoff")
     parser.add_argument(
         "--top-k", type=int, default=20, help="Number of candidates to display"
@@ -76,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "--mine-all",
         action="store_true",
         help="Mine every shared map for same-mapper disagreements and write "
-        "runs/<disjoint>/mined.csv instead of entering interactive mode",
+        "runs/<disjoint>/<mode>/mined.csv instead of entering interactive mode",
     )
     parser.add_argument(
         "--min-stars",
@@ -101,7 +88,6 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
     count = len(ids)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     console.print(f"[dim]Mining {count:,} maps on {device}...[/dim]")
-    lambdas = [target.retrieval_lambda for target in targets]
     primary = np.full(count, -1, dtype=np.int64)
     sets = np.full(count, -1, dtype=np.int64)
     stars = np.full(count, np.nan)
@@ -128,22 +114,13 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
             pass
 
     stream = torch.from_numpy(matrices[0]).to(device)
-    bias = None
-    bias_cpu = None
-    if densities[0] is not None:
-        bias = torch.from_numpy(
-            np.asarray(
-                retrieval.density_term(densities[0], lambdas[0]), dtype=np.float32
-            )
-        ).to(device)
-        bias_cpu = bias.cpu().numpy()
+    bias_cpu = retrieval.density_term(densities[0]).astype(np.float32)
+    bias = torch.from_numpy(bias_cpu).to(device)
     queries, candidates, source_ranks, source_sims = [], [], [], []
     width = 1024
     for start in range(0, count, width):
         stop = min(start + width, count)
-        scores = stream[start:stop] @ stream.T
-        if bias is not None:
-            scores -= bias.unsqueeze(0)
+        scores = stream[start:stop] @ stream.T - bias.unsqueeze(0)
         size = stop - start
         scores[
             torch.arange(size, device=device), torch.arange(start, stop, device=device)
@@ -175,11 +152,7 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
                 queries.append(position)
                 candidates.append(candidate)
                 source_ranks.append(j + 1)
-                source_sims.append(
-                    adjustment + float(bias_cpu[candidate])
-                    if bias_cpu is not None
-                    else adjustment
-                )
+                source_sims.append(adjustment + float(bias_cpu[candidate]))
     del stream, bias
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -193,21 +166,16 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
     unique, starts, counts = np.unique(queries, return_counts=True, return_index=True)
     ends = starts + counts
     other = torch.from_numpy(matrices[1]).to(device)
-    other_bias = None
-    if densities[1] is not None:
-        other_bias = torch.from_numpy(
-            np.asarray(
-                retrieval.density_term(densities[1], lambdas[1]), dtype=np.float32
-            )
-        ).to(device)
+    other_bias = torch.from_numpy(
+        retrieval.density_term(densities[1]).astype(np.float32)
+    ).to(device)
     disjoint_ranks = np.empty(len(queries), dtype=np.int64)
     disjoint_sims = np.empty(len(queries), dtype=np.float32)
     for start in range(0, len(unique), 512):
         stop = min(start + 512, len(unique))
         batch = unique[start:stop]
         batch_scores = other[torch.from_numpy(batch).to(device)] @ other.T
-        if other_bias is not None:
-            batch_scores -= other_bias.unsqueeze(0)
+        batch_scores -= other_bias.unsqueeze(0)
         batch_scores[
             torch.arange(len(batch), device=device),
             torch.from_numpy(batch).to(device),
@@ -218,10 +186,9 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
             disjoint_ranks[starts[index] : ends[index]] = (
                 batch_scores[row].unsqueeze(0) > adjusted.unsqueeze(1)
             ).sum(dim=1).cpu().numpy() + 1
-            values = adjusted.cpu().numpy()
-            if densities[1] is not None:
-                values = values + densities[1][pair] * lambdas[1] * 0.5
-            disjoint_sims[starts[index] : ends[index]] = values
+            disjoint_sims[starts[index] : ends[index]] = adjusted.cpu().numpy() + (
+                retrieval.density_term(densities[1][pair])
+            )
         del batch_scores
     del other, other_bias
     if device.type == "cuda":
@@ -314,11 +281,7 @@ def mine_all(args, targets, ids, matrices, densities, metadata) -> pl.DataFrame:
 
 def main() -> None:
     args = parse_args()
-    paths = [
-        str(target_path(args.source, args.mode, args.source_variant)),
-        str(target_path(args.disjoint, args.mode, args.disjoint_variant)),
-    ]
-    targets = load_targets(paths, no_center=set(paths), mode=args.mode)
+    targets = load_targets([args.source, args.disjoint], mode=args.mode)
     ids = np.asarray(common_ids(targets), dtype=np.int64)
     if len(ids) < 2:
         raise SystemExit("Mining requires at least two maps present in both exports")
@@ -331,7 +294,7 @@ def main() -> None:
         )
         target.embeddings = np.empty((0, 0), dtype=np.float32)
     metadata = metadata_by_id(load_metadata(resolve_path(args.metadata)))
-    if DEFAULT_STRAINS_PATH.exists():
+    if STRAINS_PATH.exists():
         apply_strain_stars(metadata)
     console.print(
         f"[dim]Ranking over {len(ids):,} shared maps, excluding the query. "
@@ -341,11 +304,7 @@ def main() -> None:
         frame = mine_all(args, targets, ids, matrices, densities, metadata)
         output = resolve_path(args.output) if args.output else None
         if output is None:
-            if targets[1].run_dir is None:
-                raise SystemExit(
-                    "Batch mining needs --output when the disjoint target is not a run"
-                )
-            output = targets[1].run_dir / "mined.csv"
+            output = targets[1].artifacts.directory / "mined.csv"
         output.parent.mkdir(parents=True, exist_ok=True)
         frame.write_csv(output)
         console.print(
@@ -376,9 +335,7 @@ def main() -> None:
         for target, matrix, density in zip(targets, matrices, densities):
             similarity = matrix @ matrix[query_index]
             similarities.append(similarity)
-            scores = similarity.copy()
-            if density is not None:
-                scores -= retrieval.density_term(density, target.retrieval_lambda)
+            scores = similarity - retrieval.density_term(density)
             scores[query_index] = -np.inf
             order = np.argsort(-scores, kind="stable")
             rank = np.empty(len(ids), dtype=np.int64)
