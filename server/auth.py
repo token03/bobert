@@ -7,6 +7,7 @@ from http.cookies import SimpleCookie
 from typing import Any
 
 SESSION_COOKIE = "bobert_session"
+SESSION_HINT_COOKIE = "bobert_logged_in"
 STATE_COOKIE = "bobert_oauth"
 SESSION_SECONDS = 30 * 24 * 3600
 STATE_SECONDS = 600

@@ -39,9 +39,19 @@ export async function fetchDefaultRecommendations(mode: Mode, signal?: AbortSign
   return data
 }
 
+const SESSION_HINT_COOKIE = 'bobert_logged_in'
+
+function hasSessionHint(): boolean {
+  return document.cookie.split('; ').some((cookie) => cookie.startsWith(`${SESSION_HINT_COOKIE}=`))
+}
+
 export async function fetchSession(): Promise<Schemas['Session'] | null> {
+  if (!hasSessionHint()) return null
   const { data, response } = await client.GET('/api/me')
-  if (response.status === 401) return null
+  if (response.status === 401) {
+    document.cookie = `${SESSION_HINT_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax`
+    return null
+  }
   if (!data) throw new Error(`Request failed with ${response.status}`)
   return data
 }

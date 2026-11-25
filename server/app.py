@@ -333,12 +333,21 @@ async def login_callback(request: Request, code: str, state: str) -> RedirectRes
         httponly=True,
         samesite="lax",
     )
+    response.set_cookie(
+        auth.SESSION_HINT_COOKIE,
+        "1",
+        max_age=auth.SESSION_SECONDS,
+        secure=True,
+        httponly=False,
+        samesite="lax",
+    )
     return response
 
 
 @app.post("/api/auth/logout", status_code=204)
 def logout(response: Response) -> None:
     response.delete_cookie(auth.SESSION_COOKIE)
+    response.delete_cookie(auth.SESSION_HINT_COOKIE)
 
 
 def require_session(request: Request, response: Response) -> dict[str, Any]:
