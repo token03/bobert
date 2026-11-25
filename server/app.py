@@ -198,6 +198,8 @@ class RequestLoggingMiddleware:
             cookie.decode(errors="replace") if cookie else None
         )
         user = f"{session['user_id']}:{session['username']}" if session else "-"
+        log_fields: dict[str, Any] = {}
+        scope.setdefault("state", {})["log_fields"] = log_fields
         start = time.perf_counter()
         status = 500
         logged = False
@@ -224,8 +226,9 @@ class RequestLoggingMiddleware:
                 logged = True
                 elapsed = (time.perf_counter() - start) * 1000
                 if not (scope["path"] == "/health" and status < 400):
+                    extra = "".join(f" {k}={v}" for k, v in log_fields.items())
                     log.info(
-                        "request_id=%s client_ip=%s user=%s method=%s path=%s status=%d elapsed_ms=%.2f",
+                        "request_id=%s client_ip=%s user=%s method=%s path=%s status=%d elapsed_ms=%.2f%s",
                         request_id,
                         client_ip,
                         user,
@@ -233,6 +236,7 @@ class RequestLoggingMiddleware:
                         scope["path"],
                         status,
                         elapsed,
+                        extra,
                     )
 
         try:
@@ -393,8 +397,12 @@ def default_recommend(
 
 
 @app.post("/api/recommend", response_model=RecommendResponse)
-async def recommend(payload: RecommendRequest) -> dict[str, Any]:
+async def recommend(request: Request, payload: RecommendRequest) -> dict[str, Any]:
     beatmap_ids = list(dict.fromkeys(payload.beatmap_ids))
+    shown_ids = ",".join(str(bid) for bid in beatmap_ids[:5])
+    if len(beatmap_ids) > 5:
+        shown_ids = f"{shown_ids},+{len(beatmap_ids) - 5}"
+    request.state.log_fields["beatmap_ids"] = shown_ids
     inferred_metadata = {}
     mode = payload.mode
     if mode is None:
