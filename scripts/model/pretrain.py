@@ -1,146 +1,57 @@
-from __future__ import annotations
-
 import argparse
-from pathlib import Path
 from typing import cast
 
-import pytorch_lightning as pl
 import torch
 from omegaconf import DictConfig, OmegaConf
 
 from core.artifacts import RunArtifacts
-from core.model import BobertForPretraining
+from core.dataset import FeatureStore, feature_path
+from core.model import BobertEncoder, BobertForPretraining, EncoderConfig
 from core.modes import MODES
-from scripts.common.paths import (
-    RUNS_DIR,
-    find_latest_checkpoint,
-)
-from training.loader import BobertDataModule
-from training.pretrain import BobertModule
-from training.setup import create_trainer, setup_device
-
-PROFILES = {
-    "proxy": {"data.sample_size": 100000, "training.trainer.epochs": 6},
-    "validate": {"data.sample_size": 160000, "training.trainer.epochs": 10},
-    "full": {
-        "data.sample_size": None,
-        "training.trainer.epochs": 20,
-        "data.val_split": 0,
-    },
-}
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Pretrain a BoBERT encoder.")
-    parser.add_argument("--config", default="configs/pretrain.yaml")
-    parser.add_argument("--mode", choices=tuple(MODES))
-    parser.add_argument("--profile", choices=tuple(PROFILES))
-    parser.add_argument("--no-validation", action="store_true")
-    parser.add_argument("--sample-size", type=int)
-    parser.add_argument("--epochs", type=int)
-    parser.add_argument("--seed", type=int)
-    parser.add_argument("--resume-ckpt")
-    parser.add_argument("-v", "--version", required=True)
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument(
-        "--compile",
-        dest="compile_model",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-    )
-    parser.add_argument(
-        "--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE"
-    )
-    return parser.parse_args()
-
-
-def load_config(args: argparse.Namespace) -> DictConfig:
-    config = cast(DictConfig, OmegaConf.load(args.config))
-    overrides = dict(PROFILES[args.profile]) if args.profile else {}
-    for key, value in (
-        ("data.mode", args.mode),
-        ("data.sample_size", args.sample_size),
-        ("training.trainer.epochs", args.epochs),
-        ("training.seed", args.seed),
-        ("runtime.compile_model", args.compile_model),
-    ):
-        if value is not None:
-            overrides[key] = value
-    if args.no_validation:
-        overrides["data.val_split"] = 0
-    for key, value in overrides.items():
-        OmegaConf.update(config, key, value)
-    config = cast(
-        DictConfig, OmegaConf.merge(config, OmegaConf.from_dotlist(args.overrides))
-    )
-    OmegaConf.resolve(config)
-    OmegaConf.set_struct(config, True)
-    return config
-
-
-def resolve_resume_checkpoint(args: argparse.Namespace, mode: str) -> Path | None:
-    if args.resume_ckpt == "latest":
-        checkpoint = find_latest_checkpoint(RUNS_DIR / args.version / mode)
-        if checkpoint is None:
-            raise FileNotFoundError(f"No checkpoint found in {RUNS_DIR}")
-        return checkpoint
-    if args.resume_ckpt:
-        checkpoint = Path(args.resume_ckpt)
-        if not checkpoint.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-        return checkpoint
-    return None
+from scripts.common.paths import DATA_DIR, FEATURES_DIR, PROJECT_ROOT, RUNS_DIR
+from training.pretrain import pretrain
 
 
 def main() -> int:
-    args = parse_args()
-    config = load_config(args)
-    resume_checkpoint = resolve_resume_checkpoint(args, config.data.mode)
-    artifacts = RunArtifacts(RUNS_DIR / args.version, config.data.mode)
-    if artifacts.model.exists() and resume_checkpoint is None:
-        raise FileExistsError(f"Model already exists: {artifacts.model}")
-    pl.seed_everything(config.training.seed, workers=True)
+    parser = argparse.ArgumentParser(
+        description="Pretrain a BoBERT encoder; resumes from checkpoint.pt if present"
+    )
+    parser.add_argument("run", help="Run under runs/")
+    parser.add_argument("--mode", choices=tuple(MODES), default="std")
+    parser.add_argument("--config", default=str(PROJECT_ROOT / "configs/pretrain.yaml"))
+    parser.add_argument(
+        "--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE"
+    )
+    args = parser.parse_args()
+    config = cast(
+        DictConfig,
+        OmegaConf.merge(
+            OmegaConf.load(args.config),
+            {"data": {"mode": args.mode}},
+            OmegaConf.from_dotlist(args.overrides),
+        ),
+    )
+    artifacts = RunArtifacts(RUNS_DIR / args.run, args.mode)
+    if artifacts.model.exists():
+        raise FileExistsError(f"{artifacts.model} already exists")
+    artifacts.directory.mkdir(parents=True, exist_ok=True)
 
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"Using device: {setup_device()}")
-
+    torch.manual_seed(config.data.seed)
     torch.set_float32_matmul_precision("high")
-
-    datamodule = BobertDataModule(config)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = BobertForPretraining.from_config(config, device)
-    print(
-        f"{config.data.mode} encoder: {model.bert.parameter_count() / 1e6:.2f}M "
-        f"parameters, d_model {model.bert.d_model}, {len(model.bert.layers)} layers"
+    model = BobertForPretraining(
+        BobertEncoder(
+            EncoderConfig(
+                mode=args.mode, max_seq_len=config.data.max_seq_len, **config.model
+            ),
+            use_flash=True,
+            activation_checkpointing=config.training.activation_checkpointing,
+        ),
+        config.training.section_contrast_weight,
     )
-
-    run_name = args.version
-    module = BobertModule(model, config, datamodule, quiet=args.quiet)
-    trainer = create_trainer(
-        config, RUNS_DIR / run_name, run_name=config.data.mode, quiet=args.quiet
-    )
-    run_dir = Path(trainer.log_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(config, run_dir / "training.yaml")
-
-    print("\nPretraining setup complete.")
-    print(f"Run directory: {trainer.log_dir}")
-    print(f"Total epochs: {config.training.trainer.epochs}")
-
-    if resume_checkpoint is not None:
-        print(f"Resuming from checkpoint: {resume_checkpoint}")
-        print(f"Appending logs to: {trainer.log_dir}")
-
-    trainer.fit(
-        module,
-        datamodule=datamodule,
-        ckpt_path=str(resume_checkpoint) if resume_checkpoint is not None else None,
-    )
-
-    model.bert.save_pretrained(artifacts.model)
-    print(f"Exported model: {artifacts.model}")
-
-    print("\nBoBERT pretraining completed!")
+    store = FeatureStore(feature_path(FEATURES_DIR, args.mode), args.mode)
+    pretrain(model, store, config, DATA_DIR, artifacts.directory)
+    model.bert.metadata["training"] = OmegaConf.to_container(config)
+    model.bert.save_pretrained(artifacts.directory)
     return 0
 
 

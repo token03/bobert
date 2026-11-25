@@ -1,0 +1,39 @@
+data:
+  seed: 42
+  max_seq_len: 4096
+  num_workers: 4
+  sample_size: null
+  val_size: 10000
+
+model:
+  d_model: 256
+  n_heads: 4
+  n_layers: 6
+  dim_feedforward: 640
+  dropout: 0.0
+  local_attention_window: 128
+  local_attention_block_size: 256
+  global_attention_layers: [2, 5]
+  feature_token_dim: 16
+
+distill:
+  rotation_seed: 1337
+  online_epochs: 6
+  keep_layers: [0, 1, 2, 4, 6, 8]
+  calibration_maps: 1024
+  loss:
+    tokens: [1.5, 0.25]
+    taps: [0.5, 0.10]
+    stage: [0.35, 0.05]
+
+training:
+  compile: true
+  epochs: 15
+  batch_size: 384
+  max_tokens_online: 65536
+  max_tokens_fast: 98304
+  lr: 1.8e-3
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_ratio: 0.03
+  min_lr_ratio: 0.015

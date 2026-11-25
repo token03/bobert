@@ -17,9 +17,7 @@ dependencies = [
     "pyarrow>=21.0.0",
     "python-dotenv>=1.1.1",
     "pyyaml>=6.0.3",
-    "rotary-embedding-torch>=0.8.9",
     "safetensors>=0.6",
-    "tqdm>=4.67.1",
     "uvicorn[standard]>=0.35.0",
     "zstandard>=0.25.0",
 ]
@@ -36,29 +34,22 @@ train = [
     "pandas>=2.3.3",
     "parsecore[fast]",
     "plotly>=6.3.0",
-    "pytorch-lightning>=2.6.0",
     "rapidfuzz>=3.14.5",
     "requests>=2.32.5",
-    "rich>=14.1.0",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
     "seaborn>=0.13.2",
-    "tensorboard>=2.20.0",
     "umap-learn>=0.5.9.post2",
     "mypy>=1.18",
 ]
 
 [project.scripts]
 update = "scripts.update:main"
-sync-beatmaps = "scripts.sources.beatmaps.sync:main"
-import-beatmaps = "scripts.sources.beatmaps.import_archive:main"
-download-beatmaps = "scripts.sources.beatmaps.files:main"
-fetch-beatmapsets = "scripts.sources.beatmaps.sets:main"
-fetch-collection-vertices = "scripts.sources.collections.vertices:main"
-fetch-collection-edges = "scripts.sources.collections.edges:main"
+fetch-collections = "scripts.sources.collections:main"
 build-features = "scripts.dataset.features:main"
 build-strains = "scripts.dataset.strains:main"
 pretrain = "scripts.model.pretrain:main"
+distill = "scripts.model.distill:main"
 embed = "scripts.model.embed:main"
 adapt = "scripts.model.adapt:main"
 build-labels = "scripts.model.labels:main"

@@ -1,20 +1,31 @@
 seed: 42
+calibration:
+  sample_size: 100000
+  pc_shrink: 0.8
+  base_weight: 0.3
+  adapted_scale: 0.75
 collections:
   epochs: 1
   batch_size: 1024
   temperature: 0.03
-  learning_rate: 5e-4
+  learning_rate: 5.0e-4
   weight_decay: 0.01
   preserve_weight: 0.1
-  positives_per_map: 2
+  positives_per_map: 4
   pair_seed: 123
+  informative_size: 256
+  collections_per_map: 8
+  hard_negatives: 256
 mined:
   epochs: 20
   batch_size: 1024
   temperature: 0.03
-  learning_rate: 5e-4
+  learning_rate: 5.0e-4
   weight_decay: 0.01
   preserve_weight: 1.0
   positives_per_map: 4
   pair_seed: 123
+  informative_size: 256
+  collections_per_map: 8
+  hard_negatives: 256
   blend: 0.75

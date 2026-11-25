@@ -1,24 +1,15 @@
 from __future__ import annotations
 
 import json
-import math
-import time
-from collections import defaultdict
 
-import numpy as np
 import polars as pl
-from tqdm import tqdm
 
 from core.modes import MODES
 from scripts.common.paths import BEATMAPS_PATH, COLLECTIONS_DIR
+from training.data import is_holdout_set
 
-HOLDOUT_BUCKETS = 10
 MIN_COLLECTION_MAPS = 5
 SET_STAR_DELTA = 0.5
-
-
-def is_holdout_set(beatmapset_ids) -> np.ndarray:
-    return np.asarray(beatmapset_ids).astype(np.int64) % HOLDOUT_BUCKETS == 0
 
 
 def mode_collections(mode: str) -> pl.DataFrame:
@@ -56,112 +47,3 @@ def mode_collections(mode: str) -> pl.DataFrame:
 
 def add_collection_key(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(pl.struct("collection_id", "source").alias("collection_key"))
-
-
-def deduplicate_collections(
-    df: pl.DataFrame,
-    threshold: float,
-    *,
-    probe_items: int = 32,
-    min_size: int = 5,
-    verbose: bool = False,
-) -> pl.DataFrame:
-    input_is_pandas = df.__class__.__module__.startswith("pandas")
-    if input_is_pandas:
-        df = pl.from_pandas(df)
-
-    if verbose:
-        print("--- Starting Deduplication Process ---")
-        start_time = time.time()
-
-    df = add_collection_key(df)
-    col_groups = {
-        (row["collection_key"]["collection_id"], row["collection_key"]["source"]): set(
-            row["beatmap_id"]
-        )
-        for row in df.group_by("collection_key")
-        .agg(pl.col("beatmap_id"))
-        .iter_rows(named=True)
-    }
-
-    content_hashes = {}
-    for ckey, beatmaps in col_groups.items():
-        sig = tuple(sorted(beatmaps))
-        prev = content_hashes.get(sig)
-        if prev is None or ckey[0] < prev[0]:
-            content_hashes[sig] = ckey
-
-    unique_content_ckeys = set(content_hashes.values())
-    sorted_ckeys = sorted(
-        unique_content_ckeys, key=lambda key: len(col_groups[key]), reverse=True
-    )
-
-    kept_ckeys = []
-    kept_sets = {}
-    postings = defaultdict(list)
-
-    def min_required_overlap(len_a, len_b):
-        return math.ceil((threshold * (len_a + len_b)) / (1.0 + threshold))
-
-    for ckey in tqdm(sorted_ckeys, desc="Deduplicating"):
-        beatmaps = col_groups[ckey]
-        len_a = len(beatmaps)
-        if len_a < min_size:
-            continue
-
-        items = list(beatmaps)
-        if len(items) > 4 * probe_items:
-            step = max(1, len(items) // (4 * probe_items))
-            items = items[::step]
-
-        items.sort(key=lambda item: len(postings.get(item, [])))
-        probe = items[:probe_items]
-
-        overlap_counts = defaultdict(int)
-        for beatmap_id in probe:
-            for kept_key in postings.get(beatmap_id, []):
-                overlap_counts[kept_key] += 1
-
-        is_duplicate = False
-        for kept_key, approx_overlap in sorted(
-            overlap_counts.items(), key=lambda item: item[1], reverse=True
-        ):
-            kept = kept_sets[kept_key]
-            len_b = len(kept)
-            if len_a < threshold * len_b or len_b < threshold * len_a:
-                continue
-            if approx_overlap == 0:
-                continue
-            intersection = len(beatmaps & kept)
-            if intersection < min_required_overlap(len_a, len_b):
-                continue
-            union = len_a + len_b - intersection
-            if intersection / union >= threshold:
-                is_duplicate = True
-                break
-
-        if not is_duplicate:
-            kept_ckeys.append(ckey)
-            kept_sets[ckey] = beatmaps
-            for beatmap_id in beatmaps:
-                postings[beatmap_id].append(ckey)
-
-    if verbose:
-        print(
-            f"Final Collection Count: {len(kept_ckeys)} (Removed {len(col_groups) - len(kept_ckeys)} duplicates)"
-        )
-        print(f"Deduplication took {(time.time() - start_time):.2f}s")
-
-    kept_df = pl.DataFrame(
-        kept_ckeys,
-        schema={
-            "collection_id": df.schema["collection_id"],
-            "source": df.schema["source"],
-        },
-        orient="row",
-    )
-    result = df.join(kept_df, on=["collection_id", "source"], how="semi")
-    if input_is_pandas:
-        result = result.to_pandas()
-        result["collection_key"] = list(zip(result["collection_id"], result["source"]))
-    return result

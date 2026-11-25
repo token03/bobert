@@ -12,58 +12,34 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn.functional as F
-from rich.console import Console
-from rich.table import Table
 from sklearn.model_selection import GroupKFold
 
-from core import retrieval
-from core.artifacts import (
-    Index,
-    RunArtifacts,
-    from_bfloat16,
-    read_index,
-    run_artifacts,
-)
+from core.artifacts import RunArtifacts, checksum, run_artifacts
+from core.index import Index, read_index
 from core.modes import MODES
-from scripts.common.collections import is_holdout_set
-from scripts.common.paths import COLLECTIONS_DIR, DATA_DIR, RUNS_DIR, resolve_path
+from scripts.common.paths import (
+    BEATMAPS_PATH,
+    COLLECTIONS_DIR,
+    DATA_DIR,
+    RUNS_DIR,
+    STRAINS_PATH,
+    resolve_path,
+)
+from training.data import is_holdout_set
 
-console = Console()
-
-
-BEATMAPS_EVAL_PATH = DATA_DIR / "beatmaps.parquet"
-BEATMAPSETS_EVAL_PATH = DATA_DIR / "beatmapsets.parquet"
 COLLECTION_EDGES_EVAL_PATH = COLLECTIONS_DIR / "edges.parquet"
-STRAINS_EVAL_PATH = DATA_DIR / "strains.parquet"
 
 PROBE_SEED = 0
 PROBE_FOLDS = 4
 PROBE_RIDGE_ALPHA = 1e-3
 RIDGE_GRID = (0.1, 1.0, 10.0)
 PROBE_MIN_LABEL_MAPS = 50
-MIN_PROBE_MAPS = 1000
-RATING_MAX_STARS = 20.0
-MAP_ATTRIBUTE_COLUMNS = {
-    "ar": "ar",
-    "cs": "cs",
-    "od": "accuracy",
-    "hp": "drain",
-    "submitted_date": "submitted_date",
-}
-DIFFICULTY_NEIGHBOR_K = 50
-DIFFICULTY_BATCH_SIZE = 1024
-DIFFICULTY_QUERY_SAMPLE = 100_000
 COLLECTION_MIN_SETS = 5
 COLLECTION_MAX_SETS = 300
 COLLECTION_QUERY_BATCH = 128
 COLLECTION_NDCG_K = 20
 RETRIEVAL_RECALL_KS = (10, 20, 50)
 RETRIEVAL_HARD_NEGATIVE_K = 100
-RETRIEVAL_HUBNESS_K = 50
-RETRIEVAL_HUBNESS_SAMPLE = 20_000
-RETRIEVAL_HUBNESS_BATCH = 2048
-CHANCE_PAIR_SAMPLES = 200_000
-PAIRED_TEST_CHUNK = 2000
 
 
 @dataclass
@@ -75,11 +51,11 @@ class TargetData:
     beatmap_ids: np.ndarray
     embeddings: np.ndarray
     id_to_index: dict[int, int]
-    densities: np.ndarray
+    penalties: np.ndarray
 
     def index_vectors(self, ids: list[int]) -> tuple[np.ndarray, np.ndarray]:
         rows = self.index.rows(np.asarray(ids))
-        return from_bfloat16(self.index.embeddings[rows]), self.index.densities[rows]
+        return self.index.vectors(rows), self.index.penalties[rows]
 
 
 @dataclass
@@ -90,13 +66,6 @@ class EvalResult:
 
 
 EVAL_RESULTS: list[EvalResult] = []
-
-
-@dataclass
-class DifficultyData:
-    ids: list[int]
-    stars: np.ndarray
-    groups: np.ndarray
 
 
 @dataclass
@@ -126,7 +95,7 @@ def load_eval_groups(path: Path) -> dict[str, list[int]]:
 @cache
 def native_stars(mode: str) -> pl.DataFrame:
     return (
-        pl.read_parquet(STRAINS_EVAL_PATH, columns=["beatmap_id", "mode_int", "stars"])
+        pl.read_parquet(STRAINS_PATH, columns=["beatmap_id", "mode_int", "stars"])
         .filter(
             (pl.col("mode_int") == MODES[mode].mode_int) & pl.col("stars").is_finite()
         )
@@ -162,14 +131,14 @@ def load_targets(
                 beatmap_ids,
                 index.vectors()[keep],
                 {int(beatmap_id): row for row, beatmap_id in enumerate(beatmap_ids)},
-                index.densities[keep],
+                index.penalties[keep],
             )
         )
     return loaded
 
 
 def load_beatmaps(columns: list[str]) -> pl.DataFrame:
-    return pl.read_parquet(BEATMAPS_EVAL_PATH, columns=["id", *columns]).rename(
+    return pl.read_parquet(BEATMAPS_PATH, columns=["id", *columns]).rename(
         {"id": "beatmap_id"}
     )
 
@@ -191,10 +160,10 @@ def target_matrix(target: TargetData, ids: list[int]) -> np.ndarray:
     ]
 
 
-def target_densities(target: TargetData, ids: list[int]) -> np.ndarray | None:
-    if target.densities is None:
+def target_penalties(target: TargetData, ids: list[int]) -> np.ndarray | None:
+    if target.penalties is None:
         return None
-    return target.densities[[target.id_to_index[int(beatmap_id)] for beatmap_id in ids]]
+    return target.penalties[[target.id_to_index[int(beatmap_id)] for beatmap_id in ids]]
 
 
 def mean(values: list[float]) -> float:
@@ -220,68 +189,6 @@ def eval_device() -> torch.device:
     return torch.device("cpu")
 
 
-def corpus_knn_skewness(
-    candidates: torch.Tensor,
-    densities: torch.Tensor | None,
-) -> float:
-    device = candidates.device
-    sample_size = min(
-        RETRIEVAL_HUBNESS_SAMPLE if device.type == "cuda" else 2_000,
-        len(candidates),
-    )
-    sample = np.random.default_rng(PROBE_SEED).choice(
-        len(candidates), size=sample_size, replace=False
-    )
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
-    cast = candidates.to(dtype)
-    if densities is not None:
-        densities = densities.to(dtype)
-    counts = torch.zeros(len(candidates), dtype=torch.float32, device=device)
-    for start in range(0, sample_size, RETRIEVAL_HUBNESS_BATCH):
-        rows = torch.tensor(
-            sample[start : start + RETRIEVAL_HUBNESS_BATCH], device=device
-        )
-        scores = cast[rows] @ cast.T
-        if densities is not None:
-            scores = scores - retrieval.density_term(densities)
-        scores[torch.arange(len(rows), device=device), rows] = -torch.inf
-        neighbors = scores.topk(RETRIEVAL_HUBNESS_K, dim=1).indices
-        counts += torch.bincount(
-            neighbors.reshape(-1), minlength=len(candidates)
-        ).float()
-    deviation = (counts - counts.mean()) / counts.std()
-    return float((deviation**3).mean().item())
-
-
-def paired_ap_test(
-    first: dict[int, float], second: dict[int, float], permutations: int = 20000
-) -> dict[str, object]:
-    common = sorted(set(first) & set(second))
-    diffs = np.array([second[query_id] - first[query_id] for query_id in common])
-    observed = float(diffs.mean()) if len(diffs) else 0.0
-    device = eval_device()
-    generator = torch.Generator(device).manual_seed(PROBE_SEED)
-    values = torch.tensor(diffs, dtype=torch.float64, device=device)
-    extreme = 0
-    for start in range(0, permutations, PAIRED_TEST_CHUNK):
-        count = min(PAIRED_TEST_CHUNK, permutations - start)
-        signs = (
-            torch.randint(
-                0, 2, (count, len(diffs)), generator=generator, device=device
-            ).double()
-            * 2
-            - 1
-        )
-        null = (signs @ values).abs() / max(len(diffs), 1)
-        extreme += int((null >= abs(observed)).sum().item())
-    return {
-        "delta": observed,
-        "p_value": extreme / permutations,
-        "queries": len(diffs),
-        "permutations": permutations,
-    }
-
-
 def evaluate_grouped_retrieval(
     target: TargetData,
     groups: dict[str, list[int]],
@@ -299,10 +206,10 @@ def evaluate_grouped_retrieval(
     candidates = torch.tensor(
         target_matrix(target, candidate_ids), dtype=torch.float32, device=device
     )
-    densities = target_densities(target, candidate_ids)
-    densities_t = (
-        torch.tensor(densities, dtype=torch.float32, device=device)
-        if densities is not None
+    penalties = target_penalties(target, candidate_ids)
+    penalties_t = (
+        torch.tensor(penalties, dtype=torch.float32, device=device)
+        if penalties is not None
         else None
     )
 
@@ -334,8 +241,8 @@ def evaluate_grouped_retrieval(
         sims = candidates[query_indices] @ candidates.T
     finally:
         torch.backends.cuda.matmul.allow_tf32 = tf32
-    if densities_t is not None:
-        sims = sims - retrieval.density_term(densities_t)
+    if penalties_t is not None:
+        sims = sims - penalties_t
     sims[torch.arange(len(query_ids), device=device), query_indices] = -torch.inf
     query_sets = set_ids[query_indices.cpu().numpy()]
     columns_by_set = {
@@ -348,8 +255,7 @@ def evaluate_grouped_retrieval(
     positive_counts = [len(positives_by_query[beatmap_id]) for beatmap_id in query_ids]
     top_count = min(
         len(candidate_ids) - 1,
-        max(positive_counts, default=0)
-        + max(RETRIEVAL_HARD_NEGATIVE_K, RETRIEVAL_HUBNESS_K),
+        max(positive_counts, default=0) + RETRIEVAL_HARD_NEGATIVE_K,
     )
     top = sims.topk(top_count, dim=1)
     top_indices = top.indices.cpu().numpy()
@@ -361,8 +267,6 @@ def evaluate_grouped_retrieval(
     ndcgs = {cutoff: [] for cutoff in RETRIEVAL_RECALL_KS}
     query_weights = []
     local_margins = []
-    query_rows = []
-    ranked_by_query = {}
     for row, query_id in enumerate(query_ids):
         positive_ids = positives_by_query[query_id]
         positive_count = len(positive_ids)
@@ -386,14 +290,11 @@ def evaluate_grouped_retrieval(
         keep = np.asarray(keep, dtype=np.int64)
         ranked = top_indices[row][keep].astype(np.int64)
         ranked_scores = top_values[row][keep]
-        ranked_by_query[query_id] = ranked
         is_positive = np.isin(ranked, positive_indices)
-        hits = np.flatnonzero(is_positive) + 1
         query_weights.append(1 / np.sqrt(positive_count + 1))
         r_precisions.append(float(is_positive[:positive_count].mean()))
         for cutoff in RETRIEVAL_RECALL_KS:
             recalls[cutoff].append(float(is_positive[:cutoff].sum() / positive_count))
-        best_rank = int(hits[0]) if len(hits) else None
         positive_columns = torch.tensor(positive_indices, device=device)
         positive_scores = sims[row, positive_columns]
         columns = torch.arange(len(candidate_ids), device=device)
@@ -416,25 +317,6 @@ def evaluate_grouped_retrieval(
             discounts = 1.0 / np.log2(np.arange(2, len(relevant) + 2))
             ideal = (1.0 / np.log2(np.arange(2, min(positive_count, cutoff) + 2))).sum()
             ndcgs[cutoff].append(float((relevant * discounts).sum() / ideal))
-        query_rows.append(
-            {
-                "query_id": int(query_id),
-                "positives": positive_count,
-                "ap": average_precision,
-                "r_precision": float(is_positive[:positive_count].mean()),
-                **{
-                    f"recall@{cutoff}": float(
-                        is_positive[:cutoff].sum() / positive_count
-                    )
-                    for cutoff in RETRIEVAL_RECALL_KS
-                },
-                **{
-                    f"ndcg@{cutoff}": ndcgs[cutoff][-1]
-                    for cutoff in RETRIEVAL_RECALL_KS
-                },
-                "best_rank": best_rank,
-            }
-        )
 
         hard_negative_values = ranked_scores[~is_positive][:RETRIEVAL_HARD_NEGATIVE_K]
         if len(hard_negative_values):
@@ -447,53 +329,6 @@ def evaluate_grouped_retrieval(
                     - np.percentile(hard_negative_values, 90)
                 )
             )
-
-    detail_groups = []
-    for group_id, ids in groups.items():
-        present = [
-            beatmap_id for beatmap_id in dict.fromkeys(ids) if beatmap_id in covered
-        ]
-        group_rows = []
-        for query_id in present:
-            if query_id not in ranked_by_query:
-                continue
-            query_set = set_ids[candidate_indices[query_id]]
-            mates = [
-                target_id
-                for target_id in present
-                if target_id != query_id
-                and set_ids[candidate_indices[target_id]] != query_set
-            ]
-            if not mates:
-                group_rows.append(
-                    {
-                        "query_id": int(query_id),
-                        "positives": 0,
-                        "ap": 0.0,
-                        "best_rank": None,
-                    }
-                )
-                continue
-            mate_columns = np.array(
-                [candidate_indices[target_id] for target_id in mates]
-            )
-            flags = np.isin(ranked_by_query[query_id], mate_columns)
-            found = np.flatnonzero(flags) + 1
-            group_rows.append(
-                {
-                    "query_id": int(query_id),
-                    "positives": len(mates),
-                    "ap": float(
-                        (np.arange(1, len(found) + 1) / found).sum() / len(mates)
-                    )
-                    if len(found)
-                    else 0.0,
-                    "best_rank": int(found[0]) if len(found) else None,
-                }
-            )
-        detail_groups.append(
-            {"group_id": str(group_id), "maps": len(present), "queries": group_rows}
-        )
 
     return {
         "evaluation_id_coverage": len(covered) / len(eval_ids),
@@ -513,13 +348,7 @@ def evaluate_grouped_retrieval(
         if local_margins
         else float("nan"),
         "bottom20_local_margin": bottom20_mean(local_margins),
-        f"knn_{RETRIEVAL_HUBNESS_K}_skewness": corpus_knn_skewness(
-            candidates, densities_t
-        ),
     }, {
-        "groups": detail_groups,
-        "queries": query_rows,
-        "paired": None,
         "population_sha256": fingerprint(
             {"candidates": candidate_ids, "groups": groups}
         ),
@@ -537,16 +366,20 @@ def format_metric(value: float) -> str:
 def print_metrics(
     title: str, metrics_by_target: dict[str, dict[str, float]], keys: list[str]
 ) -> None:
-    table = Table(title=title, show_header=True, header_style="bold magenta")
     names = list(metrics_by_target)
-    table.add_column("Metric", style="cyan", no_wrap=True)
-    for name in names:
-        table.add_column(name, justify="right")
-
+    width = max(map(len, keys)) + 2
+    columns = [max(len(name), 10) + 2 for name in names]
+    print(f"\n{title}")
+    print(
+        "".ljust(width)
+        + "".join(name.rjust(size) for name, size in zip(names, columns))
+    )
     for key in keys:
         values = [metrics_by_target[name].get(key, float("nan")) for name in names]
-        table.add_row(key, *[format_metric(value) for value in values])
-    console.print(table)
+        cells = (
+            format_metric(value).rjust(size) for value, size in zip(values, columns)
+        )
+        print(key.ljust(width) + "".join(cells), flush=True)
 
 
 def filter_min_count(
@@ -666,41 +499,6 @@ def fold_indices(
     ]
 
 
-def ridge_oof(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    folds: list[tuple[torch.Tensor, torch.Tensor]],
-) -> torch.Tensor:
-    vector_target = y.ndim == 1
-    if vector_target:
-        y = y[:, None]
-    pred = torch.empty_like(y)
-    for train_idx, test_idx in folds:
-        x_mean = x[train_idx].mean(dim=0)
-        y_mean = y[train_idx].mean(dim=0)
-        x_train = x[train_idx] - x_mean
-        gram = x_train.T @ x_train / train_idx.numel()
-        gram.diagonal().add_(PROBE_RIDGE_ALPHA)
-        cross = x_train.T @ (y[train_idx] - y_mean) / train_idx.numel()
-        chol = torch.linalg.cholesky(gram)
-        weights = torch.cholesky_solve(cross, chol)
-        pred[test_idx] = (x[test_idx] - x_mean) @ weights + y_mean
-    return pred[:, 0] if vector_target else pred
-
-
-def oof_r2(
-    y: torch.Tensor,
-    pred: torch.Tensor,
-    folds: list[tuple[torch.Tensor, torch.Tensor]],
-) -> torch.Tensor:
-    baseline = torch.empty_like(y)
-    for train_idx, test_idx in folds:
-        baseline[test_idx] = y[train_idx].mean(dim=0)
-    residual = ((y - pred) ** 2).sum(dim=0)
-    total = ((y - baseline) ** 2).sum(dim=0)
-    return 1.0 - residual / total.clamp_min(1e-12)
-
-
 def ridge_multiclass_metrics(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -758,7 +556,7 @@ def multiclass_probe(
     title: str,
 ) -> EvalResult | None:
     if len(set(labels)) < 2:
-        console.print(f"[yellow]Skipping {title}: fewer than two labels.[/yellow]")
+        print(f"Skipping {title}: fewer than two labels.")
         return None
 
     encoded, classes = encode_labels(labels)
@@ -793,33 +591,12 @@ def multiclass_probe(
     return EvalResult(title, metrics, {target.name: detail for target in targets})
 
 
-def load_difficulty_data(targets: list[TargetData], mode: str) -> DifficultyData | None:
-    stars = native_stars(mode).filter(
-        (pl.col("stars") > 0.0) & (pl.col("stars") <= RATING_MAX_STARS)
-    )
-    ids = common_ids(targets, set(stars["beatmap_id"].to_list()))
-    if len(ids) < MIN_PROBE_MAPS:
-        console.print(
-            f"[yellow]Skipping difficulty eval: only {len(ids):,} "
-            "shared star ratings.[/yellow]"
-        )
-        return None
-    stars = stars.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
-    values = stars["stars"].cast(pl.Float32).to_numpy()
-    normalized = (values - values.mean()) / values.std()
-    return DifficultyData(
-        stars["beatmap_id"].to_list(), normalized, beatmapset_groups(ids)
-    )
-
-
 def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -> None:
     if targets[0].mode != "std":
         return
     groups = load_eval_groups(resolve_path(args.eval))
     if not groups:
-        console.print(
-            "[yellow]Skipping grouped retrieval: no eval groups with at least two beatmaps.[/yellow]"
-        )
+        print("Skipping grouped retrieval: no eval groups with at least two beatmaps.")
         return
     candidate_ids = common_ids(targets)
     per_target = {
@@ -832,32 +609,6 @@ def run_grouped_retrieval(targets: list[TargetData], args: argparse.Namespace) -
         {name: detail for name, (_, detail) in per_target.items()},
     )
     print_eval_result(result)
-    print_paired_ap(targets, result, "queries", ("query_id",))
-
-
-def print_paired_ap(
-    targets: list[TargetData], result: EvalResult, rows: str, keys: tuple[str, ...]
-) -> None:
-    if len(targets) != 2:
-        return
-    first, second = targets[0].name, targets[1].name
-    test = paired_ap_test(
-        {
-            tuple(row[key] for key in keys): row["ap"]
-            for row in result.detail[first][rows]
-        },
-        {
-            tuple(row[key] for key in keys): row["ap"]
-            for row in result.detail[second][rows]
-        },
-    )
-    paired = {"first": first, "second": second, **test}
-    result.detail[first]["paired"] = paired
-    result.detail[second]["paired"] = paired
-    console.print(
-        f"[dim]Paired AP Δ ({second} − {first}): {test['delta']:+.4f}, "
-        f"p={test['p_value']:.4f} (permutation, n={test['queries']})[/dim]"
-    )
 
 
 def load_collection_data(candidate_ids: list[int]) -> CollectionData | None:
@@ -943,12 +694,10 @@ def evaluate_collection_retrieval(
     candidates = torch.tensor(
         target_matrix(target, candidate_ids), dtype=torch.float32, device=device
     )
-    densities = target_densities(target, candidate_ids)
+    penalties = target_penalties(target, candidate_ids)
     penalty = (
-        retrieval.density_term(
-            torch.tensor(densities, dtype=torch.float32, device=device)
-        )
-        if densities is not None
+        torch.tensor(penalties, dtype=torch.float32, device=device)
+        if penalties is not None
         else None
     )
     set_index = torch.tensor(data.set_index, device=device)
@@ -1043,17 +792,6 @@ def evaluate_collection_retrieval(
         ],
         axis=1,
     )
-    query_counts = np.bincount(data.row_collection, minlength=collection_count)
-    detail_rows = [
-        {
-            "collection_id": int(collection_id),
-            "source": int(source),
-            "sets": int(data.sizes[index]),
-            "queries": int(query_counts[index]),
-            "ap": float(per_collection[index, 0]),
-        }
-        for index, (collection_id, source) in enumerate(data.keys)
-    ]
     return {
         "collections": float(collection_count),
         "queries": float(len(data.row_query)),
@@ -1062,7 +800,7 @@ def evaluate_collection_retrieval(
         "macro_r_precision": float(per_collection[:, 2].mean()),
         "chance_ap": float(per_collection[:, 3].mean()),
         "chance_r_precision": float(per_collection[:, 4].mean()),
-    }, {"collections": detail_rows, "paired": None}
+    }, {}
 
 
 def run_collection_retrieval(
@@ -1071,9 +809,7 @@ def run_collection_retrieval(
     candidate_ids = common_ids(targets)
     data = load_collection_data(candidate_ids)
     if data is None:
-        console.print(
-            "[yellow]Skipping Collection Retrieval: no held-out collection maps.[/yellow]"
-        )
+        print("Skipping Collection Retrieval: no held-out collection maps.")
         return
     per_target = {
         target.name: evaluate_collection_retrieval(target, data, candidate_ids)
@@ -1101,7 +837,6 @@ def run_collection_retrieval(
             }
         )
     print_eval_result(result)
-    print_paired_ap(targets, result, "collections", ("collection_id", "source"))
 
 
 def run_categorical_probe(
@@ -1146,20 +881,6 @@ def random_average_precision(positives, candidates: int):
     return harmonic / candidates + (positives - 1) * (candidates - harmonic) / (
         candidates * (candidates - 1)
     )
-
-
-def bootstrap_mean(values, *, seed: int = 42, repetitions: int = 4000) -> list[float]:
-    values = np.asarray(values, dtype=np.float64)
-    if not len(values) or not np.isfinite(values).all():
-        raise ValueError("Bootstrap values must be nonempty and finite")
-    generator = np.random.default_rng(seed)
-    samples = []
-    for _ in range(0, repetitions, 200):
-        indices = generator.integers(
-            len(values), size=(min(200, repetitions - len(samples)), len(values))
-        )
-        samples.extend(values[indices].mean(1).tolist())
-    return np.quantile(samples, (0.025, 0.975)).tolist()
 
 
 def ridge_scores(x, y, train, test, alpha: float, classes: int):
@@ -1239,7 +960,6 @@ def evaluate_mapper(
     by_class = class_metrics(scores, labels, classes)
     result = {
         "metrics": {key: float(value.mean()) for key, value in by_class.items()},
-        "by_mapper": {key: value.tolist() for key, value in by_class.items()},
         "mapper_ids": owners,
         "population": {
             "mappers": classes,
@@ -1322,7 +1042,6 @@ def evaluate_mapper(
             per_mapper = np.mean(values, axis=0)
             key = f"prototype_{support}shot_accuracy"
             result["metrics"][key] = float(per_mapper.mean())
-            result["by_mapper"][key] = per_mapper.tolist()
     valid_classes = retrieval_counts > 0
     retrieval_values = retrieval_sums / np.maximum(retrieval_counts[:, None], 1)
     for index, key in enumerate(
@@ -1335,20 +1054,10 @@ def evaluate_mapper(
         values = retrieval_values[valid_classes, index]
         if len(values):
             result["metrics"][key] = float(values.mean())
-            result.setdefault("cross_artist_by_mapper", {})[key] = values.tolist()
     result["cross_artist_mapper_ids"] = [
         owner for owner, valid in zip(owners, valid_classes) if valid
     ]
     result["population"]["cross_artist_queries"] = int(retrieval_counts.sum())
-    result["confidence_intervals"] = {
-        key: bootstrap_mean(values) for key, values in result["by_mapper"].items()
-    }
-    result["confidence_intervals"].update(
-        {
-            key: bootstrap_mean(values)
-            for key, values in result.get("cross_artist_by_mapper", {}).items()
-        }
-    )
     return result
 
 
@@ -1389,7 +1098,7 @@ def run_item_item_eval(targets: list[TargetData], _args: argparse.Namespace) -> 
     )
     metrics = {}
     for target in targets:
-        vectors, densities = target.index_vectors(ids)
+        vectors, penalties = target.index_vectors(ids)
         lookup = {beatmap: index for index, beatmap in enumerate(ids)}
         values = []
         for row in panel:
@@ -1398,9 +1107,7 @@ def run_item_item_eval(targets: list[TargetData], _args: argparse.Namespace) -> 
                 lookup[beatmap]
                 for beatmap in [row["positive_id"], *row["negative_ids"]]
             ]
-            scores = vectors[indexes] @ query - retrieval.density_term(
-                densities[indexes]
-            )
+            scores = vectors[indexes] @ query - penalties[indexes]
             values.append(
                 float(
                     np.mean((scores[0] > scores[1:]) + 0.5 * (scores[0] == scores[1:]))
@@ -1412,156 +1119,6 @@ def run_item_item_eval(targets: list[TargetData], _args: argparse.Namespace) -> 
             "chance": 0.5,
         }
     print_eval_result(EvalResult("Item-item Diagnostic", metrics))
-
-
-def run_artist_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    run_categorical_probe(
-        targets,
-        load_beatmaps(["artist"]),
-        "artist",
-        "Artist Probe",
-    )
-
-
-def run_genre_eval(targets: list[TargetData], _args: argparse.Namespace) -> None:
-    if not BEATMAPSETS_EVAL_PATH.exists():
-        console.print(
-            f"[yellow]Skipping Genre Probe: {BEATMAPSETS_EVAL_PATH} not found.[/yellow]"
-        )
-        return
-    beatmaps = pl.read_parquet(
-        BEATMAPSETS_EVAL_PATH, columns=["beatmap_id", "genre_id"]
-    )
-    run_categorical_probe(targets, beatmaps, "genre_id", "Genre Probe")
-
-
-def run_map_attribute_eval(
-    targets: list[TargetData], _args: argparse.Namespace
-) -> None:
-    source_columns = list(MAP_ATTRIBUTE_COLUMNS.values())
-    beatmaps = load_beatmaps(source_columns).with_columns(
-        (
-            pl.col("submitted_date")
-            .str.to_datetime("%Y-%m-%d %H:%M:%S%z", strict=False)
-            .dt.epoch("s")
-            / 86_400
-        ).alias("submitted_date")
-    )
-    beatmaps = beatmaps.drop_nulls(["beatmap_id", *source_columns])
-    beatmaps = beatmaps.filter(
-        pl.all_horizontal([pl.col(column).is_finite() for column in source_columns])
-    )
-    ids = common_ids(targets, set(beatmaps["beatmap_id"].to_list()))
-    beatmaps = beatmaps.filter(pl.col("beatmap_id").is_in(ids)).sort("beatmap_id")
-    ids = [int(beatmap_id) for beatmap_id in beatmaps["beatmap_id"]]
-    if len(ids) < MIN_PROBE_MAPS:
-        console.print(
-            f"[yellow]Skipping Map Attribute Probe: only {len(ids):,} shared maps.[/yellow]"
-        )
-        return
-
-    device = probe_device()
-    folds = fold_indices(beatmapset_groups(ids), device)
-    y = torch.tensor(
-        beatmaps.select(source_columns).to_numpy(), dtype=torch.float32, device=device
-    )
-    metrics = {}
-    for target in targets:
-        x = torch.tensor(target_matrix(target, ids), dtype=torch.float32, device=device)
-        pred = ridge_oof(x, y, folds)
-        scores = oof_r2(y, pred, folds)
-        metrics[target.name] = {
-            f"r2_{name}": float(scores[index].item())
-            for index, name in enumerate(MAP_ATTRIBUTE_COLUMNS)
-        }
-        del x, pred, scores
-    print_eval_result(EvalResult("Map Attribute Probe", metrics))
-
-
-def difficulty_neighbor_metrics(
-    embeddings: torch.Tensor,
-    stars: torch.Tensor,
-    groups: torch.Tensor,
-    densities: torch.Tensor | None,
-    random_pair_distance: float,
-    largest_group: int,
-    queries: torch.Tensor,
-) -> dict[str, float]:
-    total = 0.0
-    depth = DIFFICULTY_NEIGHBOR_K + largest_group
-
-    for start in range(0, len(queries), DIFFICULTY_BATCH_SIZE):
-        rows = queries[start : start + DIFFICULTY_BATCH_SIZE]
-        scores = embeddings[rows] @ embeddings.T
-        if densities is not None:
-            scores = scores - retrieval.density_term(densities)
-        neighbors = scores.topk(depth, dim=1).indices
-        other = groups[neighbors] != groups[rows, None]
-        keep = other & (other.cumsum(dim=1) <= DIFFICULTY_NEIGHBOR_K)
-        distance = torch.abs(stars[neighbors] - stars[rows, None]) * keep
-        total += float(distance.sum().item()) / DIFFICULTY_NEIGHBOR_K
-
-    return {
-        f"distance@{DIFFICULTY_NEIGHBOR_K}": total / len(queries),
-        "random_pair_distance": random_pair_distance,
-    }
-
-
-def run_difficulty_neighbor_eval(
-    targets: list[TargetData], data: DifficultyData
-) -> None:
-    largest_group = max(np.unique(data.groups, return_counts=True)[1])
-    if len(data.ids) - largest_group < DIFFICULTY_NEIGHBOR_K:
-        console.print(
-            "[yellow]Skipping Difficulty Neighbors: too few candidates.[/yellow]"
-        )
-        return
-
-    device = probe_device()
-    stars = torch.tensor(data.stars, dtype=torch.float32, device=device)
-    groups = torch.tensor(data.groups, dtype=torch.long, device=device)
-    rng = np.random.default_rng(PROBE_SEED)
-    left = rng.integers(0, len(data.stars), CHANCE_PAIR_SAMPLES)
-    right = rng.integers(0, len(data.stars), CHANCE_PAIR_SAMPLES)
-    random_pair_distance = float(np.abs(data.stars[left] - data.stars[right]).mean())
-    queries = torch.tensor(
-        np.sort(
-            rng.choice(
-                len(data.ids),
-                min(DIFFICULTY_QUERY_SAMPLE, len(data.ids)),
-                replace=False,
-            )
-        ),
-        device=device,
-    )
-    metrics = {}
-    for target in targets:
-        embeddings = target_matrix(target, data.ids)
-        embeddings = torch.tensor(embeddings, device=device).half()
-        target_density = target_densities(target, data.ids)
-        densities = (
-            torch.tensor(target_density, device=device).half()
-            if target_density is not None
-            else None
-        )
-        metrics[target.name] = difficulty_neighbor_metrics(
-            embeddings,
-            stars,
-            groups,
-            densities,
-            random_pair_distance,
-            int(largest_group),
-            queries,
-        )
-        del embeddings
-    print_eval_result(EvalResult("Difficulty Neighbors", metrics))
-
-
-def run_difficulty_evals(targets: list[TargetData], args: argparse.Namespace) -> None:
-    data = load_difficulty_data(targets, targets[0].mode)
-    if data is None:
-        return
-    run_difficulty_neighbor_eval(targets, data)
 
 
 def print_eval_result(result: EvalResult) -> None:
@@ -1595,7 +1152,7 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                 "generated_at": generated_at,
                 "target": target.name,
                 "targets": [item.name for item in targets],
-                "model_sha256": target.index.model_sha256,
+                "model_sha256": checksum(target.artifacts.model),
                 "evaluations": evaluations,
                 "diagnostics": {
                     result.name: {
@@ -1605,7 +1162,6 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
                         in {
                             "population",
                             "population_sha256",
-                            "confidence_intervals",
                             "selected_relative_ridge",
                             "warning",
                         }
@@ -1620,7 +1176,7 @@ def save_eval_results(targets: list[TargetData], filename: str = "eval.json") ->
             json.dumps(payload, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
         )
-        console.print(f"[dim]Saved {output}[/dim]")
+        print(f"Saved {output}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1664,10 +1220,6 @@ def main() -> None:
         evals += [
             run_mapper_eval,
             run_item_item_eval,
-            run_artist_eval,
-            run_genre_eval,
-            run_map_attribute_eval,
-            run_difficulty_evals,
         ]
     for run_eval in evals:
         run_eval(targets, args)

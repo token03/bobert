@@ -2,15 +2,11 @@ import argparse
 
 import numpy as np
 import polars as pl
+import torch
 
-from core.artifacts import (
-    Index,
-    Labels,
-    read_index,
-    run_artifacts,
-    save_labels,
-    unit_rows,
-)
+from core.artifacts import run_artifacts, unit_rows
+from core.index import Index, read_index
+from core.model import BobertEncoder
 from scripts.common.collections import mode_collections
 from scripts.common.paths import COLLECTIONS_DIR, RUNS_DIR
 
@@ -78,7 +74,7 @@ def main() -> None:
     parser.add_argument("-v", "--version", default="current")
     args = parser.parse_args()
     artifacts = run_artifacts(RUNS_DIR / args.version, "std")
-    index = read_index(artifacts, with_densities=False)
+    index = read_index(artifacts)
     collections = read_collections(index.ids)
     names = list(WORDS)
     members = collections.select(names).to_numpy().astype(np.float32)
@@ -95,8 +91,10 @@ def main() -> None:
         inputs.T @ (targets - targets.mean(axis=0)),
     )
     bias = -(means @ weight).mean(axis=0)
-    save_labels(artifacts.labels, Labels(names, weight, bias), index.model_sha256)
-    print(f"Wrote {len(names)} labels to {artifacts.labels}")
+    model = BobertEncoder.from_pretrained(artifacts.directory, torch.device("cpu"))
+    model.set_labels(names, weight.astype(np.float32), bias.astype(np.float32))
+    model.save_pretrained(artifacts.directory)
+    print(f"Wrote {len(names)} labels to {artifacts.model}")
 
 
 if __name__ == "__main__":

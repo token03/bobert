@@ -1,50 +1,35 @@
 from collections import deque
 from dataclasses import dataclass
+from functools import partial
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from omegaconf import DictConfig
-from torch import nn
-from tqdm import tqdm
+from omegaconf import DictConfig, OmegaConf
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from core.artifacts import unit_rows
 from core.model import EmbeddingAdapter
 
-PASS_SEED_STRIDE = 333
-CALIBRATION_SAMPLE_SIZE = 100_000
-CALIBRATION_CHUNK_SIZE = 100_000
-PC_SHRINK = 0.8
-BASE_WEIGHT = 0.3
-ADAPTED_SCALE = 0.75
-
-INFORMATIVE_MAX_SIZE = 256
-SPECIFICITY_EXPONENT = 1.0
-MAX_INFO_COLLECTIONS_PER_MAP = 8
-EFFECTIVE_POSITIVES_PER_MAP = 4
-HARD_NEGATIVE_COUNT = 256
+from .common import DEVICE, CsvLog, Trainer
 
 
-@dataclass(slots=True)
-class GraphIndex:
+@dataclass(frozen=True, slots=True)
+class PairGraph:
+    pairs: np.ndarray
     members: dict[int, list[int]]
-    pair_collections: np.ndarray
     specificity: np.ndarray
-    norm_specificity: np.ndarray
-    num_pairs: int
-
-
-_GRAPH: GraphIndex | None = None
+    pair_weights: np.ndarray
 
 
 def sample_pairs(
-    collections: list[np.ndarray], positives_per_map: int, seed: int
-) -> np.ndarray:
-    global _GRAPH
-    sizes = np.array([len(collection) for collection in collections], dtype=np.int64)
-    specificity = 1.0 / np.power(
-        np.maximum(sizes, 1).astype(np.float64), SPECIFICITY_EXPONENT
-    )
-    informative = sizes <= INFORMATIVE_MAX_SIZE
+    collections: list[np.ndarray], config: DictConfig, seed: int
+) -> PairGraph:
+    sizes = np.array([len(collection) for collection in collections])
+    specificity = 1.0 / np.maximum(sizes, 1)
+    informative = sizes <= config.informative_size
 
     by_map: dict[int, list[int]] = {}
     for collection_index, collection in enumerate(collections):
@@ -54,103 +39,71 @@ def sample_pairs(
     members: dict[int, list[int]] = {}
     choices: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     for anchor, collection_indices in by_map.items():
-        info = [idx for idx in collection_indices if informative[idx]]
+        info = [index for index in collection_indices if informative[index]]
         if info:
-            members[anchor] = sorted(info, key=lambda idx: int(sizes[idx]))[
-                :MAX_INFO_COLLECTIONS_PER_MAP
-            ]
+            by_size = sorted(info, key=lambda index: int(sizes[index]))
+            members[anchor] = by_size[: config.collections_per_map]
         candidates = np.asarray(info or collection_indices)
         weights = specificity[candidates]
         choices[anchor] = (candidates, weights / weights.sum())
 
-    effective_ppm = max(int(positives_per_map), EFFECTIVE_POSITIVES_PER_MAP)
-    total = len(by_map) * effective_ppm
-    pairs = np.empty((total, 2), dtype=np.int64)
-    pair_collections = np.empty(total, dtype=np.int64)
-    anchors = list(choices)
-    row = 0
-    for pass_index in range(effective_ppm):
-        generator = np.random.default_rng(seed + pass_index * PASS_SEED_STRIDE)
-        for anchor in anchors:
-            candidates, probs = choices[anchor]
-            position = generator.choice(len(candidates), p=probs)
-            chosen = candidates[position]
+    pairs, pair_collections = [], []
+    for pass_index in range(config.positives_per_map):
+        generator = np.random.default_rng((seed, pass_index))
+        for anchor, (candidates, probabilities) in choices.items():
+            chosen = int(candidates[generator.choice(len(candidates), p=probabilities)])
             positive = anchor
             while positive == anchor:
-                positive = generator.choice(collections[int(chosen)])
-            pairs[row] = (anchor, int(positive))
-            pair_collections[row] = int(chosen)
-            row += 1
+                positive = int(generator.choice(collections[chosen]))
+            pairs.append((anchor, positive))
+            pair_collections.append(chosen)
 
-    peak = max(float(specificity.max()), 1e-12)
-    _GRAPH = GraphIndex(
+    normalized = (specificity / specificity.max()).astype(np.float32)
+    return PairGraph(
+        pairs=np.array(pairs, dtype=np.int64),
         members=members,
-        pair_collections=pair_collections,
-        specificity=specificity,
-        norm_specificity=(specificity / peak).astype(np.float32),
-        num_pairs=len(pairs),
+        specificity=normalized,
+        pair_weights=normalized[pair_collections],
     )
-    return pairs
 
 
-def _batch_relations(
-    anchor_ids: np.ndarray,
-    positive_ids: np.ndarray,
-    pair_weights: np.ndarray,
-    members: dict[int, list[int]],
-    norm_specificity: np.ndarray,
-    device: torch.device,
+def batch_relations(
+    graph: PairGraph, indices: np.ndarray
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    batch_size = len(anchor_ids)
-    anchor_cols = [members.get(int(anchor), []) for anchor in anchor_ids]
-    positive_cols = [members.get(int(positive), []) for positive in positive_ids]
-
+    anchors, positives = graph.pairs[indices].T
+    size = len(indices)
     posting: dict[int, list[int]] = {}
-    for row, cols in enumerate(anchor_cols):
-        for collection_index in cols:
+    for row, anchor in enumerate(anchors):
+        for collection_index in graph.members.get(int(anchor), ()):
             posting.setdefault(collection_index, []).append(row)
 
-    mask = np.zeros((batch_size, batch_size), dtype=bool)
-    weights = np.zeros((batch_size, batch_size), dtype=np.float32)
-    rows = np.arange(batch_size)
-    mask[rows, rows] = True
-    weights[rows, rows] = pair_weights.astype(np.float32)
-    for col, cols in enumerate(positive_cols):
-        for collection_index in cols:
-            increment = float(norm_specificity[collection_index])
+    mask = np.eye(size, dtype=bool)
+    weights = np.diag(graph.pair_weights[indices])
+    for column, positive in enumerate(positives):
+        for collection_index in graph.members.get(int(positive), ()):
             for row in posting.get(collection_index, ()):
-                if row != col:
-                    mask[row, col] = True
-                    weights[row, col] += increment
+                if row != column:
+                    mask[row, column] = True
+                    weights[row, column] += graph.specificity[collection_index]
     np.minimum(weights, 1.0, out=weights)
-    return (
-        torch.from_numpy(mask).to(device),
-        torch.from_numpy(weights).to(device, dtype=torch.float32),
-    )
+    return torch.from_numpy(mask).to(DEVICE), torch.from_numpy(weights).to(DEVICE)
 
 
-def _multipositive_hard_loss(
-    sims: torch.Tensor,
-    pos_mask: torch.Tensor,
-    hard_count: int,
-    pos_weights: torch.Tensor | None = None,
+def multipositive_loss(
+    scores: torch.Tensor, positive: torch.Tensor, weights: torch.Tensor, hard: int
 ) -> torch.Tensor:
-    sims = sims.float()
-    batch_size = sims.shape[0]
-    neg_scores = sims.masked_fill(pos_mask, float("-inf"))
-    hard_count = max(1, min(int(hard_count), batch_size - 1))
-    hard_vals, hard_idx = torch.topk(neg_scores, hard_count, dim=1)
-    hard_mask = torch.zeros_like(pos_mask)
-    hard_mask.scatter_(1, hard_idx, torch.isfinite(hard_vals))
-    denom = torch.logsumexp(
-        sims.masked_fill(~(pos_mask | hard_mask), float("-inf")), dim=1
+    scores = scores.float()
+    negatives = scores.masked_fill(positive, float("-inf"))
+    hard = max(1, min(hard, len(scores) - 1))
+    hard_scores, hard_columns = torch.topk(negatives, hard, dim=1)
+    hard_mask = torch.zeros_like(positive)
+    hard_mask.scatter_(1, hard_columns, torch.isfinite(hard_scores))
+    denominator = torch.logsumexp(
+        scores.masked_fill(~(positive | hard_mask), float("-inf")), dim=1
     )
-    if pos_weights is None:
-        weights = pos_mask.float()
-    else:
-        weights = torch.where(pos_mask, pos_weights.float(), torch.zeros_like(sims))
-    mean_pos = (sims * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1e-6)
-    return (denom - mean_pos).mean()
+    weights = torch.where(positive, weights, 0.0)
+    mean_positive = (scores * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1e-6)
+    return (denominator - mean_positive).mean()
 
 
 def unique_pair_batches(
@@ -160,8 +113,8 @@ def unique_pair_batches(
     batches = []
     min_batch = min(batch_size, max(2, batch_size // 4))
     while pending:
-        batch = []
-        seen = set()
+        batch: list[int] = []
+        seen: set[int] = set()
         for _ in range(len(pending)):
             index = pending.popleft()
             first, second = pairs[index]
@@ -169,140 +122,148 @@ def unique_pair_batches(
                 pending.append(index)
                 continue
             batch.append(index)
-            seen.add(first)
-            seen.add(second)
+            seen.update((first, second))
             if len(batch) == batch_size:
                 break
         if len(batch) < min_batch:
             break
-        batches.append(np.asarray(batch, dtype=np.int64))
+        batches.append(np.asarray(batch))
     return batches
 
 
+def adapter_losses(
+    adapter: EmbeddingAdapter,
+    corpus: torch.Tensor,
+    graph: PairGraph,
+    config: DictConfig,
+    indices: np.ndarray,
+) -> dict[str, torch.Tensor]:
+    pairs = torch.from_numpy(graph.pairs[indices]).to(DEVICE)
+    anchor, positive = corpus[pairs[:, 0]], corpus[pairs[:, 1]]
+    positive_mask, weights = batch_relations(graph, indices)
+    with torch.autocast("cuda", torch.bfloat16):
+        adapted_anchor, adapted_positive = adapter(anchor), adapter(positive)
+        scores = adapted_anchor @ adapted_positive.T / config.temperature
+        contrastive = 0.5 * (
+            multipositive_loss(scores, positive_mask, weights, config.hard_negatives)
+            + multipositive_loss(
+                scores.T, positive_mask.T, weights.T, config.hard_negatives
+            )
+        )
+        preserve = 1.0 - 0.5 * (
+            F.cosine_similarity(adapted_anchor, anchor).mean()
+            + F.cosine_similarity(adapted_positive, positive).mean()
+        )
+    loss = contrastive + config.preserve_weight * preserve
+    return {"loss": loss, "contrastive": contrastive, "preserve": preserve}
+
+
 def train_adapter(
-    embeddings: np.ndarray,
-    pairs: np.ndarray,
+    corpus: torch.Tensor,
+    graph: PairGraph,
     config: DictConfig,
     seed: int,
-    device: torch.device,
+    phase: int,
+    steps: CsvLog,
 ) -> EmbeddingAdapter:
     generator = np.random.default_rng(seed)
     batches = [
         batch
         for _ in range(config.epochs)
-        for batch in unique_pair_batches(pairs, config.batch_size, generator)
+        for batch in unique_pair_batches(graph.pairs, config.batch_size, generator)
     ]
-    graph = _GRAPH if _GRAPH is not None and _GRAPH.num_pairs == len(pairs) else None
-    pair_weights = (
-        graph.norm_specificity[graph.pair_collections] if graph is not None else None
-    )
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    corpus = torch.from_numpy(embeddings).to(device=device, dtype=dtype)
-    pairs_index = torch.from_numpy(pairs).to(device)
-    adapter = EmbeddingAdapter(embeddings.shape[1]).to(device)
+    adapter = EmbeddingAdapter(corpus.shape[1]).to(DEVICE)
     optimizer = torch.optim.AdamW(
         adapter.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
-        fused=device.type == "cuda",
+        fused=True,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=len(batches)
+    trainer = Trainer(
+        [adapter],
+        optimizer,
+        CosineAnnealingLR(optimizer, len(batches)),
+        grad_clip=1.0,
+        steps=steps,
+        log_every=10,
     )
-    progress = tqdm(batches, desc="Adapting", dynamic_ncols=True)
-    for step, indices in enumerate(progress, 1):
-        rows = torch.as_tensor(indices, device=device)
-        selected = pairs_index[rows]
-        anchor, positive = corpus[selected[:, 0]], corpus[selected[:, 1]]
-        optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(
-            device_type=device.type,
-            dtype=dtype,
-            enabled=device.type == "cuda",
-        ):
-            anchor_adapted = adapter(anchor)
-            positive_adapted = adapter(positive)
-            logits = anchor_adapted @ positive_adapted.T / config.temperature
-            if graph is not None:
-                with torch.no_grad():
-                    pos_mask, pos_weights = _batch_relations(
-                        pairs[indices, 0],
-                        pairs[indices, 1],
-                        pair_weights[indices],
-                        graph.members,
-                        graph.norm_specificity,
-                        device,
-                    )
-                contrastive = (
-                    _multipositive_hard_loss(
-                        logits,
-                        pos_mask,
-                        HARD_NEGATIVE_COUNT,
-                        pos_weights,
-                    )
-                    + _multipositive_hard_loss(
-                        logits.T,
-                        pos_mask.T,
-                        HARD_NEGATIVE_COUNT,
-                        pos_weights.T,
-                    )
-                ) * 0.5
-            else:
-                labels = torch.arange(len(anchor), device=device)
-                contrastive = (
-                    sum(
-                        F.cross_entropy(scores, labels) for scores in (logits, logits.T)
-                    )
-                    * 0.5
-                )
-            preserve = (
-                2
-                - F.cosine_similarity(anchor_adapted, anchor).mean()
-                - F.cosine_similarity(positive_adapted, positive).mean()
-            ) * 0.5
-            loss = contrastive + config.preserve_weight * preserve
-        loss.backward()
-        nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
-        optimizer.step()
-        scheduler.step()
-        if step % 10 == 0 or step == progress.total:
-            progress.set_postfix(loss=f"{loss.detach().item():.4f}")
-    return adapter
+    trainer.train_epoch(
+        phase, batches, partial(adapter_losses, adapter, corpus, graph, config)
+    )
+    return adapter.eval()
+
+
+@torch.inference_mode()
+def transform(adapter: EmbeddingAdapter, embeddings: np.ndarray) -> np.ndarray:
+    weight = adapter.proj.weight
+    return (
+        adapter(torch.as_tensor(embeddings, device=weight.device, dtype=weight.dtype))
+        .float()
+        .cpu()
+        .numpy()
+    )
 
 
 def calibrate_adapter(
-    adapter: EmbeddingAdapter, embeddings: np.ndarray, seed: int
-) -> dict[str, float | int | str]:
-    adapter.eval()
+    adapter: EmbeddingAdapter,
+    embeddings: np.ndarray,
+    config: DictConfig,
+    seed: int,
+    chunk_size: int = 100_000,
+) -> None:
     sample = embeddings[
         np.random.default_rng(seed).choice(
-            len(embeddings),
-            min(CALIBRATION_SAMPLE_SIZE, len(embeddings)),
-            replace=False,
+            len(embeddings), min(config.sample_size, len(embeddings)), replace=False
         )
     ]
-    mean = np.zeros(embeddings.shape[1], dtype=np.float64)
-    for start in range(0, len(embeddings), CALIBRATION_CHUNK_SIZE):
-        mean += adapter.transform(
-            embeddings[start : start + CALIBRATION_CHUNK_SIZE]
-        ).sum(axis=0, dtype=np.float64)
-    adapted = adapter.transform(sample)
-    adapted -= (mean / len(embeddings)).astype(np.float32)
+    mean = sum(
+        transform(adapter, embeddings[start : start + chunk_size]).sum(
+            axis=0, dtype=np.float64
+        )
+        for start in range(0, len(embeddings), chunk_size)
+    ) / len(embeddings)
+    adapted = transform(adapter, sample) - mean.astype(np.float32)
     adapted /= np.maximum(np.linalg.norm(adapted, axis=1, keepdims=True), 1e-12)
     _, vectors = np.linalg.eigh(adapted.T @ adapted)
     identity = np.eye(embeddings.shape[1], dtype=np.float32)
-    projection = identity - PC_SHRINK * np.outer(vectors[:, -1], vectors[:, -1])
+    top = vectors[:, -1]
+    projection = identity - config.pc_shrink * np.outer(top, top)
     weight = projection @ adapter.proj.weight.detach().float().cpu().numpy()
-    scale = ADAPTED_SCALE / np.median(np.linalg.norm(sample @ weight.T, axis=1))
-    weight = BASE_WEIGHT * identity + (1 - BASE_WEIGHT) * scale * weight
+    scale = config.adapted_scale / np.median(np.linalg.norm(sample @ weight.T, axis=1))
+    weight = config.base_weight * identity + (1 - config.base_weight) * scale * weight
     with torch.no_grad():
-        adapter.proj.weight.copy_(
-            torch.from_numpy(weight).to(adapter.proj.weight.device)
-        )
-    return {
-        "method": "spectral_residual",
-        "sample_size": len(sample),
-        "pc_shrink": PC_SHRINK,
-        "base_weight": BASE_WEIGHT,
-        "adapted_scale": ADAPTED_SCALE,
+        adapter.proj.weight.copy_(torch.from_numpy(weight))
+
+
+def adapt(
+    embeddings: np.ndarray,
+    collections: list[np.ndarray],
+    mined: list[np.ndarray] | None,
+    config: DictConfig,
+    run_dir: Path,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    steps = CsvLog(run_dir / "adapt_steps.csv")
+    corpus = torch.from_numpy(embeddings).to(DEVICE, torch.bfloat16)
+    phase = config.collections
+    graph = sample_pairs(collections, phase, phase.pair_seed)
+    adapter = train_adapter(corpus, graph, phase, config.seed, 1, steps)
+    calibrate_adapter(adapter, embeddings, config.calibration, config.seed)
+    weight = adapter.proj.weight.detach().float().cpu().numpy()
+    metadata: dict[str, Any] = {
+        "type": "linear",
+        "config": OmegaConf.to_container(config),
+        "collection_pairs": len(graph.pairs),
     }
+    if mined is not None:
+        phase = config.mined
+        calibrated = unit_rows(embeddings @ weight.T)
+        mined_graph = sample_pairs(mined, phase, phase.pair_seed)
+        corpus = torch.from_numpy(calibrated).to(DEVICE, torch.bfloat16)
+        mined_adapter = train_adapter(corpus, mined_graph, phase, config.seed, 2, steps)
+        raw = mined_adapter.proj.weight.detach().float().cpu().numpy()
+        blend = (1.0 - phase.blend) * np.eye(
+            len(raw), dtype=np.float32
+        ) + phase.blend * raw
+        weight = blend @ weight
+        metadata["mined_pairs"] = len(mined_graph.pairs)
+    return weight, metadata

@@ -7,10 +7,9 @@ from collections import defaultdict
 from pathlib import Path
 
 import brotli
-import numpy as np
 import polars as pl
 
-from core.artifacts import RunArtifacts, index_ids, run_modes
+from core.artifacts import RunArtifacts, run_modes
 from core.modes import MODES
 from scripts.common.paths import BEATMAPS_PATH, RUNS_DIR
 
@@ -20,17 +19,8 @@ SEARCH_TERM = re.compile(
     r"[0-9a-z\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]+"
 )
 REPEATED_LETTER = re.compile(r"([0-9a-z])\1+")
+MIN_FAVOURITES = 10
 SECTION_NAMES = ("sets", "diffs", "strings", "terms", "postings", "lookup")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build each mode's client-side beatmap search artifact."
-    )
-    parser.add_argument("version", nargs="?", default="current")
-    parser.add_argument("--catalog", default=str(BEATMAPS_PATH))
-    parser.add_argument("--min-favourites", type=int, default=10)
-    return parser.parse_args()
 
 
 def tokenize(text: str) -> list[str]:
@@ -50,11 +40,11 @@ def encode_varint(value: int) -> bytes:
     return bytes(encoded)
 
 
-def load_sets(catalog_path: str, artifacts: RunArtifacts) -> pl.DataFrame:
+def load_sets(artifacts: RunArtifacts) -> pl.DataFrame:
     mode = artifacts.mode
-    indexed = pl.LazyFrame({"id": np.concatenate(index_ids(artifacts)[1])})
+    indexed = pl.scan_parquet(artifacts.embeddings).select(id="beatmap_id")
     beatmaps = (
-        pl.scan_parquet(catalog_path)
+        pl.scan_parquet(BEATMAPS_PATH)
         .join(indexed, on="id", how="semi")
         .filter(pl.col("mode") == MODES[mode].label, pl.col("deleted_at").is_null())
         .unique("id")
@@ -234,14 +224,14 @@ def write_artifact(
     return len(payload)
 
 
-def build_mode(args, artifacts: RunArtifacts) -> None:
+def build_mode(artifacts: RunArtifacts) -> None:
     mode = artifacts.mode
     output = artifacts.search
     sets = (
-        load_sets(args.catalog, artifacts)
+        load_sets(artifacts)
         .filter(
             pl.col("status").is_in(list(RANKED_STATUSES | LOVED_STATUSES))
-            | (pl.col("favourites") >= args.min_favourites)
+            | (pl.col("favourites") >= MIN_FAVOURITES)
         )
         .sort("beatmapset_id")
     )
@@ -250,7 +240,7 @@ def build_mode(args, artifacts: RunArtifacts) -> None:
         {"id": [diff["id"] for row in rows for diff in row["diffs"]]}
     ).lazy()
     lookup = (
-        pl.scan_parquet(args.catalog)
+        pl.scan_parquet(BEATMAPS_PATH)
         .filter(pl.col("mode") == MODES[mode].label, pl.col("deleted_at").is_null())
         .select("id", "beatmapset_id")
         .unique("id")
@@ -284,12 +274,18 @@ def build_mode(args, artifacts: RunArtifacts) -> None:
     )
 
 
-def main() -> int:
-    args = parse_args()
-    for artifacts in run_modes(RUNS_DIR / args.version).values():
-        build_mode(args, artifacts)
-    return 0
+def build_search(run: Path) -> None:
+    for artifacts in run_modes(run).values():
+        build_mode(artifacts)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build each mode's client-side search file"
+    )
+    parser.add_argument("version", nargs="?", default="current")
+    build_search(RUNS_DIR / parser.parse_args().version)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

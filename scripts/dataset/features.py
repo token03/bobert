@@ -2,14 +2,10 @@ import argparse
 import json
 import multiprocessing as mp
 import os
-import random
 import signal
 import time
 from collections import Counter
 from collections.abc import Collection
-from pathlib import Path
-
-from tqdm import tqdm
 
 from core.dataset import (
     FeatureStore,
@@ -18,11 +14,10 @@ from core.dataset import (
     feature_path,
     stored_beatmap_ids,
 )
-from core.features import beatmap_frames
-from core.modes import MODE_NAMES, MODES
-from core.raw import find_maps, map_id
-from scripts.common.io import read_ids
-from scripts.common.paths import resolve_path
+from core.modes import MODE_NAMES, MODES, beatmap_frames
+from scripts.common.maps import find_maps, map_id, read_map
+from scripts.common.paths import BEATMAPS_DIR, FEATURES_DIR
+from scripts.common.progress import ProgressLog
 from scripts.dataset.native import compile_parser, load_parser
 
 MAX_PARSE_LINES = 65_536
@@ -30,6 +25,8 @@ MAX_STD_OBJECTS = 16_384
 MAX_CURVE_POINTS_PER_MAP = 32_768
 PARSE_TIMEOUT_SECONDS = 30
 CHUNK_SIZE = 256
+MAX_SEQ_LEN = 4096
+WORKERS = min(8, os.cpu_count() or 1)
 
 
 class ParseTimeoutError(BaseException):
@@ -58,8 +55,9 @@ def process_chunk(task: tuple[list[str], tuple[int, ...], int]):
     for path in paths:
         try:
             signal.alarm(PARSE_TIMEOUT_SECONDS)
-            beatmap = _parser.parse_osu_file(
-                path,
+            beatmap = _parser.parse_beatmap(
+                read_map(path),
+                map_id(path),
                 max_hitobject_lines=MAX_PARSE_LINES,
                 max_curve_points=MAX_CURVE_POINTS_PER_MAP,
                 validate_dataset=True,
@@ -111,18 +109,10 @@ def process_chunk(task: tuple[list[str], tuple[int, ...], int]):
     return len(paths), results, counts, failures
 
 
-def find_beatmap_files(root_dir: str | Path) -> list[str]:
-    return [str(path) for path in find_maps(root_dir)]
-
-
-def copy_unchanged(
-    path: Path, writer: FeatureWriter, max_seq_len: int, refresh: set[int]
-) -> None:
-    store = FeatureStore(path, writer.mode)
-    if store.max_seq_len != max_seq_len:
-        raise ValueError(
-            f"{path} stores {store.max_seq_len} tokens per map, not {max_seq_len}"
-        )
+def copy_unchanged(writer: FeatureWriter, refresh: set[int]) -> None:
+    store = FeatureStore(feature_path(FEATURES_DIR, writer.mode), writer.mode)
+    if store.max_seq_len != MAX_SEQ_LEN:
+        raise ValueError(f"{store.path} stores {store.max_seq_len} tokens per map")
     offsets = store.block_offsets
     for position, beatmap_id in enumerate(store.beatmap_ids.tolist()):
         if beatmap_id not in refresh:
@@ -135,41 +125,35 @@ def copy_unchanged(
 
 
 def build_features(
-    beatmaps_dir: Path,
-    output_dir: Path,
     modes: list[str],
-    max_seq_len: int,
-    workers: int,
-    sample_size: int | None = None,
-    sample_seed: int = 42,
-    compiled: bool = True,
+    workers: int = WORKERS,
+    sample: int | None = None,
     refresh: Collection[int] | None = None,
-) -> dict[str, dict]:
-    print(f"Finding raw beatmaps under {beatmaps_dir}...")
-    files = find_beatmap_files(beatmaps_dir)
-    if sample_size and len(files) > sample_size:
-        files = sorted(random.Random(sample_seed).sample(files, sample_size))
+) -> None:
+    files = [str(path) for path in find_maps(BEATMAPS_DIR)]
+    if sample:
+        files = files[:: max(len(files) // sample, 1)][:sample]
     if refresh is not None:
         refresh = set(refresh)
-        stored = stored_beatmap_ids(output_dir) - refresh
-        files = [path for path in files if int(map_id(path)) not in stored]
-    print(f"Building {', '.join(modes)} features from {len(files):,} files.")
+        stored = stored_beatmap_ids(FEATURES_DIR) - refresh
+        files = [path for path in files if map_id(path) not in stored]
+    print(f"Building {', '.join(modes)} features from {len(files):,} files", flush=True)
 
     mode_ints = tuple(MODES[mode].mode_int for mode in modes)
     tasks = [
-        (files[start : start + CHUNK_SIZE], mode_ints, max_seq_len)
+        (files[start : start + CHUNK_SIZE], mode_ints, MAX_SEQ_LEN)
         for start in range(0, len(files), CHUNK_SIZE)
     ]
     writers = {
-        mode: FeatureWriter(feature_path(output_dir, mode), mode, max_seq_len)
+        mode: FeatureWriter(feature_path(FEATURES_DIR, mode), mode, MAX_SEQ_LEN)
         for mode in modes
     }
     if refresh is not None:
-        for mode, writer in writers.items():
-            copy_unchanged(feature_path(output_dir, mode), writer, max_seq_len, refresh)
-    native_dir = compile_parser() if compiled else None
+        for writer in writers.values():
+            copy_unchanged(writer, refresh)
+    native_dir = compile_parser()
     counts = Counter()
-    failure_path = output_dir / "failures.jsonl"
+    failure_path = FEATURES_DIR / "failures.jsonl"
     os.environ["POLARS_MAX_THREADS"] = "1"
     started = time.time()
     try:
@@ -180,7 +164,7 @@ def build_features(
                 initargs=(None if native_dir is None else str(native_dir),),
                 maxtasksperchild=100,
             ) as pool,
-            tqdm(total=len(files), desc="Building features", unit="files") as progress,
+            ProgressLog("Building features", len(files)) as progress,
             failure_path.open("w") as failure_log,
         ):
             for done, results, chunk_counts, failures in pool.imap_unordered(
@@ -200,82 +184,39 @@ def build_features(
         raise
 
     metas = {mode: writer.close() for mode, writer in writers.items()}
-    elapsed = time.time() - started
-    print(f"Finished in {elapsed / 60:.1f} min.")
+    print(f"Finished in {(time.time() - started) / 60:.1f} min", flush=True)
     for mode, meta in metas.items():
-        size = feature_path(output_dir, mode).stat().st_size
         print(
             f"  {mode}: {meta['maps']:,} maps, {meta['tokens']:,} tokens, "
-            f"{size / 1024**3:.2f} GiB, {counts[f'{mode}_filtered']:,} filtered"
+            f"{counts[f'{mode}_filtered']:,} filtered"
         )
-    print(f"  rejected by parser: {counts['rejected']:,}")
-    print(f"  failed: {counts['failed']:,} (see {failure_path})")
-    return metas
+    print(
+        f"  rejected: {counts['rejected']:,}, failed: {counts['failed']:,} (see {failure_path})"
+    )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compute hit-object features from .osu files into per-mode .bin files"
-    )
-    parser.add_argument("-d", "--directory", default="./data/beatmaps")
-    parser.add_argument("-o", "--output-dir", default="./data/features")
-    parser.add_argument(
-        "-m",
-        "--modes",
-        nargs="+",
-        choices=tuple(MODES),
-        default=list(MODES),
+        description="Rebuild the per-mode feature files from every stored .osu file"
     )
     parser.add_argument(
-        "--max-seq-len",
-        type=int,
-        default=4096,
-        help="Tokens stored per map; training can use this length or less",
+        "-m", "--modes", nargs="+", choices=tuple(MODES), default=list(MODES)
     )
     parser.add_argument(
-        "-s",
-        "--sample-size",
-        type=int,
-        default=None,
-        help="Randomly sample this many files, for quick test builds",
+        "--sample", type=int, help="Parse only this many files, for quick test builds"
     )
-    parser.add_argument("--sample-seed", type=int, default=42)
     parser.add_argument(
         "--update",
         action="store_true",
-        help="Keep stored maps and parse only new ones and those in --refresh",
+        help="Keep stored maps and parse only new files",
     )
-    parser.add_argument("--refresh", help="File of beatmap IDs to parse again")
-    parser.add_argument(
-        "--no-compile",
-        dest="compiled",
-        action="store_false",
-        help="Parse with pure Python instead of the mypyc-compiled parser",
-    )
-    parser.add_argument(
-        "-j",
-        "--workers",
-        type=int,
-        default=min(8, os.cpu_count() or 1),
-    )
+    parser.add_argument("-j", "--workers", type=int, default=WORKERS)
     args = parser.parse_args()
-    if args.workers < 1:
-        parser.error("--workers must be positive")
-    if args.max_seq_len < 1:
-        parser.error("--max-seq-len must be positive")
-
-    output_dir = resolve_path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     build_features(
-        resolve_path(args.directory),
-        output_dir,
         list(dict.fromkeys(args.modes)),
-        args.max_seq_len,
         args.workers,
-        args.sample_size,
-        args.sample_seed,
-        args.compiled,
-        read_ids(args.refresh) if args.refresh else [] if args.update else None,
+        args.sample,
+        [] if args.update else None,
     )
 
 

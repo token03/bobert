@@ -1,31 +1,23 @@
-import hashlib
 import json
 import os
 import random
 import struct
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
-import polars as pl
 import pyarrow as pa
 import torch
-from torch.utils.data import Sampler
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .modes import MODES
 
-FORMAT_VERSION = 1
 MAGIC = b"BOBFEAT1"
 FOOTER = struct.Struct("<Q8s")
 CODEC = pa.Codec("zstd", compression_level=3)
-
-
-def source_hash(mode: str) -> str:
-    digest = hashlib.sha256()
-    for module in MODES[mode].sources:
-        digest.update(Path(str(module.__file__)).read_bytes())
-    return digest.hexdigest()[:16]
 
 
 def feature_path(features_dir: str | Path, mode: str) -> Path:
@@ -81,7 +73,6 @@ class FeatureWriter:
             sections[name] = [self.file.tell(), len(values)]
             self.file.write(values.tobytes())
         meta = {
-            "format": FORMAT_VERSION,
             "mode": self.mode,
             "fields": list(self.field_names),
             "dtype": "float16",
@@ -89,7 +80,6 @@ class FeatureWriter:
             "max_seq_len": self.max_seq_len,
             "maps": len(self.beatmap_ids),
             "tokens": int(sum(self.lengths)),
-            "source_hash": source_hash(self.mode),
             "created_at": datetime.now(UTC).isoformat(),
             "sections": sections,
         }
@@ -116,8 +106,6 @@ def read_meta(path: str | Path) -> dict:
             raise ValueError(f"{path} is not a feature file")
         file.seek(-FOOTER.size - length, os.SEEK_END)
         meta = json.loads(file.read(length))
-    if meta["format"] != FORMAT_VERSION:
-        raise ValueError(f"unsupported feature format {meta['format']}")
     return meta
 
 
@@ -150,11 +138,6 @@ class FeatureStore:
             raise ValueError(
                 f"{self.path} fields do not match the {self.mode} feature schema; "
                 "rebuild it with build-features"
-            )
-        if self.meta["source_hash"] != source_hash(self.mode):
-            print(
-                f"Warning: {self.path.name} was built from different feature code; "
-                "rebuild it with build-features if features changed"
             )
         self.max_seq_len = self.meta["max_seq_len"]
         self.beatmap_ids = self._section("beatmap_id")
@@ -193,147 +176,138 @@ class FeatureStore:
             CODEC.decompress(block, decompressed_size=length * dim * 2, asbytes=True),
             dtype=np.float16,
         ).reshape(length, dim)
-        if max_seq_len is not None:
-            rows = rows[: int(max_seq_len)]
-        return torch.from_numpy(rows.copy())
-
-
-class FeatureView(Sequence[torch.Tensor]):
-    def __init__(
-        self, store: FeatureStore, positions: np.ndarray, max_seq_len: int | None
-    ):
-        self.store = store
-        self.positions = positions
-        self.max_seq_len = max_seq_len
-
-    def __len__(self) -> int:
-        return len(self.positions)
-
-    def __getitem__(self, index):
-        if isinstance(index, slice):
-            return [
-                self.store.vector(int(position), self.max_seq_len)
-                for position in self.positions[index]
-            ]
-        return self.store.vector(int(self.positions[index]), self.max_seq_len)
+        return torch.from_numpy(rows[:max_seq_len].copy())
 
 
 class LengthBucketBatchSampler(Sampler[list[int]]):
     def __init__(
         self,
-        lengths: Sequence[int],
+        lengths: np.ndarray,
         batch_size: int | None,
         max_tokens: int,
         seed: int,
         shuffle: bool = True,
     ):
-        self.lengths = [int(length) for length in lengths]
-        self.batch_size = None if batch_size is None else int(batch_size)
-        self.max_tokens = int(max_tokens)
-        self.seed = int(seed)
+        self.batches = length_buckets(lengths, batch_size, max_tokens)
+        self.seed = seed
         self.shuffle = shuffle
         self.epoch = 0
 
     def __len__(self) -> int:
-        return len(self._batches())
+        return len(self.batches)
 
-    def _batches(self) -> list[list[int]]:
-        indices = sorted(range(len(self.lengths)), key=self.lengths.__getitem__)
-        batches = []
-        batch: list[int] = []
-        tokens = 0
-        for index in indices:
-            length = self.lengths[index]
-            if batch and (
-                len(batch) == self.batch_size or tokens + length > self.max_tokens
-            ):
-                batches.append(batch)
-                batch = []
-                tokens = 0
-            batch.append(index)
-            tokens += length
-        if batch:
-            batches.append(batch)
-        return batches
-
-    def __iter__(self):
-        batches = self._batches()
+    def __iter__(self) -> Iterator[list[int]]:
+        batches = list(self.batches)
         if self.shuffle:
             random.Random(self.seed + self.epoch).shuffle(batches)
         self.epoch += 1
         yield from batches
 
 
-def _sample_beatmap_ids(
-    beatmap_ids: list[int], sample_size: int | None, dataset_seed: int
-) -> list[int]:
-    beatmap_ids = sorted(int(bid) for bid in beatmap_ids)
-    if sample_size is None or sample_size <= 0 or sample_size >= len(beatmap_ids):
-        return beatmap_ids
+def length_buckets(
+    lengths: np.ndarray, batch_size: int | None, max_tokens: int
+) -> list[list[int]]:
+    batches: list[list[int]] = []
+    batch: list[int] = []
+    tokens = 0
+    for index in np.argsort(lengths, kind="stable").tolist():
+        length = int(lengths[index])
+        if batch and (len(batch) == batch_size or tokens + length > max_tokens):
+            batches.append(batch)
+            batch, tokens = [], 0
+        batch.append(index)
+        tokens += length
+    if batch:
+        batches.append(batch)
+    return batches
 
-    rng = np.random.default_rng(dataset_seed)
-    selected = rng.choice(np.array(beatmap_ids), size=sample_size, replace=False)
-    return sorted(int(bid) for bid in selected)
+
+@dataclass(frozen=True, slots=True)
+class Packed:
+    vectors: torch.Tensor
+    cu_seqlens: torch.Tensor
+    max_seqlen: int
+
+    @property
+    def tokens(self) -> int:
+        return len(self.vectors)
+
+    def to(self, device: torch.device) -> "Packed":
+        return Packed(
+            self.vectors.to(device, non_blocking=True),
+            self.cu_seqlens.to(device, non_blocking=True),
+            self.max_seqlen,
+        )
 
 
-def select_beatmaps(
-    store: FeatureStore,
-    dataset_seed: int,
-    strains_path: str | Path | None = None,
-    strain_seq_len: int | None = None,
-    beatmap_ids: Sequence[int] | None = None,
-    sample_size: int | None = None,
-    min_sr: float | None = None,
-    max_sr: float | None = None,
-    include_strains: bool = False,
-) -> tuple[np.ndarray, np.ndarray | None]:
-    mode = MODES[store.mode]
-    targets = tuple(mode.strains)
-    selected = pl.LazyFrame(
-        {
-            "beatmap_id": store.beatmap_ids,
-            "_position": np.arange(len(store), dtype=np.int64),
-        }
+def pack(vectors: Sequence[torch.Tensor], normalization: torch.Tensor) -> Packed:
+    lengths = torch.tensor([len(vector) for vector in vectors], dtype=torch.int32)
+    mean, std = normalization.float().cpu()
+    return Packed(
+        vectors=(torch.cat(list(vectors)).float() - mean) / std,
+        cu_seqlens=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
+        max_seqlen=int(lengths.max()),
     )
-    if beatmap_ids is not None:
-        selected = selected.filter(
-            pl.col("beatmap_id").is_in([int(bid) for bid in beatmap_ids])
-        )
 
-    if include_strains or min_sr is not None or max_sr is not None:
-        if strains_path is None:
-            raise ValueError("strains_path is required to filter or load strains")
-        strains_lf = pl.scan_parquet(Path(strains_path).expanduser()).filter(
-            pl.col("mode_int") == mode.mode_int
-        )
-        if strain_seq_len is not None:
-            strains_lf = strains_lf.filter(pl.col("seq_len") <= strain_seq_len)
-        strains_lf = strains_lf.filter(
-            pl.all_horizontal(
-                [
-                    pl.col(column).is_finite()
-                    for column in dict.fromkeys(("stars", *targets))
-                ]
-            )
-        )
-        if min_sr is not None:
-            strains_lf = strains_lf.filter(pl.col("stars") >= min_sr)
-        if max_sr is not None:
-            strains_lf = strains_lf.filter(pl.col("stars") <= max_sr)
-        selected = selected.join(
-            strains_lf.select("beatmap_id", *targets),
-            on="beatmap_id",
-            how="inner",
-        )
 
-    frame = selected.collect().sort("beatmap_id")
-    sampled = _sample_beatmap_ids(
-        frame["beatmap_id"].to_list(), sample_size, dataset_seed
+class Collate:
+    def __init__(self, normalization: torch.Tensor, positions: np.ndarray):
+        self.normalization = normalization
+        self.positions = positions
+
+    def __call__(
+        self, batch: list[tuple[torch.Tensor, int]]
+    ) -> tuple[Packed, np.ndarray]:
+        vectors, indices = zip(*batch)
+        return pack(vectors, self.normalization), self.positions[list(indices)]
+
+
+class MapDataset(Dataset):
+    def __init__(
+        self,
+        store: FeatureStore,
+        positions: np.ndarray,
+        max_seq_len: int,
+        augment: bool = False,
+    ):
+        self.store = store
+        self.mode = MODES[store.mode]
+        self.positions = positions
+        self.max_seq_len = max_seq_len
+        self.augment = augment
+
+    def __len__(self) -> int:
+        return len(self.positions)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+        vector = self.store.vector(int(self.positions[index]), self.max_seq_len)
+        return (self.mode.augment(vector) if self.augment else vector), index
+
+    def lengths(self) -> np.ndarray:
+        return np.minimum(self.store.lengths[self.positions], self.max_seq_len)
+
+    def vectors(self) -> Iterator[torch.Tensor]:
+        for position in np.sort(self.positions):
+            yield self.store.vector(int(position), self.max_seq_len)
+
+
+def map_loader(
+    dataset: MapDataset,
+    collate: Callable,
+    *,
+    max_tokens: int,
+    batch_size: int | None = None,
+    shuffle: bool = False,
+    seed: int = 0,
+    workers: int = 0,
+) -> DataLoader:
+    return DataLoader(
+        dataset,
+        batch_sampler=LengthBucketBatchSampler(
+            dataset.lengths(), batch_size, max_tokens, seed, shuffle
+        ),
+        collate_fn=collate,
+        num_workers=workers,
+        persistent_workers=workers > 0,
+        pin_memory=True,
     )
-    if len(sampled) < frame.height:
-        frame = frame.filter(pl.col("beatmap_id").is_in(sampled))
-
-    strains = (
-        frame.select(targets).to_numpy().astype(np.float32) if include_strains else None
-    )
-    return frame["_position"].to_numpy(), strains

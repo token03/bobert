@@ -5,7 +5,7 @@ stage=$2
 version=$3
 repo=$4
 compose=(docker compose -f compose.yaml -f compose.prod.yaml)
-catalogs=(beatmaps.parquet beatmapsets.parquet strains.parquet)
+catalogs=(beatmaps.parquet strains.parquet)
 exec 9>.deploy.lock
 flock -n 9 || { echo 'Another deployment is running' >&2; exit 1; }
 cutover=0
@@ -19,9 +19,12 @@ test -n "$container"
 image=$(docker inspect --format '{{.Image}}' "$container")
 "${compose[@]}" config > "$stage/compose.yaml"
 printf 'services:\n  api:\n    image: %s\n' "$image" > "$stage/image.yaml"
+replace() {
+    if [ "$1" -ef "$2" ]; then rm -- "$1"; else mv -f -- "$1" "$2"; fi
+}
 rollback() {
     for file in "${catalogs[@]}"; do
-        mv -f -- "$stage/previous/$file" "data/$file" || return
+        replace "$stage/previous/$file" "data/$file" || return
     done
     ln -sfn -- "$previous" runs/.current && mv -Tf -- runs/.current runs/current || return
     docker compose --project-directory "$PWD" -f "$stage/compose.yaml" -f "$stage/image.yaml" up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 180 api
@@ -69,7 +72,7 @@ done
 echo 'Switching API'
 cutover=1
 for file in "${catalogs[@]}"; do
-    mv -f -- "$stage/release/data/$file" "data/$file"
+    replace "$stage/release/data/$file" "data/$file"
 done
 rmdir -- "$stage/release/data"
 mv -- "$stage/release" "runs/$version"

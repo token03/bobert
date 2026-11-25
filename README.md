@@ -1,57 +1,46 @@
 # BoBERT
+
 **Bidirectional osu! Beatmap Encoder Representations from Transformers**
 
-BoBERT encodes osu! beatmaps as fixed-size vectors. It supports osu!standard, taiko, catch and mania, with one encoder for each ruleset. Each encoder reads the hit objects of a map and outputs one vector. An adapter, trained on collection data, then tunes each encoder for recommendation and similarity search.
-
-The repository contains the data pipeline, the training and adaptation code, the evaluation tools and the web application.
+BoBERT learns dense representations of osu! beatmaps from their hit-object sequences across all four rulesets (`std`, `taiko`, `catch`, `mania`). Spatial patterns, rhythm, and object geometry are encoded into fixed-size embeddings. 
+While recommendation and similarity search motivated the project, the pretrained embeddings can be adapted to a wider range of representation-learning tasks, including classification, clustering, and attribute prediction.
 
 **[Try the search tool](https://bobert-web.pages.dev/)**
 
 ## Architecture
 
-BoBERT is a bidirectional Transformer encoder based on [ModernBERT](https://arxiv.org/abs/2412.13663). Each hit object is one token. A tokenizer in the style of [FT-Transformer](https://arxiv.org/abs/2106.11959) embeds the features of each hit object. Each ruleset has its own feature set. The encoder alternates local and global attention. The beatmap vector is the mean of the outputs of the global layers.
+Each hit object is tokenized by per-ruleset feature groups ([FT-Transformer](https://arxiv.org/abs/2106.11959)) and fed through a pre-norm bidirectional Transformer ([ModernBERT](https://arxiv.org/abs/2412.13663)-style) with ±128 local attention and global attention every 3rd layer. Global-layer outputs are mean-pooled and passed through a learned linear adapter.
 
-![BoBERT architecture: a per-ruleset feature tokenizer embeds each hit object's feature groups as 16-d vectors, concatenates them and projects them to a 384-d token. Tokens pass through nine pre-norm attention and SwiGLU blocks, with ±128-object local attention except at layers 3, 6 and 9, which attend globally. Those three layers are mean-pooled and passed through a linear adapter to give the 384-d beatmap vector.](docs/assets/architecture.png)
+![BoBERT architecture](docs/assets/architecture.png)
 
-### Encoder
+| | v16 | v16-mini (served) |
+| --- | --- | --- |
+| Parameters | 29.3M (std), 16M (taiko, mania), 7.2M (catch) | 4.7M |
+| Layers / width | 9 / 512 (std), 384 (taiko, mania), 256 (catch) | 6 / 256 |
+| Global attention | Layers 3, 6, 9 | Layers 3, 6 |
+| Max sequence length | 4,096 hit objects | 4,096 hit objects |
 
-| Setting | Default in [`configs/pretrain.yaml`](configs/pretrain.yaml) |
-| --- | --- |
-| Parameters | 16.1M |
-| Depth / width / heads | 9 layers / 384 / 6 |
-| Sequence length limit | 4,096 hit objects |
-| Attention | Global at layers 3, 6 and 9; ±128 hit objects at all other layers |
-
-### Data
-
-| Ruleset | Pretraining maps | Search index |
+| Ruleset | Pretraining maps | Indexed maps |
 | --- | ---: | ---: |
-| osu!standard | 692k | 499k |
-| osu!taiko | 78k | 95k |
+| osu!standard | 692k | 746k |
+| osu!taiko | 78k | 96k |
 | osu!catch | 20k | 25k |
 | osu!mania | 278k | 315k |
 
-### Pretraining
-
-- **Masked reconstruction.** The encoder reads the unmasked 70% of hit objects. A small training decoder reconstructs masked features. Features at span borders are also corrupted.
-- **Strain regression.** A linear head predicts difficulty targets from the pooled vector. The targets are skill strains for osu!standard and star rating for the other rulesets.
-- **Section contrast.** Pooled representations from alternating eight-event sections of a map are trained to agree.
-
-### Adaptation
-
-A linear adapter transforms the pretrained vector. The adapter starts as the identity. Contrastive training on pairs of maps that share collections then updates it. If a file of mined pairs is available, a second phase trains on these pairs.
-
-The pooling statistics and the adapter are stored in the model, so a map's vector depends only on the model and the map. New maps can be embedded and appended to an index without changing existing vectors.
+- **Pretraining**: Joint masked span reconstruction (30% masked), difficulty regression ([parsecore](https://github.com/Apart-Studio/parsecore) strains for `std`, SR for other modes), and self-contrastive alignment across interleaved 8-token halves.
+- **Adaptation**: Contrastive linear adapter trained on co-occurring pairs from osu!collector and osu!stats collections (plus optional mined pairs).
+- **Distillation**: `v16-mini` is structured-pruned from `v16` and distilled against its hidden states and top-256 PCA adapted vectors.
+- **Retrieval**: 4-bit quantized vectors with CSLS hubness reduction (`sim(q, x) - 0.3 * mean_k500(x)`).
 
 ## Limitations
 
-- The model reads hit objects only. It does not read AR, CS, OD or HP, so the vectors do not include these settings.
-- Maps with few hit objects give the model less data, so their nearest neighbors are less reliable.
-- The encoder reads the first 4,096 hit objects only.
-- 1/3 and 1/4 rhythms are in different regions of the vector space. Thus, the same stream in 1/3 and in 1/4 is not similar.
-- The rulesets share the architecture but not the weights, tokenizer, heads or normalization. Search compares maps of the same ruleset only.
+- Hit objects only (AR, CS, OD, HP are not inputs).
+- Short maps produce noisier neighbors.
+- Truncated at 4,096 hit objects.
+- 1/3 and 1/4 rhythms separate in embedding space.
+- Models and vector spaces are separate per ruleset.
 
-## Run locally
+## Local setup
 
 Download a release from [Hugging Face](https://huggingface.co/token03/bobert):
 
@@ -60,19 +49,7 @@ uvx --from huggingface_hub hf download token03/bobert --revision v16 --local-dir
 mv runs/v16/data/* data/ && ln -sfn v16 runs/current
 ```
 
-```text
-data/                  beatmaps, beatmapsets and strains catalogs
-runs/current -> v16/
-  {std,taiko,catch,mania}/
-    model.safetensors
-    embeddings/*.parquet
-    densities.parquet
-    labels.safetensors
-    search.bin
-    training.yaml
-```
-
-Copy [`.env.example`](.env.example) to `.env` and fill in the osu! OAuth values and `SESSION_SECRET`. Install the frontend with `bun install` in `web/`, then start the API and Vite together:
+Copy [`.env.example`](.env.example) to `.env`, run `bun install` in `web/`, and start the stack:
 
 ```sh
 mise run dev
@@ -80,39 +57,37 @@ mise run dev
 
 ## Training
 
-The training environment targets Linux x86-64, Python 3.12, PyTorch 2.11 and CUDA 12.8:
+Targets Linux x86-64, Python 3.12, PyTorch 2.11, CUDA 12.8:
 
 ```sh
 uv sync --frozen
-uv run pretrain --mode std --profile full -v my-run-base
+uv run pretrain my-run-base --mode std
 uv run embed my-run-base --mode std
 uv run adapt my-run-base my-run --mode std
+uv run distill my-run my-run-mini --mode std
 ```
 
-The [scripts guide](scripts/README.md) covers every command, including updates and releases.
+See [`scripts/README.md`](scripts/README.md) for data sync, evaluation, and release commands.
 
-## Repository guide
+## Repository layout
 
 | Directory | Contents |
 | --- | --- |
-| [`core/`](core/) | Beatmap parsing, features, encoder and dataset primitives |
-| [`training/`](training/) | Lightning modules, data loading, objectives and optimizers |
-| [`scripts/`](scripts/README.md) | Data download, feature extraction, training entry points and evaluation |
-| [`server/`](server/README.md) | FastAPI application, retrieval runtime and embedding cache |
-| [`web/`](web/README.md) | React application and Cloudflare gateway |
-| `data/`, `runs/`, `cache/` | Local datasets, model artifacts and runtime state |
+| [`core/`](core/) | Parsing, features, encoder, dataset |
+| [`training/`](training/) | Pretraining, adaptation, distillation |
+| [`scripts/`](scripts/README.md) | Data pipeline, training CLIs, evaluation, releases |
+| [`server/`](server/README.md) | FastAPI service, retrieval runtime, IRC bot |
+| [`web/`](web/README.md) | React frontend and Cloudflare gateway |
+| `data/`, `runs/`, `cache/` | Datasets, model artifacts, runtime cache |
 
 ## Acknowledgements
 
-- [MusicBERT](https://arxiv.org/abs/2106.05630): representation learning from symbolic music, a major inspiration.
-- [CM3P](https://github.com/OliBomby/CM3P) by OliBomby: inspiration for the encoder architecture.
-- [ModernBERT](https://github.com/AnswerDotAI/ModernBERT): bidirectional encoders with rotary embeddings and alternating attention.
-- [FT-Transformer](https://github.com/yandex-research/rtdl-revisiting-models): feature-wise embeddings for numerical and categorical inputs.
-- [parsecore](https://github.com/Apart-Studio/parsecore): star ratings and strain values for the pretraining targets.
-- [osu!collector](https://osucollector.com/) and [osu!stats](https://osustats.ppy.sh/): collection data for adaptation and evaluation.
-- [Beatconnect](https://beatconnect.io/): `.osu` files for the dataset.
-- [osu!](https://osu.ppy.sh/) and its mapping community: the beatmaps and metadata.
+- [MusicBERT](https://arxiv.org/abs/2106.05630), [CM3P](https://github.com/OliBomby/CM3P), [ModernBERT](https://github.com/AnswerDotAI/ModernBERT), [FT-Transformer](https://github.com/yandex-research/rtdl-revisiting-models)
+- [parsecore](https://github.com/Apart-Studio/parsecore) — star ratings and strain targets
+- [osu!collector](https://osucollector.com/) and [osu!stats](https://osustats.ppy.sh/) — collection data
+- [Beatconnect](https://beatconnect.io/) — `.osu` mirror
+- [osu!](https://osu.ppy.sh/) and its mapping community
 
 ## License
 
-The code is available under the [MIT License](LICENSE).
+[MIT](LICENSE)

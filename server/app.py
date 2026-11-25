@@ -8,7 +8,7 @@ import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
 THREAD_COUNT = min(
     2, os.cpu_count() or 1, max(1, int(os.getenv("TORCH_NUM_THREADS", "2")))
@@ -31,7 +31,7 @@ torch.set_num_threads(THREAD_COUNT)
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from core.modes import MODES, ModeName
@@ -83,8 +83,15 @@ class RecommendRequest(BaseModel):
         min_length=1, max_length=MAX_RECOMMEND_SOURCES
     )
     top_k: int = Field(default=20, ge=1, le=MAX_RECOMMEND_TOP_K)
+    offset: int = Field(default=0, ge=0)
     filters: RecommendFilters = Field(default_factory=RecommendFilters)
     distinct: bool = False
+
+    @model_validator(mode="after")
+    def check_depth(self) -> Self:
+        if self.offset + self.top_k > MAX_RECOMMEND_TOP_K:
+            raise ValueError(f"offset + top_k must be at most {MAX_RECOMMEND_TOP_K}")
+        return self
 
 
 class BeatmapSummary(BaseModel):
@@ -488,6 +495,7 @@ async def recommend(request: Request, payload: RecommendRequest) -> dict[str, An
         payload.top_k,
         payload.filters,
         payload.distinct,
+        payload.offset,
     )
     return {
         "sources": [

@@ -1,23 +1,33 @@
-from collections.abc import Sequence
+import json
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Self
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from omegaconf import DictConfig
-from rotary_embedding_torch import RotaryEmbedding
+from safetensors.torch import load_model, save_model
 from torch import nn
 
-from .artifacts import load_model, save_model
+from .artifacts import CONFIG_FILE, MODEL_FILE, read_config, replace_atomically
 from .components import (
     EncoderLayer,
     FeatureTokenizer,
     MaskedLMHead,
     RMSNorm,
 )
+from .dataset import Packed, pack
 from .modes import MODES
-from .osu import parse_osu_bytes
+from .osu import parse_beatmap
+
+
+@dataclass(frozen=True, slots=True)
+class EncoderOutputs:
+    embedding: torch.Tensor
+    tokens: torch.Tensor
+    taps: torch.Tensor
+    global_tokens: list[torch.Tensor] | None
 
 
 class EmbeddingAdapter(nn.Module):
@@ -29,13 +39,6 @@ class EmbeddingAdapter(nn.Module):
     def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.proj(embeddings), dim=-1)
 
-    @torch.inference_mode()
-    def transform(self, embeddings: np.ndarray) -> np.ndarray:
-        values = torch.as_tensor(
-            embeddings, device=self.proj.weight.device, dtype=self.proj.weight.dtype
-        )
-        return self(values).float().cpu().numpy()
-
 
 def configure_inductor() -> None:
     inductor = torch._inductor.config
@@ -44,143 +47,145 @@ def configure_inductor() -> None:
     inductor.online_softmax = False
 
 
+@dataclass(frozen=True)
+class EncoderConfig:
+    mode: str
+    d_model: int
+    n_heads: int
+    n_layers: int
+    dim_feedforward: int
+    local_attention_window: int
+    local_attention_block_size: int
+    global_attention_layers: list[int]
+    dropout: float
+    max_seq_len: int
+    feature_token_dim: int
+    labels: list[str] = field(default_factory=list)
+
+
 class BobertEncoder(nn.Module):
+    layer_means: torch.Tensor
+    rotary_angles: torch.Tensor
+
     def __init__(
         self,
-        mode: str,
-        d_model: int,
-        n_heads: int,
-        n_layers: int,
-        dim_feedforward: int,
-        local_attention_window: int,
-        local_attention_block_size: int,
-        global_attention_layers: Sequence[int],
-        dropout: float,
-        max_seq_len: int,
-        activation_checkpointing: bool,
-        feature_token_dim: int,
-        use_flash: bool,
-        adapter: dict[str, Any] | None = None,
+        config: EncoderConfig,
+        use_flash: bool = False,
+        activation_checkpointing: bool = False,
     ):
         super().__init__()
-        self.mode = MODES[mode]
-        self.d_model = d_model
-        self.n_heads = n_heads
-        self.global_attention_layers = set(global_attention_layers)
+        self.config = config
+        self.metadata: dict[str, Any] = {}
+        self.mode = MODES[config.mode]
+        self.d_model = config.d_model
+        self.n_heads = config.n_heads
+        self.global_attention_layers = set(config.global_attention_layers)
         self.use_flash = use_flash
-        self.max_seq_len = max_seq_len
-        self.model_args = {
-            "mode": mode,
-            "d_model": d_model,
-            "n_heads": n_heads,
-            "n_layers": n_layers,
-            "dim_feedforward": dim_feedforward,
-            "local_attention_window": local_attention_window,
-            "local_attention_block_size": local_attention_block_size,
-            "global_attention_layers": list(global_attention_layers),
-            "dropout": dropout,
-            "max_seq_len": max_seq_len,
-            "feature_token_dim": feature_token_dim,
-            "adapter": adapter,
-        }
-        self.tokenizer = FeatureTokenizer(self.mode, feature_token_dim, d_model)
+        self.max_seq_len = config.max_seq_len
+        self.tokenizer = FeatureTokenizer(
+            self.mode, config.feature_token_dim, config.d_model
+        )
         self.layers = nn.ModuleList(
             [
                 EncoderLayer(
-                    d_model,
-                    n_heads,
-                    dim_feedforward,
-                    dropout,
+                    config.d_model,
+                    config.n_heads,
+                    config.dim_feedforward,
+                    config.dropout,
                     is_global=i in self.global_attention_layers,
-                    local_window_size=local_attention_window,
-                    local_block_size=local_attention_block_size,
+                    local_window_size=config.local_attention_window,
+                    local_block_size=config.local_attention_block_size,
                     activation_checkpointing=activation_checkpointing,
                     use_flash=use_flash,
                 )
-                for i in range(n_layers)
+                for i in range(config.n_layers)
             ]
         )
-        self.final_norm = RMSNorm(d_model)
+        self.final_norm = RMSNorm(config.d_model)
         self.register_buffer(
-            "layer_means", torch.zeros(len(self.global_attention_layers), d_model)
+            "layer_means",
+            torch.zeros(len(self.global_attention_layers), config.d_model),
         )
-        self.adapter = EmbeddingAdapter(d_model)
-        self.rotary_emb = RotaryEmbedding(
-            dim=d_model // n_heads, cache_max_seq_len=max_seq_len
+        self.adapter = EmbeddingAdapter(config.d_model)
+        self.label_head = (
+            nn.Linear(config.d_model, len(config.labels)) if config.labels else None
         )
-        self.rotary_emb(torch.arange(max_seq_len), seq_len=max_seq_len)
-
-    @classmethod
-    def from_config(cls, config: DictConfig, *, use_flash: bool) -> Self:
-        return cls(
-            mode=config.data.mode,
-            max_seq_len=config.data.max_seq_len,
-            activation_checkpointing=config.runtime.activation_checkpointing,
-            use_flash=use_flash,
-            **config.model,
+        head_dim = config.d_model // config.n_heads
+        inverse = 1.0 / 10000 ** (torch.arange(0, head_dim, 2).float() / head_dim)
+        angles = torch.arange(config.max_seq_len).float()[:, None] * inverse
+        self.register_buffer(
+            "rotary_angles", angles.bfloat16().float(), persistent=False
         )
 
     @classmethod
-    def from_pretrained(cls, path: str | Path, device: torch.device) -> Self:
-        state, args = load_model(path)
+    def from_pretrained(cls, directory: Path, device: torch.device) -> Self:
+        saved = read_config(directory / CONFIG_FILE)
         model = cls(
-            **args, activation_checkpointing=False, use_flash=device.type == "cuda"
+            EncoderConfig(**saved.pop("model")), use_flash=device.type == "cuda"
         )
-        model.load_state_dict(state, strict=True)
+        saved.pop("features")
+        model.metadata = saved
+        load_model(model, directory / MODEL_FILE)
         return model.to(device).eval()
 
-    def to_inference(self, device: torch.device) -> Self:
-        model = self.to(device=device, dtype=torch.float32).eval()
-        if device.type == "cuda":
-            for child in model.children():
-                if child is not model.adapter:
-                    child.to(torch.bfloat16)
-            return model
+    def save_pretrained(self, directory: Path) -> None:
+        config = {
+            "model": asdict(self.config),
+            "features": list(self.mode.field_names),
+            **self.metadata,
+        }
+        replace_atomically(
+            directory / CONFIG_FILE,
+            lambda temporary: temporary.write_text(json.dumps(config, indent=2)),
+        )
+        replace_atomically(
+            directory / MODEL_FILE, lambda temporary: save_model(self, str(temporary))
+        )
+
+    def set_labels(
+        self, names: list[str], weight: np.ndarray, bias: np.ndarray
+    ) -> None:
+        self.config = replace(self.config, labels=names)
+        self.label_head = nn.Linear(self.d_model, len(names))
         with torch.no_grad():
-            for tensor in (model.rotary_emb.freqs, model.rotary_emb.cached_freqs):
-                tensor.copy_(tensor.bfloat16().float())
-        return model
+            self.label_head.weight.copy_(torch.from_numpy(weight.T))
+            self.label_head.bias.copy_(torch.from_numpy(bias))
 
-    def save_pretrained(self, path: str | Path) -> None:
-        save_model(path, self.state_dict(), self.model_args)
-
-    def parameter_count(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-    def embed_sequences(self, x: torch.Tensor) -> torch.Tensor:
-        return self.tokenizer(x)
+    @property
+    def calibrated(self) -> bool:
+        return bool(self.layer_means.any())
 
     def compile_encoder(self, mode: str = "default") -> None:
         configure_inductor()
-        self.embed_sequences = torch.compile(
-            self.embed_sequences, mode=mode, dynamic=False
-        )
+        self.tokenizer.compile(mode=mode, dynamic=False)
         self._encode = torch.compile(self._encode, mode=mode, dynamic=False)
 
-    def _rotary_freqs(self, packed_output, cu_seqlens, positions, rotary_indices=None):
-        all_freqs = self.rotary_emb(positions, seq_len=positions.shape[0])
+    def _rotary_freqs(
+        self,
+        packed_output: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        angles = self.rotary_angles[: positions.shape[0]]
         if self.use_flash and rotary_indices is None:
-            return all_freqs[:, ::2].cos(), all_freqs[:, ::2].sin()
-        total_tokens = packed_output.shape[0]
-        if rotary_indices is not None:
-            freqs = all_freqs[rotary_indices].unsqueeze(1)
-        elif cu_seqlens.numel() == 2:
-            freqs = all_freqs[:total_tokens].unsqueeze(1)
-        else:
-            token_idx = torch.arange(total_tokens, device=packed_output.device)
-            batch_ids = torch.bucketize(token_idx, cu_seqlens[1:], right=True)
-            pos = token_idx - cu_seqlens[batch_ids]
-            freqs = all_freqs[pos].view(total_tokens, 1, self.d_model // self.n_heads)
-        return freqs.cos(), freqs.sin()
+            return angles.cos(), angles.sin()
+        if rotary_indices is None:
+            tokens = torch.arange(packed_output.shape[0], device=packed_output.device)
+            sequences = torch.bucketize(tokens, cu_seqlens[1:], right=True)
+            rotary_indices = tokens - cu_seqlens[sequences]
+        token_angles = angles[rotary_indices].repeat_interleave(2, -1).unsqueeze(1)
+        return token_angles.cos(), token_angles.sin()
 
     def _encode(
         self,
         packed_embeddings: torch.Tensor,
         cu_seqlens: torch.Tensor,
         positions: torch.Tensor,
-        global_embeddings: list[torch.Tensor] | None = None,
+        global_embeddings: list[torch.Tensor],
         rotary_indices: torch.Tensor | None = None,
         section_embeddings: list[torch.Tensor] | None = None,
+        global_tokens: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
         packed_output = packed_embeddings
         rotary_freqs = self._rotary_freqs(
@@ -194,7 +199,7 @@ class BobertEncoder(nn.Module):
                 max_seqlen=positions.shape[0],
                 packed_rotary=rotary_indices is not None,
             )
-            if global_embeddings is not None and i in self.global_attention_layers:
+            if i in self.global_attention_layers:
                 normalized = self.final_norm(packed_output)
                 global_embeddings.append(self._get_embedding(normalized, cu_seqlens))
                 if section_embeddings is not None:
@@ -203,6 +208,8 @@ class BobertEncoder(nn.Module):
                             normalized, cu_seqlens, rotary_indices
                         )
                     )
+                if global_tokens is not None:
+                    global_tokens.append(normalized)
         packed_output = self.final_norm(packed_output)
         return packed_output
 
@@ -244,52 +251,64 @@ class BobertEncoder(nn.Module):
         )
         return pooled.masked_fill(lengths[:, None] == 0, 0.0)
 
-    def embed_packed(
-        self, packed_vectors: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int
-    ) -> torch.Tensor:
-        positions = torch.arange(max_seqlen, device=packed_vectors.device)
+    def encode(
+        self, batch: Packed, *, keep_global_tokens: bool = False
+    ) -> EncoderOutputs:
+        packed_vectors, cu_seqlens = batch.vectors, batch.cu_seqlens
+        positions = torch.arange(batch.max_seqlen, device=packed_vectors.device)
         torch._dynamo.mark_dynamic(packed_vectors, 0)
         torch._dynamo.maybe_mark_dynamic(cu_seqlens, 0)
         torch._dynamo.mark_dynamic(positions, 0, min=1, max=self.max_seq_len)
         global_embeddings: list[torch.Tensor] = []
-        self._encode(
-            self.embed_sequences(packed_vectors),
-            cu_seqlens,
-            positions,
-            global_embeddings=global_embeddings,
-        )
-        return torch.stack(global_embeddings)
+        global_tokens: list[torch.Tensor] | None = [] if keep_global_tokens else None
+        device_type = packed_vectors.device.type
+        with torch.autocast(
+            device_type, dtype=torch.bfloat16, enabled=device_type == "cuda"
+        ):
+            tokens = self._encode(
+                self.tokenizer(packed_vectors),
+                cu_seqlens,
+                positions,
+                global_embeddings,
+                global_tokens=global_tokens,
+            )
+        taps = torch.stack(global_embeddings)
+        return EncoderOutputs(self.pool(taps), tokens, taps, global_tokens)
 
     def pool(self, layers: torch.Tensor) -> torch.Tensor:
         layers = F.normalize(layers.float(), dim=-1)
         layers = F.normalize(layers - self.layer_means[:, None], dim=-1)
         return self.adapter(F.normalize(layers.mean(0), dim=-1))
 
-    def embed(
-        self, packed_vectors: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int
-    ) -> torch.Tensor:
-        return self.pool(self.embed_packed(packed_vectors, cu_seqlens, max_seqlen))
+    def embed(self, batch: Packed) -> torch.Tensor:
+        return self.encode(batch).embedding
+
+    @torch.inference_mode()
+    def calibrate(self, batches: Iterable[Packed]) -> int:
+        total = torch.zeros_like(self.layer_means, dtype=torch.float64)
+        maps = 0
+        for batch in batches:
+            taps = F.normalize(self.encode(batch).taps.float(), dim=-1)
+            total += taps.sum(dim=1, dtype=torch.float64)
+            maps += taps.shape[1]
+        self.layer_means.copy_(total / maps)
+        return maps
 
     def embed_osu_bytes(
         self, content: bytes, beatmap_id: int | None = None
     ) -> np.ndarray:
-        beatmap = parse_osu_bytes(
+        beatmap = parse_beatmap(
             content,
-            beatmap_id=beatmap_id,
+            beatmap_id,
             max_hitobject_lines=16384,
             max_curve_points=32768,
         )
         if beatmap is None:
             raise ValueError("could not parse a valid beatmap")
-        vectors = self.tokenizer.normalize(
-            self.mode.beatmap_tensor(beatmap, self.max_seq_len)
-        )
-        device = next(self.parameters()).device
-        vectors = vectors.to(device=device, dtype=next(self.parameters()).dtype)
-        length = vectors.shape[0]
-        cu_seqlens = torch.tensor([0, length], dtype=torch.int32, device=device)
+        vectors = self.mode.beatmap_tensor(beatmap, self.max_seq_len)
+        batch = pack([vectors], self.tokenizer.normalization)
         with torch.inference_mode():
-            embedding = self.embed(vectors, cu_seqlens, length)
+            embedding = self.embed(batch.to(self.layer_means.device))
         return embedding[0].cpu().numpy()
 
 
@@ -310,7 +329,7 @@ class BobertForPretraining(nn.Module):
                 EncoderLayer(
                     width,
                     bert.n_heads // 2,
-                    bert.model_args["dim_feedforward"] // 2,
+                    bert.config.dim_feedforward // 2,
                     0.0,
                     is_global=False,
                     local_window_size=32,
@@ -324,18 +343,6 @@ class BobertForPretraining(nn.Module):
         self.mlm_head = MaskedLMHead(bert.mode, width)
         self.strain_head = nn.Linear(bert.d_model, len(bert.mode.strains))
 
-    @classmethod
-    def from_config(cls, config: DictConfig, device: torch.device) -> Self:
-        if not 0 <= config.training.masking.ratio < 1:
-            raise ValueError("Masking ratio must be between zero and one")
-        bert = BobertEncoder.from_config(config, use_flash=device.type == "cuda")
-        return cls(
-            bert,
-            section_contrast_weight=float(
-                config.training.get("section_contrast_weight", 0.02)
-            ),
-        ).to(device)
-
     def forward_packed(
         self,
         packed_vectors: torch.Tensor,
@@ -347,10 +354,10 @@ class BobertForPretraining(nn.Module):
         visible_cu_seqlens: torch.Tensor,
         contrast_groups: torch.Tensor,
     ):
-        global_embeddings = []
-        sections = []
+        global_embeddings: list[torch.Tensor] = []
+        sections: list[torch.Tensor] = []
         encoded = self.bert._encode(
-            self.bert.embed_sequences(packed_vectors[visible_idx]),
+            self.bert.tokenizer(packed_vectors[visible_idx]),
             visible_cu_seqlens,
             positions,
             global_embeddings=global_embeddings,

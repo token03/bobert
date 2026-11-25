@@ -9,6 +9,8 @@ from urllib.parse import urlencode
 
 import httpx
 
+from core.osu import is_osu_file
+
 OSU_API_VERSION = "20241024"
 TOKEN_REFRESH_SKEW_SECONDS = 300
 REQUEST_INTERVAL_SECONDS = 1.0
@@ -178,7 +180,7 @@ class OsuClient:
                 "Accept": "text/plain,*/*;q=0.8",
             },
         )
-        if response.status_code != 200 or not is_valid_osu_file(response.content):
+        if response.status_code != 200 or not is_osu_file(response.content):
             raise BeatmapUnavailableError(f"beatmap {beatmap_id} is unavailable")
         return response.content
 
@@ -206,7 +208,7 @@ def parse_beatmap_metadata(beatmap: dict[str, Any]) -> dict[str, Any]:
     ):
         metadata[key] = json_data(beatmapset.get(key))
     if isinstance(metadata.get("ranked"), int):
-        metadata["status"] = metadata["ranked"]
+        metadata["status"] = str(metadata["ranked"])
     owners = metadata.get("owners")
     if owners:
         metadata["owners"] = " ".join(str(owner["id"]) for owner in owners)
@@ -242,10 +244,3 @@ def json_data(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     return value
-
-
-def is_valid_osu_file(content: bytes) -> bool:
-    if len(content) < 100:
-        return False
-    first_line = content.decode("utf-8", errors="ignore").split("\n", 1)[0]
-    return first_line.lstrip("\ufeff").strip().startswith("osu file format v")

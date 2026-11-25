@@ -65,7 +65,7 @@ export function statusLabel(value: string | number | null): string {
     '4': 'loved',
   }
 
-  if (!value) {
+  if (value === null || value === undefined || value === '') {
     return 'unknown status'
   }
 

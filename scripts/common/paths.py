@@ -1,20 +1,13 @@
-from __future__ import annotations
-
-import sys
 from pathlib import Path
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 RUNS_DIR = PROJECT_ROOT / "runs"
+BEATMAPS_DIR = DATA_DIR / "beatmaps"
 COLLECTIONS_DIR = DATA_DIR / "collections"
 FEATURES_DIR = DATA_DIR / "features"
 BEATMAPS_PATH = DATA_DIR / "beatmaps.parquet"
-
-
-def ensure_project_root() -> None:
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
+STRAINS_PATH = DATA_DIR / "strains.parquet"
 
 
 def resolve_path(path: str | Path) -> Path:
@@ -22,17 +15,3 @@ def resolve_path(path: str | Path) -> Path:
     if path.is_absolute() or path.exists():
         return path
     return PROJECT_ROOT / path
-
-
-def find_latest_checkpoint(runs_dir: str | Path = RUNS_DIR) -> Path | None:
-    runs_dir = Path(runs_dir)
-    candidates = list(runs_dir.rglob("checkpoints/last*.ckpt"))
-    if not candidates:
-        candidates = list(runs_dir.rglob("checkpoints/*.ckpt"))
-    return (
-        max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
-    )
-
-
-def run_name_from_checkpoint(checkpoint: Path) -> str:
-    return checkpoint.parent.parent.parent.name

@@ -1,12 +1,17 @@
+import itertools
 from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
-from rotary_embedding_torch.rotary_embedding_torch import rotate_half
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .modes import Mode
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    pairs = x.unflatten(-1, (-1, 2))
+    return torch.stack((-pairs[..., 1], pairs[..., 0]), dim=-1).flatten(-2)
 
 
 class RMSNorm(nn.Module):
@@ -16,11 +21,9 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = x.float()
-        output = output * torch.rsqrt(
-            output.square().mean(dim=-1, keepdim=True) + self.eps
-        )
-        return (output * self.weight).to(dtype=x.dtype)
+        return F.rms_norm(
+            x.float(), (self.weight.shape[0],), self.weight.float(), self.eps
+        ).to(dtype=x.dtype)
 
 
 class MultiHeadAttentionWithRoPE(nn.Module):
@@ -63,7 +66,7 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         max_seqlen: int,
         rotary_freqs: tuple[torch.Tensor, torch.Tensor],
         packed_rotary: bool = False,
-    ):
+    ) -> torch.Tensor:
         total_tokens, _ = x.shape
 
         qkv = self.wqkv(x).view(total_tokens, 3, self.n_heads, self.d_head)
@@ -186,28 +189,31 @@ class MultiHeadAttentionWithRoPE(nn.Module):
 
         return self._from_sdpa_4d(out4, v.dtype)
 
-    def _forward_torch(self, q, k, v, cu_seqlens):
-        if cu_seqlens.numel() == 2:
-            return self._forward_torch_one(q, k, v)
-
-        outputs = []
-        for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist()):
-            outputs.append(
+    def _forward_torch(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        bounds = cu_seqlens.tolist()
+        return torch.cat(
+            [
                 self._forward_torch_one(q[start:end], k[start:end], v[start:end])
-            )
-        return torch.cat(outputs, dim=0)
+                for start, end in itertools.pairwise(bounds)
+            ]
+        )
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, d_model, dim_feedforward):
+    def __init__(self, d_model: int, dim_feedforward: int):
         super().__init__()
         self.w13 = nn.Linear(d_model, dim_feedforward * 2, bias=False)
         self.w2 = nn.Linear(dim_feedforward, d_model, bias=False)
 
-    def forward(self, x):
-        x13 = self.w13(x)
-        x1, x3 = torch.chunk(x13, 2, dim=-1)
-        return self.w2(F.silu(x1) * x3)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate, value = self.w13(x).chunk(2, dim=-1)
+        return self.w2(F.silu(gate) * value)
 
 
 class EncoderLayer(nn.Module):
@@ -239,42 +245,42 @@ class EncoderLayer(nn.Module):
 
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
 
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-
-    def _ffn_block(self, src: torch.Tensor) -> torch.Tensor:
-        return self.ffn(self.norm2(src))
+    def feed_forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.ffn(self.norm2(x))
 
     def forward(
         self,
-        src: torch.Tensor,
-        rotary_freqs: tuple[torch.Tensor, torch.Tensor] | None = None,
-        cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: int | None = None,
+        x: torch.Tensor,
+        rotary_freqs: tuple[torch.Tensor, torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
         packed_rotary: bool = False,
     ) -> torch.Tensor:
-        src2 = self.self_attn(
-            self.norm1(src),
+        attended = self.self_attn(
+            self.norm1(x),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             rotary_freqs=rotary_freqs,
             packed_rotary=packed_rotary,
         )
-
-        src = src + self.dropout1(src2)
-
+        x = x + self.dropout(attended)
         if self.training and self.activation_checkpointing:
-            src2 = checkpoint(self._ffn_block, src, use_reentrant=False)
+            fed = checkpoint(self.feed_forward, x, use_reentrant=False)
         else:
-            src2 = self._ffn_block(src)
-
-        src = src + self.dropout2(src2)
-
-        return src
+            fed = self.feed_forward(x)
+        return x + self.dropout(fed)
 
 
 class FeatureTokenizer(nn.Module):
+    normalization: torch.Tensor
+    numeric_indices: torch.Tensor
+    numeric_mask: torch.Tensor
+    categorical_indices: torch.Tensor
+    categorical_cardinalities: torch.Tensor
+    category_offsets: torch.Tensor
+
     def __init__(self, mode: Mode, d_feat: int, d_model: int):
         super().__init__()
         self.mode = mode
@@ -287,13 +293,13 @@ class FeatureTokenizer(nn.Module):
         self.group_names = tuple(group[0] for group in mode.groups)
         self.numeric_weight = nn.Parameter(torch.zeros(len(sizes), 3, d_feat))
         self.numeric_bias = nn.Parameter(torch.empty(len(sizes), d_feat))
-        for group, size in enumerate(sizes):
+        for index, size in enumerate(sizes):
             nn.init.xavier_uniform_(
-                self.numeric_weight[group, :size].T,
+                self.numeric_weight[index, :size].T,
                 gain=nn.init.calculate_gain("tanh"),
             )
             bound = 1 / size**0.5
-            nn.init.uniform_(self.numeric_bias[group], -bound, bound)
+            nn.init.uniform_(self.numeric_bias[index], -bound, bound)
         self.register_buffer(
             "numeric_indices", torch.tensor(numeric_indices), persistent=False
         )
@@ -331,10 +337,6 @@ class FeatureTokenizer(nn.Module):
             (len(sizes) + len(cardinalities)) * d_feat, d_model, bias=False
         )
         self.norm = RMSNorm(d_model)
-
-    def normalize(self, vectors: torch.Tensor) -> torch.Tensor:
-        mean, std = self.normalization.to(vectors.device)
-        return (vectors.float() - mean) / std
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         numeric = x[..., self.numeric_indices] * self.numeric_mask.to(x.dtype)

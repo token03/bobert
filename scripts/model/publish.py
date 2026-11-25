@@ -5,17 +5,11 @@ import subprocess
 from pathlib import Path
 from string import Template
 
-import numpy as np
+import pyarrow.parquet as pq
 from dotenv import dotenv_values
 from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
-from core.artifacts import (
-    CATALOGS,
-    index_ids,
-    model_config,
-    validate_catalogs,
-    validate_run,
-)
+from core.artifacts import CATALOGS, read_config, validate_catalogs, validate_run
 from scripts.common.paths import DATA_DIR, PROJECT_ROOT, RUNS_DIR
 
 CARD_TEMPLATE = Path(__file__).with_name("model_card.md")
@@ -62,17 +56,14 @@ def main() -> int:
     rows = []
     for mode, artifacts in modes.items():
         paths = [
-            artifacts.model,
             artifacts.config,
-            artifacts.densities,
+            artifacts.model,
+            artifacts.embeddings,
             artifacts.search,
         ]
-        paths += artifacts.shards()
-        if artifacts.labels.exists():
-            paths.append(artifacts.labels)
         files.update({str(path.relative_to(run)): path for path in paths})
-        config = model_config(artifacts.model)["model_args"]
-        maps = len(np.unique(np.concatenate(index_ids(artifacts)[1])))
+        config = read_config(artifacts.config)["model"]
+        maps = pq.read_metadata(artifacts.embeddings).num_rows
         rows.append(
             f"| {mode} | {maps:,} | {config['d_model']} | {config['n_layers']} |"
         )

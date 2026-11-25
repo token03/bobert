@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import ctypes
+import gc
 import json
 import os
 import random
 import sqlite3
+import sys
 import threading
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isnan
@@ -14,16 +18,19 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
 import torch
 
-from core import retrieval
-from core.artifacts import (
-    RunArtifacts,
+from core.artifacts import RunArtifacts, checksum, read_labels, validate_run
+from core.index import (
+    DENSITY_WEIGHT,
+    PackedEmbeddings,
+    Scorer,
     from_bfloat16,
+    pack_embeddings,
     read_index,
-    read_labels,
     to_bfloat16,
-    validate_run,
+    unpack_embeddings,
 )
 from core.model import BobertEncoder
 from core.modes import MODES
@@ -74,11 +81,153 @@ SEARCH_COLUMNS = [
 ]
 
 
+FILTER_RANGES = {
+    "difficulty_rating": ("min_sr", "max_sr"),
+    "ar": ("min_ar", "max_ar"),
+    "cs": ("min_cs", "max_cs"),
+    "accuracy": ("min_accuracy", "max_accuracy"),
+    "drain": ("min_drain", "max_drain"),
+    "bpm": ("min_bpm", "max_bpm"),
+    "total_length": ("min_length", "max_length"),
+}
+
+
+def _release_memory() -> None:
+    gc.collect()
+    pa.default_memory_pool().release_unused()
+    if sys.platform == "linux":
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+
+def _status_match_expr(accepted: Collection[str]) -> pl.Expr:
+    values = list(accepted)
+    status = (
+        pl.col("status").cast(pl.String, strict=False).fill_null("").str.to_lowercase()
+    )
+    ranked = (
+        pl.col("ranked").cast(pl.String, strict=False).fill_null("").str.to_lowercase()
+    )
+    return status.is_in(values) | ranked.is_in(values)
+
+
+def _release_date_expr() -> pl.Expr:
+    ranked = _status_match_expr(RANKED_STATUS_VALUES)
+    return (
+        pl.when(ranked & pl.col("ranked_date").is_not_null())
+        .then(pl.col("ranked_date"))
+        .otherwise(pl.col("submitted_date"))
+        .cast(pl.String, strict=False)
+        .str.to_datetime(strict=False, time_zone="UTC")
+        .dt.epoch("us")
+        .fill_null(np.iinfo(np.int64).min)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class CachedEmbedding:
     beatmap_id: int
     embedding: np.ndarray
+    density: float
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class Candidates:
+    ids: np.ndarray
+    embeddings: PackedEmbeddings
+    penalties: np.ndarray
+    scorer: Scorer
+    metadata: pl.DataFrame
+    set_ids: np.ndarray
+    set_groups: np.ndarray
+    filter_values: dict[str, np.ndarray]
+    status_groups: dict[str, np.ndarray]
+    release_dates: np.ndarray
+
+    @classmethod
+    def build(
+        cls,
+        embeddings: PackedEmbeddings,
+        penalties: np.ndarray,
+        metadata: pl.DataFrame,
+        scorer: Scorer,
+    ) -> Candidates:
+        set_ids = metadata["beatmapset_id"].fill_null(-1).to_numpy().astype(np.int64)
+        columns = metadata.select(
+            *(
+                pl.col(column).cast(pl.Float32, strict=False).fill_null(float("nan"))
+                for column in FILTER_RANGES
+            ),
+            *(
+                _status_match_expr(accepted).alias(group)
+                for group, accepted in STATUS_GROUPS.items()
+            ),
+            _release_date_expr().alias("release_date"),
+        )
+        return cls(
+            ids=metadata["id"].to_numpy(),
+            embeddings=embeddings,
+            penalties=-penalties.astype(np.float32),
+            scorer=scorer,
+            metadata=metadata,
+            set_ids=set_ids,
+            set_groups=np.unique(set_ids, return_inverse=True)[1],
+            filter_values={
+                column: columns[column].to_numpy() for column in FILTER_RANGES
+            },
+            status_groups={group: columns[group].to_numpy() for group in STATUS_GROUPS},
+            release_dates=columns["release_date"].to_numpy(),
+        )
+
+    def vector(self, row: int) -> np.ndarray:
+        return unpack_embeddings(self.embeddings, np.array([row]))[0]
+
+    def status_mask(self, status: str) -> np.ndarray:
+        if status in self.status_groups:
+            return self.status_groups[status]
+        return self.metadata.select(_status_match_expr({status}))[:, 0].to_numpy()
+
+    def eligible(
+        self, filters: Any, source_ids: list[int], source_set_ids: list[int]
+    ) -> np.ndarray:
+        eligible = (self.set_ids != -1) & ~np.isin(self.ids, source_ids)
+        if filters.exclude_same_set:
+            eligible &= ~np.isin(self.set_ids, source_set_ids)
+        for column, (minimum_field, maximum_field) in FILTER_RANGES.items():
+            minimum = getattr(filters, minimum_field)
+            maximum = getattr(filters, maximum_field)
+            if minimum is not None:
+                eligible &= self.filter_values[column] >= minimum
+            if maximum is not None:
+                eligible &= self.filter_values[column] <= maximum
+        if filters.status:
+            eligible &= self.status_mask(filters.status.lower())
+        if filters.min_date:
+            eligible &= self.release_dates >= month_start_us(filters.min_date)
+        if filters.max_date:
+            eligible &= self.release_dates < month_end_exclusive_us(filters.max_date)
+        return eligible
+
+    def best_per_set(
+        self, query: np.ndarray, eligible: np.ndarray, count: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        rows = np.flatnonzero(eligible)
+        if len(rows) > len(self.ids) * FILTERED_SCORE_THRESHOLD:
+            scores = self.scorer(self.embeddings, query)[rows]
+        else:
+            scores = self.scorer(self.embeddings, query, rows)
+        scores += self.penalties[rows]
+        groups = self.set_groups[rows]
+        best = np.full(self.set_groups.max(initial=0) + 1, -np.inf, dtype=np.float32)
+        np.maximum.at(best, groups, scores)
+        available = np.flatnonzero(np.isfinite(best))
+        if count < len(available):
+            available = available[np.argpartition(best[available], -count)[-count:]]
+        top = available[np.argsort(best[available])[::-1]]
+        winners = np.full(len(best), -1, dtype=np.int64)
+        winning = np.isin(groups, top) & (scores == best[groups])
+        np.maximum.at(winners, groups[winning], rows[winning])
+        return winners[top], best[top]
 
 
 def mean_embedding(embeddings: list[np.ndarray]) -> np.ndarray:
@@ -92,18 +241,22 @@ def mean_embedding(embeddings: list[np.ndarray]) -> np.ndarray:
     return np.asarray(combined / norm, dtype=np.float32)
 
 
+def _cached_embedding(
+    beatmap_id: int, blob: bytes, density: float, metadata_json: str
+) -> CachedEmbedding:
+    return CachedEmbedding(
+        int(beatmap_id),
+        from_bfloat16(np.frombuffer(blob, dtype=np.uint16)),
+        float(density),
+        json.loads(metadata_json),
+    )
+
+
 class SQLiteCache:
-    def __init__(self, path: Path, embedding_dim: int, run_id: str):
+    def __init__(self, path: Path, run_id: str):
         self.path = path
-        self.embedding_dim = embedding_dim
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS embeddings (beatmap_id INTEGER PRIMARY KEY, embedding BLOB NOT NULL, metadata_json TEXT NOT NULL, created_at INTEGER NOT NULL)"
-            )
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS unavailable_beatmaps (beatmap_id INTEGER PRIMARY KEY, reason TEXT NOT NULL, created_at INTEGER NOT NULL)"
-            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
@@ -111,8 +264,14 @@ class SQLiteCache:
                 "SELECT value FROM cache_metadata WHERE key = 'run_id'"
             ).fetchone()
             if row is not None and row[0] != run_id:
-                conn.execute("DELETE FROM embeddings")
-                conn.execute("DELETE FROM unavailable_beatmaps")
+                conn.execute("DROP TABLE IF EXISTS embeddings")
+                conn.execute("DROP TABLE IF EXISTS unavailable_beatmaps")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS embeddings (beatmap_id INTEGER PRIMARY KEY, embedding BLOB NOT NULL, density REAL NOT NULL, metadata_json TEXT NOT NULL, created_at INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS unavailable_beatmaps (beatmap_id INTEGER PRIMARY KEY, reason TEXT NOT NULL, created_at INTEGER NOT NULL)"
+            )
             conn.execute(
                 "INSERT OR REPLACE INTO cache_metadata (key, value) VALUES ('run_id', ?)",
                 (run_id,),
@@ -127,29 +286,29 @@ class SQLiteCache:
     def get(self, beatmap_id: int) -> CachedEmbedding | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT embedding, metadata_json FROM embeddings WHERE beatmap_id = ?",
+                "SELECT embedding, density, metadata_json FROM embeddings WHERE beatmap_id = ?",
                 (int(beatmap_id),),
             ).fetchone()
         if row is None:
             return None
-        vector = from_bfloat16(np.frombuffer(row[0], dtype=np.uint16))
-        if vector.shape != (self.embedding_dim,):
-            return None
-        return CachedEmbedding(int(beatmap_id), vector, json.loads(row[1] or "{}"))
+        return _cached_embedding(beatmap_id, *row)
 
-    def upsert(
-        self, beatmap_id: int, embedding: np.ndarray, metadata: dict[str, Any]
-    ) -> None:
-        vector = to_bfloat16(embedding)
-        if vector.shape != (self.embedding_dim,):
-            raise ValueError(f"invalid embedding shape: {vector.shape}")
+    def list_all(self) -> list[CachedEmbedding]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT beatmap_id, embedding, density, metadata_json FROM embeddings"
+            ).fetchall()
+        return [_cached_embedding(*row) for row in rows]
+
+    def upsert(self, entry: CachedEmbedding) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO embeddings (beatmap_id, embedding, metadata_json, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO embeddings (beatmap_id, embedding, density, metadata_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
-                    int(beatmap_id),
-                    vector.tobytes(),
-                    json.dumps(metadata, separators=(",", ":")),
+                    entry.beatmap_id,
+                    to_bfloat16(entry.embedding).tobytes(),
+                    entry.density,
+                    json.dumps(entry.metadata, separators=(",", ":")),
                     int(time.time()),
                 ),
             )
@@ -179,56 +338,50 @@ class SQLiteCache:
 class Catalog:
     def __init__(self):
         strains = (
-            pl.read_parquet(
-                STRAINS_PATH, columns=["beatmap_id", "seq_len", "actual_stars"]
-            )
+            pl.scan_parquet(STRAINS_PATH)
+            .select("beatmap_id", "actual_stars")
             .filter(pl.col("actual_stars").is_not_null())
-            .sort("seq_len", descending=True)
-            .unique("beatmap_id", keep="first")
             .sort("beatmap_id")
+            .collect()
         )
         self.strain_ids = strains["beatmap_id"].to_numpy()
         self.strain_stars = strains["actual_stars"].to_numpy()
-        self.beatmaps = (
-            pl.read_parquet(BEATMAPS_PATH, columns=SEARCH_COLUMNS)
-            .join(
-                strains.select(pl.col("beatmap_id").alias("id"), "actual_stars"),
-                on="id",
-                how="left",
-            )
+        self._strains_join = strains.select(
+            pl.col("beatmap_id").alias("id"), "actual_stars"
+        ).lazy()
+
+    def source_modes(self) -> pl.DataFrame:
+        return pl.scan_parquet(BEATMAPS_PATH).select("id", "mode").collect()
+
+    def mode_beatmaps(self, mode_label: str) -> pl.DataFrame:
+        return (
+            pl.scan_parquet(BEATMAPS_PATH)
+            .select(SEARCH_COLUMNS)
+            .filter(pl.col("mode") == mode_label)
+            .join(self._strains_join, on="id", how="left")
             .with_columns(
                 pl.coalesce("actual_stars", "difficulty_rating").alias(
                     "difficulty_rating"
                 )
             )
             .drop("actual_stars")
+            .collect()
         )
 
 
 class Runtime:
     def __init__(self, artifacts: RunArtifacts, catalog: Catalog):
         self.mode = artifacts.mode
-        index = read_index(artifacts)
-        self.labels = (
-            read_labels(artifacts.labels, index.model_sha256)
-            if artifacts.labels.exists()
-            else None
-        )
-        self.static_ids = [int(value) for value in index.ids]
-        self.static_embeddings = np.ascontiguousarray(index.embeddings)
-        self.static_embeddings.flags.writeable = False
-        self.static_penalty = np.negative(
-            retrieval.density_term(index.densities), dtype=np.float32
-        )
-        self.static_penalty.flags.writeable = False
-        self.embedding_dim = self.static_embeddings.shape[1]
+        self.index = read_index(artifacts)
+        self.labels = read_labels(artifacts)
+        self.static_ids = [int(value) for value in self.index.ids]
         self.static_index = {
-            beatmap_id: index for index, beatmap_id in enumerate(self.static_ids)
+            beatmap_id: row for row, beatmap_id in enumerate(self.static_ids)
         }
 
         self.strain_ids = catalog.strain_ids
         self.strain_stars = catalog.strain_stars
-        beatmaps = catalog.beatmaps.filter(pl.col("mode") == MODES[self.mode].label)
+        beatmaps = catalog.mode_beatmaps(MODES[self.mode].label)
         defaults = (
             beatmaps.filter(
                 pl.col("status").is_in(["1", "4"]),
@@ -269,93 +422,11 @@ class Runtime:
             .drop("_static_index")
             .with_columns(pl.lit(MODES[self.mode].label).alias("mode"))
         )
-        self.static_id_values = np.asarray(self.static_ids, dtype=np.int64)
-        self.static_set_ids = (
-            self.static_metadata["beatmapset_id"]
-            .fill_null(-1)
-            .to_numpy()
-            .astype(np.int64, copy=False)
-        )
-        missing_set_ids = self.static_set_ids == -1
-        self.static_set_groups = np.empty(len(self.static_ids), dtype=np.int32)
-        if missing_set_ids.all():
-            first_missing_group = 0
-        else:
-            _, self.static_set_groups[~missing_set_ids] = np.unique(
-                self.static_set_ids[~missing_set_ids], return_inverse=True
-            )
-            first_missing_group = (
-                int(self.static_set_groups[~missing_set_ids].max()) + 1
-            )
-        if missing_set_ids.any():
-            self.static_set_groups[missing_set_ids] = np.arange(
-                first_missing_group,
-                first_missing_group + int(missing_set_ids.sum()),
-                dtype=np.int32,
-            )
-        self.static_set_group_count = int(self.static_set_groups.max()) + 1
-        self.static_set_order = np.argsort(
-            self.static_set_groups, kind="stable"
-        ).astype(np.int32)
-        ordered_set_groups = self.static_set_groups[self.static_set_order]
-        self.static_set_starts = np.flatnonzero(
-            np.r_[True, ordered_set_groups[1:] != ordered_set_groups[:-1]]
-        ).astype(np.int32)
-        self.filter_values = {
-            column: self.static_metadata[column]
-            .cast(pl.Float64, strict=False)
-            .fill_null(float("nan"))
-            .to_numpy()
-            for column in (
-                "difficulty_rating",
-                "ar",
-                "cs",
-                "accuracy",
-                "drain",
-                "bpm",
-                "total_length",
-            )
-        }
-        status_values = (
-            self.static_metadata["status"]
-            .cast(pl.String, strict=False)
-            .fill_null("none")
-            .str.to_lowercase()
-            .to_numpy()
-        )
-        ranked_values = (
-            self.static_metadata["ranked"]
-            .cast(pl.String, strict=False)
-            .fill_null("none")
-            .str.to_lowercase()
-            .to_numpy()
-        )
-        self.static_status_values = (status_values, ranked_values)
-        self.static_status_groups = {
-            group: np.isin(status_values, list(accepted))
-            | np.isin(ranked_values, list(accepted))
-            for group, accepted in STATUS_GROUPS.items()
-        }
-        ranked_status = pl.col("status").cast(pl.String, strict=False).fill_null(
-            ""
-        ).str.to_lowercase().is_in(RANKED_STATUS_VALUES) | pl.col("ranked").cast(
-            pl.String, strict=False
-        ).fill_null("").str.to_lowercase().is_in(RANKED_STATUS_VALUES)
-        release_date = (
-            pl.when(ranked_status & pl.col("ranked_date").is_not_null())
-            .then(pl.col("ranked_date"))
-            .otherwise(pl.col("submitted_date"))
-        )
-        self.static_release_dates = (
-            self.static_metadata.select(
-                release_date.cast(pl.String, strict=False)
-                .str.to_datetime(strict=False, time_zone="UTC")
-                .dt.epoch("us")
-                .fill_null(np.iinfo(np.int64).min)
-                .alias("release_date")
-            )["release_date"]
-            .to_numpy()
-            .astype(np.int64, copy=False)
+        self.static = Candidates.build(
+            self.index.packed,
+            self.index.penalties,
+            self.static_metadata,
+            self.index.scorer,
         )
         self.fallback_defaults = [
             self.public_summary(int(row["id"]), row)
@@ -384,18 +455,54 @@ class Runtime:
         del beatmaps
         self.inference_semaphore = threading.Semaphore(1)
         cache_path = CACHE_DB.with_name(f"{CACHE_DB.stem}-{self.mode}{CACHE_DB.suffix}")
-        self.cache = SQLiteCache(cache_path, self.embedding_dim, index.model_sha256)
+        self.cache = SQLiteCache(cache_path, checksum(artifacts.model))
+        self._dynamic_lock = threading.Lock()
+        self._dynamic_entries: dict[int, CachedEmbedding] = {}
+        self.dynamic: Candidates | None = None
+        self._hydrate_dynamic()
 
         self.artifacts = artifacts
         self._model = None
+
+    def _hydrate_dynamic(self) -> None:
+        entries = []
+        for entry in self.cache.list_all():
+            if metadata_complete(entry.metadata):
+                entries.append(entry)
+            else:
+                self.cache.delete(entry.beatmap_id)
+        self._add_dynamic(entries)
+
+    def _add_dynamic(self, entries: list[CachedEmbedding]) -> None:
+        with self._dynamic_lock:
+            for entry in entries:
+                if entry.beatmap_id not in self.static_index:
+                    self._dynamic_entries[entry.beatmap_id] = entry
+            if not self._dynamic_entries:
+                return
+            cached = list(self._dynamic_entries.values())
+            metadata = pl.DataFrame(
+                [{**entry.metadata, "id": entry.beatmap_id} for entry in cached],
+                schema=self.static.metadata.schema,
+                strict=False,
+            ).with_columns(pl.lit(MODES[self.mode].label).alias("mode"))
+            self.dynamic = Candidates.build(
+                pack_embeddings(
+                    np.stack([entry.embedding for entry in cached]), self.index.format
+                ),
+                DENSITY_WEIGHT
+                * np.array([entry.density for entry in cached], dtype=np.float32),
+                metadata,
+                self.index.scorer,
+            )
 
     @property
     def model(self) -> BobertEncoder:
         if self._model is None:
             device = torch.device("cpu")
             self._model = BobertEncoder.from_pretrained(
-                self.artifacts.model, device
-            ).to_inference(device)
+                self.artifacts.directory, device
+            )
         return self._model
 
     def validate_source(self, beatmap_id: int, metadata: dict[str, Any]) -> None:
@@ -436,9 +543,9 @@ class Runtime:
     ) -> tuple[np.ndarray, dict[str, Any]] | None:
         static_index = self.static_index.get(beatmap_id)
         if static_index is not None:
-            return from_bfloat16(
-                self.static_embeddings[static_index]
-            ), self.static_metadata.row(static_index, named=True)
+            return self.static.vector(static_index), self.static_metadata.row(
+                static_index, named=True
+            )
         return None
 
     def unindexed(self, beatmap_ids: list[int]) -> list[int]:
@@ -469,7 +576,14 @@ class Runtime:
         if not np.isfinite(raw).all():
             raise ValueError(f"beatmap {beatmap_id} produced an invalid embedding")
         embedding = from_bfloat16(to_bfloat16(raw))
-        self.cache.upsert(beatmap_id, embedding, metadata)
+        entry = CachedEmbedding(
+            beatmap_id,
+            embedding,
+            self.index.density(embedding),
+            metadata,
+        )
+        self.cache.upsert(entry)
+        self._add_dynamic([entry])
         return embedding
 
     def star_rating(self, beatmap_id: int) -> float | None:
@@ -495,156 +609,79 @@ class Runtime:
         top_k: int,
         filters: Any,
         distinct: bool,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
+        wanted = offset + top_k
         source_set_ids = [
             beatmapset_id
             for metadata in source_metadata
             if (beatmapset_id := metadata_set_id(metadata)) is not None
         ]
-        min_month = month_start_us(filters.min_date)
-        max_month = month_end_exclusive_us(filters.max_date)
-        eligible = ~np.isin(self.static_id_values, source_ids)
-        eligible &= self.static_set_ids != -1
-        if filters.exclude_same_set and source_set_ids:
-            eligible &= ~np.isin(self.static_set_ids, source_set_ids)
-        for column, minimum, maximum in (
-            ("difficulty_rating", filters.min_sr, filters.max_sr),
-            ("ar", filters.min_ar, filters.max_ar),
-            ("cs", filters.min_cs, filters.max_cs),
-            ("accuracy", filters.min_accuracy, filters.max_accuracy),
-            ("drain", filters.min_drain, filters.max_drain),
-            ("bpm", filters.min_bpm, filters.max_bpm),
-            ("total_length", filters.min_length, filters.max_length),
-        ):
-            values = self.filter_values[column]
-            if minimum is not None:
-                eligible &= values >= minimum
-            if maximum is not None:
-                eligible &= values <= maximum
-        if filters.status:
-            status = filters.status.lower()
-            status_mask = self.static_status_groups.get(status)
-            if status_mask is None:
-                accepted = list(STATUS_GROUPS.get(status, {status}))
-                status_mask = np.isin(self.static_status_values[0], accepted) | np.isin(
-                    self.static_status_values[1], accepted
-                )
-            eligible &= status_mask
-        if min_month is not None:
-            eligible &= self.static_release_dates >= min_month
-        if max_month is not None:
-            eligible &= self.static_release_dates < max_month
-
-        eligible_indices = np.flatnonzero(eligible)
-        if not len(eligible_indices):
-            return []
-        score_filtered = (
-            len(eligible_indices) <= len(self.static_ids) * FILTERED_SCORE_THRESHOLD
-        )
-        if score_filtered:
-            scores = retrieval.bfloat16_scores(
-                self.static_embeddings, query_embedding, eligible_indices
+        count = wanted + COPY_CANDIDATES if distinct else wanted
+        best_by_set: dict[int, tuple[float, Candidates, int]] = {}
+        for candidates in (self.static, self.dynamic):
+            if candidates is None:
+                continue
+            eligible = candidates.eligible(filters, source_ids, source_set_ids)
+            rows, scores = candidates.best_per_set(query_embedding, eligible, count)
+            for row, score in zip(rows.tolist(), scores.tolist()):
+                set_id = int(candidates.set_ids[row])
+                if set_id not in best_by_set or score > best_by_set[set_id][0]:
+                    best_by_set[set_id] = (score, candidates, row)
+        hits = sorted(best_by_set.values(), key=lambda hit: hit[0], reverse=True)
+        hits = hits[:count]
+        if distinct and hits:
+            vectors = np.stack([candidates.vector(row) for _, candidates, row in hits])
+            ranked = np.array(
+                [candidates.status_groups["ranked"][row] for _, candidates, row in hits]
             )
-            scores += self.static_penalty[eligible_indices]
-            groups = self.static_set_groups[eligible_indices]
-            best_scores = np.full(
-                self.static_set_group_count, -np.inf, dtype=np.float32
-            )
-            np.maximum.at(best_scores, groups, scores)
-            winning = scores == best_scores[groups]
-            best_positions = np.full(self.static_set_group_count, -1, dtype=np.int32)
-            np.maximum.at(best_positions, groups[winning], np.flatnonzero(winning))
-            available_groups = np.flatnonzero(best_positions >= 0)
-        else:
-            ranking_scores = retrieval.bfloat16_scores(
-                self.static_embeddings, query_embedding
-            )
-            ranking_scores += self.static_penalty
-            ranking_scores[~eligible] = -np.inf
-            best_scores = np.maximum.reduceat(
-                ranking_scores[self.static_set_order], self.static_set_starts
-            )
-            available_groups = np.flatnonzero(np.isfinite(best_scores))
-        candidate_count = top_k + COPY_CANDIDATES if distinct else top_k
-        result_count = min(candidate_count, len(available_groups))
-        if result_count < len(available_groups):
-            selected = np.argpartition(best_scores[available_groups], -result_count)[
-                -result_count:
+            hits = [
+                hits[i]
+                for i in distinct_positions(query_embedding, vectors, ranked, wanted)
             ]
-            selected_groups = available_groups[selected]
-        else:
-            selected_groups = available_groups
-        selected_groups = selected_groups[
-            np.argsort(best_scores[selected_groups])[::-1]
-        ]
-        if score_filtered:
-            selected_positions = best_positions[selected_groups]
-            selected_indices = eligible_indices[selected_positions]
-            selected_scores = scores[selected_positions]
-        else:
-            selected_indices = []
-            for group in selected_groups:
-                start = self.static_set_starts[group]
-                stop = (
-                    self.static_set_starts[group + 1]
-                    if group + 1 < self.static_set_group_count
-                    else len(self.static_set_order)
-                )
-                group_indices = self.static_set_order[start:stop]
-                group_scores = ranking_scores[group_indices]
-                tied = np.flatnonzero(group_scores == best_scores[group])
-                selected_indices.append(group_indices[tied[-1]])
-            selected_scores = ranking_scores[selected_indices]
-        selected_indices = np.asarray(selected_indices)
-        selected_scores = np.asarray(selected_scores)
-        if distinct:
-            kept = self.distinct(query_embedding, selected_indices, top_k)
-            selected_indices = selected_indices[kept]
-            selected_scores = selected_scores[kept]
 
         results = []
-        for index, score in zip(selected_indices, selected_scores):
-            beatmap_id = self.static_ids[index]
+        for score, candidates, row in hits[offset:wanted]:
             result = self.public_summary(
-                beatmap_id, self.static_metadata.row(index, named=True)
+                int(candidates.ids[row]), candidates.metadata.row(row, named=True)
             )
-            result["score"] = float(score - self.static_penalty[index])
+            result["score"] = float(score - candidates.penalties[row])
             results.append(result)
         return results
 
-    def distinct(
-        self, query_embedding: np.ndarray, indices: np.ndarray, top_k: int
-    ) -> list[int]:
-        embeddings = from_bfloat16(self.static_embeddings[indices])
-        copies_query = embeddings @ query_embedding >= COPY_SIMILARITY
-        ranked = self.static_status_groups["ranked"][indices]
-        kept: list[int] = []
-        for position in sorted(range(len(indices)), key=lambda i: not ranked[i]):
-            if copies_query[position]:
-                continue
-            if kept and (embeddings[kept] @ embeddings[position]).max() >= (
-                COPY_SIMILARITY
-            ):
-                continue
-            kept.append(position)
-        return sorted(kept)[:top_k]
+
+def distinct_positions(
+    query_embedding: np.ndarray,
+    embeddings: np.ndarray,
+    ranked: np.ndarray,
+    top_k: int,
+) -> list[int]:
+    copies_query = embeddings @ query_embedding >= COPY_SIMILARITY
+    kept: list[int] = []
+    for position in sorted(range(len(embeddings)), key=lambda i: not ranked[i]):
+        if copies_query[position]:
+            continue
+        if kept and (embeddings[kept] @ embeddings[position]).max() >= COPY_SIMILARITY:
+            continue
+        kept.append(position)
+    return sorted(kept)[:top_k]
 
 
 class RuntimeRegistry:
     def __init__(self):
         selected = validate_run(RUN_DIR)
         catalog = Catalog()
-        self.source_modes = catalog.beatmaps.select("id", "mode")
+        self.source_modes = catalog.source_modes()
         self.runtimes = {}
         inference_semaphore = threading.Semaphore(1)
         for mode, artifacts in selected.items():
             self.runtimes[mode] = Runtime(artifacts, catalog)
             self.runtimes[mode].inference_semaphore = inference_semaphore
-            catalog.beatmaps = catalog.beatmaps.filter(
-                pl.col("mode") != MODES[mode].label
-            )
+            _release_memory()
+        del catalog
+        _release_memory()
 
     def validate_sources(self, mode: str, ids: list[int]) -> None:
         known = self.source_modes.filter(pl.col("id").is_in(ids))
