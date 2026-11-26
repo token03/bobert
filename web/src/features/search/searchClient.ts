@@ -3,7 +3,6 @@ import type { CatalogStats, SearchSet } from './search'
 
 export type SearchRequest = { mode: Mode } & (
   | { type: 'search'; query: string }
-  | { type: 'set'; beatmapId: number }
   | { type: 'title'; beatmapId: number }
   | { type: 'stats' }
 )
@@ -41,10 +40,6 @@ function send<T>(request: SearchRequest): Promise<T> {
 
 export function searchBeatmaps(query: string, mode: Mode): Promise<SearchSet[]> {
   return send({ type: 'search', query, mode })
-}
-
-export function lookupBeatmapSet(beatmapId: number, mode: Mode): Promise<number | null> {
-  return send({ type: 'set', beatmapId, mode })
 }
 
 export function lookupBeatmapTitle(beatmapId: number, mode: Mode): Promise<string | null> {

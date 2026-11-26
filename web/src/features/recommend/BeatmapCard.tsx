@@ -7,8 +7,6 @@ import type { BeatmapMetadata } from '../../shared/types'
 import { beatmapUrl, cardCoverUrl, coverUrl, userUrl } from '../../shared/urls'
 import styles from './BeatmapCard.module.css'
 
-export type SweepDirection = 'left' | 'right'
-
 type CardProps = {
   beatmap: BeatmapMetadata
   onCopy: (beatmapId: number) => Promise<void>
@@ -17,14 +15,8 @@ type CardProps = {
   isPreviewPlaying: boolean
 }
 
-type SourceBeatmapCardProps = CardProps & {
-  sweepDirection?: SweepDirection
-  sweepPhase?: 'in' | 'out'
-  onSweepEnd?: () => void
-}
-
 type ResultBeatmapCardProps = CardProps & {
-  onSearch: (beatmap: BeatmapMetadata, direction: SweepDirection) => Promise<void>
+  onSearch: (beatmap: BeatmapMetadata) => Promise<void>
   isLoading: boolean
 }
 
@@ -58,22 +50,14 @@ function useCardLink(beatmap: BeatmapMetadata) {
   }
 }
 
-export function SourceBeatmapCard({ beatmap, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying, sweepDirection, sweepPhase, onSweepEnd }: SourceBeatmapCardProps) {
+export function SourceBeatmapCard({ beatmap, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: CardProps) {
   const { copied, setCopied, linkProps } = useCardLink(beatmap)
 
   return (
     <article
       className={`${styles['beatmap-card']} ${styles['source-card']} ${styles['clickable-card']}`}
-      data-beatmap-card
       data-card-variant="source"
-      data-sweep-direction={sweepDirection}
-      data-sweep-phase={sweepPhase}
       {...linkProps}
-      onAnimationEnd={(event) => {
-        if (event.target === event.currentTarget && sweepPhase) {
-          onSweepEnd?.()
-        }
-      }}
     >
       <BeatmapCover
         className={`${styles['source-cover']} ${styles['cover-preview']}`}
@@ -104,7 +88,7 @@ export function ResultBeatmapCard({ beatmap, onCopy, onSearch, isLoading, onPlay
   const { copied, setCopied, linkProps } = useCardLink(beatmap)
 
   return (
-    <article className={`${styles['beatmap-card']} ${styles['beatmap-card-result']} ${styles['beatmap-row']} ${styles['clickable-card']}`} data-beatmap-card {...linkProps}>
+    <article className={`${styles['beatmap-card']} ${styles['beatmap-card-result']} ${styles['beatmap-row']} ${styles['clickable-card']}`} {...linkProps}>
       <BeatmapCover
         className={styles['cover-preview']}
         src={beatmap.beatmapset_id === null ? null : coverUrl(beatmap.beatmapset_id)}
@@ -240,7 +224,7 @@ function BeatmapStats({ beatmap, variant, children }: BeatmapStatsProps) {
 type CardActionsProps = {
   beatmap: BeatmapMetadata
   onCopy: (beatmapId: number) => Promise<void>
-  onSearch?: (beatmap: BeatmapMetadata, direction: SweepDirection) => Promise<void>
+  onSearch?: (beatmap: BeatmapMetadata) => Promise<void>
   isLoading?: boolean
   copied: boolean
   onCopiedChange: (copied: boolean) => void
@@ -253,16 +237,7 @@ function CardActions({ beatmap, onCopy, onSearch, isLoading = false, copied, onC
         <button
           type="button"
           disabled={isLoading}
-          onClick={(event) =>
-            handleActionClick(event, () => {
-              const card = event.currentTarget.closest('[data-beatmap-card]')
-              const list = card?.closest('[data-results-list]')
-              const cardRect = card?.getBoundingClientRect()
-              const listRect = list?.getBoundingClientRect()
-              const direction = cardRect && listRect && cardRect.left >= listRect.left + listRect.width / 2 ? 'right' : 'left'
-              return onSearch(beatmap, direction)
-            })
-          }
+          onClick={(event) => handleActionClick(event, () => onSearch(beatmap))}
           aria-label="Search similar"
           title="Search similar"
         >

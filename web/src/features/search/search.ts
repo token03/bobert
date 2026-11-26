@@ -634,11 +634,6 @@ function decodeStrings(bytes: Uint8Array, count: number): string[] {
   return strings
 }
 
-export function findSetId(corpus: SearchCorpus, beatmapId: number): number | null {
-  const index = corpus.mapIds.indexOf(beatmapId)
-  return index < 0 ? null : corpus.mapSetIds[index]
-}
-
 export type CatalogStat = 'stars' | 'ar' | 'cs' | 'bpm' | 'length'
 export type CatalogHistogram = { resolution: number; counts: Uint32Array }
 export type CatalogStats = Record<CatalogStat, CatalogHistogram>

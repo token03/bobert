@@ -1,4 +1,4 @@
-import { beatmapTitle, catalogStats, decodeCorpus, findSetId, searchCorpus } from './search'
+import { beatmapTitle, catalogStats, decodeCorpus, searchCorpus } from './search'
 import type { SearchCorpus } from './search'
 import type { SearchRequest } from './searchClient'
 
@@ -20,7 +20,6 @@ function loadCorpus(mode: string): Promise<SearchCorpus> {
 function handle(corpus: SearchCorpus, request: SearchRequest) {
   switch (request.type) {
     case 'search': return searchCorpus(corpus, request.query)
-    case 'set': return findSetId(corpus, request.beatmapId)
     case 'title': return beatmapTitle(corpus, request.beatmapId)
     case 'stats': return catalogStats(corpus)
   }

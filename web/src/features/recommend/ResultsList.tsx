@@ -1,14 +1,13 @@
 import type { CSSProperties } from 'react'
 import type { BeatmapMetadata } from '../../shared/types'
 import { ResultBeatmapCard } from './BeatmapCard'
-import type { SweepDirection } from './BeatmapCard'
 import cardStyles from './BeatmapCard.module.css'
 import styles from './ResultsList.module.css'
 
 type ResultsListProps = {
   beatmaps: BeatmapMetadata[]
   onCopy: (beatmapId: number) => Promise<void>
-  onSearch: (beatmap: BeatmapMetadata, direction: SweepDirection) => Promise<void>
+  onSearch: (beatmap: BeatmapMetadata) => Promise<void>
   isLoading: boolean
   onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
   activePreviewSetId: number | null
@@ -17,7 +16,7 @@ type ResultsListProps = {
 
 export function ResultsList({ beatmaps, onCopy, onSearch, isLoading, onPlayPreview, activePreviewSetId, isPreviewPlaying }: ResultsListProps) {
   return (
-    <div className={styles['result-list']} data-results-list>
+    <div className={styles['result-list']}>
       {beatmaps.map((beatmap) => (
         <ResultBeatmapCard
           key={beatmap.beatmap_id}

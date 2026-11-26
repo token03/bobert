@@ -9,28 +9,19 @@ import { fetchDefaultRecommendations, fetchMyGroups, fetchSession, logout, recom
 import { parseBeatmapIds } from '../../shared/beatmapIds'
 import { copyText } from '../../shared/copy'
 import type { BeatmapMetadata } from '../../shared/types'
-import { avatarUrl, cardCoverUrl, userUrl } from '../../shared/urls'
+import { avatarUrl, userUrl } from '../../shared/urls'
 import { modes, modeLabels } from '../../shared/types'
 import { buildRecommendRequest, clearFilters, defaultSearch } from './filters'
 import type { RecommendSearch } from './filters'
 import { PlayGroupTabs } from './PlayGroupTabs'
 import { RecommendForm } from './RecommendForm'
 import { SourceBeatmapCard } from './BeatmapCard'
-import type { SweepDirection } from './BeatmapCard'
 import { LoadingResultsList, ResultsList } from './ResultsList'
-import { lookupBeatmapSet } from '../search/searchClient'
 import cardStyles from './BeatmapCard.module.css'
 import listStyles from './ResultsList.module.css'
 import styles from './RecommendPage.module.css'
 
 type HistoryMode = 'push' | 'replace'
-type SourceSwap = {
-  beatmap: BeatmapMetadata | null
-  nextBeatmap: BeatmapMetadata
-  direction: SweepDirection
-  phase: 'in' | 'out' | 'preloading' | 'waiting'
-  requestDone: boolean
-}
 
 const staleTime = 5 * 60_000
 
@@ -52,10 +43,7 @@ export function RecommendPage() {
   const resultsRef = useRef<HTMLDivElement>(null)
   const [outgoingResults, setOutgoingResults] = useState<BeatmapMetadata[] | null>(null)
   const [resultsHeight, setResultsHeight] = useState(0)
-  const [sourceSwap, setSourceSwap] = useState<SourceSwap | null>(null)
-  const [sourceView, setSourceView] = useState<{ beatmapId: number | null; direction: SweepDirection; animate: boolean }>({ beatmapId: null, direction: 'left', animate: false })
-  const [shownSource, setShownSource] = useState<BeatmapMetadata | null>(null)
-  const [leavingSource, setLeavingSource] = useState<BeatmapMetadata | null>(null)
+  const [selectedSourceId, setSelectedSourceId] = useState<number | null>(null)
   const audio = useAudioPreview({ onError: console.error })
   const beatmapIds = parseBeatmapIds(search.beatmap)
   const recommend = useQuery(recommendationOptions(search))
@@ -92,7 +80,7 @@ export function RecommendPage() {
     : defaults.data?.results
   const response = beatmapIds === null ? null : recommend.data ?? null
   const sourceBeatmaps = response?.sources.map((source) => source.metadata) ?? []
-  const selectedSource = sourceBeatmaps.find((beatmap) => beatmap.beatmap_id === sourceView.beatmapId) ?? sourceBeatmaps[0] ?? null
+  const selectedSource = sourceBeatmaps.find((beatmap) => beatmap.beatmap_id === selectedSourceId) ?? sourceBeatmaps[0] ?? null
   const isLoading = recommend.isFetching || browse.isFetching
   const requestError = beatmapIds === null ? browse.error : recommend.error
   const unavailableBeatmapId = requestError instanceof UnavailableBeatmapError ? requestError.beatmapId : null
@@ -177,7 +165,6 @@ export function RecommendPage() {
   }
 
   async function updateBeatmaps(values: RecommendSearch) {
-    setSourceSwap(null)
     if (!parseBeatmapIds(values.beatmap)) {
       exitResults()
       await navigate({ search: values })
@@ -186,101 +173,14 @@ export function RecommendPage() {
     await runRecommend(values, 'push', false)
   }
 
-  async function swapSourceBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection, request: Promise<unknown>, preloadCover = true) {
-    const currentSource = selectedSource
-    setSourceView((view) => ({ ...view, beatmapId: null, animate: false }))
-    setSourceSwap({
-      beatmap: currentSource ?? beatmap,
-      nextBeatmap: beatmap,
-      direction,
-      phase: currentSource ? 'preloading' : 'in',
-      requestDone: false,
-    })
-
-    void request.then(() => {
-      setSourceSwap((swap) => {
-        if (!swap || swap.nextBeatmap.beatmap_id !== beatmap.beatmap_id) {
-          return swap
-        }
-        return swap.phase === 'waiting' ? null : { ...swap, requestDone: true }
-      })
-    })
-
-    if (!currentSource) {
-      await request
-      return
-    }
-
-    if (preloadCover && beatmap.beatmapset_id !== null) {
-      await new Promise<void>((resolve) => {
-        const image = new Image()
-        image.onload = () => resolve()
-        image.onerror = () => resolve()
-        image.src = cardCoverUrl(beatmap.beatmapset_id!)
-      })
-    }
-
-    setSourceSwap((swap) => {
-      if (!swap || swap.nextBeatmap.beatmap_id !== beatmap.beatmap_id) {
-        return swap
-      }
-      return { ...swap, beatmap: swap.beatmap ?? beatmap, phase: swap.beatmap ? 'out' : 'in' }
-    })
-    await request
-  }
-
-  async function runManualRecommend(values: RecommendSearch) {
-    const nextBeatmapIds = parseBeatmapIds(values.beatmap)!
-    if (nextBeatmapIds.length !== 1) {
-      await runRecommend(values)
-      return
-    }
-    const nextBeatmapId = nextBeatmapIds[0]
-    if (response?.sources.length === 1 && response.sources[0].beatmap_id === nextBeatmapId) {
-      await runRecommend(values)
-      return
-    }
-
-    const request = runRecommend(values)
-    const knownBeatmap = [...(response?.results ?? []), ...(browseResults ?? [])].find((beatmap) => beatmap.beatmap_id === nextBeatmapId)
-    if (knownBeatmap) {
-      await swapSourceBeatmap(knownBeatmap, 'left', request, false)
-      return
-    }
-
-    void lookupBeatmapSet(nextBeatmapId, values.mode).then((setId) => {
-      if (setId !== null) new Image().src = cardCoverUrl(setId)
-    }).catch(() => {})
-
-    const data = await request
-    const nextSource = data?.sources.find((source) => source.beatmap_id === nextBeatmapId)?.metadata ?? data?.sources[0]?.metadata ?? null
-    if (nextSource && nextSource.beatmap_id !== selectedSource?.beatmap_id) {
-      await swapSourceBeatmap(nextSource, 'left', Promise.resolve(), true)
-    }
-  }
-
-  async function searchBeatmap(beatmap: BeatmapMetadata, direction: SweepDirection) {
+  async function searchBeatmap(beatmap: BeatmapMetadata) {
     const nextValues = { ...search, beatmap: String(beatmap.beatmap_id) }
     if (beatmap.title) {
       queryClient.setQueryData<string | null>(['beatmap-title', search.mode, beatmap.beatmap_id], (title) => title ?? beatmap.title)
     }
+    setSelectedSourceId(null)
     scrollToPageTop()
-    await swapSourceBeatmap(beatmap, direction, runRecommend(nextValues, 'push', false))
-  }
-
-  function finishSourceSweep() {
-    setSourceSwap((swap) => {
-      if (!swap) {
-        return null
-      }
-      if (swap.phase === 'out') {
-        return { ...swap, beatmap: swap.nextBeatmap, phase: 'in' }
-      }
-      if (swap.phase === 'in') {
-        return swap.requestDone ? null : { ...swap, phase: 'waiting' }
-      }
-      return swap
-    })
+    await runRecommend(nextValues, 'push', false)
   }
 
   const defaultResults = beatmapIds === null ? browseResults : undefined
@@ -301,7 +201,7 @@ export function RecommendPage() {
           void updateBeatmaps(values)
         }}
         onSubmit={(values) => {
-          void runManualRecommend(values)
+          void runRecommend(values)
         }}
         onReset={(values) => {
           void resetRecommendations(values)
@@ -325,13 +225,7 @@ export function RecommendPage() {
       isPreviewPlaying={audio.isPlaying}
     />
   )
-  const sourceBeatmap = sourceSwap ? sourceSwap.beatmap : selectedSource
-  if (sourceBeatmap !== shownSource) {
-    setShownSource(sourceBeatmap)
-    setLeavingSource(!sourceBeatmap && beatmapIds === null ? shownSource : null)
-  }
-  const sourceSweepPhase = sourceSwap?.phase === 'in' || sourceSwap?.phase === 'out' ? sourceSwap.phase : undefined
-  const showSourcePlaceholder = !sourceBeatmap && isLoading && beatmapIds !== null
+  const showSourcePlaceholder = !selectedSource && isLoading && beatmapIds !== null
 
   return (
     <main className={styles['app-shell']}>
@@ -339,37 +233,11 @@ export function RecommendPage() {
 
       <section className={styles['results-panel']}>
         <div className={styles['recommend-layout']}>
-          {leavingSource && beatmapIds === null ? (
-            <SourceBeatmapCard
-              beatmap={leavingSource}
-              onCopy={copyBeatmapId}
-              onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
-              activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
-              isPreviewPlaying={audio.isPlaying}
-              sweepDirection="left"
-              sweepPhase="out"
-              onSweepEnd={() => {
-                setLeavingSource(null)
-              }}
-            />
-          ) : sourceSwap && sourceBeatmap ? (
-            <SourceBeatmapCard
-              beatmap={sourceBeatmap}
-              onCopy={copyBeatmapId}
-              onPlayPreview={(beatmap: BeatmapMetadata) => audio.playPreview(beatmap)}
-              activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
-              isPreviewPlaying={audio.isPlaying}
-              sweepDirection={sourceSweepPhase ? sourceSwap?.direction : undefined}
-              sweepPhase={sourceSweepPhase}
-              onSweepEnd={finishSourceSweep}
-            />
-          ) : sourceBeatmap ? (
+          {selectedSource ? (
             <SourceBeatmapPager
               beatmaps={sourceBeatmaps}
-              beatmap={sourceBeatmap}
-              direction={sourceView.direction}
-              animate={sourceView.animate}
-              onSelect={(beatmapId, direction) => setSourceView({ beatmapId, direction, animate: true })}
+              beatmap={selectedSource}
+              onSelect={setSelectedSourceId}
               onCopy={copyBeatmapId}
               onPlayPreview={(beatmap) => audio.playPreview(beatmap)}
               activePreviewSetId={audio.activeBeatmap?.beatmapset_id ?? null}
@@ -437,7 +305,6 @@ export function RecommendPage() {
                       type="button"
                       aria-pressed={search.mode === mode}
                       onClick={() => {
-                        setSourceSwap(null)
                         setOutgoingResults(null)
                         void navigate({ search: { ...defaultSearch, mode } })
                       }}
@@ -543,16 +410,14 @@ export function RecommendPage() {
 type SourceBeatmapPagerProps = {
   beatmaps: BeatmapMetadata[]
   beatmap: BeatmapMetadata
-  direction: SweepDirection
-  animate: boolean
-  onSelect: (beatmapId: number, direction: SweepDirection) => void
+  onSelect: (beatmapId: number) => void
   onCopy: (beatmapId: number) => Promise<void>
   onPlayPreview: (beatmap: BeatmapMetadata) => Promise<void>
   activePreviewSetId: number | null
   isPreviewPlaying: boolean
 }
 
-function SourceBeatmapPager({ beatmaps, beatmap, direction, animate, onSelect, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: SourceBeatmapPagerProps) {
+function SourceBeatmapPager({ beatmaps, beatmap, onSelect, onCopy, onPlayPreview, activePreviewSetId, isPreviewPlaying }: SourceBeatmapPagerProps) {
   const card = (
     <SourceBeatmapCard
       key={beatmap.beatmap_id}
@@ -561,8 +426,6 @@ function SourceBeatmapPager({ beatmaps, beatmap, direction, animate, onSelect, o
       onPlayPreview={onPlayPreview}
       activePreviewSetId={activePreviewSetId}
       isPreviewPlaying={isPreviewPlaying}
-      sweepDirection={direction}
-      sweepPhase={animate && beatmaps.length > 1 ? 'in' : undefined}
     />
   )
 
@@ -570,12 +433,8 @@ function SourceBeatmapPager({ beatmaps, beatmap, direction, animate, onSelect, o
     return card
   }
 
-  const selectedIndex = beatmaps.findIndex((source) => source.beatmap_id === beatmap.beatmap_id)
   return (
-    <Tabs.Root className={styles['source-pager']} value={beatmap.beatmap_id} onValueChange={(beatmapId) => {
-      const nextIndex = beatmaps.findIndex((source) => source.beatmap_id === beatmapId)
-      onSelect(beatmapId as number, nextIndex < selectedIndex ? 'left' : 'right')
-    }}>
+    <Tabs.Root className={styles['source-pager']} value={beatmap.beatmap_id} onValueChange={(beatmapId) => onSelect(beatmapId as number)}>
       <Tabs.Panel className={styles['source-panel']} value={beatmap.beatmap_id}>{card}</Tabs.Panel>
       <Tabs.List className={styles['source-tabs']} activateOnFocus aria-label="Source beatmaps">
         {beatmaps.map((source, index) => (
