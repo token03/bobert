@@ -37,6 +37,13 @@
   background: transparent;
   padding-bottom: var(--space-xl);
   box-shadow: inset 0 -1px var(--separator-soft);
+  animation: source-card-in 180ms ease-out;
+}
+
+@keyframes source-card-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .source-card .beatmap-card-content {
@@ -149,7 +156,6 @@
 
 .source-cover.cover-preview img {
   object-position: center;
-  opacity: 1;
 }
 
 .cover-preview::after {
@@ -1020,6 +1026,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .source-card {
+    animation: none;
+  }
+
   .cover-preview img {
     transition: none;
   }

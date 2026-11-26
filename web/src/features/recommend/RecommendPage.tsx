@@ -44,6 +44,7 @@ export function RecommendPage() {
   const [outgoingResults, setOutgoingResults] = useState<BeatmapMetadata[] | null>(null)
   const [resultsHeight, setResultsHeight] = useState(0)
   const [selectedSourceId, setSelectedSourceId] = useState<number | null>(null)
+  const [optimisticSource, setOptimisticSource] = useState<BeatmapMetadata | null>(null)
   const audio = useAudioPreview({ onError: console.error })
   const beatmapIds = parseBeatmapIds(search.beatmap)
   const recommend = useQuery(recommendationOptions(search))
@@ -79,7 +80,15 @@ export function RecommendPage() {
     ? personal.data?.results.filter((beatmap) => !playedSets.has(beatmap.beatmapset_id))
     : defaults.data?.results
   const response = beatmapIds === null ? null : recommend.data ?? null
-  const sourceBeatmaps = response?.sources.map((source) => source.metadata) ?? []
+  const sourcesMatch = beatmapIds !== null
+    && response !== null
+    && response.sources.length === beatmapIds.length
+    && response.sources.every((source, index) => source.beatmap_id === beatmapIds[index])
+  const sourceBeatmaps = sourcesMatch
+    ? response.sources.map((source) => source.metadata)
+    : beatmapIds?.length === 1 && optimisticSource?.beatmap_id === beatmapIds[0]
+      ? [optimisticSource]
+      : []
   const selectedSource = sourceBeatmaps.find((beatmap) => beatmap.beatmap_id === selectedSourceId) ?? sourceBeatmaps[0] ?? null
   const isLoading = recommend.isFetching || browse.isFetching
   const requestError = beatmapIds === null ? browse.error : recommend.error
@@ -178,6 +187,7 @@ export function RecommendPage() {
     if (beatmap.title) {
       queryClient.setQueryData<string | null>(['beatmap-title', search.mode, beatmap.beatmap_id], (title) => title ?? beatmap.title)
     }
+    setOptimisticSource(beatmap)
     setSelectedSourceId(null)
     scrollToPageTop()
     await runRecommend(nextValues, 'push', false)
